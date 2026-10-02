@@ -116,7 +116,7 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, and external-types compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
-| `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
+| `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `cargo-coverage-gate run` orchestrates instrumented `nextest`, followed by `doc-test` and `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
@@ -203,7 +203,7 @@ matrix overhead.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config LCOV reports scoped to the same affected packages, so instrumented but unselected dependencies do not contaminate downstream coverage totals. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. On Windows, an `llvm-cov export` that exceeds the process command-line limit (OS error 206) is retried from cargo-llvm-cov's diagnostic through an LLVM response file. Other report failures remain failures. Per-config reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
+| `llvm-cov`   | One `cargo +<catalog-nightly> coverage-gate <affected-packages> run --no-coverage-target aarch64-pc-windows-msvc` invocation owns test execution, collection, LCOV handoff and merging, and the per-package threshold verdict. With no explicit configuration flags, `run` covers both all-features and no-default-features configurations. On Windows ARM the explicit no-coverage target still runs the selected tests but produces no coverage or gate verdict. CI may upload the emitted reports for display, but cargo-coverage-gate's local verdict is authoritative. Collection details are part of the [`cargo-coverage-gate` design](../../../cargo-coverage-gate/docs/design/README.md), not duplicated in Anvil. | oxidizer, oxidizer-github |
 | `doc-test`   | Two cargo-test runs over affected packages with at least one Cargo metadata target marked `doctest = true`: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). The capability flag includes explicit library crate types and proc macros while excluding bin-only packages, which make Cargo error when they are the complete selection. An empty doctest-capable subset is a successful no-op. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
 
@@ -277,12 +277,11 @@ false `MISSED` results because no behavioral change reaches the tests.
 ### `scheduled-test`
 
 Same three checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and the same
-recipe invocations, with the same per-config output paths
-(`target/coverage/lcov-<config>.info`).
-The recipe is shared between tiers; only the cloud workflow
-wiring around it changes (PR uploads LCOV to Codecov / ADO from each
-PR run; scheduled does the same against `main` plus flags the upload as `scheduled` in
-Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
+recipe invocations. `ANVIL_IMPACT=off` changes cargo-coverage-gate's selection
+from the affected package file to the complete workspace; collection and
+artifact paths remain owned by cargo-coverage-gate. Only the surrounding cloud
+workflow wiring differs: PR and scheduled runs upload the tool's completed
+reports under their respective stream labels. Two purposes for re-running
 on scheduled: catch flakes/environmental sensitivities that didn't trip in PR, and
 publish a full-coverage snapshot for the current state of `main`.
 

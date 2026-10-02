@@ -235,7 +235,7 @@ These focused operations are not substitutes for either verification tier.
 ### Tool Versions
 
 Anvil's Rust nightly and cargo-tool pins live exclusively in
-[`justfiles/anvil/versions.just`](./justfiles/anvil/versions.just). Because this
+[`.anvil/setup.just`](./.anvil/setup.just). Because this
 repository develops cargo-anvil itself, catalog updates start in
 `crates/cargo-anvil/templates/justfiles/anvil/versions.just` and are applied by
 running `cargo anvil`. The default stable toolchain remains in
