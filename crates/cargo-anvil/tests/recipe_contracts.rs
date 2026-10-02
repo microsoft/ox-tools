@@ -25,6 +25,7 @@ const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BUILD: &str = include_str!("../templates/justfiles/anvil/dev/build.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const DOC_BUILD: &str = include_str!("../templates/justfiles/anvil/checks/doc-build.just");
+const DOC_TEST: &str = include_str!("../templates/justfiles/anvil/checks/doc-test.just");
 const EXAMPLES: &str = include_str!("../templates/justfiles/anvil/checks/examples.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
@@ -220,7 +221,11 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = $packageId
             manifest_path = $manifestPath
-            targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $libName
+                kind = if ($env:FAKE_FIRST_RLIB) { @('rlib') } else { @('lib') }
+                doctest = -not [bool]$env:FAKE_FIRST_DOCTEST_FALSE
+            })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
                 # Preserve the empty array through expression output so JSON emits [] rather than null.
                 Write-Output -NoEnumerate @()
@@ -252,7 +257,11 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = $secondPackageId
             manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
-            targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_SECOND_PACKAGE_NAME
+                kind = if ($env:FAKE_SECOND_BIN_ONLY) { @('bin') } else { @('lib') }
+                doctest = -not [bool]$env:FAKE_SECOND_DOCTEST_FALSE
+            })
             publish = $null
             metadata = $secondMetadata
         }
@@ -268,7 +277,11 @@ if ($args -contains 'metadata') {
                 $env:FAKE_THIRD_PACKAGE_NAME,
                 'Cargo.toml'
             )
-            targets = @([pscustomobject]@{ name = $env:FAKE_THIRD_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_THIRD_PACKAGE_NAME
+                kind = if ($env:FAKE_THIRD_PROC_MACRO) { @('proc-macro') } else { @('lib') }
+                doctest = -not [bool]$env:FAKE_THIRD_DOCTEST_FALSE
+            })
             publish = @('private-registry')
             metadata = [pscustomobject]@{}
         }
@@ -1864,7 +1877,7 @@ source-prereq:
 }
 
 #[test]
-fn public_api_checks_fail_when_metadata_discovery_fails() {
+fn metadata_consuming_checks_fail_when_discovery_fails() {
     if !tools_available() {
         return;
     }
@@ -1890,6 +1903,12 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
                 "anvil-toolchain-nightly-external-types-install",
                 "anvil-impact",
             ][..],
+        ),
+        (
+            "doc-test.just",
+            DOC_TEST,
+            "anvil-doc-test",
+            &["anvil-doc-test-validate-prereqs", "anvil-toolchain-stable-install", "anvil-impact"][..],
         ),
     ] {
         let tmp = fixture(&[(recipe_file, contents), ("impact.just", IMPACT)], dependencies);
@@ -2202,6 +2221,131 @@ fn fmt_propagates_cargo_each_failure() {
         &[("FAKE_EACH_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))],
     );
     assert_failed(&output, "anvil-fmt cargo-each failure");
+}
+
+#[test]
+fn doc_test_selects_only_doctest_capable_affected_packages() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-toolchain-stable-install", "anvil-impact"],
+    );
+    let log = tmp.path().join("cargo.log");
+    seed_include(
+        tmp.path(),
+        "affected",
+        "--package Foo@0.1.0 --package foo@0.1.0 --package macro-package@0.1.0",
+    );
+    let output = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
+            ("FAKE_FIRST_RLIB", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("foo")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_SECOND_DOCTEST_FALSE", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "doctest-capable selection failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(&log).unwrap();
+    let doc_commands = commands.lines().filter(|line| line.contains("test --doc")).collect::<Vec<_>>();
+    assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
+    for command in doc_commands {
+        assert!(
+            command.contains("--package Foo@0.1.0"),
+            "an explicit doctest-capable case-distinct crate was dropped:\n{command}"
+        );
+        assert!(
+            command.contains("--package macro-package@0.1.0"),
+            "a proc-macro doctest package was dropped:\n{command}"
+        );
+        assert!(
+            !command.contains("--package foo@0.1.0"),
+            "a case-distinct bin-only package reached cargo test --doc:\n{command}"
+        );
+    }
+
+    fs::remove_file(&log).unwrap();
+    seed_include(tmp.path(), "affected", "--package foo@0.1.0");
+    let bin_only = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("foo")),
+            ("FAKE_FIRST_DOCTEST_FALSE", OsStr::new("1")),
+        ],
+    );
+    assert!(bin_only.status.success(), "bin-only selection must skip cleanly");
+    assert!(
+        String::from_utf8_lossy(&bin_only.stdout).contains("no affected doctest-capable packages"),
+        "bin-only skip must explain why no doctests ran"
+    );
+    let bin_only_commands = fs::read_to_string(log).unwrap();
+    assert!(
+        !bin_only_commands.lines().any(|line| line.contains("test --doc")),
+        "a bin-only impact set must not invoke cargo test --doc:\n{bin_only_commands}"
+    );
+}
+
+#[test]
+fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-toolchain-stable-install", "anvil-impact"],
+    );
+    seed_include(tmp.path(), "affected", "--workspace");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
+            ("FAKE_FIRST_RLIB", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("foo")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_SECOND_DOCTEST_FALSE", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "workspace doctest-capability selection failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(&log).unwrap();
+    let doc_commands = commands.lines().filter(|line| line.contains("test --doc")).collect::<Vec<_>>();
+    assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
+    for command in doc_commands {
+        assert!(
+            command.contains("--package Foo@0.1.0 --package macro-package@0.1.0"),
+            "workspace selection must emit all capable members in ordinal order:\n{command}"
+        );
+        assert!(
+            !command.contains("--package foo@0.1.0"),
+            "workspace selection must exclude case-distinct bin-only members:\n{command}"
+        );
+    }
 }
 
 #[test]
