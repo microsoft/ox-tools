@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use crate::error::{EachError, JsonFileReadError, JsonFileUtf8Error, JsonLineParseError, JsonRecordShapeError};
+use crate::error::{EachError, JsonLineParseError, JsonLinesFileReadError, JsonLinesFileUtf8Error, JsonRecordShapeError};
 
 /// One object record and its diagnostic origin.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,8 +32,8 @@ pub(crate) fn load(inline: &[String], files: &[PathBuf]) -> Result<Vec<JsonRecor
     }
     for path in files {
         let display = path.display().to_string();
-        let bytes = std::fs::read(path).map_err(|error| JsonFileReadError::caused_by(display.clone(), error))?;
-        let text = String::from_utf8(bytes).map_err(|error| JsonFileUtf8Error::caused_by(display.clone(), error))?;
+        let bytes = std::fs::read(path).map_err(|error| JsonLinesFileReadError::caused_by(display.clone(), error))?;
+        let text = String::from_utf8(bytes).map_err(|error| JsonLinesFileUtf8Error::caused_by(display.clone(), error))?;
         parse_source(&text, display, &mut records)?;
     }
     Ok(records)
@@ -71,6 +71,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files; Miri isolation forbids filesystem access")]
     fn inline_and_file_records_preserve_source_order_and_duplicates() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let path = temp.path().join("records.jsonl");
@@ -96,6 +97,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files; Miri isolation forbids filesystem access")]
     fn file_io_and_utf8_errors_name_the_file() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let missing = temp.path().join("missing.jsonl");

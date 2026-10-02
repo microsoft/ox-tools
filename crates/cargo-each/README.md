@@ -118,12 +118,15 @@ Substituted inside each command argument:
   valid only in `--once` mode and only as a standalone argument.
 * `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
   or root `[package].rust-version` in a single-package repository; valid in
-  every mode.
+  Cargo-backed per-package, per-target, and `--once` modes.
+* `{json:key}` — the top-level string field named `key` in the current
+  record; valid only in JSON-record mode.
 
-Using a placeholder in the wrong mode is a usage error. Only the tokens
-above are interpreted; any other `{…}` sequence (a typo, or a literal brace
-an argument needs) passes through verbatim to the spawned command — there is
-no brace-escape, so this passthrough is part of the contract.
+Using a placeholder in the wrong mode is a usage error. Every `{json:…}`
+sequence is validated as a JSON placeholder. Other unrecognized `{…}`
+sequences (a typo, or a literal brace an argument needs) pass through
+verbatim to the spawned command — there is no brace-escape, so this
+passthrough is part of the contract.
 
 ## Behavior
 

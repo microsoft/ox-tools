@@ -271,7 +271,7 @@ Substituted inside each `ARG` of the command template:
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
 | `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
-| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository. | all |
+| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository. | Cargo-backed per-package, per-target, once |
 | `{json:key}` | The top-level string field named `key` from the current JSON object. Missing or non-string referenced fields are errors. Inserted values are not rescanned for placeholder-shaped text. | JSON-record |
 
 Per-target mode accepts all per-package placeholders plus `{target}`. Using a

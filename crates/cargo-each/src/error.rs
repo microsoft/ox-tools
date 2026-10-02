@@ -38,8 +38,8 @@
     PackageFileUtf8Error,
     InvalidPackageFileLineError,
     JsonInputConflictError,
-    JsonFileReadError,
-    JsonFileUtf8Error,
+    JsonLinesFileReadError,
+    JsonLinesFileUtf8Error,
     JsonLineParseError,
     JsonRecordShapeError,
     JsonRecordFieldError,
@@ -138,7 +138,7 @@ pub(crate) struct JsonInputConflictError {
 #[ohno::error]
 #[display("could not read JSON Lines file `{path}`")]
 #[from(std::io::Error)]
-pub(crate) struct JsonFileReadError {
+pub(crate) struct JsonLinesFileReadError {
     pub(crate) path: String,
 }
 
@@ -146,7 +146,7 @@ pub(crate) struct JsonFileReadError {
 #[ohno::error]
 #[display("JSON Lines file `{path}` is not valid UTF-8")]
 #[from(std::string::FromUtf8Error)]
-pub(crate) struct JsonFileUtf8Error {
+pub(crate) struct JsonLinesFileUtf8Error {
     pub(crate) path: String,
 }
 

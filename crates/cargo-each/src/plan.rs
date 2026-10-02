@@ -83,8 +83,8 @@ impl Plan {
             .iter()
             .map(|record| {
                 let placeholders = Placeholders::Json {
-                    fields: record.fields.clone(),
-                    source: record.source.clone(),
+                    fields: &record.fields,
+                    source: &record.source,
                     line: record.line,
                 };
                 Ok(Invocation {
