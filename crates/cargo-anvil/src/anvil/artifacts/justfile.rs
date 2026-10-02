@@ -102,6 +102,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "careful",
         "cargo-hack",
         "cargo-sort",
+        "check-all-targets",
         "clippy",
         "deny",
         "doc-build",
@@ -268,6 +269,7 @@ mod tests {
             ("careful", Affected),
             ("cargo-hack", Required),
             ("cargo-sort", Modified),
+            ("check-all-targets", Affected),
             ("clippy", Affected),
             ("deny", Unscoped),
             ("doc-build", Required),
@@ -331,6 +333,7 @@ mod tests {
         let checks = all_check_bodies();
         for needle in [
             "anvil-fmt",
+            "anvil-check-all-targets",
             "anvil-clippy",
             "anvil-license-headers",
             "anvil-pr-title",
@@ -438,7 +441,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(scoped, 21, "every impact-scoped check must be covered");
+        assert_eq!(scoped, 22, "every impact-scoped check must be covered");
     }
 
     #[test]
@@ -599,7 +602,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (25, 7),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
