@@ -1115,18 +1115,27 @@ mod tests {
         command
     }
 
+    struct ReleaseMarker(std::path::PathBuf);
+
+    impl Drop for ReleaseMarker {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"release");
+        }
+    }
+
     #[test]
     fn child_sleep_probe() {
         if let Some(duration) = std::env::var_os("CARGO_EACH_CHILD_SLEEP_MS") {
             if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_STARTED_MARKER") {
                 std::fs::write(marker, b"started").expect("the parent passes a writable start marker path");
             }
+            let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
             if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_RELEASE_MARKER") {
-                while !std::path::Path::new(&marker).exists() {
+                let deadline = Instant::now() + Duration::from_millis(millis);
+                while !std::path::Path::new(&marker).exists() && Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(1));
                 }
             } else {
-                let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
                 thread::sleep(Duration::from_millis(millis));
             }
         }
@@ -1530,7 +1539,9 @@ mod tests {
         let started_marker = temporary.path().join("direct-child-started");
         let release_marker = temporary.path().join("direct-child-release");
         let completion_marker = temporary.path().join("direct-child-completed");
+        let release = ReleaseMarker(release_marker.clone());
         let child = sleeping_test_command()
+            .env("CARGO_EACH_CHILD_SLEEP_MS", "5000")
             .env("CARGO_EACH_CHILD_STARTED_MARKER", &started_marker)
             .env("CARGO_EACH_CHILD_RELEASE_MARKER", &release_marker)
             .env("CARGO_EACH_CHILD_MARKER", &completion_marker)
@@ -1544,7 +1555,7 @@ mod tests {
         let started = Instant::now();
         terminate_child(child).expect("direct-child termination succeeds");
         assert!(started.elapsed() < Duration::from_secs(2));
-        std::fs::write(&release_marker, b"release").expect("release a surviving direct child");
+        drop(release);
         thread::sleep(Duration::from_millis(500));
         assert!(
             !completion_marker.exists(),
