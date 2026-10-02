@@ -80,10 +80,13 @@ can be double-quoted. Expression atoms:
   name order, substituting the per-package placeholders below.
 * `--once`: run the command exactly once when the set is non-empty (skip
   when empty), using the `{packages}` placeholder to inject the selection.
-* `--skip-without-workspace-rust-version`: for a nonempty plan, require a
-  valid root workspace Rust version before execution, but exit 0 without
-  spawning the command when the root declaration is absent. The gate applies
-  even when the command does not use `{workspace-rust-version}`.
+* `--skip-without-workspace-rust-version`: when the command uses
+  `{workspace-rust-version}`, turn an absent root declaration into a
+  successful no-op instead of an error. Using the flag without the
+  placeholder is a usage error.
+* `--json-lines` / `--json-lines-file`: bypass Cargo selection and run once
+  per JSON object, substituting top-level string fields through
+  `{json:key}`.
 * `--each-target <KIND>`: run once per matching Cargo target, using
   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
   `--target-required-feature` further narrows targets.
@@ -130,10 +133,16 @@ exits 0. This is what lets callers drop bespoke nothing-to-do guards.
 Workspace Rust-version validation is lazy by default: it runs only when the
 command uses `{workspace-rust-version}` and the resolved plan has work, then
 requires every member’s resolved minimum to be present and no newer than the
-root floor. `--skip-without-workspace-rust-version` forces that validation
-for a nonempty plan and turns only an absent root declaration into a
-successful no-op. Placeholder mode validation still runs before an
+root floor. `--skip-without-workspace-rust-version` changes only the
+placeholder’s absent-root behavior; validation remains strict whenever a
+root floor exists. Placeholder mode validation still runs before an
 empty-plan no-op.
+
+JSON-record mode requires one JSON object per nonempty input line and does
+not load Cargo metadata. Referenced `{json:key}` fields must exist and be
+strings. Invalid input is rejected before any command is spawned, records
+retain input order and duplicates, and an empty record set is a successful
+no-op.
 
 The effective worker count is the requested `--jobs` value capped by plan
 size. An effective count of one uses sequential

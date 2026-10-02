@@ -55,6 +55,16 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) none: bool,
 
+    /// Parse one JSON object per nonempty line and run the command once per
+    /// record. Repeatable. JSON mode bypasses Cargo workspace selection.
+    #[arg(long = "json-lines", value_name = "JSONL")]
+    pub(crate) json_lines: Vec<String>,
+
+    /// Read JSON Lines records from a UTF-8 file. Repeatable and may be
+    /// combined with --json-lines; inline values are processed before files.
+    #[arg(long = "json-lines-file", value_name = "PATH")]
+    pub(crate) json_lines_files: Vec<PathBuf>,
+
     // --- filtering ---
     /// Keep only members matching this Boolean expression. Repeatable;
     /// expressions are AND-combined. Supports `not`, `and`, `or`, and
@@ -75,10 +85,9 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) once: bool,
 
-    /// Skip successfully when the root manifest declares no workspace Rust
-    /// version. Invalid declarations and inconsistent member versions remain
-    /// errors. Applies even when the command does not use the corresponding
-    /// placeholder.
+    /// When the command uses `{workspace-rust-version}`, skip successfully if
+    /// the root manifest does not declare it. Using this flag without the
+    /// placeholder is an error.
     #[arg(long)]
     pub(crate) skip_without_workspace_rust_version: bool,
 

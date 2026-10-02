@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use cargo_metadata::TargetKind;
 
 use crate::error::{ChdirConflictsWithOnceError, EachError};
-use crate::substitute::{Placeholders, substitute, validate_placeholders};
+use crate::json_lines::JsonRecord;
+use crate::substitute::{Placeholders, substitute, validate_json_placeholders, validate_placeholders};
 use crate::workspace::Member;
 
 /// How the command is run over the selected set.
@@ -75,6 +76,27 @@ pub(crate) struct BuildOptions<'a> {
 }
 
 impl Plan {
+    /// Build one invocation per JSON object in input order.
+    pub(crate) fn build_json(records: &[JsonRecord], command: &[String]) -> Result<Self, EachError> {
+        validate_json_placeholders(command)?;
+        let invocations = records
+            .iter()
+            .map(|record| {
+                let placeholders = Placeholders::Json {
+                    fields: record.fields.clone(),
+                    source: record.source.clone(),
+                    line: record.line,
+                };
+                Ok(Invocation {
+                    label: Some(record.label()),
+                    argv: substitute(command, &placeholders)?,
+                    work_dir: None,
+                })
+            })
+            .collect::<Result<Vec<_>, EachError>>()?;
+        Ok(Self { invocations })
+    }
+
     /// Validate plan-wide configuration and report whether it produces no
     /// invocations without expanding placeholders.
     ///
@@ -256,6 +278,27 @@ mod tests {
                 workspace_rust_version: None,
             },
         )
+    }
+
+    #[test]
+    fn json_plan_preserves_record_order_duplicates_and_labels() {
+        let record = |source: &str, line: usize, value: &str| JsonRecord {
+            fields: serde_json::json!({"value": value}).as_object().expect("object").clone(),
+            source: source.to_owned(),
+            line,
+        };
+        let records = [
+            record("inline", 1, "alpha"),
+            record("file.jsonl", 3, "beta"),
+            record("inline", 1, "alpha"),
+        ];
+        let plan = Plan::build_json(&records, &cmd(&["echo", "{json:value}"])).expect("build JSON plan");
+        assert_eq!(plan.invocations.len(), 3);
+        assert_eq!(plan.invocations[0].argv, ["echo", "alpha"]);
+        assert_eq!(plan.invocations[1].argv, ["echo", "beta"]);
+        assert_eq!(plan.invocations[2].argv, ["echo", "alpha"]);
+        assert_eq!(plan.invocations[1].label.as_deref(), Some("file.jsonl:3"));
+        assert!(plan.invocations.iter().all(|invocation| invocation.work_dir.is_none()));
     }
 
     #[test]

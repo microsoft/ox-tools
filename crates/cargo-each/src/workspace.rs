@@ -170,9 +170,11 @@ impl Workspace {
     ///
     /// # Errors
     ///
-    /// Returns [`EachError`] if the root manifest cannot be read or parsed, if
-    /// the declaration is invalid, or if any workspace member omits
-    /// `rust-version` or requires a newer compiler than the root floor.
+    /// Returns [`EachError`] if the root manifest cannot be read or parsed, or,
+    /// when a root declaration exists, if it is invalid or any workspace
+    /// member omits `rust-version` or requires a newer compiler than the root
+    /// floor. Returns `None` without validating member floors when the root
+    /// declaration is absent.
     pub(crate) fn workspace_rust_version_if_declared(&self) -> Result<Option<String>, EachError> {
         let path = self.root_manifest_path.display().to_string();
         let text = std::fs::read_to_string(&self.root_manifest_path)
