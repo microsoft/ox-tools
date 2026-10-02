@@ -15,10 +15,8 @@
 # (regions/cargo-rust-lints.toml) so non-miri builds don't warn.
 #
 # Under scheduled-runtime-analysis these profiles run full-workspace:
-# that tier sets ANVIL_IMPACT=off, so _anvil-impact-include resolves
-# to --workspace. A direct local invocation is impact-scoped like any
-# other affected-tier check -- it reads the anvil-impact cache and
-# honors --skip.
+# that tier sets ANVIL_IMPACT=off, so cargo-each selects the workspace.
+# A direct local invocation consumes the affected package file.
 
 # Run Miri tests with the Tree Borrows model.
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
@@ -30,8 +28,8 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-t
 
 # Install prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
-anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
-anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
+anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

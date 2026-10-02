@@ -296,6 +296,8 @@ fn commit_fixture(dir: &TempDir) {
     };
 
     assert!(git(&["init", "--quiet"]).success());
+    assert!(git(&["config", "core.autocrlf", "false"]).success());
+    assert!(git(&["config", "core.safecrlf", "false"]).success());
     assert!(git(&["add", "."]).success());
     assert!(
         git(&[

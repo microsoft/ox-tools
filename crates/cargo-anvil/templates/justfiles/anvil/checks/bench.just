@@ -9,23 +9,16 @@
 # Affected tier.
 
 # Build all workspace benchmarks.
-[script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} bench @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-run
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{packages}' --all-features --no-run
 
 # bench uses the cargo built-in in compile-only mode; no extra tool install
 # is needed beyond the Rust toolchain.
 
 # Install prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
-anvil-bench-setup installer="install": anvil-toolchain-stable-install
+anvil-bench-setup installer="install": (anvil-toolchain-stable-install installer)
 
 # Validate prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
-anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

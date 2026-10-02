@@ -16,7 +16,7 @@ pub struct CliMeta {
     ///
     /// Used solely to strip the leading word cargo injects (`cargo myforge`
     /// → argv `myforge …`), to render `--help`, and as the `tool` identity
-    /// recorded in `.anvil.lock` for the single-tool guard.
+    /// recorded in `.anvil/manifest.toml` for the single-tool guard.
     pub subcommand: String,
     /// Binary name shown in help. Defaults to `cargo-{subcommand}`.
     pub bin_name: String,

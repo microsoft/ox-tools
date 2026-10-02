@@ -3618,14 +3618,16 @@ mod tests {
     #[test]
     fn survey_retains_cargos_resolved_target_directory() {
         let (_directory, root) = workspace();
-        let target = root.join("configured-target");
+        let configured_target = root.join("configured-target");
 
         fs::create_dir_all(root.join(".cargo")).expect("cargo configuration directory");
         fs::write(
             root.join(".cargo/config.toml"),
-            format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
+            format!("[build]\ntarget-dir = '{}'\n", configured_target.as_str()),
         )
         .expect("cargo configuration");
+        let metadata = load_metadata(&root, &FeatureArgs::default()).expect("Cargo resolves the fixture metadata");
+        let target = Utf8PathBuf::from(metadata.target_directory.as_str());
 
         let survey = survey(&root, SelectArgs::default());
 

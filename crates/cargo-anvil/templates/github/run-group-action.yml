@@ -38,7 +38,7 @@ runs:
   using: composite
   steps:
     - id: setup
-      uses: ./.github/actions/anvil-setup
+      uses: ./.anvil/github/actions/setup
       with:
         group: ${{ inputs.group }}
         free-disk-space: ${{ inputs.free-disk-space }}
@@ -79,7 +79,7 @@ runs:
     - name: Publish supplemental Anvil commit status
       if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
-      uses: ./.github/actions/anvil-report-status
+      uses: ./.anvil/github/actions/report-status
       with:
         group: ${{ inputs.group }}
         setup_outcome: ${{ steps.setup.outcome }}

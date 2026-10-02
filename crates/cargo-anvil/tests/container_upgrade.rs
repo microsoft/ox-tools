@@ -110,7 +110,7 @@ fn rewind_to_runner_layout(root: &Path) -> Manifest {
         // host this rewind deletes outright.
         let path = match artifact {
             cargo_anvil::Artifact::OwnedFile(spec) => spec.path,
-            cargo_anvil::Artifact::Region(_) => continue,
+            cargo_anvil::Artifact::OwnedFileSection(_) | cargo_anvil::Artifact::Region(_) => continue,
         };
         let full = root.join(path);
         if full.exists() {
@@ -213,6 +213,7 @@ fn upgrading_from_the_runner_layout_retires_the_seam_and_emits_the_new_backend()
                     spec.id
                 );
             }
+            cargo_anvil::Artifact::OwnedFileSection(_) => {}
         }
     }
 
@@ -558,7 +559,7 @@ fn refusing_a_composed_host_leaves_its_lock_entry_intact() {
         .insert(".anvil/container/Dockerfile".to_owned(), checksum_str(previous_render));
     manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
     manifest.save(root).unwrap();
-    let lock_before = std::fs::read_to_string(root.join(".anvil.lock")).unwrap();
+    let lock_before = std::fs::read_to_string(Manifest::path_for(root)).unwrap();
 
     run_update(&Catalog::anvil(), &local(), root).unwrap();
 
@@ -569,7 +570,7 @@ fn refusing_a_composed_host_leaves_its_lock_entry_intact() {
         "a refused host keeps its recorded checksum, or its provenance is gone"
     );
     assert_eq!(
-        std::fs::read_to_string(root.join(".anvil.lock")).unwrap(),
+        std::fs::read_to_string(Manifest::path_for(root)).unwrap(),
         lock_before,
         "refusing must not rewrite the lock at all"
     );
@@ -800,8 +801,8 @@ fn a_composed_host_that_lost_its_regions_is_told_to_restore_it() {
 fn a_case_only_rename_of_an_owned_file_is_not_deleted() {
     let tmp = generated_tree();
     let root = tmp.path();
-    let canonical = root.join("justfiles/anvil/tools.just");
-    let renamed = root.join("justfiles/anvil/Tools.just");
+    let canonical = root.join(".anvil/anvil.just");
+    let renamed = root.join(".anvil/Anvil.just");
     assert!(canonical.is_file(), "precondition: the owned recipe exists as generated");
 
     let body = std::fs::read_to_string(&canonical).unwrap();
@@ -809,7 +810,7 @@ fn a_case_only_rename_of_an_owned_file_is_not_deleted() {
     write(&renamed, &body);
     // The lock still carries the original casing, which is the whole point.
     assert_eq!(
-        Manifest::load(root).unwrap().file_checksum("justfiles/anvil/tools.just"),
+        Manifest::load(root).unwrap().file_checksum(".anvil/anvil.just"),
         Some(checksum_str(&body).as_str()),
         "precondition: the lock records the pre-rename casing"
     );
@@ -827,7 +828,7 @@ fn a_case_only_rename_of_an_owned_file_is_not_deleted() {
         })
         .collect();
     assert!(
-        !removed.iter().any(|p| p.eq_ignore_ascii_case("justfiles/anvil/tools.just")),
+        !removed.iter().any(|p| p.eq_ignore_ascii_case(".anvil/anvil.just")),
         "anvil must not retire the artifact it just wrote: {removed:?}"
     );
     assert!(
@@ -835,8 +836,7 @@ fn a_case_only_rename_of_an_owned_file_is_not_deleted() {
         "the generated recipe must still be on disk after the run"
     );
     assert!(
-        !root.join("justfiles/anvil/Tools.just.anvil-proposed").exists()
-            && !root.join("justfiles/anvil/tools.just.anvil-proposed").exists(),
+        !root.join(".anvil/Anvil.just.anvil-proposed").exists() && !root.join(".anvil/anvil.just.anvil-proposed").exists(),
         "a file anvil still owns must not be proposed against as though it were repository-authored"
     );
 }
@@ -874,7 +874,7 @@ fn refusing_a_composed_host_spares_a_retired_region_entry_too() {
     let mut manifest = Manifest::load(root).unwrap();
     manifest.set_region(".anvil/container/Dockerfile", legacy_id, checksum_str(legacy_body));
     manifest.save(root).unwrap();
-    let lock_before = std::fs::read_to_string(root.join(".anvil.lock")).unwrap();
+    let lock_before = std::fs::read_to_string(Manifest::path_for(root)).unwrap();
 
     let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
 
@@ -884,7 +884,7 @@ fn refusing_a_composed_host_spares_a_retired_region_entry_too() {
         "a refused host must not have a block spliced out of it"
     );
     assert_eq!(
-        std::fs::read_to_string(root.join(".anvil.lock")).unwrap(),
+        std::fs::read_to_string(Manifest::path_for(root)).unwrap(),
         lock_before,
         "\"nothing was written to it\" has to be true of the lock as well as the file"
     );

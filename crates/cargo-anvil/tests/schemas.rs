@@ -79,8 +79,15 @@ fn try_run(cmd: &mut Command) -> Option<Output> {
 fn taplo_validates_emitted_toml_files() {
     let tmp = run_with_backend("github");
     let mut cmd = Command::new("taplo");
-    cmd.args(["check", "Cargo.toml", "deny.toml", "rustfmt.toml", ".delta.toml", ".anvil.lock"])
-        .current_dir(tmp.path());
+    cmd.args([
+        "check",
+        "Cargo.toml",
+        "deny.toml",
+        "rustfmt.toml",
+        ".delta.toml",
+        ".anvil/manifest.toml",
+    ])
+    .current_dir(tmp.path());
 
     let Some(out) = try_run(&mut cmd) else {
         eprintln!("skipping: taplo not installed");
@@ -184,10 +191,10 @@ fn emitted_powershell_scripts_disable_profiles() {
 #[test]
 fn ado_yaml_emitted_files_have_consistent_indent() {
     let tmp = run_with_backend("ado");
-    let root = tmp.path().join(".pipelines");
     let mut count = 0_usize;
-    for entry in walkdir::WalkDir::new(&root)
+    for entry in [tmp.path().join(".pipelines"), tmp.path().join(".anvil/ado")]
         .into_iter()
+        .flat_map(walkdir::WalkDir::new)
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|s| s == "yml"))
     {
@@ -207,5 +214,5 @@ fn ado_yaml_emitted_files_have_consistent_indent() {
             );
         }
     }
-    assert!(count >= 11, "expected at least 11 emitted .pipelines yml files, got {count}");
+    assert!(count >= 11, "expected at least 11 emitted ADO yml files, got {count}");
 }

@@ -4,103 +4,7 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-#
-# Each check belongs to one of four buckets, which determines how it scopes
-# its work to the packages impacted by a change:
-#
-#   - "modified": only run when at least one package's source files
-#     changed in the diff. The tier only admits or skips the recipe; it
-#     does not forward package arguments. Each admitted tool owns its
-#     normal input domain. A recipe may invoke that tool once (cargo
-#     heather, cargo sort) or fan out one bounded child per workspace
-#     member (cargo each).
-#
-#   - "affected": run on the affected set (modified ∪ reverse-deps within the
-#     workspace). The tool takes --package; the recipe splices the resolved
-#     package list into the cargo invocation, defaulting to --workspace when
-#     the tier is unscoped.
-#
-#   - "required": run on the required set (affected ∪ workspace-internal
-#     transitive deps). Same splice/default as affected, for checks whose tool
-#     resolves through the dep graph (cargo doc -> intra-doc links; cargo hack
-#     -> feature powerset; cargo udeps -> unused-deps).
-#
-#   - "unscoped": always run. External-input checks (deny, audit, aprz) and
-#     PR-context checks (pr-title) live here, as do checks whose inputs
-#     include repo-level files cargo-delta maps to no package (the
-#     workspace-level README template via readme-check, the root `.spelling`
-#     via spellcheck); scheduled-exhaustive recipes (mutants-full) are
-#     unscoped by design.
-#
-# Each scoped check depends on `anvil-impact` (which produces the
-# target/anvil/impact cache) and captures its category's scope into a local
-# variable by calling the shared resolver:
-#
-#   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
-#
-# _anvil-impact-include reads that cache both locally and in cloud workflows
-# (where the group job downloaded the target/anvil/impact artifact), so the
-# same code path runs everywhere -- no scoping is threaded between jobs via
-# environment variables. `$include` is one of:
-#
-#   * "--workspace" (affected/required) or "" (modified) - the tier is
-#     unscoped: ANVIL_IMPACT=off, or no impact cache is present outside consume
-#     mode (under consume a missing cache is a hard failure, not an unscoped
-#     run). Recipes splat
-#     "--workspace" (an empty string is NOT $null, so recipes test truthiness
-#     rather than `?? "--workspace"`, which would splat an empty arg cargo
-#     rejects).
-#   * "--package A@v --package B@v" - the tier has members. Packages are
-#     version-qualified cargo specs so they resolve uniquely even when a
-#     like-named crate is also a transitive dependency.
-#   * "--skip" - the tier is empty for this change (recipe exits 0).
-#
-# Those three values are only meaningful when the resolver succeeded, so every
-# caller captures its exit code and propagates it before reading `$include`:
-#
-#   $impactExit = $LASTEXITCODE
-#   if ($impactExit -ne 0) { exit $impactExit }
-#
-# `$ErrorActionPreference = 'Stop'` does not fail a recipe on a native
-# command's nonzero exit, so without that guard a failed lookup (a missing
-# cache under ANVIL_IMPACT=consume, an unreadable include file, an
-# unrecognized ANVIL_IMPACT value) would leave `$include` empty and the check
-# would silently widen to its unscoped default and pass. The same reason
-# anvil-impact fails loudly in consume mode applies to reading the cache it
-# asserts: a broken scope must stop the check, not quietly rescope it.
-#
-# This keeps the per-recipe boilerplate to a single capture, the exit-code
-# guard, a one-line skip guard, and the cargo invocation. Modified-tier
-# recipes never forward `$include`; they only check the skip sentinel and then
-# let their command determine its normal input domain.
-#
-# Every recipe whose body uses multi-line conditionals or array-splat
-# splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on
-# Windows (since Windows 10), on GH/ADO hosted Linux + Windows
-# runners, and installable on macOS via Homebrew or the upstream
-# installer. We chose pwsh over bash because just's shebang dispatch
-# requires `cygpath` on Windows (only on PATH from inside Git Bash),
-# while [script("pwsh", "-NoProfile")] works from plain PowerShell with no PATH
-# augmentation. We require pwsh 7+ (enforced via _anvil-require pwsh)
-# for consistent semantics of the array-splat splice and the modern
-# operators used across these recipes.
-#
-# Every recipe that runs a command is annotated with [script("pwsh", "-NoProfile")],
-# including single-command ones (cargo deny check, cargo audit). They do
-# NOT inherit the adopter's default shell: just defaults to `sh`, which is
-# absent on Windows and varies across environments, so relying on it makes
-# these recipes non-portable. Routing every command through pwsh keeps
-# behavior identical on every platform.
-#
-# Note: [script(...)] requires `set unstable`. The adopter's root
-# justfile must declare it (typically as a top-level line). anvil's
-# mod.just does NOT redeclare it, to avoid conflicting with adopters
-# who already have it.
-
 # Platform configs replace, rather than overlay, cargo-mutants' default config.
-# Selection is native Just evaluation, independent of the recipe's interpreter.
 _anvil_mutants_platform_config := ".cargo/mutants." + os() + ".toml"
 _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutants_platform_config) == "true" {
     "--config=" + _anvil_mutants_platform_config
@@ -108,61 +12,41 @@ _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutant
     ""
 }
 
-# _anvil-base-ref: single source of truth for "which git ref does a PR
-# diff against". Shared by the impact step (github/impact-action.yml,
-# ado/steps/impact.yml) and anvil-mutants-diff so the resolution lives in
-# exactly one place. Precedence:
-#   1. BASE_REF -- explicit override. GitHub sets it to the PR base commit
-#      SHA; adopters can set a full ref like `origin/release`.
-#   2. SYSTEM_PULLREQUEST_TARGETBRANCH -- ADO PR builds. This is the
-#      *fully-qualified* target ref (e.g. `refs/heads/main`), so strip the
-#      `refs/heads/` prefix and resolve to `origin/<branch>`
-#      (`origin/refs/heads/main` is not a valid ref).
-#   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
-#   4. origin/main, then origin/master -- local / non-PR fallback.
-# Prints ONLY the resolved ref to stdout so callers can capture it:
-#   pwsh : $base = (& "{{ just_executable() }}" _anvil-base-ref)
-#   bash : base="$(just _anvil-base-ref)"
+# Read the declared root MSRV without resolving it through rustup. `none` is a
+# valid answer when a repository toolchain file selects Rust.
+[private]
 [script("pwsh", "-NoProfile")]
-_anvil-base-ref:
-    $ErrorActionPreference = 'Stop'
-    if ($env:BASE_REF) {
-        Write-Output $env:BASE_REF
+_anvil-root-msrv:
+    if ($env:ANVIL_RUST_VERSION) {
+        Write-Output $env:ANVIL_RUST_VERSION
         exit 0
     }
-    if ($env:SYSTEM_PULLREQUEST_TARGETBRANCH) {
-        Write-Output ("origin/" + ($env:SYSTEM_PULLREQUEST_TARGETBRANCH -replace '^refs/heads/', ''))
-        exit 0
-    }
-    if ($env:GITHUB_BASE_REF) {
-        Write-Output "origin/$($env:GITHUB_BASE_REF)"
-        exit 0
-    }
-    foreach ($candidate in @('origin/main', 'origin/master')) {
-        git rev-parse --verify $candidate 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Output $candidate
-            exit 0
+    $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
+    $values = @{}
+    $section = ''
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+            $section = $Matches[1].Trim()
+            continue
+        }
+        if ($section -in @('workspace.package', 'package') -and
+            $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+            $values[$section] = $Matches[2]
         }
     }
-    Write-Error 'anvil-base-ref: cannot resolve a base ref. Set BASE_REF, or ensure origin/main or origin/master exists.'
-    exit 1
+    if ($values.ContainsKey('workspace.package')) {
+        Write-Output $values['workspace.package']
+    } elseif ($values.ContainsKey('package')) {
+        Write-Output $values['package']
+    } else {
+        Write-Output 'none'
+    }
 
-# Run a private recipe with impact scoping disabled.
-#
-# The only way to reach a whole dependency tree with an environment variable:
-# `just` runs each dependency as its own process, and a dependency-only
-# recipe's body executes after its dependencies, so exporting from there is
-# too late. Invoking `_anvil-<name>` as a child process makes every check
-# below it inherit the setting.
-#
-# The justfile is named explicitly so the child resolves the same file the
-# wrapper was defined in, rather than whatever an upward search from the
-# working directory happens to find.
+# Scheduled groups execute a private group recipe in a child Just process so
+# ANVIL_IMPACT=off is visible while that child's dependency graph is evaluated.
 [private]
 [script("pwsh", "-NoProfile")]
 _anvil-unscoped name:
-    $ErrorActionPreference = 'Stop'
     $env:ANVIL_IMPACT = 'off'
     & '{{ replace(just_executable(), "'", "''") }}' --justfile '{{ replace(justfile(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
     exit $LASTEXITCODE

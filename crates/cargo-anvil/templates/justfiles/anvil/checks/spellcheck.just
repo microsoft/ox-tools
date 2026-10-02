@@ -13,13 +13,13 @@
 # package -- so this check cannot be safely impact-scoped and always runs.
 #
 # cargo-spellcheck reads a Hunspell-compatible dictionary file at the
-# path configured in spellcheck.toml (typically `extra_dictionaries =
+# path configured in `spellcheck.toml` (typically `extra_dictionaries =
 # ["target/spelling.dic"]`). The convention used by the surveyed
 # Microsoft Rust repos is to keep the *source* word list in a
 # human-edited `.spelling` file at the repo root and preprocess it
 # into the .dic format at check time (Hunspell .dic requires:
 # alphabetical sort, blank/numeric lines removed, line-count header).
-# We always (re)generate `target/spelling.dic` so that a spellcheck.toml
+# We always (re)generate `target/spelling.dic` so that the generated config
 # pointing at it never fails on a missing file -- if `.spelling` is
 # absent we emit an empty dictionary (count `0`, no words) rather than
 # leaving the path dangling.
@@ -37,15 +37,7 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $line_count = $filtered_lines.Count
     [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
     @($line_count) + $filtered_lines | Set-Content $output_file
-    # Pass --cfg explicitly when a spellcheck.toml exists at repo root,
-    # otherwise cargo-spellcheck falls back to its built-in defaults and
-    # ignores user-curated dictionaries (`extra_dictionaries`, custom
-    # hunspell langs, etc.).
-    if (Test-Path 'spellcheck.toml') {
-        & cargo {{_anvil_stable_toolchain_args}} spellcheck --cfg spellcheck.toml check --code 1
-    } else {
-        & cargo {{_anvil_stable_toolchain_args}} spellcheck check --code 1
-    }
+    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} spellcheck --cfg spellcheck.toml check --code 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # cargo-spellcheck has a source-build-time libclang dependency. The
@@ -54,8 +46,8 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 
 # Install prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
-anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install installer)
+anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
-anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
+anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs

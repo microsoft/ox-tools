@@ -114,7 +114,7 @@ fn dry_run_on_fresh_workspace_reports_changes_and_exits_1() {
     let ws = workspace();
     anvil(ws.path(), &["--no-backends", "--dry-run"]).assert().failure().code(1);
     // Dry-run must not have written anything.
-    assert!(!ws.path().join("justfiles/anvil/mod.just").exists());
+    assert!(!ws.path().join(".anvil/anvil.just").exists());
 }
 
 #[test]
@@ -128,8 +128,11 @@ fn apply_writes_files_then_dry_run_is_clean() {
         .stdout(predicates::str::contains("repo_root="))
         .stdout(predicates::str::contains("INFO").not())
         .stdout(predicates::str::contains("cargo_anvil::run").not());
-    assert!(ws.path().join("justfiles/anvil/mod.just").is_file());
-    assert!(ws.path().join(".anvil.lock").is_file());
+    assert!(ws.path().join(".anvil/anvil.just").is_file());
+    assert!(ws.path().join(".anvil/checks.just").is_file());
+    assert!(ws.path().join(".anvil/setup.just").is_file());
+    assert!(ws.path().join(".anvil/container.just").is_file());
+    assert!(ws.path().join(".anvil/manifest.toml").is_file());
 
     // Second dry-run against the now-up-to-date tree: no changes, exit 0.
     anvil(ws.path(), &["--no-backends", "--dry-run"]).assert().success();
@@ -139,7 +142,7 @@ fn apply_writes_files_then_dry_run_is_clean() {
 fn dry_run_fails_when_only_the_lockfile_is_stale() {
     let ws = workspace();
     anvil(ws.path(), &["--no-backends"]).assert().success();
-    let lock_path = ws.path().join(".anvil.lock");
+    let lock_path = ws.path().join(".anvil/manifest.toml");
     let current = std::fs::read_to_string(&lock_path).unwrap();
     let stale = current.replace(
         current.lines().find(|line| line.starts_with("catalog_checksum = ")).unwrap(),
@@ -151,7 +154,7 @@ fn dry_run_fails_when_only_the_lockfile_is_stale() {
         .assert()
         .failure()
         .code(1)
-        .stdout(predicates::str::contains(".anvil.lock"));
+        .stdout(predicates::str::contains(".anvil/manifest.toml"));
 
     assert_eq!(std::fs::read_to_string(lock_path).unwrap(), stale);
 }

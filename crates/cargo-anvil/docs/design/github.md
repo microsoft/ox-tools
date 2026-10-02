@@ -15,7 +15,7 @@ need to change:
    impact jobs and the per-group jobs with all the impact-artifact upload/download
    plumbing. These change when anvil's groups or impact wiring evolve; most users won't
    ever edit them.
-3. **Shared composite actions** (`.github/actions/anvil-*/`). The reusable
+3. **Shared composite actions** (`.anvil/github/actions/*/`). The reusable
    workflows pass a constant group name to one `anvil-run-group` action, which
    runs setup plus the matching `just anvil-<tier>-<group>` recipe and surfaces
    the concrete failure without duplicating group membership. See
@@ -63,9 +63,9 @@ flowchart LR
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     required_checks["required-checks<br/>(single branch-protection context)"]:::job
-    impact_act[".github/actions/<br/>anvil-impact"]:::action
-    setup_act[".github/actions/<br/>anvil-setup"]:::action
-    run_group_act[".github/actions/<br/>anvil-run-group"]:::action
+    impact_act[".anvil/github/actions/<br/>impact"]:::action
+    setup_act[".anvil/github/actions/<br/>setup"]:::action
+    run_group_act[".anvil/github/actions/<br/>run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     impact_just["just anvil-impact"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
@@ -130,8 +130,8 @@ flowchart LR
     srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
     publish_job["publish-failure<br/>upsert incident issue"]:::job
-    setup_act[".github/actions/<br/>anvil-setup"]:::action
-    run_group_act[".github/actions/<br/>anvil-run-group"]:::action
+    setup_act[".anvil/github/actions/<br/>setup"]:::action
+    run_group_act[".anvil/github/actions/<br/>run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
@@ -183,16 +183,16 @@ are emitted for GitHub, ADO, and local-only installations. They are shown here
 alongside the GitHub-gated files so the on-disk tree is complete.
 
 ```text
+.anvil/github/actions/
+├── setup/action.yml                   owned   (install just + group-scoped catalog tools)
+├── setup/just-problem-matcher.json    owned   (annotate failing Just recipes)
+├── run-group/action.yml               owned   (orchestrate any Just group)
+├── report-status/action.yml           owned   (publish per-job commit statuses)
+└── impact/action.yml                  owned   (compute and upload impact)
+
 .github/
 ├── instructions/
 │   └── cargo-anvil.instructions.md    owned   (repository-wide setup and verification guidance; all backends)
-├── actions/
-│   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
-│   ├── anvil-setup/just-problem-matcher.json
-│   │                                  owned   (annotate failing Just recipes)
-│   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
-│   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
-│   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
 ├── skills/
 │   ├── cargo-anvil-adoption/SKILL.md  owned   (post-generation cleanup workflow; all backends)
 │   └── code-review/SKILL.md           owned   (GitHub PR review guidance)
@@ -203,7 +203,7 @@ alongside the GitHub-gated files so the on-disk tree is complete.
     └── anvil-scheduled.yml              owned
 ```
 
-All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
+All files are regular owned files tracked by `.anvil/manifest.toml`
 (no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
 who customize the root workflow take ownership through the standard dirty-file
 flow.
@@ -302,8 +302,7 @@ a `.anvil-proposed` sibling on the next `update` — see
   `*_runner` inputs.
 - **Different schedule** for the scheduled tier.
 - **Path filters** to skip the workflow on docs-only PRs (though anvil's
-  `cargo delta impact` step already produces a `--skip` sentinel for the include lists
-  when nothing relevant changed).
+  cargo-delta package files are empty when nothing relevant changed).
 
 anvil ships two defaults in the root workflow that adopters typically keep but can
 remove if they have specific reasons:
@@ -348,13 +347,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
-      - uses: ./.github/actions/anvil-impact   # runs `just anvil-impact` + upload-artifact anvil-impact-Linux
+      - uses: ./.anvil/github/actions/impact   # runs `just anvil-impact` + upload-artifact anvil-impact-Linux
   impact-windows:
     runs-on: ${{ inputs.windows_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
-      - uses: ./.github/actions/anvil-impact   # uploads anvil-impact-Windows
+      - uses: ./.anvil/github/actions/impact   # uploads anvil-impact-Windows
 
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
@@ -369,7 +368,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
+        with: { fetch-depth: 0 }  # mutation and impact checks need the PR base history
       # Download the impact cache computed on this leg's OS into
       # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
       # pr-runtime-analysis / pr-mutants do the identical download.
@@ -377,7 +376,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-fast
           impact_mode: consume   # scoped checks read the downloaded cache
@@ -404,7 +403,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-test
           impact_mode: consume
@@ -427,7 +426,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-msrv
           impact_mode: consume
@@ -461,11 +460,11 @@ jobs are skipped and the run fails at impact (we add no `if: always()` / `if:
 !cancelled()` override that would let them run anyway). This keeps a broken impact a
 blocking failure rather than leaving the run green with a lone red impact job.
 
-The wiring never branches on impact's *output values*, though. When impact succeeds,
-each group always runs; recipes inside the group decide whether a given check no-ops,
-by testing for the literal sentinel `--skip` in the relevant include var. This matters
-because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
-must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
+The wiring never branches on impact's *output values*. When impact succeeds,
+each group always runs; cargo-each turns an empty package file into a per-check
+no-op. This matters because unscoped checks (`deny`, `audit`, `aprz`,
+`pr-title`, `mutants-full`) must run on every PR, including docs-only PRs where
+every package file is empty. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the recipe-side
 contract.
 
@@ -543,7 +542,7 @@ reusable workflow). Moving a check between groups or buckets remains a pure
 catalog change.
 
 ```yaml
-# .github/actions/anvil-run-group/action.yml  (owned)
+# .anvil/github/actions/run-group/action.yml  (owned)
 name: anvil-run-group
 description: Run an Anvil Just group and report its result.
 inputs:
@@ -570,7 +569,7 @@ runs:
   using: composite
   steps:
     - id: setup
-      uses: ./.github/actions/anvil-setup
+      uses: ./.anvil/github/actions/setup
       with:
         group: ${{ inputs.group }}
         free-disk-space: ${{ inputs.free-disk-space }}
@@ -580,7 +579,7 @@ runs:
       env:
         ANVIL_GROUP: ${{ inputs.group }}
         # The impact set reaches scoped checks through the downloaded
-        # target/anvil/impact cache (read via `_anvil-impact-include`), not
+        # target/anvil/impact package files (read by cargo-each), not
         # threaded --package strings. This action only fixes the mode.
         ANVIL_IMPACT: ${{ inputs.impact_mode }}
         GITHUB_TOKEN: ${{ github.token }}
@@ -597,7 +596,7 @@ runs:
     - name: Publish supplemental Anvil commit status
       if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
-      uses: ./.github/actions/anvil-report-status
+      uses: ./.anvil/github/actions/report-status
       with:
         group: ${{ inputs.group }}
         setup_outcome: ${{ steps.setup.outcome }}
@@ -626,8 +625,8 @@ The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
 `BASE_REF` on the `pr-mutants` group step. They are environment variables rather
 than action inputs because only the recipes consume them.
 
-The recipes themselves consume the downloaded impact cache (via
-`_anvil-impact-include`) and only the PR-context env vars they need; the catalog
+The recipes themselves consume downloaded package files via cargo-each and
+only the PR-context env vars they need; the catalog
 records the tier mapping (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
 Fixing only the mode (`consume`/`off`) at each group-action invocation, rather
@@ -809,21 +808,22 @@ Other groups retain the action's disabled default.
 
 ## 6. Impact scoping
 
-`.github/actions/anvil-impact/action.yml` is a composite action that runs the shared
+`.anvil/github/actions/impact/action.yml` is a composite action that runs the shared
 `anvil-impact` recipe — the same impact building block adopters run locally (see
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe)). It:
 
-1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
+1. `./.anvil/github/actions/setup` with `group: none` (bootstrap rust + just +
    cache; no catalog tools).
-2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
-   needs. **This is the only job that runs cargo-delta to compute the impact
-   set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
-   `consume` mode they never run it -- they read the downloaded impact cache.)
-3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
-   base ref (in a throwaway worktree) and the working tree, runs
-   `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
-   the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
-   and the `snapshots/`.
+2. Installs cargo-each and cargo-delta through their generated setup recipes.
+   These are the only catalog tools the shared recipe needs. **This is the only
+   job that runs cargo-delta to compute the impact set.** (Group setup jobs also
+   install cargo-delta as a prerequisite, but in `consume` mode they never run
+   it -- they read the downloaded impact cache.)
+3. `just anvil-impact`, which invokes cargo-delta managed mode and writes one
+   canonical `name@version` per line to `modified.packages`,
+   `affected.packages`, and `required.packages` under
+   `target/anvil/impact/`. cargo-delta owns merge-base snapshots and cache
+   invalidation under its own target directory.
 4. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
    (`actions/upload-artifact`).
 
@@ -833,8 +833,8 @@ The impact set propagates as an **uploaded workflow artifact** — the entire
 `target/anvil/impact/` cache — not as job outputs or environment variables. Each group
 job **downloads** it and its scoped checks read the cache directly, exactly as a local
 run does: this is the whole point — CI and local execution take the identical code
-path (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`), rather than CI
-threading pre-formatted strings that local runs never see. The chain in
+path (`anvil-impact` → `<tier>.packages` → cargo-each `--package-file`), rather
+than CI threading pre-formatted strings that local runs never see. The chain in
 `anvil-pr-impl.yml`:
 
 1. **Two impact jobs**, `impact-linux` and `impact-windows`, each run the
@@ -853,10 +853,10 @@ threading pre-formatted strings that local runs never see. The chain in
    `anvil-impact` is a pure no-op — it trusts the downloaded cache verbatim and
    **neither snapshots nor recomputes**, so it needs neither cargo-delta nor a fetched
    base ref (a group job installs the former and shallow-checks-out without the latter).
-   Each scoped check then reads its category's scope from
-   `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
-   `$include` variable). This is why the group jobs stay lean and can't be tripped up by
-   an environmental difference from the impact job.
+   Each scoped check gives its category's package file directly to cargo-each.
+   A present empty file is an explicit successful no-op; a missing file fails
+   closed. This is why group jobs stay lean and cannot diverge from the impact
+   job's selection.
 4. **Scheduled group jobs download nothing** and always validate the full workspace, so
    their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
    group class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
@@ -866,9 +866,9 @@ threading pre-formatted strings that local runs never see. The chain in
    state could ever flip a scheduled job into impact scoping and skip the full-workspace
    backstop.)
 
-The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
-status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
-`mutants-full`) must run on every PR even when every tier reports `--skip`. Steps that
+The wiring never gates jobs on the impact result. This is intentional: unscoped
+checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`) must run on every
+PR even when every package file is empty. Steps that
 need a per-tier side decision read the downloaded cache file directly (e.g. the Codecov
 upload is gated on both coverage files existing via `hashFiles(...)`), never on a job
 output.
@@ -915,10 +915,10 @@ users that need additional preparation take ownership of the generated reusable
 implementation workflow and add the preparation there. The generated composite
 actions remain implementation details rather than a separately supported API.
 
-Prerequisite validation remains read-only. For the root-MSRV fallback, it
-requires rustup and verifies the exact MSRV toolchain is already installed
-before running Cargo metadata, preventing validation from auto-installing a
-compiler.
+Prerequisite validation remains read-only. The generated recipe entry point
+exports `RUSTUP_AUTO_INSTALL=0`, so a missing selected toolchain fails
+validation instead of being downloaded implicitly. Setup recipes install
+toolchains explicitly through rustup.
 
 ## 8. Caching
 
@@ -1124,61 +1124,3 @@ Repositories that do not want issue publication set the
 lives in repository settings instead of an Anvil-owned workflow, so the root workflow
 stays on the automatic update path. The scheduled call retains `issues: write`; the
 publisher's condition prevents use of that permission when publication is disabled.
-
-## 12. Advisory PR comments
-
-Recipes that surface non-blocking findings exit 0 and write a markdown body to
-`target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
-for the cross-backend convention). The GitHub backend turns presence/absence of those
-files into upserts/deletions of a sticky PR comment via
-[`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment).
-
-The wiring lives in the `pr-fast` job of `anvil-pr-impl.yml` (the only group whose
-recipes emit comments today). Two steps run after the composite that executes the
-`pr-fast` group:
-
-```yaml
-- name: Upsert anvil-semver advisory
-  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && hashFiles('target/anvil/comments/semver.md') != ''
-  uses: marocchino/sticky-pull-request-comment
-  with:
-    header: anvil-semver
-    path: target/anvil/comments/semver.md
-- name: Clear anvil-semver advisory
-  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && hashFiles('target/anvil/comments/semver.md') == ''
-  uses: marocchino/sticky-pull-request-comment
-  with:
-    header: anvil-semver
-    delete: true
-```
-
-Conditions explained:
-
-- `always()` keeps the comment in sync even if an unrelated `pr-fast` check failed; the
-  advisory state is independent of the rest of the job's pass/fail.
-- `github.event_name == 'pull_request'` skips the steps on `merge_group` and other
-  triggers where there's no PR thread to post to.
-- `matrix.os == 'linux'` picks the canonical x86_64 Linux leg so the four-OS matrix
-  doesn't race on the same comment.
-- `head.repo.full_name == github.repository` skips fork PRs. GitHub doesn't grant
-  `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
-
-Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
-`pull-requests: write` on the `validation` job that calls
-`anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
-of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
-use `pull-requests: write`. Merge-group executions share this caller but cannot
-reach the pull-request-only write steps. Fork PRs cannot reach them either,
-regardless of whether an administrator has enabled write tokens for fork
-workflows.
-
-Adding a new advisory check is a two-step change: the recipe writes
-`target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
-a matching `Upsert anvil-<NEW>` / `Clear anvil-<NEW>` pair with
-`header: anvil-<NEW>`. There's deliberately no auto-discovery loop over the
-convention dir — explicit per-check steps keep stale comments deterministically
-clearable when a check is removed from the catalog.
