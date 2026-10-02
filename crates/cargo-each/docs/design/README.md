@@ -347,7 +347,8 @@ no-op.
   temporary files before group spawn; no pipe-reader threads are created. The
   child writer and parent reader are separately reopened so parent seeks cannot
   move a descendant's write position. The parent records each file's current
-  length when the leader completes, or after timeout cleanup completes.
+  length when the leader completes, or immediately after the timeout
+  termination request returns.
   Plan-order emission seeks to the beginning and streams exactly that many
   bytes, so memory does not scale with command output and output is not
   intentionally truncated.

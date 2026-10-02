@@ -150,13 +150,14 @@ descendants. Every genuinely parallel invocation redirects stdout and
 stderr directly to separate unique temporary files.
 Child writers and parent readers are separately reopened so parent seeks
 cannot move descendant write positions. Cargo-each records each file’s
-current length when the leader completes (or after timeout cleanup), then
-reads exactly that finite snapshot in plan order without loading unbounded
-output into memory. Later writes by background or escaped descendants are
-outside the snapshot. RAII removes cargo-each’s directory entry, but a
-preserved descendant can keep the backing storage allocated and growing
-until its inherited writer closes. Capture create, reopen, length, seek, and
-read failures are infrastructure failures.
+current length when the leader completes (or immediately after the timeout
+termination request returns), then reads exactly that finite snapshot in
+plan order without loading unbounded output into memory. Later writes by
+background or escaped descendants are outside the snapshot. RAII removes
+cargo-each’s directory entry, but a preserved descendant can keep the
+backing storage allocated and growing until its inherited writer closes.
+Capture create, reopen, length, seek, and read failures are infrastructure
+failures.
 
 At a timeout, cargo-each makes one termination request for the Windows job
 or Unix process group and returns without waiting for operating-system

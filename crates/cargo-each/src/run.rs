@@ -1121,8 +1121,14 @@ mod tests {
             if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_STARTED_MARKER") {
                 std::fs::write(marker, b"started").expect("the parent passes a writable start marker path");
             }
-            let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
-            thread::sleep(Duration::from_millis(millis));
+            if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_RELEASE_MARKER") {
+                while !std::path::Path::new(&marker).exists() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            } else {
+                let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
+                thread::sleep(Duration::from_millis(millis));
+            }
         }
         if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_MARKER") {
             std::fs::write(marker, b"completed").expect("the parent passes a writable marker path");
@@ -1522,14 +1528,12 @@ mod tests {
 
         let temporary = tempfile::tempdir().expect("create marker directory");
         let started_marker = temporary.path().join("direct-child-started");
+        let release_marker = temporary.path().join("direct-child-release");
         let completion_marker = temporary.path().join("direct-child-completed");
-        let child = Command::new(std::env::current_exe().expect("the test binary knows its path"))
-            .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
-            .env("CARGO_EACH_CHILD_SLEEP_MS", "50")
+        let child = sleeping_test_command()
             .env("CARGO_EACH_CHILD_STARTED_MARKER", &started_marker)
+            .env("CARGO_EACH_CHILD_RELEASE_MARKER", &release_marker)
             .env("CARGO_EACH_CHILD_MARKER", &completion_marker)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn sleeping direct child");
         let start_deadline = Instant::now() + Duration::from_secs(5);
@@ -1540,7 +1544,8 @@ mod tests {
         let started = Instant::now();
         terminate_child(child).expect("direct-child termination succeeds");
         assert!(started.elapsed() < Duration::from_secs(2));
-        thread::sleep(Duration::from_millis(250));
+        std::fs::write(&release_marker, b"release").expect("release a surviving direct child");
+        thread::sleep(Duration::from_millis(500));
         assert!(
             !completion_marker.exists(),
             "the direct child must not reach its completion marker after termination"
