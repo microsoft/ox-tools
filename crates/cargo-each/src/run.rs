@@ -403,22 +403,7 @@ fn run_streamed_with(invocation: &Invocation, spawn: impl FnOnce(Command) -> Res
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
-    let control = StreamedChild { child };
-    wait_for_process(control, None, observe_streamed_child, terminate_streamed_child, CHILD_OBSERVATION).result
-}
-
-struct StreamedChild {
-    child: Child,
-}
-
-fn observe_streamed_child(control: &mut StreamedChild) -> io::Result<Option<ExitStatus>> {
-    control.child.try_wait()
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Thin ownership adapter for an OS wait-error path.
-fn terminate_streamed_child(control: StreamedChild) -> io::Result<()> {
-    terminate_child(control.child)
+    wait_for_process(child, None, Child::try_wait, terminate_child, CHILD_OBSERVATION).result
 }
 
 fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration) -> InvocationResult {
@@ -924,14 +909,14 @@ mod tests {
     use super::{
         BufferedOutcome, CHILD_LEADER_OBSERVATION, CHILD_OBSERVATION, CapturedOutput, CapturedStream, EXECUTION_CONFIGURATION_CONTEXT,
         Invocation, InvocationResult, OutputEmitError, PLAN_BUILD_CONTEXT, PROCESS_POLL_INTERVAL, Plan, RunningWorker,
-        SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, StreamedChild, TemporarySnapshot,
-        TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM,
-        WORKSPACE_RUST_VERSION_CONTEXT, add_infrastructure_failure, apply_filters, combine_captured_output, create_output_capture_with,
-        display_duration, effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
-        failure_stops_launching, finish_capture, observe_streamed_child, panic_description, parallel_failure_exit_code, parse_predicates,
-        parse_target_kinds, record_emitted_failure, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
-        wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
+        SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
+        WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
+        add_infrastructure_failure, apply_filters, combine_captured_output, create_output_capture_with, display_duration,
+        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
+        failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
+        record_emitted_failure, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with,
+        shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group, wait_for_process,
+        wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
 
@@ -1535,10 +1520,31 @@ mod tests {
         terminate_group(group).expect("process-group termination succeeds");
         assert!(started.elapsed() < Duration::from_secs(2));
 
-        let child = sleeping_test_command().spawn().expect("spawn sleeping direct child");
+        let temporary = tempfile::tempdir().expect("create marker directory");
+        let started_marker = temporary.path().join("direct-child-started");
+        let completion_marker = temporary.path().join("direct-child-completed");
+        let child = Command::new(std::env::current_exe().expect("the test binary knows its path"))
+            .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
+            .env("CARGO_EACH_CHILD_SLEEP_MS", "50")
+            .env("CARGO_EACH_CHILD_STARTED_MARKER", &started_marker)
+            .env("CARGO_EACH_CHILD_MARKER", &completion_marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleeping direct child");
+        let start_deadline = Instant::now() + Duration::from_secs(5);
+        while !started_marker.exists() && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(started_marker.exists(), "the direct child must start before termination");
         let started = Instant::now();
         terminate_child(child).expect("direct-child termination succeeds");
         assert!(started.elapsed() < Duration::from_secs(2));
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !completion_marker.exists(),
+            "the direct child must not reach its completion marker after termination"
+        );
     }
 
     #[test]
@@ -1578,24 +1584,6 @@ mod tests {
             injected,
             InvocationResult::Infrastructure(message) if message.contains("injected group spawn failure")
         ));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns a child process")]
-    fn streamed_child_observation_returns_a_completed_status() {
-        let mut command = Command::new("rustc");
-        let mut child = command
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn short-lived child");
-        let expected = child.wait().expect("wait for short-lived child");
-        let mut control = StreamedChild { child };
-        assert_eq!(
-            observe_streamed_child(&mut control).expect("observe completed child"),
-            Some(expected)
-        );
     }
 
     #[test]
