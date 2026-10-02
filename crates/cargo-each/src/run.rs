@@ -19,8 +19,11 @@ use command_group::{CommandGroup as _, GroupChild};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
-use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError};
+use crate::error::{
+    InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError, SkipWithoutWorkspaceRustVersionRequiresPlaceholderError,
+};
 use crate::filter::Predicate;
+use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
 use crate::substitute::uses_workspace_rust_version;
@@ -53,6 +56,15 @@ const REAPER_START_CONTEXT: &str = "failed to start cargo-each process reaper";
 type ReaperJob = Box<dyn FnOnce() + Send + 'static>;
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
+    if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
+        return run_json(args);
+    }
+
+    let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
+    if args.skip_without_workspace_rust_version && !command_uses_workspace_rust_version {
+        return Err(SkipWithoutWorkspaceRustVersionRequiresPlaceholderError::new()).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
+    }
+
     let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
     let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
@@ -93,7 +105,16 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let workspace_rust_version = if uses_workspace_rust_version(&args.command) {
+    let workspace_rust_version = if args.skip_without_workspace_rust_version {
+        let Some(version) = workspace
+            .workspace_rust_version_if_declared()
+            .into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?
+        else {
+            eprintln!("cargo each: root manifest declares no workspace Rust version; nothing to do");
+            return Ok(ExitCode::SUCCESS);
+        };
+        Some(version)
+    } else if command_uses_workspace_rust_version {
         Some(workspace.workspace_rust_version().into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?)
     } else {
         None
@@ -115,6 +136,45 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     }
 
     execute(&plan, args.keep_going, args.jobs, args.timeout)
+}
+
+fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
+    validate_json_mode(args)?;
+    let records = json_lines::load(&args.json_lines, &args.json_lines_files).into_app_err("failed to read JSON Lines input")?;
+    let plan = Plan::build_json(&records, &args.command).into_app_err(PLAN_BUILD_CONTEXT)?;
+    if plan.invocations.is_empty() {
+        eprintln!("cargo each: JSON input resolved to no work; nothing to do");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.dry_run {
+        for invocation in &plan.invocations {
+            println!("{}", shell_join(&invocation.argv));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    execute(&plan, args.keep_going, args.jobs, args.timeout)
+}
+
+fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
+    let conflicts = [
+        (!args.packages.is_empty(), "--package"),
+        (!args.package_files.is_empty(), "--package-file"),
+        (args.workspace, "--workspace"),
+        (!args.exclude.is_empty(), "--exclude"),
+        (args.none, "--none"),
+        (!args.filters.is_empty(), "--filter"),
+        (!args.exclude_filters.is_empty(), "--exclude-filter"),
+        (args.once, "--once"),
+        (!args.each_targets.is_empty(), "--each-target"),
+        (!args.target_required_feature.is_empty(), "--target-required-feature"),
+        (args.chdir, "--chdir"),
+        (args.skip_without_workspace_rust_version, "--skip-without-workspace-rust-version"),
+        (args.manifest_path.is_some(), "--manifest-path"),
+    ];
+    if let Some((_, option)) = conflicts.into_iter().find(|(present, _)| *present) {
+        return Err(JsonInputConflictError::new(option.to_owned())).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
+    }
+    Ok(())
 }
 
 /// Assemble a [`Selection`] from direct and file-backed package specs.

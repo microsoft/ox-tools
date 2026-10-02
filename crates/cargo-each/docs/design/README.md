@@ -247,6 +247,9 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 |------|---------|
 | *(default)* | **per-package**: run `<COMMAND>` once per selected member, in name order, with placeholders substituted. |
 | `--once` | **once**: run `<COMMAND>` exactly once when the set is non-empty (skip when empty). Use `{packages}` to inject the selection. |
+| `--skip-without-workspace-rust-version` | Changes missing-value behavior for `{workspace-rust-version}`. Without the flag, an absent root declaration is an error; with it, a nonempty plan exits 0 without spawning the command. The flag is a usage error when the command does not contain the placeholder. When a root floor exists, ordinary declaration and member validation is unchanged. |
+| `--json-lines <JSONL>` | **JSON-record mode**: parse one JSON object per nonempty line in the provided value and run `<COMMAND>` once per record. Repeatable. Mutually exclusive with Cargo package selection, filters, target/once modes, `--chdir`, `--manifest-path`, and workspace Rust-version behavior. |
+| `--json-lines-file <PATH>` | Read JSON records from UTF-8 files instead of command-line values. Repeatable and may be combined with `--json-lines`; inline values are processed first, followed by files in argument order within each source. |
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
@@ -268,7 +271,8 @@ Substituted inside each `ARG` of the command template:
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
 | `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
-| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository. | all |
+| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository. | Cargo-backed per-package, per-target, once |
+| `{json:key}` | The top-level string field named `key` from the current JSON object. Missing or non-string referenced fields are errors. Inserted values are not rescanned for placeholder-shaped text. | JSON-record |
 
 Per-target mode accepts all per-package placeholders plus `{target}`. Using a
 per-package or per-target token in `--once` mode, `{target}` in per-package
@@ -285,11 +289,20 @@ floor. Missing values, a member requiring a newer compiler, or a non-Rust
 semantic version is a configuration error. Lower member minima are valid. This
 matches the meaning of one compiler selected for a complete workspace; it is
 not a per-package toolchain matrix. The validation is lazy: commands that do
-not contain the placeholder do not require a workspace Rust version, and a
-resolved plan with no invocations does not resolve or validate the value even
-when the template contains the placeholder. Placeholder mode validation still
-runs before that no-op decision, so misuse remains an exit-2 usage error on an
-empty set.
+not contain the placeholder do not require a workspace Rust version, and using
+`--skip-without-workspace-rust-version` without the placeholder is a usage
+error. With the flag, only absence of the root declaration becomes a successful
+no-op; if a root floor exists, missing, invalid, or newer member versions remain
+errors. Without a root floor there is no member floor to compare or require.
+A resolved package plan with no invocations does not resolve or validate the
+value, while placeholder mode validation still runs before that no-op decision.
+
+JSON-record mode does not load Cargo metadata or require a `Cargo.toml`. Each
+nonempty input line must be a JSON object. Objects may contain arbitrary JSON
+values, but every field referenced by `{json:key}` must exist and be a string.
+Records preserve source and line order, including duplicates. All records and
+placeholder references are validated before any child process is spawned.
+An empty record set is a successful no-op.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. No matching targets is a successful
@@ -307,6 +320,15 @@ no-op.
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.
+- **An absent optional workspace Rust version is success.**
+  `--skip-without-workspace-rust-version` exits 0 with a one-line note when a
+  nonempty package plan uses `{workspace-rust-version}` and the root manifest
+  has no workspace Rust-version declaration. It does not absorb malformed TOML
+  or invalid/inconsistent metadata when a root declaration exists.
+- **JSON input is strict and shell-free.** Invalid JSON, non-object records,
+  malformed JSON placeholders, and missing or non-string referenced fields are
+  usage/configuration errors before execution. Record values become argv text
+  directly; they are never interpreted by a shell.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
@@ -449,8 +471,16 @@ The setup graph can use `{workspace-rust-version}` to install the single root
 MSRV fallback without parsing Cargo TOML in a shell:
 
 ```just
-cargo each --workspace --once -- \
+cargo each --workspace --once --skip-without-workspace-rust-version -- \
     rustup toolchain install {workspace-rust-version} --profile minimal
+```
+
+A caller can discover records separately and execute one command per JSON line
+without loading Cargo metadata:
+
+```text
+cargo each --json-lines '{"package":"alpha","test":"fuzz_one"}' -- \
+    cargo bolero test --package {json:package} {json:test}
 ```
 
 ## 7. Rejected alternatives

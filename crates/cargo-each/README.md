@@ -80,6 +80,13 @@ can be double-quoted. Expression atoms:
   name order, substituting the per-package placeholders below.
 * `--once`: run the command exactly once when the set is non-empty (skip
   when empty), using the `{packages}` placeholder to inject the selection.
+* `--skip-without-workspace-rust-version`: when the command uses
+  `{workspace-rust-version}`, turn an absent root declaration into a
+  successful no-op instead of an error. Using the flag without the
+  placeholder is a usage error.
+* `--json-lines` / `--json-lines-file`: bypass Cargo selection and run once
+  per JSON object, substituting top-level string fields through
+  `{json:key}`.
 * `--each-target <KIND>`: run once per matching Cargo target, using
   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
   `--target-required-feature` further narrows targets.
@@ -111,22 +118,34 @@ Substituted inside each command argument:
   valid only in `--once` mode and only as a standalone argument.
 * `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
   or root `[package].rust-version` in a single-package repository; valid in
-  every mode.
+  Cargo-backed per-package, per-target, and `--once` modes.
+* `{json:key}` — the top-level string field named `key` in the current
+  record; valid only in JSON-record mode.
 
-Using a placeholder in the wrong mode is a usage error. Only the tokens
-above are interpreted; any other `{…}` sequence (a typo, or a literal brace
-an argument needs) passes through verbatim to the spawned command — there is
-no brace-escape, so this passthrough is part of the contract.
+Using a placeholder in the wrong mode is a usage error. Every `{json:…}`
+sequence is validated as a JSON placeholder. Other unrecognized `{…}`
+sequences (a typo, or a literal brace an argument needs) pass through
+verbatim to the spawned command — there is no brace-escape, so this
+passthrough is part of the contract.
 
 ## Behavior
 
 An empty resolved selection (via `--none`, or a filter that removes every
 member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
-Workspace Rust-version validation is lazy: it runs only when the command
-uses `{workspace-rust-version}` and the resolved plan has work, then requires
-every member’s resolved minimum to be present and no newer than the root
-floor. Placeholder mode validation still runs before an empty-plan no-op.
+Workspace Rust-version validation is lazy by default: it runs only when the
+command uses `{workspace-rust-version}` and the resolved plan has work, then
+requires every member’s resolved minimum to be present and no newer than the
+root floor. `--skip-without-workspace-rust-version` changes only the
+placeholder’s absent-root behavior; validation remains strict whenever a
+root floor exists. Placeholder mode validation still runs before an
+empty-plan no-op.
+
+JSON-record mode requires one JSON object per nonempty input line and does
+not load Cargo metadata. Referenced `{json:key}` fields must exist and be
+strings. Invalid input is rejected before any command is spawned, records
+retain input order and duplicates, and an empty record set is a successful
+no-op.
 
 The effective worker count is the requested `--jobs` value capped by plan
 size. An effective count of one uses sequential

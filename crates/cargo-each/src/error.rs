@@ -37,6 +37,13 @@
     PackageFileReadError,
     PackageFileUtf8Error,
     InvalidPackageFileLineError,
+    JsonInputConflictError,
+    JsonLinesFileReadError,
+    JsonLinesFileUtf8Error,
+    JsonLineParseError,
+    JsonRecordShapeError,
+    JsonRecordFieldError,
+    SkipWithoutWorkspaceRustVersionRequiresPlaceholderError,
     WorkspaceManifestReadError,
     WorkspaceManifestParseError,
     WorkspaceRustVersionError
@@ -119,6 +126,61 @@ pub(crate) struct InvalidPackageFileLineError {
     pub(crate) spec: String,
     pub(crate) reason: String,
 }
+
+/// JSON-record input was combined with a Cargo workspace selection option.
+#[ohno::error]
+#[display("JSON-record mode cannot be combined with `{option}`")]
+pub(crate) struct JsonInputConflictError {
+    pub(crate) option: String,
+}
+
+/// A `--json-lines-file` could not be read.
+#[ohno::error]
+#[display("could not read JSON Lines file `{path}`")]
+#[from(std::io::Error)]
+pub(crate) struct JsonLinesFileReadError {
+    pub(crate) path: String,
+}
+
+/// A `--json-lines-file` was not valid UTF-8.
+#[ohno::error]
+#[display("JSON Lines file `{path}` is not valid UTF-8")]
+#[from(std::string::FromUtf8Error)]
+pub(crate) struct JsonLinesFileUtf8Error {
+    pub(crate) path: String,
+}
+
+/// A nonempty JSON Lines record could not be parsed.
+#[ohno::error]
+#[display("invalid JSON in {source} at line {line}: {reason}")]
+pub(crate) struct JsonLineParseError {
+    pub(crate) source: String,
+    pub(crate) line: usize,
+    pub(crate) reason: String,
+}
+
+/// A JSON Lines record was valid JSON but not an object.
+#[ohno::error]
+#[display("JSON record in {source} at line {line} must be an object")]
+pub(crate) struct JsonRecordShapeError {
+    pub(crate) source: String,
+    pub(crate) line: usize,
+}
+
+/// A JSON placeholder referenced a missing or non-string field.
+#[ohno::error]
+#[display("cannot expand `{{json:{key}}}` for {source} line {line}: {reason}")]
+pub(crate) struct JsonRecordFieldError {
+    pub(crate) source: String,
+    pub(crate) line: usize,
+    pub(crate) key: String,
+    pub(crate) reason: String,
+}
+
+/// The optional workspace-version flag was supplied without its placeholder.
+#[ohno::error]
+#[display("`--skip-without-workspace-rust-version` requires the command to use `{{workspace-rust-version}}`")]
+pub(crate) struct SkipWithoutWorkspaceRustVersionRequiresPlaceholderError;
 
 /// The root manifest could not be read while resolving
 /// `{workspace-rust-version}`.

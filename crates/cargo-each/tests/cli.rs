@@ -111,6 +111,12 @@ fn each(manifest: &Path) -> Command {
     cmd
 }
 
+fn json_each() -> Command {
+    let mut cmd = Command::cargo_bin("cargo-each").expect("binary");
+    cmd.arg("each");
+    cmd
+}
+
 fn rust_version_fixture(root_floor: Option<&str>, members: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
@@ -573,6 +579,7 @@ fn none_is_a_successful_noop() {
         .args([
             "--none",
             "--once",
+            "--skip-without-workspace-rust-version",
             "--dry-run",
             "--",
             "cargo",
@@ -1416,6 +1423,104 @@ fn workspace_rust_version_rejects_missing_or_invalid_root_floor() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn workspace_rust_version_skip_requires_the_placeholder() {
+    let (_tmp, manifest) = rust_version_fixture(None, &[("alpha", Some("1.70"))]);
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--",
+            "rustc",
+            "--version",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("requires the command to use"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn absent_workspace_rust_version_skips_even_when_members_have_no_floor() {
+    let (_tmp, manifest) = rust_version_fixture(None, &[("alpha", None)]);
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--",
+            "rustup",
+            "toolchain",
+            "install",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("root manifest declares no workspace Rust version").and(predicate::str::contains("nothing to do")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_gate_runs_and_substitutes_when_declared() {
+    let (_tmp, manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("workspace"))]);
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--dry-run",
+            "--",
+            "echo",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo 1.80"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_gate_does_not_absorb_invalid_configuration() {
+    let (_invalid, invalid_manifest) = rust_version_fixture(Some("2.0"), &[("alpha", Some("1.70"))]);
+    each(&invalid_manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--dry-run",
+            "--",
+            "echo",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("2.0").and(predicate::str::contains("Rust 1.x")));
+
+    let (_missing_member, missing_member_manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("workspace")), ("beta", None)]);
+    each(&missing_member_manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--dry-run",
+            "--",
+            "echo",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("beta").and(predicate::str::contains("rust-version")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn workspace_rust_version_uses_root_package_for_single_package_repository() {
     let (_tmp, manifest) = single_package_fixture("1.75");
     each(&manifest)
@@ -1450,6 +1555,121 @@ fn jobs_help_documents_auto_and_default() {
                 .and(predicate::str::contains("available parallelism"))
                 .and(predicate::str::contains("Defaults to 1")),
         );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn help_documents_the_optional_workspace_rust_version_gate() {
+    Command::cargo_bin("cargo-each")
+        .expect("binary")
+        .args(["each", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--skip-without-workspace-rust-version"))
+        .stdout(predicate::str::contains("Using this flag without the placeholder is an error"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn inline_json_records_preserve_order_duplicates_and_substitute_string_fields() {
+    json_each()
+        .args([
+            "--json-lines",
+            "{\"package\":\"alpha\",\"test\":\"one\"}\n{\"package\":\"beta\",\"test\":\"two\"}\n{\"package\":\"alpha\",\"test\":\"one\"}",
+            "--dry-run",
+            "--",
+            "echo",
+            "{json:package}:{json:test}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("echo alpha:one\necho beta:two\necho alpha:one\n"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn json_line_files_follow_inline_records_and_need_no_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let records = temp.path().join("records.jsonl");
+    fs::write(&records, "\u{feff}{\"value\":\"file\"}\n\n").expect("write JSON Lines");
+    json_each()
+        .current_dir(temp.path())
+        .args(["--json-lines", "{\"value\":\"inline\"}", "--json-lines-file"])
+        .arg(records)
+        .args(["--dry-run", "--", "echo", "{json:value}"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("echo inline\necho file\n"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn empty_json_input_is_a_successful_noop() {
+    json_each()
+        .args(["--json-lines", "\n", "--", "rustc", "--version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("JSON input resolved to no work"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn json_input_rejects_invalid_records_fields_and_placeholders_before_execution() {
+    for (input, command, expected) in [
+        ("{bad", "{json:value}", "invalid JSON"),
+        ("[]", "{json:value}", "must be an object"),
+        ("{\"other\":\"value\"}", "{json:value}", "field is missing"),
+        ("{\"value\":1}", "{json:value}", "field is not a string"),
+        ("{\"value\":\"ok\"}", "{json:value", "missing its closing"),
+        ("{\"value\":\"ok\"}", "{name}", "not valid in JSON-record mode"),
+    ] {
+        json_each()
+            .args(["--json-lines", input, "--dry-run", "--", "echo", command])
+            .assert()
+            .failure()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(expected));
+    }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn json_input_rejects_workspace_selection_options() {
+    json_each()
+        .args([
+            "--json-lines",
+            "{\"value\":\"ok\"}",
+            "--workspace",
+            "--dry-run",
+            "--",
+            "echo",
+            "{json:value}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be combined with `--workspace`"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and child processes; miri supports neither")]
+#[test]
+fn json_records_execute_through_the_bounded_ordered_scheduler() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let probe = compile_execution_probe(temp.path());
+    let completion_log = temp.path().join("completion.log");
+    json_each()
+        .args(["--json-lines", "{\"name\":\"alpha\"}\n{\"name\":\"beta\"}", "--jobs", "2", "--"])
+        .arg(probe)
+        .args(["ordered", "{json:name}"])
+        .arg(&completion_log)
+        .assert()
+        .success()
+        .stdout(predicate::eq("alpha:start\nalpha:end\nbeta:start\nbeta:end\n"))
+        .stderr(predicate::str::contains("cargo each: --json-lines #1:1").and(predicate::str::contains("cargo each: --json-lines #1:2")));
+    let completion = fs::read_to_string(completion_log).expect("completion log");
+    assert_eq!(completion, "beta\nalpha\n", "the two JSON invocations must run concurrently");
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
