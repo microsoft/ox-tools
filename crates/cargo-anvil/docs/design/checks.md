@@ -56,6 +56,7 @@ flowchart LR
 
     pr_fast --> fmt[fmt]:::check
     pr_fast --> clippy[clippy]:::check
+    pr_fast --> check_all_targets[check-all-targets]:::check
     pr_fast --> cargo_sort[cargo-sort]:::check
     pr_fast --> license_headers[license-headers]:::check
     pr_fast --> ensure_no_cyclic_deps[ensure-no-cyclic-deps]:::check
@@ -178,6 +179,7 @@ while paired prerequisite validation remains read-only.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
+| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --package '{spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; an unscoped run selects every workspace member. | package-isolated all-target compilation |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
@@ -191,6 +193,32 @@ while paired prerequisite validation remains read-only.
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+
+#### Package-isolated all-target compilation
+
+Cargo unifies dependency features across packages selected in one invocation.
+A workspace build can therefore pass because another selected package enables
+an optional dependency or feature that a package forgot to declare for its own
+tests or examples. Disabling defaults in a batched workspace invocation does
+not remove that blind spot.
+
+The fast tier checks affected packages one at a time, first with default
+features and then with defaults disabled. Both configurations reuse Cargo's
+normal build cache.
+`--all-targets` includes unit and integration tests, examples, and benchmarks,
+so test-only dependency omissions are checked as well as the library and binaries.
+For example, a module enabled by `cfg(test)` may reference an optional dependency
+that must also be declared as a dev-dependency. Examples that need a package
+feature must declare `required-features` or gate the feature-specific scenario.
+Cargo still skips targets whose declared feature requirements are not enabled.
+
+This is a compile-time guardrail, not a complete feature matrix or a test runner.
+It complements all-features linting and batched coverage without instrumenting,
+linking, or executing every package's test binaries. Dependency defaults and
+explicitly requested dependency features still apply. Cold runs must compile
+their dependency graph; a warm-cache duration is not a cold-build cost estimate.
+`--keep-going` reports all failing packages within a configuration. A failed
+configuration stops the check before the next configuration runs.
 
 ### `pr-slow` umbrella
 
@@ -370,7 +398,7 @@ What that means concretely:
 - **Run only in PR** -- checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
-  `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
+  `ensure-no-default-features`, `check-all-targets`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
   `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
@@ -423,7 +451,7 @@ Bucket assignments per check:
 | Bucket    | Checks                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------|
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
-| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
+| affected  | `clippy`*, `check-all-targets`, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
 | unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
 

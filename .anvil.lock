@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.13.0"
-catalog_checksum = "sha256:1dd8b935a9831bf08d87a4c919701e9f39cabffa29dc78ffbd72e307cbd1fff3"
+catalog_checksum = "sha256:cd4afacce8bc8ac35931d7af91955780e2e00f2527c1ff4f8b0003a5c2d7ac2e"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -82,6 +82,10 @@ checksum = "sha256:0e9bc3484c29de8bd27fd422d239b129f4a09675a8985cbad31130dcd0a82
 [[file]]
 path = "justfiles/anvil/checks/cargo-sort.just"
 checksum = "sha256:5980f815098ed337c617d08b626c84f71d7190663efc68e3d333ba13b8934dad"
+
+[[file]]
+path = "justfiles/anvil/checks/check-all-targets.just"
+checksum = "sha256:d59d15c6cbba54f664643ab8fef3b0440397666682e0339e6cd2caf36152ada1"
 
 [[file]]
 path = "justfiles/anvil/checks/clippy.just"
@@ -189,7 +193,7 @@ checksum = "sha256:0bb312ad114d180657faf4bff47e8ef874c59703acce10170a65d6deffc6c
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"
-checksum = "sha256:29a219b7d8b2eaa605b0444838f05ffc7538ab8bccc43d1613c555f7562a731f"
+checksum = "sha256:c1d00cf98f88cf34006abd1c6d61c8ec64d119013da3959dead2d03e337ad3c5"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-msrv.just"
@@ -233,11 +237,11 @@ checksum = "sha256:8db1cc469e2b28eb49884b1dd9af02fd6f15790a8141f1d066ac03e9e6bd6
 
 [[file]]
 path = "justfiles/anvil/impact.just"
-checksum = "sha256:9f97b749d64c3fa3ea4ca75a6cd413209287c977b635c0354a15b59b32362840"
+checksum = "sha256:ecdf846e178a632c08817d9ddd81db0aab61dbc785aeb693d1c239ca5b6bb6bd"
 
 [[file]]
 path = "justfiles/anvil/mod.just"
-checksum = "sha256:43d04edd4067ab7c76472d020e46caa5a406d25a11e45007ed865626f6a049eb"
+checksum = "sha256:cd7cf6a3bb4550b3579b3e854833fd3d98659bf219149cc84a04cba019826c64"
 
 [[file]]
 path = "justfiles/anvil/tiers.just"
@@ -249,7 +253,7 @@ checksum = "sha256:77329a0cb72de82742e7f48b6c8c06874e13b5c1622dc8080ce003e0c5ece
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:321c52416fe0024450d9293396144b0171d0818a013cda5fb026599a06a5f90d"
+checksum = "sha256:2d237760ec11d5cde9cc4ab73bfb0f6ce1152f856930450f003a19ba33ccd476"
 
 [[region]]
 host = ".anvil/container/Dockerfile"
