@@ -453,17 +453,17 @@ enforced by their matching prerequisite validation.
 
 ### 3.6 Nightly pinning
 
-A handful of catalog checks need nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
+A handful of catalog checks use nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
 `check-external-types`. We **pin** the nightly snapshots used by these checks rather than
 floating bare `+nightly`. Pinning eliminates "rustup update on Tuesday broke main on
 Wednesday" — every cloud-workflow run uses the same nightly until we deliberately bump the pin.
 
-`fmt` is on nightly because the catalog's `rustfmt.toml` opts into `unstable_features`
+`fmt` is on nightly because the default catalog's `rustfmt.toml` opts into `unstable_features`
 to get import grouping (`imports_granularity = "Module"`, `group_imports =
-"StdExternalCrate"`) and `format_code_in_doc_comments`. Those are the high-value
-opinions every surveyed Microsoft Rust repo reaches for; the stable rustfmt option set
-doesn't include them. Pinning is what makes nightly fmt sustainable — formatting
-churn happens on a pin bump, not on every `rustup update`.
+"StdExternalCrate"`) and `format_code_in_doc_comments`. The stable rustfmt option set
+doesn't include these settings. The recipe retains the pinned nightly even when a
+repository's formatting configuration enables only stable options. Pinning keeps
+formatting churn tied to deliberate pin bumps, not every `rustup update`.
 
 The pins live in `justfiles/anvil/versions.just` as plain just variables:
 
