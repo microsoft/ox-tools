@@ -24,6 +24,7 @@ const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BUILD: &str = include_str!("../templates/justfiles/anvil/dev/build.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
+const CHECK_ALL_TARGETS: &str = include_str!("../templates/justfiles/anvil/checks/check-all-targets.just");
 const DOC_BUILD: &str = include_str!("../templates/justfiles/anvil/checks/doc-build.just");
 const DOC_TEST: &str = include_str!("../templates/justfiles/anvil/checks/doc-test.just");
 const EXAMPLES: &str = include_str!("../templates/justfiles/anvil/checks/examples.just");
@@ -190,6 +191,12 @@ if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
 }
 if ($args -contains 'each') {
+    $featureExit = if ($args -contains '--no-default-features') {
+        $env:FAKE_EACH_NO_DEFAULT_EXIT
+    } else {
+        $env:FAKE_EACH_DEFAULT_EXIT
+    }
+    if ($featureExit) { exit [int]$featureExit }
     exit [int]$env:FAKE_EACH_EXIT
 }
 if ($args -contains 'metadata') {
@@ -658,35 +665,233 @@ fn scoped_check_propagates_missing_consumed_impact_cache() {
     if !tools_available() {
         return;
     }
+    for (name, template, recipe, cache) in [
+        ("fmt.just", FMT, "anvil-fmt", "include_modified.txt"),
+        (
+            "check-all-targets.just",
+            CHECK_ALL_TARGETS,
+            "anvil-check-all-targets",
+            "include_affected.txt",
+        ),
+    ] {
+        let tmp = fixture(
+            &[(name, template), ("impact.just", IMPACT)],
+            &[
+                "anvil-component-nightly-rustfmt-validate-prereqs",
+                "anvil-component-nightly-rustfmt-install",
+                "anvil-tool-rustc-validate-prereqs",
+                "anvil-toolchain-stable-install",
+                "anvil-tool-cargo-each-validate-prereqs",
+                "anvil-tool-cargo-each-install installer",
+                "anvil-impact",
+            ],
+        );
+        let log = tmp.path().join("cargo.log");
+        let output = run_just(
+            tmp.path(),
+            &[recipe],
+            &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
+        );
+
+        assert_failed(&output, "missing consumed impact cache");
+        // The impact dependency is stubbed, so this error proves the recipe
+        // body propagated scope resolution failure before invoking Cargo.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(cache),
+            "{recipe} must surface the resolver's own cache-missing error\nstderr:\n{stderr}"
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!log.exists(), "the scoped command must not run after impact scope resolution fails");
+    }
+}
+
+#[mutants::skip]
+fn all_targets_fixture() -> TempDir {
     let tmp = fixture(
-        &[("fmt.just", FMT), ("impact.just", IMPACT)],
+        &[("check-all-targets.just", CHECK_ALL_TARGETS), ("impact.just", IMPACT)],
         &[
-            "anvil-component-nightly-rustfmt-validate-prereqs",
-            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-rustc-validate-prereqs",
+            "anvil-toolchain-stable-install",
             "anvil-tool-cargo-each-validate-prereqs",
             "anvil-tool-cargo-each-install installer",
             "anvil-impact",
         ],
     );
+    let justfile_path = tmp.path().join("Justfile");
+    let justfile = fs::read_to_string(&justfile_path).unwrap().replace(
+        "_anvil_stable_toolchain_args := \"@()\"",
+        "_anvil_stable_toolchain_args := \"'+stable-test'\"",
+    );
+    write(&justfile_path, &justfile);
+    tmp
+}
+
+#[test]
+fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = all_targets_fixture();
     let log = tmp.path().join("cargo.log");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-fmt"],
-        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
+
+    for selection in ["-p first@1.2.3 -p second@4.5.6", "--workspace"] {
+        seed_include(tmp.path(), "affected", selection);
+        let output = run_just(tmp.path(), &["anvil-check-all-targets"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+        assert!(
+            output.status.success(),
+            "isolated checks failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
+            [
+                format!("+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{spec}} --all-targets --locked"),
+                format!(
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{spec}} --all-targets --no-default-features --locked"
+                ),
+            ],
+            "both configurations must check packages independently, with both Cargo processes selecting stable"
+        );
+        fs::remove_file(&log).unwrap();
+    }
+
+    for failure in ["FAKE_EACH_EXIT", "FAKE_EACH_DEFAULT_EXIT", "FAKE_EACH_NO_DEFAULT_EXIT"] {
+        let failed = run_just(
+            tmp.path(),
+            &["anvil-check-all-targets"],
+            &[("FAKE_CARGO_LOG", log.as_os_str()), (failure, OsStr::new(ARBITRARY_FAILURE_EXIT))],
+        );
+        assert_failed(&failed, "isolated check cargo-each failure");
+        assert_eq!(failed.status.code(), Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()));
+        assert_eq!(
+            fs::read_to_string(&log).unwrap().lines().count(),
+            if failure == "FAKE_EACH_NO_DEFAULT_EXIT" { 2 } else { 1 },
+            "a failed configuration must stop the check before the next configuration"
+        );
+        fs::remove_file(&log).unwrap();
+    }
+
+    let justfile_path = tmp.path().join("Justfile");
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str("\n[script(\"pwsh\", \"-NoProfile\")]\n_anvil-impact-include tier:\n    exit 0\n");
+    write(&justfile_path, &justfile);
+    let fallback = run_just(tmp.path(), &["anvil-check-all-targets"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    assert!(
+        fallback.status.success(),
+        "empty impact output must fall back to the workspace:\n{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
+        [
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {spec} --all-targets --locked",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {spec} --all-targets --no-default-features --locked",
+        ]
+    );
+}
+
+#[test]
+fn all_targets_skips_empty_affected_selection() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = all_targets_fixture();
+    seed_include(tmp.path(), "affected", "--skip");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(tmp.path(), &["anvil-check-all-targets"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    assert!(
+        output.status.success(),
+        "an empty affected selection must succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!log.exists(), "Cargo must not run for an empty affected selection");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no affected packages"));
+}
+
+#[test]
+fn all_targets_isolation_exposes_missing_dev_dependency_features() {
+    let tmp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\"provider\", \"consumer\", \"sibling\"]\n",
+    );
+    write(
+        &tmp.path().join("provider").join("Cargo.toml"),
+        "[package]\nname = \"provider\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+         [features]\ndefault = [\"std\"]\nstd = []\n",
+    );
+    write(
+        &tmp.path().join("provider").join("src").join("lib.rs"),
+        "#[cfg(feature = \"std\")]\npub fn std_api() {}\n",
+    );
+    write(
+        &tmp.path().join("consumer").join("Cargo.toml"),
+        "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+         [dependencies]\nprovider = { path = \"../provider\", default-features = false }\n",
+    );
+    write(&tmp.path().join("consumer").join("src").join("lib.rs"), "");
+    write(
+        &tmp.path().join("consumer").join("tests").join("feature_contract.rs"),
+        "#[test]\nfn uses_std_api() { provider::std_api(); }\n",
+    );
+    write(
+        &tmp.path().join("sibling").join("Cargo.toml"),
+        "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+         [dependencies]\nprovider = { path = \"../provider\", default-features = false, features = [\"std\"] }\n",
+    );
+    write(&tmp.path().join("sibling").join("src").join("lib.rs"), "");
+
+    let lockfile = Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("Cargo is available to execute this integration test");
+    assert!(
+        lockfile.status.success(),
+        "path-only fixture lockfile generation failed:\n{}",
+        String::from_utf8_lossy(&lockfile.stderr)
     );
 
-    assert_failed(&output, "missing consumed impact cache");
-    // anvil-impact is stubbed here, so the only component that can report a
-    // missing include file is the resolver called from inside anvil-fmt --
-    // which proves the recipe body ran and propagated, rather than just
-    // failing to load the fixture or tripping the dependency's own guard.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("include_modified.txt"),
-        "the scoped check must surface the resolver's own cache-missing error\nstderr:\n{stderr}"
-    );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(!log.exists(), "the scoped command must not run after impact scope resolution fails");
+    for feature_args in [&[][..], &["--no-default-features"][..]] {
+        for (selection, expected_success) in [(&["--workspace"][..], true), (&["--package", "consumer"][..], false)] {
+            let output = Command::new("cargo")
+                .args(["check", "--all-targets", "--locked", "--offline"])
+                .args(feature_args)
+                .args(selection)
+                .current_dir(tmp.path())
+                .output()
+                .expect("Cargo is available to execute this integration test");
+            assert_eq!(
+                output.status.success(),
+                expected_success,
+                "workspace feature unification must mask the consumer's missing dev-dependency feature activation, but isolation must expose it:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !expected_success {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("std_api"));
+            }
+        }
+    }
+
+    let consumer_manifest = tmp.path().join("consumer").join("Cargo.toml");
+    let mut manifest = fs::read_to_string(&consumer_manifest).unwrap();
+    manifest.push_str("\n[dev-dependencies]\nprovider = { path = \"../provider\", default-features = false, features = [\"std\"] }\n");
+    write(&consumer_manifest, &manifest);
+    for feature_args in [&[][..], &["--no-default-features"][..]] {
+        let repaired = Command::new("cargo")
+            .args(["check", "--package", "consumer", "--all-targets", "--locked", "--offline"])
+            .args(feature_args)
+            .current_dir(tmp.path())
+            .output()
+            .expect("Cargo is available to execute this integration test");
+        assert!(
+            repaired.status.success(),
+            "declaring the required dev-dependency feature must make the isolated check pass:\n{}",
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+    }
 }
 
 fn assert_miri_cargo_calls(cargo_calls: &str) {
