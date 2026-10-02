@@ -1405,18 +1405,19 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
         write(&default_cache.join(file), spec);
     }
 
-    let injected = TempDir::new().unwrap();
+    let injected_relative = "injected [cache]";
+    let injected = root.join(injected_relative);
     for (file, spec) in [
         ("include_modified.txt", "--package injected-modified@0.1.0"),
         ("include_affected.txt", "--package injected-affected@0.1.0"),
         ("include_required.txt", "--package injected-required@0.1.0"),
     ] {
-        write(&injected.path().join(file), spec);
+        write(&injected.join(file), spec);
     }
     let command = |args: &[&str]| {
         just_cmd(root, args)
             .env("ANVIL_IMPACT", "consume")
-            .env("ANVIL_IMPACT_INPUT_DIR", injected.path())
+            .env("ANVIL_IMPACT_INPUT_DIR", injected_relative)
             .env("PATH", &shim.path)
             .env("ANVIL_TEST_LOG", &shim.log)
             .output()
@@ -1449,7 +1450,7 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
         );
     }
 
-    fs::remove_file(injected.path().join("include_affected.txt")).unwrap();
+    fs::remove_file(injected.join("include_affected.txt")).unwrap();
     for args in [&["anvil-impact"][..], &["_anvil-impact-include", "affected"][..]] {
         let out = command(args);
         let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
