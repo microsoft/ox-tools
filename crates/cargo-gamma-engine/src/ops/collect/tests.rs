@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 use core::ops::Range;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::fs;
+use std::process::Command;
 
 use compact_str::CompactString;
 use syn::parse_file;
@@ -16,12 +19,57 @@ use crate::schema::{AssignedMutant, Ordinal, instrument, instrument_with_guards}
 fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
     let selection = Selection::parse(ops).unwrap();
+    let defaults = Defaults::of(&file.ast);
 
-    collect(&file, &selection)
+    collect_with(&file, &selection, &CfgSet::unconditional(), &defaults)
 }
 
 fn mutators(source: &str, ops: &str) -> Vec<&'static str> {
     candidates(source, ops).into_iter().map(|c| c.mutator).collect()
+}
+
+fn assert_candidates_compile(source: &str, ops: &str) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::current_dir().expect("the test process has a current directory");
+    let directory = root.join("target").join("cargo-gamma-engine-compile-fixtures");
+    fs::create_dir_all(&directory).expect("the fixture output directory can be created");
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+
+    for candidate in candidates(source, ops) {
+        if candidate.shape == Shape::IterBlock {
+            continue;
+        }
+        let replacement = match candidate.shape {
+            Shape::Block => format!("{{ {} }}", candidate.replacement),
+            _ => candidate.replacement.to_string(),
+        };
+        let mut mutated = source.to_owned();
+        mutated.replace_range(candidate.span.clone(), &replacement);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let stem = format!("fixture-{}-{id}", std::process::id());
+        let input = directory.join(format!("{stem}.rs"));
+        let output = directory.join(format!("{stem}.rmeta"));
+        fs::write(&input, mutated).expect("the compile fixture can be written");
+        let result = Command::new(&rustc)
+            .arg("--crate-type=lib")
+            .arg("--edition=2024")
+            .arg("--emit=metadata")
+            .arg("-o")
+            .arg(&output)
+            .arg(&input)
+            .output()
+            .expect("rustc can be launched for a compile fixture");
+        let _ = fs::remove_file(&input);
+        let _ = fs::remove_file(&output);
+
+        assert!(
+            result.status.success(),
+            "{} => {}\n{}",
+            candidate.mutator,
+            candidate.replacement,
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 
 #[test]
@@ -318,12 +366,20 @@ const OPERATOR_ORACLE: &[OperatorCase] = &[
     (
         "fn f(x: bool, y: bool) -> bool { x && y }",
         "logical",
-        &[("logical.and_to_or", "(x) || (y)")],
+        &[
+            ("logical.and_to_or", "(x) || (y)"),
+            ("logical.and_remove_left", "(y)"),
+            ("logical.and_remove_right", "(x)"),
+        ],
     ),
     (
         "fn f(x: bool, y: bool) -> bool { x || y }",
         "logical",
-        &[("logical.or_to_and", "(x) && (y)")],
+        &[
+            ("logical.or_to_and", "(x) && (y)"),
+            ("logical.or_remove_left", "(y)"),
+            ("logical.or_remove_right", "(x)"),
+        ],
     ),
     (
         "fn f(a: &mut i32, b: i32) { *a += b; }",
@@ -412,7 +468,7 @@ fn the_operator_oracle_covers_every_replacement_the_tables_offer() {
     let pairs: usize = OPERATOR_ORACLE.iter().map(|(_, _, expected)| expected.len()).sum();
 
     assert_eq!(OPERATOR_ORACLE.len(), 28, "one row per binary and compound-assignment operator");
-    assert_eq!(pairs, 38, "one assertion per `binary_replacements` entry");
+    assert_eq!(pairs, 42, "one assertion per binary operator mutation");
 }
 
 #[test]
@@ -843,21 +899,21 @@ fn an_ok_is_not_flipped_to_an_error_the_signature_cannot_default() {
 }
 
 #[test]
-fn an_ok_is_still_flipped_when_the_error_type_is_the_workspace_s_own() {
+fn an_ok_is_not_flipped_without_positive_workspace_default_evidence() {
     let found = mutators("fn f() -> Result<u8, crate::Error> { Ok(1) }", "result");
 
-    assert!(found.contains(&"result.ok_to_err"), "{found:?}");
+    assert!(!found.contains(&"result.ok_to_err"), "{found:?}");
 }
 
 #[test]
-fn an_ok_inside_an_aliased_result_stays_optimistic() {
+fn an_ok_inside_an_unresolved_result_alias_is_withheld() {
     let found = mutators("fn f() -> Result<u8> { Ok(1) }", "result");
 
-    assert!(found.contains(&"result.ok_to_err"), "{found:?}");
+    assert!(!found.contains(&"result.ok_to_err"), "{found:?}");
 }
 
 #[test]
-fn a_workspace_error_type_is_still_given_a_default() {
+fn a_workspace_error_type_needs_positive_default_evidence() {
     for source in [
         "fn f() -> Result<u8, crate::Error> { todo!() }",
         "fn f() -> Result<u8, super::Error> { todo!() }",
@@ -866,7 +922,7 @@ fn a_workspace_error_type_is_still_given_a_default() {
         let found = candidates(source, "fn_value");
         let texts: Vec<&str> = found.iter().map(|c| c.replacement.as_str()).collect();
 
-        assert!(texts.contains(&"Err(Default::default())"), "{source}: {texts:?}");
+        assert!(!texts.contains(&"Err(Default::default())"), "{source}: {texts:?}");
     }
 }
 
@@ -951,6 +1007,33 @@ fn an_unsuffixed_zero_in_a_written_unsigned_context_is_not_decremented() {
 }
 
 #[test]
+fn an_unsuffixed_zero_in_a_standard_unsigned_constructor_is_not_decremented() {
+    for source in [
+        "fn f() { std::time::Duration::from_secs(0); }",
+        "use core::time::Duration; fn f() { Duration::new(0, 0); }",
+        "use std::num::NonZeroU32; fn f() { NonZeroU32::new(0); }",
+        "fn f() { core::sync::atomic::AtomicUsize::new(0); }",
+        "fn f() { char::from_u32(0); }",
+    ] {
+        let found = candidates(source, "literal.int_decrement");
+
+        assert!(found.iter().all(|candidate| candidate.replacement != "-1"), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn an_unknown_same_named_constructor_keeps_its_zero_decrement() {
+    let source = "use crate::time::Duration; fn f() { Duration::from_secs(0); }";
+    let found = candidates(source, "literal.int_decrement");
+
+    assert_eq!(
+        found.iter().filter(|candidate| candidate.replacement == "-1").count(),
+        1,
+        "{found:?}"
+    );
+}
+
+#[test]
 fn zero_decrement_is_preserved_for_signed_and_unknown_contexts() {
     for source in [
         "fn f() -> i32 { 0 }",
@@ -966,6 +1049,43 @@ fn zero_decrement_is_preserved_for_signed_and_unknown_contexts() {
             "{source}: {found:?}"
         );
     }
+}
+
+#[test]
+fn expression_perturbations_use_a_float_unit_when_the_type_is_written() {
+    for source in [
+        "fn f(value: f64) { consume(value); }",
+        "fn f(value: f32) -> f32 { value }",
+        "fn f(value: f64) -> f64 { return value; }",
+        "fn f(value: usize) { consume(value as f64); }",
+        "fn f(value: std::time::Duration) { consume(value.as_secs_f64()); }",
+    ] {
+        let found = candidates(source, "expr.increment,expr.decrement");
+        let replacements = found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>();
+
+        assert!(
+            replacements.iter().any(|replacement| replacement.ends_with("+ 1.0")),
+            "{source}: {found:?}"
+        );
+        assert!(
+            replacements.iter().any(|replacement| replacement.ends_with("- 1.0")),
+            "{source}: {found:?}"
+        );
+        assert!(
+            replacements
+                .iter()
+                .all(|replacement| !replacement.ends_with("+ 1") && !replacement.ends_with("- 1"))
+        );
+    }
+}
+
+#[test]
+fn a_generic_local_collection_shadow_uses_the_safe_collection_constructor() {
+    let source = "#[derive(Default)] struct Vec<T>(std::marker::PhantomData<T>); fn f() -> Vec<u8> { make() }";
+    let found = candidates(source, "fn_value.empty_collection");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Vec::new()");
 }
 
 #[test]
@@ -1010,7 +1130,7 @@ fn an_explicitly_typed_closure_uses_its_own_error_context() {
     let source = "use std::io; fn f() -> Result<u8, io::Error> { let nested = || -> Result<u8, crate::Error> { Ok(1) }; nested() }";
     let found = mutators(source, "result.ok_to_err");
 
-    assert_eq!(found, vec!["result.ok_to_err"], "{source}: {found:?}");
+    assert!(found.is_empty(), "{source}: {found:?}");
 }
 
 #[test]
@@ -1421,7 +1541,6 @@ fn function_value_replacements_cover_return_type_shapes() {
         "fn_value.xyzzy_string",
         "fn_value.empty_collection",
         "fn_value.one_element",
-        "fn_value.default",
     ] {
         assert!(found.contains(&expected), "{expected} not in {found:?}");
     }
@@ -1468,10 +1587,13 @@ fn unselected_function_values_are_filtered_at_emit_time() {
 }
 
 #[test]
-fn literals_without_literal_mutators_are_ignored() {
+fn character_literals_have_focused_replacements() {
     let found = candidates("fn f() -> char { 'x' }", "literal");
 
-    assert!(found.is_empty());
+    assert_eq!(
+        found.iter().map(|candidate| candidate.mutator).collect::<Vec<_>>(),
+        ["literal.char_to_distinct", "literal.char_to_nul"]
+    );
 }
 
 #[test]
@@ -2111,14 +2233,14 @@ fn a_default_is_not_invented_for_a_trait_object() {
 }
 
 #[test]
-fn an_associated_type_of_self_is_still_given_a_default() {
+fn an_unresolved_associated_type_of_self_is_not_given_a_default() {
     // `Self::Value` looks like `D::Error` but is not: inside an `impl` it resolves to a type
     // that block chose, which often does have a `Default`. Treating it as abstract cost six
     // mutants a real suite had caught.
     let source = "impl Visitor for V { fn visit(self) -> Result<Self::Value, u8> { h() } }";
     let found = candidates(source, "fn_value");
 
-    assert!(found.iter().any(|c| c.replacement == "Ok(Default::default())"), "{found:?}");
+    assert!(!found.iter().any(|c| c.replacement == "Ok(Default::default())"), "{found:?}");
 }
 
 #[test]
@@ -2131,12 +2253,18 @@ fn perturbation_is_on_by_default() {
 
 #[test]
 fn option_and_result_construction_is_mutated_both_ways() {
-    let found = mutators("fn f(flag: bool) { let _ = if flag { Some(1) } else { None }; }", "option");
+    let found = mutators(
+        "fn f(flag: bool) { let _: Option<u8> = if flag { Some(1) } else { None }; }",
+        "option",
+    );
 
     assert!(found.contains(&"option.some_to_none"), "{found:?}");
     assert!(found.contains(&"option.none_to_some"), "{found:?}");
 
-    let found = mutators("fn f(flag: bool) { let _ = if flag { Ok(1) } else { Err(2) }; }", "result");
+    let found = mutators(
+        "fn f(flag: bool) { let _: Result<u8, u8> = if flag { Ok(1) } else { Err(2) }; }",
+        "result",
+    );
 
     assert!(found.contains(&"result.ok_to_err"), "{found:?}");
     assert!(found.contains(&"result.err_to_ok"), "{found:?}");
@@ -2188,6 +2316,329 @@ fn explicit_return_types_keep_defaultable_option_payloads() {
 }
 
 #[test]
+fn syntax_type_evidence_withholds_only_proven_incompatible_numeric_mutations() {
+    let source = r#"
+                use std::ops::Range;
+                use std::time::Instant;
+                struct Record { at: usize, text: String, when: Instant }
+                fn takes_index(_: usize) {}
+                fn f(record: Record, signed: i32, unknown: impl core::ops::Add<Output = i32> + Copy) {
+                    let local: usize = 0;
+                    let signed_zero: i32 = 0;
+                    let range: Range<usize> = 0..1;
+                    takes_index(0);
+                    unknown_call(0);
+                    let _ = [1][0];
+                    let _ = Record { at: 0, text: String::new(), when: Instant::now() };
+                    let _ = record.text + "x";
+                    let _ = record.when + std::time::Duration::from_secs(1);
+                    let _ = signed + signed;
+                    let _ = unknown + unknown;
+                    consume((local, signed_zero, range));
+                }
+            "#;
+    let found = candidates(source, "literal.int_decrement,arith.add_to_mul");
+
+    assert_eq!(
+        found
+            .iter()
+            .filter(|candidate| candidate.mutator == "literal.int_decrement" && candidate.replacement == "-1")
+            .count(),
+        2,
+        "signed and unknown unsuffixed zero remain while every proven unsigned zero is withheld: {found:?}"
+    );
+    let multiplications = found.iter().filter(|candidate| candidate.mutator == "arith.add_to_mul").count();
+    assert_eq!(multiplications, 2, "signed and unresolved overloaded additions remain: {found:?}");
+}
+
+#[test]
+fn unsigned_zero_inference_does_not_cross_function_or_binding_scopes() {
+    let source = r"
+        struct Record { count: usize }
+        fn takes_index(_: usize) {}
+        fn signed_shadow() { let i: i32 = 0; consume(i); }
+        fn f(data: &[u8], text: &str, names: usize, option: Option<usize>, values: &[usize]) {
+            let mut i = 0;
+            consume(data[i]);
+            let mut cursor = 1;
+            cursor = 0;
+            consume(&text[..cursor]);
+            consume(names == 0);
+            takes_index(0);
+            let _ = Record { count: 0 };
+            consume(&data[..option.map_or(0, |i| i + 1)]);
+            let total = values.iter().map(|_| 0).sum();
+            consume(&data[..total]);
+            let signed: i32 = 0;
+            consume(signed);
+            unknown(0);
+        }
+    ";
+    let found = candidates(source, "literal.int_decrement");
+    let negative_zeros = found.iter().filter(|candidate| candidate.replacement == "-1").count();
+
+    assert_eq!(
+        negative_zeros, 6,
+        "file-wide name reuse must not make unrelated or shadowed bindings unsigned: {found:?}"
+    );
+}
+
+#[test]
+fn explicit_non_numeric_types_veto_numeric_use_guesses_and_local_call_arguments() {
+    let source = r"
+        fn takes_text(_: &str) {}
+        fn takes_option(_: Option<usize>) {}
+        fn f(newline: &str, position: Option<usize>) {
+            takes_text(newline);
+            takes_option(position);
+            consume(newline, position);
+        }
+    ";
+
+    assert!(candidates(source, "expr.increment,expr.decrement").is_empty());
+}
+
+#[test]
+fn textual_and_temporal_additions_keep_only_compatible_arithmetic_replacements() {
+    let source = r#"
+        use std::time::{Duration, Instant};
+        fn f(when: Instant, number: i32, unknown: impl core::ops::Add<Output = i32> + Copy) {
+            consume("a".to_owned() + "b");
+            consume(String::from("a") + "b");
+            consume(when + Duration::from_secs(1));
+            consume(number + 1);
+            consume(unknown + unknown);
+        }
+    "#;
+    let found = candidates(source, "arith.add_to_sub,arith.add_to_mul");
+
+    assert_eq!(
+        found.len(),
+        5,
+        "the valid `Instant + Duration` to subtraction replacement remains: {found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "arith.add_to_sub" && candidate.replacement.contains("when")),
+        "{found:?}"
+    );
+    assert!(
+        !found
+            .iter()
+            .any(|candidate| candidate.mutator == "arith.add_to_mul" && candidate.replacement.contains("when")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn local_types_with_temporal_names_do_not_lose_arithmetic_candidates() {
+    let source = "struct Duration; fn f(left: Duration, right: Duration) { consume(left + right); }";
+    let found = candidates(source, "arith.add_to_sub,arith.add_to_mul");
+
+    assert_eq!(found.len(), 2, "{found:?}");
+}
+
+#[test]
+fn unshadowed_prelude_string_keeps_only_compatible_arithmetic_replacements() {
+    let found = candidates(
+        "fn f(left: String, right: &str) { consume(left + right); }",
+        "arith.add_to_sub,arith.add_to_mul",
+    );
+    assert!(found.is_empty(), "{found:?}");
+
+    let local = candidates(
+        "struct String; fn f(left: String, right: String) { consume(left + right); }",
+        "arith.add_to_sub,arith.add_to_mul",
+    );
+    assert_eq!(local.len(), 2, "{local:?}");
+}
+
+#[test]
+fn let_else_and_value_required_loops_reject_type_breaking_mutations() {
+    let source = r"
+        fn value() -> i32 { loop { continue; } }
+        fn scan(values: &[Option<i32>]) {
+            for value in values {
+                let Some(value) = value else { continue; };
+                consume(value);
+            }
+            loop { continue; }
+        }
+    ";
+    let found = candidates(source, "loop.continue_to_break,loop.delete_continue");
+
+    assert_eq!(
+        found
+            .iter()
+            .filter(|candidate| candidate.mutator == "loop.continue_to_break")
+            .count(),
+        2,
+        "the let-else and ordinary unit-loop replacements remain viable: {found:?}"
+    );
+    assert_eq!(
+        found.iter().filter(|candidate| candidate.mutator == "loop.delete_continue").count(),
+        2,
+        "the let-else tail is load-bearing while both loop tails remain deletable: {found:?}"
+    );
+}
+
+#[test]
+fn last_to_first_requires_a_receiver_with_a_proven_first_method() {
+    let source = r"
+        fn slice(values: &[u8]) { consume(values.last()); }
+        fn vector(values: Vec<u8>) { consume(values.last()); }
+        fn iterator(text: &str) { consume(text.split_whitespace().last()); }
+        fn unknown<T: Iterator<Item = u8>>(values: T) { consume(values.last()); }
+    ";
+    let found = candidates(source, "iter.last_to_first");
+
+    assert_eq!(found.len(), 2, "only slice and Vec receivers prove `.first()`: {found:?}");
+    assert!(found.iter().all(|candidate| candidate.replacement.contains(".first()")));
+}
+
+#[test]
+fn removing_not_preserves_the_value_type_of_borrowed_bools() {
+    let found = candidates(
+        "fn f(flag: &bool, owned: bool) -> (bool, bool) { (!flag, !owned) }",
+        "unary.remove_not",
+    );
+    let replacements = found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>();
+
+    assert_eq!(replacements, ["*(flag)", "owned"]);
+}
+
+#[test]
+fn default_payloads_require_positive_evidence_through_aliases_closures_and_assignments() {
+    let source = r#"
+                type Maybe<T> = Option<T>;
+                type Outcome<T, E> = Result<T, E>;
+                #[derive(Default)]
+                enum LocalError { #[default] Missing }
+                enum NoDefault { Missing }
+                fn bounded<T: Default>() -> Maybe<T> { None }
+                fn unbounded<T>() -> Maybe<T> { None }
+                fn reuse(value: core::num::NonZeroU8) -> Option<core::num::NonZeroU8> { None }
+                fn f(flag: bool) {
+                    let _: Maybe<u8> = if flag { None } else { Some(1) };
+                    let _: Outcome<u8, LocalError> = Ok(1);
+                    let _: Outcome<u8, NoDefault> = Ok(1);
+                    let closure = || -> Outcome<u8, LocalError> { Err(LocalError::Missing) };
+                    let mut value: String = String::from("x");
+                    value = String::from("y");
+                    consume(closure);
+                }
+            "#;
+    let found = candidates(source, "option.none_to_some,result.ok_to_err,result.err_to_ok,assign_value.default");
+    let names = found.iter().map(|candidate| candidate.mutator).collect::<Vec<_>>();
+
+    assert_eq!(names.iter().filter(|&&name| name == "option.none_to_some").count(), 3, "{found:?}");
+    assert!(found.iter().any(|candidate| candidate.replacement == "Some(value)"), "{found:?}");
+    assert_eq!(names.iter().filter(|&&name| name == "result.ok_to_err").count(), 1, "{found:?}");
+    assert_eq!(names.iter().filter(|&&name| name == "result.err_to_ok").count(), 1, "{found:?}");
+    assert_eq!(names.iter().filter(|&&name| name == "assign_value.default").count(), 1, "{found:?}");
+}
+
+#[test]
+fn whole_function_values_preserve_alias_unsized_iterator_tuple_and_reference_shapes() {
+    let source = r"
+                use std::collections::{HashMap, HashSet};
+                use std::sync::Arc;
+                type Map = HashMap<u8, u8, std::collections::hash_map::RandomState>;
+                type Set = std::collections::HashSet<u8>;
+                fn map() -> Map { make() }
+                fn set() -> Set { make() }
+                fn text() -> Arc<str> { make() }
+                fn shared() -> &'static [u8] { &[1] }
+                fn mutable() -> &'static mut u8 { make() }
+                fn opaque() -> impl Iterator<Item = u8> { core::iter::once(1) }
+                fn mixed<T>() -> (u8, T) { make() }
+            ";
+    let found = candidates(source, "fn_value");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.item_path.as_ref() == "map" && candidate.replacement == "Default::default()")
+    );
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.item_path.as_ref() == "set" && candidate.replacement == "Default::default()")
+    );
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.item_path.as_ref() == "text" && candidate.replacement == "Arc::from(\"\")")
+    );
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.item_path.as_ref() == "shared" && candidate.replacement == "&[]")
+    );
+    assert!(!found.iter().any(|candidate| candidate.item_path.as_ref() == "mutable"));
+    assert!(found.iter().any(|candidate| candidate.item_path.as_ref() == "opaque"));
+    assert!(!found.iter().any(|candidate| candidate.item_path.as_ref() == "mixed"));
+    assert!(found.iter().all(|candidate| !candidate.replacement.contains("Box::leak")));
+}
+
+#[test]
+fn deletion_gates_only_concrete_local_data_flow_hazards() {
+    let source = r"
+                fn f(mut value: u8, permit: Permit, flag: bool) {
+                    let deferred;
+                    deferred = 1;
+                    drop(permit);
+                    value = 2;
+                    if flag { continue_here(); }
+                    consume((deferred, value));
+                }
+            ";
+    let found = candidates(source, "stmt.delete_call,stmt.delete_assign");
+
+    assert!(
+        !found
+            .iter()
+            .any(|candidate| candidate.replacement.is_empty() && &source[candidate.span.clone()] == "drop(permit);")
+    );
+    assert!(!found.iter().any(|candidate| &source[candidate.span.clone()] == "deferred = 1;"));
+    assert!(found.iter().any(|candidate| &source[candidate.span.clone()] == "value = 2;"));
+    assert!(found.iter().any(|candidate| &source[candidate.span.clone()] == "continue_here();"));
+}
+
+#[test]
+fn positive_milestone_counterexamples_compile_after_direct_replacement() {
+    assert_candidates_compile(
+        "pub fn arithmetic(a: i32, b: i32) -> i32 { a + b }",
+        "arith.add_to_mul,expr.increment,expr.decrement",
+    );
+    assert_candidates_compile(
+        r#"
+            #[derive(Default)]
+            pub enum LocalError { #[default] Missing }
+            pub fn option() -> Option<u8> { None }
+            pub fn okay() -> Result<u8, LocalError> { Ok(1) }
+            pub fn error() -> Result<u8, LocalError> { Err(LocalError::Missing) }
+            pub fn assign(mut value: String) { value = String::from("x"); drop(value); }
+        "#,
+        "option.none_to_some,result.ok_to_err,result.err_to_ok,assign_value.default",
+    );
+    assert_candidates_compile(
+        r#"
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            type Map = HashMap<u8, u8, std::collections::hash_map::RandomState>;
+            pub fn vector() -> Vec<u8> { vec![1] }
+            pub fn map() -> Map { HashMap::default() }
+            pub fn text() -> Arc<str> { Arc::from("x") }
+            pub fn tuple() -> (u8, bool) { (1, true) }
+            pub fn shared() -> &'static [u8] { &[1] }
+        "#,
+        "fn_value",
+    );
+}
+
+#[test]
 fn function_generics_without_default_bounds_reject_default_payloads() {
     let source = "
         fn tail<T>() -> Option<T> { None }
@@ -2201,7 +2652,7 @@ fn function_generics_without_default_bounds_reject_default_payloads() {
 }
 
 #[test]
-fn inferred_replacement_payloads_remain_candidates() {
+fn inferred_replacement_payloads_without_type_evidence_are_withheld() {
     let source = "
         fn f(flag: bool) {
             let option = if flag { None } else { Some(make_value()) };
@@ -2211,22 +2662,22 @@ fn inferred_replacement_payloads_remain_candidates() {
     ";
     let found = mutators(source, "option.none_to_some,result.ok_to_err,result.err_to_ok");
 
-    assert!(found.contains(&"option.none_to_some"), "{found:?}");
-    assert!(found.contains(&"result.ok_to_err"), "{found:?}");
-    assert!(found.contains(&"result.err_to_ok"), "{found:?}");
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
-fn iterator_methods_swap_only_where_the_types_agree() {
+fn iterator_methods_with_different_types_use_the_iterator_expression_shape() {
     let found = mutators("fn f(v: &[u32]) { let _ = v.iter().any(|n| *n > 0); }", "iter");
 
     assert!(found.contains(&"iter.any_to_all"), "{found:?}");
 
-    // `take` and `skip` return different types, so no mutant may be offered for them. This
-    // would otherwise be generated on every chain in a codebase and withdrawn on every run.
-    let found = mutators("fn f(v: &[u32], n: usize) { let _ = v.iter().take(n).count(); }", "iter");
+    let found = candidates(
+        "fn f(v: &[u32], n: usize) { let _ = v.iter().take(n).count(); }",
+        "iter.take_to_skip",
+    );
 
-    assert!(!found.contains(&"iter.take_to_skip"), "{found:?}");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].shape, Shape::IterExpr);
 }
 
 #[test]
@@ -2633,7 +3084,7 @@ fn a_local_type_that_shares_a_collection_name_but_has_no_generics_falls_back_to_
 }
 
 #[test]
-fn a_bare_box_with_no_generic_argument_is_not_treated_as_unconstructable() {
+fn a_bare_box_with_no_default_evidence_is_not_invented() {
     // `Box` is only as unconstructable as whatever it wraps, and asking what it wraps when
     // nothing was written down should be answered with "nothing", not with a guess. A `Box`
     // spelled without its argument at all — a locally shadowed name, since the real type
@@ -2642,7 +3093,7 @@ fn a_bare_box_with_no_generic_argument_is_not_treated_as_unconstructable() {
     let source = "struct Box; fn f() -> Result<i32, Box> { g() }";
     let found = candidates(source, "fn_value");
 
-    assert!(found.iter().any(|c| c.replacement == "Err(Default::default())"), "{found:?}");
+    assert!(!found.iter().any(|c| c.replacement == "Err(Default::default())"), "{found:?}");
 }
 
 #[test]
@@ -2792,12 +3243,15 @@ fn the_default_method_of_a_default_impl_is_not_replaced_by_a_call_to_itself() {
 /// named method inside `impl Default` is not what `Default::default()` resolves to either.
 #[test]
 fn only_the_default_method_of_a_default_impl_loses_that_replacement() {
-    let inherent = candidates("impl Thing { fn default() -> Self { Thing { n: 7 } } }", "fn_value.default");
+    let inherent = candidates(
+        "#[derive(Default)] struct Thing { n: u8 } impl Thing { fn default() -> Self { Thing { n: 7 } } }",
+        "fn_value.default",
+    );
 
     assert!(!inherent.is_empty(), "an inherent `default` is not the trait method: {inherent:?}");
 
     let sibling = candidates(
-        "impl Default for Thing { fn helper() -> Other { Other { n: 7 } } }",
+        "#[derive(Default)] struct Other { n: u8 } struct Thing; impl Default for Thing { fn default() -> Self { Thing } } impl Thing { fn helper() -> Other { Other { n: 7 } } }",
         "fn_value.default",
     );
 
@@ -2872,21 +3326,18 @@ fn standard_time_types_are_not_replaced_with_default() {
 /// position, but not where the value is what a type is *inferred* from — an
 /// `impl Iterator<Item = &T>` would infer `Once<&mut T>` and be withdrawn as unviable.
 #[test]
-fn a_shared_reference_return_is_served_by_reborrowing_a_leaked_box() {
+fn a_shared_reference_return_is_not_fabricated_by_leaking_a_box() {
     let found = candidates("fn f(v: &Vec<String>) -> &String { &v[0] }", "fn_value");
 
-    assert!(
-        found.iter().any(|c| c.replacement == "&*Box::leak(Box::new(String::new()))"),
-        "{found:?}"
-    );
+    assert!(found.is_empty(), "{found:?}");
 }
 
 /// A mutable reference is not reborrowed, because `Box::leak` already yields exactly that.
 #[test]
-fn a_mutable_reference_return_is_served_by_the_leak_alone() {
+fn a_mutable_reference_return_is_not_fabricated_by_leaking_a_box() {
     let found = candidates("fn f(v: &mut Vec<u8>) -> &mut u8 { &mut v[0] }", "fn_value");
 
-    assert!(found.iter().any(|c| c.replacement == "Box::leak(Box::new(1))"), "{found:?}");
+    assert!(found.is_empty(), "{found:?}");
 }
 
 /// A reference to something abstract still yields nothing. `Box::new` needs a value of the
@@ -2958,7 +3409,7 @@ fn a_result_that_names_its_error_still_offers_one() {
 fn a_lifetime_does_not_count_towards_the_type_arguments() {
     let found = candidates("fn f() -> Cow<'static, str> { borrow() }", "fn_value");
 
-    assert!(found.iter().any(|c| c.replacement.contains("Cow::Owned")), "{found:?}");
+    assert!(found.is_empty(), "{found:?}");
 }
 
 fn span_of(text: &str, needle: &str) -> core::ops::Range<usize> {
@@ -3118,16 +3569,6 @@ fn a_stated_value_displaces_the_guessed_ones() {
             "#[gamma::value(h())] fn f() -> String { g() }",
             "String::new()",
         ),
-        (
-            "fn f() -> MyAlias { g() }",
-            "#[gamma::value(h())] fn f() -> MyAlias { g() }",
-            "Default::default()",
-        ),
-        (
-            "impl Trait for S { type Item = u8; fn f(&self) -> Self::Item { g() } }",
-            "impl Trait for S { type Item = u8; #[gamma::value(h())] fn f(&self) -> Self::Item { g() } }",
-            "Default::default()",
-        ),
     ] {
         assert!(
             fn_values(source).iter().any(|(_, value)| value == guessed),
@@ -3236,11 +3677,115 @@ fn stating_a_value_leaves_every_other_family_alone() {
     }
 }
 
+#[test]
+fn f4_catalog_families_discover_every_default_on_operator() {
+    let expected = [
+        "logical.and_remove_left",
+        "logical.and_remove_right",
+        "logical.or_remove_left",
+        "logical.or_remove_right",
+        "option.is_some_to_is_none",
+        "option.is_none_to_is_some",
+        "result.is_ok_to_is_err",
+        "result.is_err_to_is_ok",
+        "try.propagate_to_unwrap",
+        "fallback.unwrap_or_to_default",
+        "fallback.unwrap_or_else_to_default",
+        "fallback.map_or_to_default",
+        "fallback.map_or_else_to_default",
+        "collection.reverse_vec",
+        "collection.reverse_array",
+        "literal.float_to_zero",
+        "literal.float_to_one",
+        "literal.float_negate",
+        "literal.char_to_nul",
+        "literal.char_to_distinct",
+        "literal.byte_to_nul",
+        "literal.byte_to_distinct",
+        "loop.break_value_default",
+        "return_value.default",
+        "bool_expr.negate",
+        "call.replace_with_default",
+        "call_result.default",
+        "iter.remove_rev",
+        "iter.remove_filter",
+        "iter.take_to_skip",
+        "iter.skip_to_take",
+        "parameter.default_shadow",
+        "regex.remove_start_anchor",
+        "regex.remove_end_anchor",
+        "regex.star_to_plus",
+        "regex.plus_to_star",
+        "regex.optional_to_required",
+        "regex.negate_character_class",
+    ];
+    let source = r#"
+        struct Regex;
+        impl Regex { fn new(_: &str) -> Result<Self, ()> { Ok(Self) } }
+
+        fn helper() -> usize { 7 }
+        fn early(flag: bool) -> usize { if flag { return 7; } 8 }
+        fn boolean(flag: bool, other: bool) -> bool {
+            let _: bool = flag && other;
+            let _: bool = flag || other;
+            return flag;
+        }
+        fn semantics(option: Option<usize>, result: Result<usize, usize>) -> Result<usize, usize> {
+            let _ = option.is_some();
+            let _ = option.is_none();
+            let _ = result.is_ok();
+            let _ = result.is_err();
+            let _ = result?;
+            let _ = option.unwrap_or(7);
+            let _ = option.unwrap_or_else(|| 7);
+            let _ = option.map_or(7, |value| value);
+            let _ = option.map_or_else(|| 7, |value| value);
+            let _: usize = helper();
+            return Ok(helper());
+        }
+        fn collections() {
+            let _ = vec![1, 2, 3];
+            let _ = [1, 2, 3];
+            let _ = 2.5f64;
+            let _ = 'a';
+            let _ = b'a';
+            let _: usize = loop { break 3; };
+            for _ in [1, 2, 3].into_iter().rev().filter(|value| *value > 0).take(2).skip(1) {}
+            let _ = Regex::new("^a+b*[cd]?$");
+        }
+    "#;
+    let selection = expected.join(",");
+    let found = mutators(source, &selection);
+
+    for name in expected {
+        assert!(found.contains(&name), "`{name}` was not discovered: {found:#?}");
+        assert!(
+            REGISTRY.iter().any(|mutator| mutator.name == name && mutator.default_on),
+            "`{name}` is not default-on"
+        );
+    }
+}
+
 /// The named error values keep the replacement indices they had before.
 ///
 /// Their indices continue the guessed list's, so if a stated value shortened that list the
 /// `--error` mutants at every annotated site would be renumbered, and a renumbered mutant is a
 /// new id: suppressions by id stop matching and an incremental run re-runs work it had settled.
+#[test]
+fn regex_end_anchor_is_active_after_an_even_backslash_run() {
+    for source in [
+        r#"struct Regex; impl Regex { fn new(_: &str) {} } fn f() { Regex::new(r"\\$"); }"#,
+        r#"struct Regex; impl Regex { fn new(_: &str) {} } fn f() { Regex::new(r"\\\\$"); }"#,
+    ] {
+        let found = mutators(source, "regex.remove_end_anchor");
+
+        assert_eq!(found, vec!["regex.remove_end_anchor"], "{source}: {found:?}");
+    }
+
+    let escaped = r#"struct Regex; impl Regex { fn new(_: &str) {} } fn f() { Regex::new(r"\$"); }"#;
+    assert!(mutators(escaped, "regex.remove_end_anchor").is_empty());
+}
+
 #[test]
 fn a_stated_value_does_not_renumber_the_named_error_mutants() {
     let plain = with_errors("fn f() -> Result<i32, MyError> { Ok(1) }", &["MyError::Io"]);
@@ -3254,7 +3799,11 @@ fn a_stated_value_does_not_renumber_the_named_error_mutants() {
             .collect()
     };
 
-    assert_eq!(indices(&plain), vec![4], "the premise is that the errors follow the guessed values");
+    assert_eq!(
+        indices(&plain),
+        vec![3],
+        "the errors follow the positively constructed guessed values"
+    );
     assert_eq!(indices(&stated), indices(&plain));
 }
 
@@ -3301,15 +3850,15 @@ fn a_file_that_states_nothing_uses_the_site_counted_identity_baseline() {
         vec![
             "2b643388f655",
             "6ecb982becec",
-            "c0fc1efe0f11",
+            "14fa38baad8e",
             "3c5e85253765",
             "0a42ad003f48",
-            "496b6928efc8",
             "2c30ededa685",
             "6b3d0f1f4c8a",
             "7db3aae5c3f8",
             "14e9e208d250",
             "1a5c3cad1dc5",
+            "806bb4676d2a",
             "e7e1046f74d6",
             "bee0a88bd144",
             "3e4f9ce3258f",
@@ -3383,6 +3932,8 @@ fn a_stated_value_on_a_const_fn_produces_nothing() {
 /// fixture can name the exact return shapes the `fn_value` family keys on without carrying the
 /// machinery to make them real.
 const EVERY_FAMILY_FIXTURE: &str = r#"
+#[derive(Default)]
+enum MyError { #[default] Boom }
 fn returns_unit() { do_work(); }
 fn returns_bool() -> bool { compute() }
 fn returns_signed() -> i32 { compute() }
@@ -3398,6 +3949,11 @@ fn returns_result_ref() -> Result<&'static dyn core::fmt::Debug, MyError> { comp
 fn returns_vec() -> Vec<i32> { compute() }
 fn returns_tuple() -> (i32, bool) { compute() }
 fn returns_custom() -> Custom { compute() }
+#[derive(Default)]
+struct Defaultable;
+fn returns_defaultable() -> Defaultable { compute() }
+fn returns_optional_defaultable() -> Option<Defaultable> { compute() }
+fn returns_result_defaultable() -> Result<Defaultable, MyError> { compute() }
 
 #[gamma::value(Custom::EMPTY)]
 fn returns_a_stated_value() -> Custom { compute() }
@@ -3477,6 +4033,7 @@ fn loop_op(v: &[i32]) {
         if *x == 1 {
             break;
         }
+        let _: i32 = loop { break 2; };
     }
 }
 
@@ -3488,6 +4045,9 @@ fn unary_op(a: i32, c: bool) -> i32 {
 fn literal_op() -> i32 {
     let _b = true;
     let _s = "hello";
+    let _f = 2.5f64;
+    let _c = 'a';
+    let _y = b'a';
     5
 }
 
@@ -3503,11 +4063,24 @@ fn expr_op(n: usize) {
 }
 
 fn option_op(flag: bool) {
-    let _ = if flag { Some(1) } else { None };
+    let value: Option<u8> = if flag { Some(1) } else { None };
+    let _ = value.is_some();
+    let _ = value.is_none();
+    let _ = value.unwrap_or(2);
+    let _ = value.unwrap_or_else(|| 2);
+    let _ = value.map_or(2, |item| item);
+    let _ = value.map_or_else(|| 2, |item| item);
 }
 
 fn result_op(flag: bool) {
-    let _ = if flag { Ok(1) } else { Err(2) };
+    let value: Result<u8, u8> = if flag { Ok(1) } else { Err(2) };
+    let _ = value.is_ok();
+    let _ = value.is_err();
+}
+
+fn try_op(value: Result<u8, MyError>) -> Result<u8, MyError> {
+    let item = value?;
+    return Ok(item);
 }
 
 fn iter_op(v: &[u32], mut w: Vec<u32>) {
@@ -3519,6 +4092,7 @@ fn iter_op(v: &[u32], mut w: Vec<u32>) {
     let _ = v.last();
     w.sort();
     w.dedup();
+    let _ = v.iter().rev().filter(|n| **n > 0).take(2).skip(1).count();
 }
 
 fn string_op(s: &str) {
@@ -3532,12 +4106,21 @@ fn string_op(s: &str) {
 
 fn collection_op() {
     let _ = vec![1, 2, 3];
+    let _ = [1, 2, 3];
 }
 
 fn assign_value_op(mut n: u32) {
     n = n + 1;
     let _ = n;
 }
+
+fn local_value() -> i32 { 7 }
+fn call_op() -> i32 { local_value() }
+fn early_return(flag: bool) -> i32 { if flag { return 7; } 8 }
+
+struct Regex;
+impl Regex { fn new(_: &str) -> Result<Self, ()> { Ok(Self) } }
+fn regex_op() { let _ = Regex::new("^a+b*[cd]?$"); }
 "#;
 
 /// Every entry in `REGISTRY` must produce at least one candidate that is attributed to it.

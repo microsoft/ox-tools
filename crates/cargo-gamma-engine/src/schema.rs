@@ -48,8 +48,8 @@ pub const GUARD_PATH: &str = "::gamma_rt::a";
 
 /// The crate path of the two-variant iterator wrapper, as it appears in instrumented source.
 ///
-/// Used only by [`Shape::IterBlock`], which is the one shape whose two arms cannot be made to
-/// agree on a type without it.
+/// Used by iterator-valued block and expression shapes whose two arms cannot be made to agree on a
+/// type without it.
 pub const EITHER_PATH: &str = "::gamma_rt::Either";
 
 /// A one-based line and column in instrumented text, ordered as the text reads.
@@ -220,6 +220,9 @@ fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> 
     // #[gamma::skip(all, reason = "capacity affects allocation behavior only; line starts are unchanged")]
     let mut starts: Vec<usize> = Vec::with_capacity(text.len() / 32);
 
+    // The first-line sweep already starts at byte zero; this entry supplies the line-number slot,
+    // while its byte value is never used to reset the cursor.
+    // #[gamma::skip(literal.int_increment, reason = "changing the unused first-line start leaves every resolved position unchanged")]
     starts.push(0);
     starts.extend(text.match_indices('\n').map(|(at, _matched)| at + 1));
 
@@ -460,14 +463,18 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
 
     for (ordinal, replacement) in &node.mutants {
         match node.shape {
-            Shape::Expr | Shape::Block | Shape::IterBlock => {
-                let opening = if node.shape == Shape::Expr { "(" } else { "{ " };
+            Shape::Expr | Shape::Block | Shape::IterBlock | Shape::IterExpr => {
+                let opening = if matches!(node.shape, Shape::Expr | Shape::IterExpr) {
+                    "("
+                } else {
+                    "{ "
+                };
 
                 let _ = write!(out, "{opening}if {GUARD_PATH}({ordinal}u32) {{ ");
 
                 // The mutant is the left variant and the original the right, which is what makes
                 // the two arms one type. See `Shape::IterBlock`.
-                if node.shape == Shape::IterBlock {
+                if matches!(node.shape, Shape::IterBlock | Shape::IterExpr) {
                     let _ = write!(out, "{EITHER_PATH}::L(");
                 }
 
@@ -476,7 +483,7 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
                 out.push_str(replacement);
                 mutated.push((*ordinal, from..out.len()));
 
-                if node.shape == Shape::IterBlock {
+                if matches!(node.shape, Shape::IterBlock | Shape::IterExpr) {
                     out.push(')');
                 }
 
@@ -485,7 +492,7 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
                 // Every `else` arm is wrapped, not just the one holding the original text. An
                 // outer arm holds the next guard down, whose type is an `Either` of its own, and
                 // the two arms only agree once that is the right-hand side of this one.
-                if node.shape == Shape::IterBlock {
+                if matches!(node.shape, Shape::IterBlock | Shape::IterExpr) {
                     let _ = write!(out, "{EITHER_PATH}::R(");
                 }
             }
@@ -531,6 +538,7 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
     let close = match node.shape {
         Shape::Expr => " })",
         Shape::Block => " } }",
+        Shape::IterExpr => ") })",
         // The extra `)` closes the `Either::R` this arm was opened with.
         Shape::IterBlock => ") } }",
         Shape::Continue | Shape::Break | Shape::Stmt => " }",
@@ -624,6 +632,19 @@ mod tests {
         let out = instrument(text, &[&only]).expect("instrumented");
 
         let _parsed = parse_file(&out).expect("the instrumented form must parse");
+    }
+
+    #[test]
+    fn an_iterator_expression_wraps_both_types_without_becoming_a_block() {
+        let text = "fn f() -> usize { (0..10).rev().count() }\n";
+        let site = span_of(text, "(0..10).rev()");
+        let only = mutant(site, 1, "(0..10)", Shape::IterExpr);
+
+        let out = instrument(text, &[&only]).expect("instrumented");
+
+        assert!(out.contains("(if ::gamma_rt::a(1u32) { ::gamma_rt::Either::L((0..10))"), "{out}");
+        assert!(out.contains("::gamma_rt::Either::R((0..10).rev()) })"), "{out}");
+        let _parsed = parse_file(&out).expect("the instrumented iterator expression must parse");
     }
 
     #[test]
@@ -744,6 +765,18 @@ mod tests {
     }
 
     #[test]
+    fn a_sibling_after_a_nested_site_attaches_to_the_enclosing_site() {
+        let text = "abcdefghij";
+        let outer = mutant(0..10, 1, "outer", Shape::Expr);
+        let nested = mutant(1..3, 2, "nested", Shape::Expr);
+        let sibling = mutant(4..6, 3, "sibling", Shape::Expr);
+
+        let out = instrument(text, &[&outer, &nested, &sibling]).expect("nested siblings are unambiguous");
+
+        assert_eq!(out.matches("::gamma_rt::a(").count(), 3);
+    }
+
+    #[test]
     fn a_guarded_site_that_grows_shifts_the_guards_below_it() {
         // The first site emits both the mutated text and the original, so the file gets longer and
         // the second guard sits well below the line its mutant was written on.
@@ -783,6 +816,18 @@ mod tests {
 
         assert!(out.contains("{ if ::gamma_rt::a(7u32) { break; } continue }"), "{out}");
         let _parsed = parse_file(&out).expect("the specialized guard must parse");
+    }
+
+    #[test]
+    fn a_continue_guard_records_the_replacement_region() {
+        let text = "fn f() { loop { continue; } }\n";
+        let site = span_of(text, "continue");
+        let replacement = mutant(site, 1, "break", Shape::Continue);
+
+        let (_out, guards) = instrument_with_guards(text, &[&replacement]).expect("instrumented");
+        let mutated = guards.get(&1).expect("recorded").mutated.clone();
+
+        assert!(mutated.is_some(), "a non-deletion replacement must have a diagnostic region");
     }
 
     #[test]

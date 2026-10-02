@@ -346,7 +346,7 @@ fn timeouts(summary: Summary, mutants: &[Mutant]) -> Option<Finding> {
         ),
         detail: vec![format!("{} of CPU time spent waiting for them", human(spent))],
         remedy: "a mutant that hangs is a mutant the suite detected, so this is signal, not \
-                 failure — it is just expensive signal. `cargo gamma suppress` writes suppressions \
+                 failure — it is just expensive signal. `cargo gamma suppress --apply` writes suppressions \
                  for them so the next run does not pay again."
             .to_owned(),
         cost: "a suppressed timeout leaves the score unchanged today, but stops being retested, so \
@@ -404,7 +404,7 @@ fn out_of_memory(summary: Summary, mutants: &[Mutant]) -> Option<Finding> {
                  measure` reports each binary's peak without stopping anything, and \
                  `--memory-multiplier` or `--memory-headroom` widen the ceiling if the baseline it \
                  came from was unrepresentative. A site that is genuinely allowed to allocate this \
-                 much is eligible for `cargo gamma suppress` by default."
+                 much is eligible for `cargo gamma suppress --apply` by default."
             .to_owned(),
         cost: "a widened ceiling stops bounding the runaway allocation it was there to catch, and a \
                suppressed site stops being retested, so a later edit that makes it allocate without \

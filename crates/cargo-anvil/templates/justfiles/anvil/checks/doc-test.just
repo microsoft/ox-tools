@@ -12,11 +12,76 @@
 # doctests that only compile when those features are off. The
 # duplication is cheap because doctests are already a small fraction
 # of total compile/test time.
+#
+# Cargo errors when `cargo test --doc` selects only bin-only packages. Build
+# the subset with at least one Cargo target marked `doctest = true`. This uses
+# Cargo's capability bit rather than approximating from target kinds, so
+# explicit crate types such as rlib/cdylib and proc macros remain eligible.
 
 # Run documentation tests for affected workspace packages.
+[script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --all-features --locked
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --locked
+    $ErrorActionPreference = 'Stop'
+    $selection = $null
+    if ('{{ anvil_impact_mode }}' -ne 'off') {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-doc-test: missing impact package file $packageFile"
+        }
+        $selection = @(Get-Content -LiteralPath $packageFile | Where-Object { $_ -ne '' })
+        if ($selection.Count -eq 0) {
+            Write-Host 'anvil-doc-test: no affected packages; skipping'
+            exit 0
+        }
+    }
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspacePackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $docPackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($package in $meta.packages) {
+        $spec = "$($package.name)@$($package.version)"
+        $workspacePackages.Add($spec) | Out-Null
+        if ($package.targets | Where-Object { $_.doctest -eq $true }) {
+            $docPackages.Add($spec) | Out-Null
+        }
+    }
+    $specs = if ($null -eq $selection) {
+        $workspaceSpecs = [string[]]@($docPackages)
+        [Array]::Sort($workspaceSpecs, [System.StringComparer]::Ordinal)
+        $workspaceSpecs
+    } else {
+        @(
+            foreach ($spec in $selection) {
+                if (-not $workspacePackages.Contains($spec)) {
+                    throw "anvil-doc-test: impact package spec '$spec' does not identify a workspace member"
+                }
+                if ($docPackages.Contains($spec)) { $spec }
+            }
+        )
+    }
+    if ($specs.Count -eq 0) {
+        Write-Host 'anvil-doc-test: no affected doctest-capable packages; skipping'
+        exit 0
+    }
+    $docSelection = [System.Collections.Generic.List[string]]::new()
+    foreach ($spec in $specs) {
+        $docSelection.Add('--package')
+        $docSelection.Add($spec)
+    }
+    & cargo each @docSelection --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo each @docSelection --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]

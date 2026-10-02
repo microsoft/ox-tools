@@ -269,6 +269,11 @@ impl Sink {
         self
     }
 
+    /// Changes the width reported by this terminal.
+    pub fn resize_terminal(&mut self, width: u16) {
+        self.width = Some(width);
+    }
+
     /// Adds a variable to the fake environment.
     #[must_use]
     pub fn with_env(mut self, name: &str, value: &str) -> Self {
@@ -566,6 +571,7 @@ const HELPER_VERSION: u32 = 7;
 /// property of the test scaffolding: a binary target would be produced for every `cargo build` any
 /// consumer of this crate ever ran, and would have to be excluded from the tool's own sweeps by
 /// hand.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn helper_binary_path() -> &'static camino::Utf8Path {
     static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
 
@@ -674,6 +680,7 @@ pub fn test_binary(path: &str) -> crate::exec::TestBinary {
         target: String::new(),
         manifest_dir: Utf8PathBuf::new(),
         linked_sources: None,
+        libtest: Some(true),
         baseline: Duration::ZERO,
         budget: None,
         tests: None,
@@ -697,8 +704,11 @@ pub struct Recorder {
     /// Number of workload entries and worker lanes announced for the sweep.
     pub sweep_plan: Option<(usize, usize)>,
 
-    /// Run-local ordinals announced as workers started them.
-    pub mutant_starts: Vec<(u32, core::time::Duration)>,
+    /// Number of workers announced as they started a mutant.
+    pub mutant_starts: usize,
+
+    /// Number of quiet-sweep heartbeat events.
+    pub heartbeats: usize,
 
     /// Every warning the run raised, in order.
     pub warnings: Vec<String>,
@@ -721,8 +731,12 @@ impl crate::exec::Events for Recorder {
         self.sweep_plan = Some((work.len(), jobs));
     }
 
-    fn mutant_started(&mut self, ordinal: u32, elapsed: core::time::Duration) {
-        self.mutant_starts.push((ordinal, elapsed));
+    fn mutant_started(&mut self) {
+        self.mutant_starts = self.mutant_starts.saturating_add(1);
+    }
+
+    fn heartbeat(&mut self) {
+        self.heartbeats = self.heartbeats.saturating_add(1);
     }
 }
 
@@ -778,6 +792,7 @@ pub fn private_system_tempdir(prefix: &str) -> tempfile::TempDir {
 /// run.
 ///
 /// Returns `true`, so a caller can write `if unsupported(…) { return; }` and read it as a sentence.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn standing_down(what: &str, why: &str) -> bool {
     let count = STOOD_DOWN.fetch_add(1, Ordering::Relaxed) + 1;
     let line = format!("standing down ({count}): {what} — {why}\n");
@@ -794,6 +809,7 @@ static STOOD_DOWN: AtomicUsize = AtomicUsize::new(0);
 /// The one place the check is written, so that the reason a test skipped is the reason the tool
 /// itself would give a user.
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn without_memory_support(what: &str) -> bool {
     match crate::exec::memory_support() {
         Ok(()) => false,
@@ -838,6 +854,7 @@ pub const WATCHDOG: Duration = Duration::from_mins(1);
 ///
 /// If `body` does not finish within `budget`, or panics. A panic inside `body` is re-raised here so
 /// that it fails the test rather than being swallowed by the worker thread.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn within<T: Send + 'static>(budget: Duration, what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
     if std::env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
         return body();
@@ -964,6 +981,7 @@ mod tests {
 
     /// The watchdog returns what the closure returned, and does it on the closure's own thread.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_closure_that_finishes_gets_its_value_back() {
         if std::env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -984,6 +1002,7 @@ mod tests {
     /// this body is *meant* to be late — and the hung thread is left running, which is exactly what
     /// the helper promises to do.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_body_that_never_finishes_is_reported_as_hung() {
         if std::env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -1278,6 +1297,7 @@ pub mod advise_fixture {
             target: target.to_owned(),
             manifest_dir: Utf8PathBuf::from(format!("/w/{package}")),
             linked_sources: None,
+            libtest: Some(true),
             baseline: Duration::from_secs(baseline),
             tests,
             budget: None,

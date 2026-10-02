@@ -149,7 +149,11 @@ impl<'a> SourceFileAnalyzer<'a> {
                 .and_then(|segment| segment.name_ref())
                 .is_some_and(|name| matches!(&*name.text(), "test" | "bench" | "cfg"));
 
-            is_candidate && attribute_marks_test(&attr.syntax().text().to_string())
+            if !is_candidate {
+                return false;
+            }
+
+            attribute_marks_test(&attr.syntax().text().to_string())
         })
     }
 
@@ -321,10 +325,6 @@ fn cfg_predicate_is_test_only(predicate: &str) -> bool {
         return !parts.is_empty() && parts.iter().all(|part| cfg_predicate_is_test_only(part));
     }
 
-    if strip_call(predicate, "not").is_some() {
-        return false;
-    }
-
     predicate == "test"
 }
 
@@ -444,9 +444,83 @@ pub fn production_after_tests() {
     fn test_blank_line_detection_uses_real_line_text() {
         let analyzer = SourceFileAnalyzer::new("fn main() {}\n   \n");
 
+        assert_eq!(analyzer.line_starts, vec![0, 13, 17]);
+        assert_eq!(analyzer.get_line_text(0), Some("fn main() {}\n"));
+        assert_eq!(analyzer.get_line_text(1), Some("   \n"));
+        assert_eq!(analyzer.get_line_text(2), Some(""));
         assert!(!analyzer.is_blank_line(0));
         assert!(analyzer.is_blank_line(1));
         assert!(analyzer.is_blank_line(99));
+    }
+
+    #[test]
+    fn offset_lookup_observes_line_boundaries_exactly() {
+        let analyzer = SourceFileAnalyzer::new("abc\ndef\n");
+
+        assert_eq!(analyzer.offset_to_line(0), 0);
+        assert_eq!(analyzer.offset_to_line(3), 0);
+        assert_eq!(analyzer.offset_to_line(4), 1);
+        assert_eq!(analyzer.offset_to_line(7), 1);
+        assert_eq!(analyzer.offset_to_line(8), 2);
+    }
+
+    #[test]
+    fn marking_a_line_changes_only_that_line() {
+        let mut analyzer = SourceFileAnalyzer::new("one\ntwo\nthree");
+
+        analyzer.mark_line(1, LINE_COMMENT);
+
+        assert_eq!(analyzer.line_flags, vec![0, LINE_COMMENT, 0]);
+        assert_eq!(analyzer.count_lines(LINE_COMMENT), 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri detects UB in external rowan crate")]
+    fn comments_and_code_are_recorded_on_their_exact_lines() {
+        let source = "fn main() {\n\n    let value = 1;\n    // comment\n    dbg!(value);\n}\n";
+        let parse = SourceFile::parse(source, Edition::CURRENT);
+        let mut analyzer = SourceFileAnalyzer::new(source);
+        analyzer.analyze(parse.tree().syntax());
+
+        assert_eq!(analyzer.line_flags[1], 0, "the blank line must remain unmarked");
+        assert_eq!(
+            analyzer.line_flags[3] & LINE_COMMENT,
+            LINE_COMMENT,
+            "the comment flag belongs on the comment line"
+        );
+        assert_eq!(
+            analyzer.line_flags[2] & LINE_PRODUCTION,
+            LINE_PRODUCTION,
+            "code after a blank line must still be visited"
+        );
+        assert_eq!(
+            analyzer.line_flags[4] & LINE_PRODUCTION,
+            LINE_PRODUCTION,
+            "later code must not be skipped"
+        );
+        assert_eq!(
+            analyzer.line_flags[2] & LINE_COMMENT,
+            0,
+            "ordinary syntax tokens must not be treated as comments"
+        );
+    }
+
+    #[test]
+    fn comment_token_uses_the_comment_flag_and_exact_span() {
+        let source = "// first\n// second\n";
+        let parse = SourceFile::parse(source, Edition::CURRENT);
+        let comment = parse
+            .tree()
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+            .find(|token| token.kind() == SyntaxKind::COMMENT)
+            .expect("fixture contains a comment token");
+        let mut analyzer = SourceFileAnalyzer::new(source);
+
+        analyzer.record_comment_lines_from_token(&comment);
+
+        assert_eq!(analyzer.line_flags, vec![LINE_COMMENT, 0, 0]);
     }
 
     #[test]
@@ -629,6 +703,24 @@ mod tests {
         assert!(!cfg_predicate_is_test_only("any(test, feature = \"x\")"));
         assert!(!cfg_predicate_is_test_only("feature = \"test-util\""));
         assert!(!cfg_predicate_is_test_only(""));
+        assert!(!cfg_predicate_is_test_only("any()"));
+    }
+
+    #[test]
+    fn attribute_parser_rejects_incomplete_calls_and_preserves_whitespace_rules() {
+        assert!(!attribute_marks_test("#[cfg"));
+        assert!(!attribute_marks_test("#[cfg test)]"));
+        assert_eq!(strip_call("all (test)", "all"), Some("test"));
+        assert_eq!(strip_call("all test", "all"), None);
+        assert_eq!(split_predicates("test,, all(test, unix), "), vec!["test", "all(test, unix)"]);
+    }
+
+    #[test]
+    fn line_flag_bits_are_independent() {
+        assert_eq!(LINE_PRODUCTION, 1);
+        assert_eq!(LINE_TEST, 2);
+        assert_eq!(LINE_COMMENT, 4);
+        assert_eq!(LINE_PRODUCTION | LINE_TEST | LINE_COMMENT, 7);
     }
 
     #[test]

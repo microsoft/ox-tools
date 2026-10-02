@@ -53,8 +53,10 @@ anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-insta
     {{ anvil_stable_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 [group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
+    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
+    exit $LASTEXITCODE
 
 [group("anvil-setup")]
 anvil-tool-pwsh-validate-prereqs:
@@ -86,15 +88,19 @@ _install-component toolchain component:
 anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
+    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
+    exit $LASTEXITCODE
 
 [group("anvil-setup")]
 anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
+    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
+    exit $LASTEXITCODE
 
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")

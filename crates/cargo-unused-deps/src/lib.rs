@@ -550,8 +550,20 @@ fn dependency_table(target: Option<&str>, section: &str) -> String {
     target.map_or_else(|| format!("[{section}]"), |target| format!("[target.'{target}'.{section}]"))
 }
 
-/// The catalog check: `[workspace.dependencies]` entries no member inherits.
+/// Split from [`run`] so tests can drive it without a process boundary or a
+/// parsed command line.
 fn catalog_check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<ExitCode> {
+    catalog_check_with_hook(manifest_path, fix, require_workspace, |_| {})
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CheckStage {
+    MembersEnumerated,
+    InheritanceCollected,
+    MembersVerified,
+}
+
+fn catalog_check_with_hook(manifest_path: &Path, fix: bool, require_workspace: bool, mut hook: impl FnMut(CheckStage)) -> Result<ExitCode> {
     let original = detect::read_manifest_text(manifest_path)?;
     let mut manifest = detect::parse_manifest(&original, manifest_path)?;
 
@@ -577,7 +589,9 @@ fn catalog_check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Re
     }
 
     let members = members_of(manifest_path)?;
+    hook(CheckStage::MembersEnumerated);
     let inheritance = detect::inherited(&members)?;
+    hook(CheckStage::InheritanceCollected);
     let (unused, stale) = detect::partition(&catalog, &inheritance.keys, &inheritance.declarations);
 
     report_stale(&stale);
@@ -599,6 +613,7 @@ fn catalog_check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Re
 
     let outcome = fix::remove(&mut manifest, &unused);
     verify_members_unchanged(manifest_path, &members)?;
+    hook(CheckStage::MembersVerified);
     write_back(manifest_path, &original, &inheritance.inputs, &manifest.to_string())?;
 
     println!(
@@ -638,6 +653,35 @@ fn catalog_check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Re
 ///   on the file the link points at and the indirection survives. Replacing the
 ///   link itself would quietly turn it into a regular file.
 fn write_back(manifest_path: &Path, original: &str, member_inputs: &[ManifestInput], contents: &str) -> Result<()> {
+    write_back_with_fault(manifest_path, original, member_inputs, contents, None)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteBackStep {
+    Resolve,
+    Read,
+    Metadata,
+    Create,
+    Write,
+    Permissions,
+    Persist,
+}
+
+fn faultable<T>(step: WriteBackStep, fault: Option<WriteBackStep>, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    if fault == Some(step) {
+        ohno::bail!("injected {step:?} failure");
+    }
+
+    operation()
+}
+
+fn write_back_with_fault(
+    manifest_path: &Path,
+    original: &str,
+    member_inputs: &[ManifestInput],
+    contents: &str,
+    fault: Option<WriteBackStep>,
+) -> Result<()> {
     // Eagerly formatted rather than built in `with_context` closures: those
     // closures only run on failures no test can force portably.
     let resolve_failure = format!("failed to resolve {}", manifest_path.display());
@@ -649,9 +693,13 @@ fn write_back(manifest_path: &Path, original: &str, member_inputs: &[ManifestInp
 
     // Follow a symlinked manifest through to its target, the way an in-place
     // write would have.
-    let target = fs::canonicalize(manifest_path).into_app_err(resolve_failure)?;
+    let target = faultable(WriteBackStep::Resolve, fault, || {
+        fs::canonicalize(manifest_path).into_app_err(resolve_failure)
+    })?;
 
-    let current = fs::read_to_string(&target).into_app_err(read_failure)?;
+    let current = faultable(WriteBackStep::Read, fault, || {
+        fs::read_to_string(&target).into_app_err(read_failure)
+    })?;
     if current != original {
         ohno::bail!(
             "{} changed on disk while the check was running; not writing",
@@ -666,16 +714,27 @@ fn write_back(manifest_path: &Path, original: &str, member_inputs: &[ManifestInp
         }
     }
 
-    let permissions = fs::metadata(&target).into_app_err(metadata_failure)?.permissions();
+    let permissions = faultable(WriteBackStep::Metadata, fault, || {
+        fs::metadata(&target).into_app_err(metadata_failure)
+    })?
+    .permissions();
     let directory = target
         .parent()
         .expect("a canonicalized file path always names a file, so it always has a parent directory");
 
     // Same directory as the manifest, so the rename stays on one filesystem.
-    let mut staged = NamedTempFile::new_in(directory).into_app_err(write_failure.clone())?;
-    staged.write_all(contents.as_bytes()).into_app_err(write_failure)?;
-    staged.as_file().set_permissions(permissions).into_app_err(permissions_failure)?;
-    staged.persist(&target).into_app_err(persist_failure)?;
+    let mut staged = faultable(WriteBackStep::Create, fault, || {
+        NamedTempFile::new_in(directory).into_app_err(write_failure.clone())
+    })?;
+    faultable(WriteBackStep::Write, fault, || {
+        staged.write_all(contents.as_bytes()).into_app_err(write_failure)
+    })?;
+    faultable(WriteBackStep::Permissions, fault, || {
+        staged.as_file().set_permissions(permissions).into_app_err(permissions_failure)
+    })?;
+    faultable(WriteBackStep::Persist, fault, || {
+        staged.persist(&target).map(|_| ()).into_app_err(persist_failure)
+    })?;
 
     Ok(())
 }
@@ -917,7 +976,139 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{verify_members_unchanged, write_back};
+    use super::{
+        CheckStage, WriteBackStep, catalog_check, catalog_check_with_hook, verify_members_unchanged, write_back, write_back_with_fault,
+    };
+
+    fn write_member(path: &std::path::Path, name: &str, body: &str) {
+        fs::create_dir_all(path.join("src")).expect("create member source directory");
+        fs::write(path.join("src/lib.rs"), "").expect("write member source");
+        fs::write(
+            path.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n{body}"),
+        )
+        .expect("write member manifest");
+    }
+
+    #[test]
+    fn check_propagates_root_read_parse_and_catalog_errors() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let manifest = dir.path().join("Cargo.toml");
+
+        let read_error = catalog_check(&manifest, false, false).expect_err("a missing root manifest must fail");
+        assert!(read_error.to_string().contains("failed to read"), "unexpected error: {read_error}");
+
+        fs::write(&manifest, "[workspace").expect("write malformed root manifest");
+        let parse_error = catalog_check(&manifest, false, false).expect_err("malformed TOML must fail");
+        assert!(
+            parse_error.to_string().contains("failed to parse"),
+            "unexpected error: {parse_error}"
+        );
+
+        fs::write(&manifest, "[workspace]\ndependencies = \"invalid\"\n").expect("write invalid catalog");
+        let catalog_error = catalog_check(&manifest, false, false).expect_err("an invalid catalog must fail");
+        assert!(
+            catalog_error.to_string().contains("[workspace.dependencies] must be a table"),
+            "unexpected error: {catalog_error}"
+        );
+    }
+
+    #[test]
+    fn check_propagates_member_enumeration_errors() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let manifest = dir.path().join("Cargo.toml");
+        fs::write(
+            &manifest,
+            "[workspace]\nmembers = [\"missing\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+        )
+        .expect("write workspace");
+
+        let error = catalog_check(&manifest, false, false).expect_err("invalid workspace membership must fail");
+
+        assert!(
+            error.to_string().contains("failed to enumerate the workspace members"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn check_propagates_member_read_errors() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let manifest = dir.path().join("Cargo.toml");
+        let member = dir.path().join("member");
+        fs::write(
+            &manifest,
+            "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+        )
+        .expect("write workspace");
+        write_member(&member, "member", "");
+
+        let error = catalog_check_with_hook(&manifest, false, false, |stage| {
+            if stage == CheckStage::MembersEnumerated {
+                fs::remove_file(member.join("Cargo.toml")).expect("remove member manifest");
+            }
+        })
+        .expect_err("a disappearing member manifest must fail");
+
+        assert!(error.to_string().contains("failed to read"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn check_propagates_membership_changes_before_fixing() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let manifest = dir.path().join("Cargo.toml");
+        let member = dir.path().join("member");
+        let newcomer = dir.path().join("newcomer");
+        fs::write(
+            &manifest,
+            "[workspace]\nmembers = [\"*\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+        )
+        .expect("write workspace");
+        write_member(&member, "member", "");
+
+        let error = catalog_check_with_hook(&manifest, true, false, |stage| {
+            if stage == CheckStage::InheritanceCollected {
+                write_member(&newcomer, "newcomer", "");
+            }
+        })
+        .expect_err("changed workspace membership must abort the fix");
+
+        assert!(
+            error
+                .to_string()
+                .contains("workspace membership changed while the check was running"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn check_propagates_write_back_errors() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let manifest = dir.path().join("Cargo.toml");
+        let member = dir.path().join("member");
+        fs::write(
+            &manifest,
+            "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+        )
+        .expect("write workspace");
+        write_member(&member, "member", "");
+
+        let error = catalog_check_with_hook(&manifest, true, false, |stage| {
+            if stage == CheckStage::MembersVerified {
+                fs::write(
+                    &manifest,
+                    "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\ncompeting = \"1\"\n",
+                )
+                .expect("write competing edit");
+            }
+        })
+        .expect_err("a competing edit must abort the fix");
+
+        assert!(
+            error.to_string().contains("changed on disk while the check was running"),
+            "unexpected error: {error}"
+        );
+    }
 
     /// The unchanged-input guard cannot be driven from an integration test: the
     /// window it protects is between the read and the write of a single run, so
@@ -932,6 +1123,50 @@ mod tests {
         write_back(&path, "original", &[], "replacement").expect("an unchanged manifest is replaced");
 
         assert_eq!(fs::read_to_string(&path).expect("failed to read back"), "replacement");
+    }
+
+    #[test]
+    fn write_back_propagates_each_atomic_replacement_failure() {
+        for step in [
+            WriteBackStep::Resolve,
+            WriteBackStep::Read,
+            WriteBackStep::Metadata,
+            WriteBackStep::Create,
+            WriteBackStep::Write,
+            WriteBackStep::Permissions,
+            WriteBackStep::Persist,
+        ] {
+            let dir = TempDir::new().expect("failed to create temp dir");
+            let path = dir.path().join("Cargo.toml");
+            fs::write(&path, "original").expect("failed to seed the manifest");
+
+            let error = write_back_with_fault(&path, "original", &[], "replacement", Some(step))
+                .expect_err("injected I/O failures must be returned");
+
+            assert_eq!(error.to_string(), format!("injected {step:?} failure"));
+            assert_eq!(
+                fs::read_to_string(&path).expect("failed to read back"),
+                "original",
+                "{step:?} failure must not replace the manifest"
+            );
+        }
+    }
+
+    #[test]
+    fn write_back_returns_real_resolve_and_read_errors() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let missing = dir.path().join("missing.toml");
+        let resolve_error = write_back(&missing, "", &[], "replacement").expect_err("missing path must fail");
+        assert!(
+            resolve_error.to_string().contains("failed to resolve"),
+            "unexpected error: {resolve_error}"
+        );
+
+        let read_error = write_back(dir.path(), "", &[], "replacement").expect_err("a directory is not a manifest");
+        assert!(
+            read_error.to_string().contains("failed to re-read"),
+            "unexpected error: {read_error}"
+        );
     }
 
     #[test]
@@ -1045,5 +1280,12 @@ mod tests {
                 .contains("workspace membership changed while the check was running"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn membership_lookup_failure_is_returned_instead_of_panicking() {
+        let error = verify_members_unchanged(std::path::Path::new("a-manifest-that-does-not-exist"), &[])
+            .expect_err("cargo metadata failure must be returned");
+        assert!(error.to_string().contains("failed to enumerate the workspace members"), "{error}");
     }
 }

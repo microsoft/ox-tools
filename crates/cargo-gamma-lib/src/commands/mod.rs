@@ -7,6 +7,7 @@ mod clean;
 mod cli;
 mod completions;
 mod console_events;
+mod dashboard;
 mod dispatch;
 mod explain;
 mod hints;
@@ -21,8 +22,8 @@ mod when;
 
 #[doc(inline)]
 pub use cli::{
-    BuildLimitArgs, CleanArgs, Cli, Command, CompletionsArgs, ConfigArgs, ExplainArgs, FeatureArgs, HintsArgs, ListArgs, ListKind,
-    MeasureArgs, MergeArgs, RunArgs, SelectArgs, SuppressArgs, UnsuppressArgs,
+    BuildLimitArgs, CleanArgs, Cli, Command, CompletionsArgs, ConfigArgs, ExplainArgs, FeatureArgs, HintsArgs, ListArgs, ListCommand,
+    ListFilesArgs, ListKind, ListMutantsArgs, ListRegistryArgs, MeasureArgs, MergeArgs, RunArgs, SelectArgs, SuppressArgs, UnsuppressArgs,
 };
 #[doc(inline)]
 pub use dispatch::{EXIT_CANNOT_PROCEED, EXIT_GATE_FAILED, EXIT_INTERNAL, EXIT_OK, EXIT_USAGE, run};

@@ -6,8 +6,11 @@
 ## Purpose
 
 This proc-macro crate exposes the user-facing `gamma` attribute namespace used
-to suppress mutations and state expected outcomes. Each attribute validates
-its arguments and otherwise returns the annotated item unchanged.
+to suppress mutations, state expected outcomes, and declare shared resources
+used by tests. Mutation-control attributes return the annotated item unchanged.
+`#[gamma::resource("name")]` additionally emits an ignored test marker whose
+harness name lets cargo-gamma associate the resource with an exact test or
+test target without runtime registration.
 
 ## Boundaries
 
@@ -15,7 +18,9 @@ its arguments and otherwise returns the annotated item unchanged.
   `#[gamma::skip]`.
 - Parsing and validation live in `cargo-gamma-attrs-impl`; this proc-macro
   crate remains a thin compiler-hosted shim.
-- The macros must not instrument code or add runtime behavior.
+- The macros must not instrument production code or add runtime behavior.
+- Resource markers are ignored tests: they appear in harness listings but
+  never execute.
 
 ## Public contract
 

@@ -33,7 +33,7 @@ pub fn validate_config<H: Host>(host: &mut H, args: &ValidateArgs) -> Result<()>
         let mut metadata_cmd = MetadataCommand::new();
         let _ = metadata_cmd.manifest_path(&args.manifest_path);
         let metadata = metadata_cmd.exec().into_app_err("retrieving workspace metadata")?;
-        metadata.workspace_root.join("aprz.toml")
+        default_config_path(&metadata.workspace_root)
     };
 
     if !config_path.as_std_path().exists() {
@@ -52,13 +52,10 @@ pub fn validate_config<H: Host>(host: &mut H, args: &ValidateArgs) -> Result<()>
 ///
 /// Returns an error if the config file cannot be loaded, parsed, or if expressions fail to evaluate
 fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
-    let config = Config::load(
-        config_path.parent().unwrap_or_else(|| Utf8Path::new(".")),
-        Some(&config_path.to_path_buf()),
-    )?;
+    let config = Config::load(config_path, Some(&config_path.to_path_buf()))?;
 
     // Validate that all expressions can be evaluated against default metrics (only if any are defined)
-    if !config.high_risk.is_empty() || !config.eval.is_empty() {
+    if has_expressions(&config) {
         let appraisal = evaluate(
             &config.high_risk,
             &config.eval,
@@ -77,6 +74,14 @@ fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn default_config_path(workspace_root: &Utf8Path) -> Utf8PathBuf {
+    workspace_root.join("aprz.toml")
+}
+
+const fn has_expressions(config: &Config) -> bool {
+    !config.high_risk.is_empty() || !config.eval.is_empty()
 }
 
 #[cfg(test)]
@@ -110,6 +115,37 @@ mod tests {
         let result = validate_config(&mut host, &args);
 
         assert!(result.is_ok(), "Default configuration should validate successfully: {result:?}");
+    }
+
+    #[test]
+    fn metadata_errors_keep_their_context() {
+        let mut host = TestHost::new();
+        let args = ValidateArgs {
+            config: None,
+            manifest_path: Utf8PathBuf::from("missing-manifest-for-validate-test.toml"),
+        };
+
+        let error = validate_config(&mut host, &args).expect_err("a missing manifest must be reported");
+        assert!(error.to_string().contains("retrieving workspace metadata"));
+    }
+
+    #[test]
+    fn default_path_and_expression_detection_preserve_the_contract() {
+        assert_eq!(default_config_path(Utf8Path::new("workspace")).file_name(), Some("aprz.toml"));
+
+        let mut config = Config::default();
+        config.high_risk.clear();
+        config.eval.clear();
+        assert!(!has_expressions(&config));
+        config
+            .high_risk
+            .push(crate::expr::Expression::new("required", None, "true", None).expect("the fixture expression is valid"));
+        assert!(has_expressions(&config));
+        config.high_risk.clear();
+        config
+            .eval
+            .push(crate::expr::Expression::new("weighted", None, "true", None).expect("the fixture expression is valid"));
+        assert!(has_expressions(&config));
     }
 
     #[test]
@@ -280,12 +316,15 @@ expression = "this_metric_does_not_exist > 100"
             config: Some(config_path),
             manifest_path: Utf8PathBuf::from("Cargo.toml"),
         };
-        let result = validate_config(&mut host, &args);
-
-        assert!(result.is_err(), "Expression referencing nonexistent metric should fail validation");
+        let error =
+            validate_config(&mut host, &args).expect_err("an expression referencing a nonexistent metric must be evaluated and rejected");
+        assert!(
+            error.to_string().contains("expression 'nonexistent_metric' failed"),
+            "unexpected validation error: {error}"
+        );
 
         // Extract just the error message before the context chain and backtrace
-        let error_msg = result.unwrap_err().to_string();
+        let error_msg = error.to_string();
         let without_context = error_msg.split("\n>").next().unwrap_or(&error_msg);
         let snapshot_content = without_context.split("\nBacktrace:").next().unwrap_or(without_context).trim();
         insta::assert_snapshot!(snapshot_content);

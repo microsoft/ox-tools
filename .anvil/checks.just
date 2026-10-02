@@ -388,11 +388,76 @@ anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
 # doctests that only compile when those features are off. The
 # duplication is cheap because doctests are already a small fraction
 # of total compile/test time.
+#
+# Cargo errors when `cargo test --doc` selects only bin-only packages. Build
+# the subset with at least one Cargo target marked `doctest = true`. This uses
+# Cargo's capability bit rather than approximating from target kinds, so
+# explicit crate types such as rlib/cdylib and proc macros remain eligible.
 
 # Run documentation tests for affected workspace packages.
+[script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --all-features --locked
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --locked
+    $ErrorActionPreference = 'Stop'
+    $selection = $null
+    if ('{{ anvil_impact_mode }}' -ne 'off') {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-doc-test: missing impact package file $packageFile"
+        }
+        $selection = @(Get-Content -LiteralPath $packageFile | Where-Object { $_ -ne '' })
+        if ($selection.Count -eq 0) {
+            Write-Host 'anvil-doc-test: no affected packages; skipping'
+            exit 0
+        }
+    }
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspacePackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $docPackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($package in $meta.packages) {
+        $spec = "$($package.name)@$($package.version)"
+        $workspacePackages.Add($spec) | Out-Null
+        if ($package.targets | Where-Object { $_.doctest -eq $true }) {
+            $docPackages.Add($spec) | Out-Null
+        }
+    }
+    $specs = if ($null -eq $selection) {
+        $workspaceSpecs = [string[]]@($docPackages)
+        [Array]::Sort($workspaceSpecs, [System.StringComparer]::Ordinal)
+        $workspaceSpecs
+    } else {
+        @(
+            foreach ($spec in $selection) {
+                if (-not $workspacePackages.Contains($spec)) {
+                    throw "anvil-doc-test: impact package spec '$spec' does not identify a workspace member"
+                }
+                if ($docPackages.Contains($spec)) { $spec }
+            }
+        )
+    }
+    if ($specs.Count -eq 0) {
+        Write-Host 'anvil-doc-test: no affected doctest-capable packages; skipping'
+        exit 0
+    }
+    $docSelection = [System.Collections.Generic.List[string]]::new()
+    foreach ($spec in $specs) {
+        $docSelection.Add('--package')
+        $docSelection.Add($spec)
+    }
+    & cargo each @docSelection --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo each @docSelection --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -418,8 +483,81 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
 [arg("timeout", long, pattern='(?:[1-9][0-9]{0,2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)')]
 anvil-examples run="false" package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
     cargo each {{ if example == "" { if package == "" { anvil_affected_selection } else { "--package " + quote(package) } } else if package == "" { error("--example requires --package") } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if example == "" { "--examples" } else { "--example " + quote(example) } }} --all-features --locked
-    {{ if run == "true" { if example == "" { "" } else { "# " } } else { "# " } }}cargo each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --each-target example --timeout {{ timeout }}s --keep-going -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{spec}' --example '{target}' --all-features --locked
+    {{ if run == "true" { if example == "" { "& " + quote(just_executable()) + " _anvil-examples-run " + quote(package) + " " + quote(timeout) } else { "# explicit example selected below" } } else { "# example execution not requested" } }}
     {{ if run == "true" { if example == "" { "# " } else { "" } } else { "# " } }}cargo each --package {{ quote(package) }} --timeout {{ timeout }}s -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{spec}' --example {{ quote(example) }} --all-features --locked
+
+# Run automatically eligible examples while honoring each package's
+# `[package.metadata.anvil.examples].no-run` target list.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-examples-run package timeout:
+    $ErrorActionPreference = 'Stop'
+    $packageName = '{{ replace(package, "'", "''") }}'
+    $timeout = '{{ replace(timeout, "'", "''") }}'
+    $selected = $null
+    if (-not $packageName -and '{{ anvil_impact_mode }}' -ne 'off') {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-examples: missing impact package file $packageFile"
+        }
+        $selected = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::Ordinal
+        )
+        foreach ($spec in Get-Content -LiteralPath $packageFile) {
+            if ($spec) { $selected.Add($spec) | Out-Null }
+        }
+        if ($selected.Count -eq 0) {
+            Write-Host 'anvil-examples: no affected packages; skipping execution'
+            exit 0
+        }
+    }
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-examples: cargo metadata failed'; exit $LASTEXITCODE }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-examples: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspacePackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($candidate in $meta.packages) {
+        $workspacePackages.Add("$($candidate.name)@$($candidate.version)") | Out-Null
+    }
+    if ($null -ne $selected) {
+        foreach ($spec in $selected) {
+            if (-not $workspacePackages.Contains($spec)) {
+                throw "anvil-examples: impact package spec '$spec' does not identify a workspace member"
+            }
+        }
+    }
+    $targets = @(
+        foreach ($candidate in $meta.packages) {
+            $spec = "$($candidate.name)@$($candidate.version)"
+            if ($packageName -and $candidate.name -cne $packageName) { continue }
+            if ($null -ne $selected -and -not $selected.Contains($spec)) { continue }
+            $excluded = @($candidate.metadata.anvil.examples.'no-run')
+            foreach ($target in $candidate.targets) {
+                if ($target.kind -ccontains 'example' -and $excluded -cnotcontains $target.name) {
+                    [pscustomobject]@{ spec = $spec; target = $target.name }
+                }
+            }
+        }
+    )
+    if ($packageName -and -not ($meta.packages | Where-Object { $_.name -ceq $packageName })) {
+        throw "anvil-examples: package '$packageName' does not identify a workspace member"
+    }
+    if ($targets.Count -eq 0) {
+        Write-Host 'anvil-examples: no automatically runnable examples; skipping'
+        exit 0
+    }
+    $failed = $false
+    foreach ($item in $targets) {
+        & cargo each --package $item.spec --timeout "${timeout}s" -- cargo {{ anvil_stable_toolchain_arg }} run --config 'env.ANVIL_EXAMPLE="1"' --package '{spec}' --example $item.target --all-features --locked
+        if ($LASTEXITCODE -ne 0) { $failed = $true }
+    }
+    if ($failed) { exit 1 }
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -512,8 +650,77 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
 # invocations cleanly on both pwsh/bash.
 
 # Run Loom concurrency tests for affected workspace packages.
+[script("pwsh", "-NoProfile")]
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --each-target test --target-required-feature loom -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
+    $ErrorActionPreference = 'Stop'
+    $selected = $null
+    if ('{{ anvil_impact_mode }}' -ne 'off') {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-loom: missing impact package file $packageFile"
+        }
+        $selected = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::Ordinal
+        )
+        foreach ($spec in Get-Content -LiteralPath $packageFile) {
+            if ($spec) { $selected.Add($spec) | Out-Null }
+        }
+        if ($selected.Count -eq 0) {
+            Write-Host 'anvil-loom: no affected packages; skipping'
+            exit 0
+        }
+    }
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-loom: cargo metadata failed'; exit $LASTEXITCODE }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-loom: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspacePackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($package in $meta.packages) {
+        $workspacePackages.Add("$($package.name)@$($package.version)") | Out-Null
+    }
+    if ($null -ne $selected) {
+        foreach ($spec in $selected) {
+            if (-not $workspacePackages.Contains($spec)) {
+                throw "anvil-loom: impact package spec '$spec' does not identify a workspace member"
+            }
+        }
+    }
+    $loomTargetPackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $declarers = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($package in $meta.packages) {
+        $spec = "$($package.name)@$($package.version)"
+        if ($null -ne $selected -and -not $selected.Contains($spec)) { continue }
+        if ($package.features.PSObject.Properties.Name -ccontains 'loom' -or
+            [bool]($package.dependencies | Where-Object { $_.target -and $_.target -match 'cfg\(.*\bloom\b.*\)' })) {
+            $declarers.Add($spec) | Out-Null
+        }
+        foreach ($target in $package.targets) {
+            if ($target.kind -ccontains 'test' -and $target.'required-features' -ccontains 'loom') {
+                $loomTargetPackages.Add($spec) | Out-Null
+            }
+        }
+    }
+    $missing = @($declarers | Where-Object { -not $loomTargetPackages.Contains($_) })
+    if ($missing.Count -ne 0) {
+        [Array]::Sort($missing, [System.StringComparer]::Ordinal)
+        throw 'anvil-loom: package(s) declare Loom support but expose no [[test]] target with required-features = ["loom"]: ' + ($missing -join ', ')
+    }
+    if ($loomTargetPackages.Count -eq 0) {
+        Write-Host 'anvil-loom: no Loom test targets; skipping'
+        exit 0
+    }
+    & cargo each {{ anvil_affected_selection }} --each-target test --target-required-feature loom -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
+    exit $LASTEXITCODE
 
 anvil_miri_jobs := env("ANVIL_MIRI_JOBS", "auto")
 

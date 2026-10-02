@@ -58,6 +58,47 @@ mod tests {
 
     const HEADER: &str = "Copyright (c) Microsoft Corporation.\nLicensed under the MIT License.";
 
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("deliberate read failure"))
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("deliberate write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn check_propagates_reader_errors_without_panicking() {
+        let error = check(FailingReader, HEADER, FileKind::Rust).expect_err("reader failure must be returned");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "deliberate read failure");
+    }
+
+    #[test]
+    fn fix_propagates_reader_errors_without_panicking() {
+        let error = fix(FailingReader, Vec::new(), HEADER, FileKind::Rust).expect_err("reader failure must be returned");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "deliberate read failure");
+    }
+
+    #[test]
+    fn fix_propagates_writer_errors_without_panicking() {
+        let error = fix(&b"fn main() {}\n"[..], FailingWriter, HEADER, FileKind::Rust).expect_err("writer failure must be returned");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "deliberate write failure");
+    }
+
     #[test]
     fn fix_preserves_crlf_when_adding_missing_header() {
         let input = b"fn main() {}\r\n";

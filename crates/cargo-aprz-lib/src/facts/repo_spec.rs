@@ -4,7 +4,8 @@
 use core::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use ohno::{IntoAppError, bail};
+use ohno::bail;
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -21,6 +22,9 @@ pub struct RepoSpec {
 impl RepoSpec {
     pub fn parse(url: &Url) -> Result<Self> {
         let path_segments: Vec<_> = url.path_segments().map(Iterator::collect).unwrap_or_default();
+        let Some(host) = url.host_str() else {
+            bail!("repository URL is missing a host; expected a URL like https://host/owner/repo, got: {url}");
+        };
 
         if path_segments.len() < 2 {
             bail!("invalid repository URL format: {url}");
@@ -30,13 +34,26 @@ impl RepoSpec {
             bail!("invalid repository URL: empty owner or repo name: {url}");
         }
 
-        let host = url.host_str().unwrap_or_default();
         let owner = path_segments[0];
         let repo = path_segments[1].trim_end_matches(".git");
-        let scheme = url.scheme();
-
-        // Reconstruct a clean URL with only scheme://host/owner/repo
-        let clean_url = Url::parse(&format!("{scheme}://{host}/{owner}/{repo}")).into_app_err("reconstructing repository URL")?;
+        let decoded_owner = percent_decode_str(owner)
+            .decode_utf8()
+            .map_err(|cause| ohno::app_err!("repository owner is not valid UTF-8: {cause}"))?;
+        let decoded_repo = percent_decode_str(repo)
+            .decode_utf8()
+            .map_err(|cause| ohno::app_err!("repository name is not valid UTF-8: {cause}"))?;
+        let mut clean_url = url.clone();
+        if clean_url.set_password(None).is_err() || clean_url.set_username("").is_err() || clean_url.set_port(None).is_err() {
+            bail!("repository URL does not support host credential normalization: {url}");
+        }
+        clean_url
+            .path_segments_mut()
+            .map_err(|()| ohno::app_err!("repository URL does not support path normalization: {url}"))?
+            .clear()
+            .push(&decoded_owner)
+            .push(&decoded_repo);
+        clean_url.set_query(None);
+        clean_url.set_fragment(None);
 
         Ok(Self {
             host: Arc::from(host),
@@ -117,6 +134,53 @@ mod tests {
         assert_eq!(spec.owner(), "tokio-rs");
         assert_eq!(spec.repo(), "tokio");
         assert_eq!(spec.url().as_str(), "https://github.com/tokio-rs/tokio");
+    }
+
+    #[test]
+    fn test_parse_removes_query_and_fragment_from_clean_url() {
+        let url = Url::parse("https://github.com/tokio-rs/tokio?tab=readme#files").unwrap();
+        let spec = RepoSpec::parse(&url).unwrap();
+
+        assert_eq!(spec.url().as_str(), "https://github.com/tokio-rs/tokio");
+    }
+
+    #[test]
+    fn test_parse_removes_credentials_and_explicit_port_from_clean_url() {
+        let url = Url::parse("https://secret-user:secret-password@github.com:8443/tokio-rs/tokio").unwrap();
+        let spec = RepoSpec::parse(&url).unwrap();
+
+        assert_eq!(spec.url().as_str(), "https://github.com/tokio-rs/tokio");
+        assert_eq!(spec.to_string(), "https://github.com/tokio-rs/tokio");
+    }
+
+    #[test]
+    fn test_parse_does_not_double_encode_path_segments() {
+        let url = Url::parse("https://github.com/my%20org/my%20repo.git/tree/main").unwrap();
+        let spec = RepoSpec::parse(&url).unwrap();
+
+        assert_eq!(spec.url().as_str(), "https://github.com/my%20org/my%20repo");
+    }
+
+    #[test]
+    fn test_parse_preserves_encoded_path_separators_within_segments() {
+        let url = Url::parse("https://github.com/acme%2Fteam/repo").unwrap();
+        let spec = RepoSpec::parse(&url).unwrap();
+
+        assert_eq!(spec.owner(), "acme%2Fteam");
+        assert_eq!(spec.url().as_str(), "https://github.com/acme%2Fteam/repo");
+    }
+
+    #[test]
+    fn hostless_repository_urls_are_rejected_without_panicking() {
+        for raw in ["file:///owner/repo", "custom:///owner/repo"] {
+            let url = Url::parse(raw).unwrap();
+            let error = RepoSpec::parse(&url).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!("repository URL is missing a host; expected a URL like https://host/owner/repo, got: {raw}")
+            );
+        }
     }
 
     #[test]

@@ -4,9 +4,13 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+export RUSTUP_AUTO_INSTALL := "0"
+
 import 'setup.just'
 import 'checks.just'
-import 'container.just'
+# A downstream catalog can remove every container artifact without making the
+# remaining recipe surface fail to parse.
+import? 'container.just'
 
 # Friendly default: `just anvil` runs the PR tier.
 alias anvil := anvil-pr

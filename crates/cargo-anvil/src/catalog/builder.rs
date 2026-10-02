@@ -394,6 +394,22 @@ mod tests {
     }
 
     #[test]
+    fn replace_artifact_updates_the_exact_nonzero_index() {
+        let first = Artifact::owned_file("first", "first-body");
+        let second = Artifact::owned_file("second", "second-body");
+        let catalog = Catalog::builder(CliMeta::new("tool"))
+            .with_artifact(first.clone())
+            .with_artifact(second)
+            .replace_artifact(Artifact::owned_file("second", "replacement"))
+            .build()
+            .unwrap();
+
+        assert_eq!(catalog.artifacts()[0].key(), first.key());
+        assert_eq!(catalog.artifacts()[0].body(), "first-body");
+        assert_eq!(catalog.artifacts()[1].body(), "replacement");
+    }
+
+    #[test]
     fn replace_artifact_errors_when_absent() {
         let err = Catalog::anvil()
             .into_builder()
@@ -550,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_file_sections_require_consistent_gates_and_nonempty_identity() {
+    fn owned_file_sections_require_consistent_gates() {
         let inconsistent = Catalog::builder(CliMeta::new("t"))
             .with_artifact(Artifact::backend_file_section(
                 crate::backend::Backend::GitHub,
@@ -567,13 +583,30 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(inconsistent.to_string().contains("inconsistent backend gates"));
+    }
 
+    #[test]
+    fn owned_file_sections_require_nonempty_identity() {
         for artifact in [
             Artifact::owned_file_section("", "part", "body"),
             Artifact::owned_file_section(".anvil/composed", "", "body"),
         ] {
-            Catalog::builder(CliMeta::new("t")).with_artifact(artifact).build().unwrap_err();
+            let error = Catalog::builder(CliMeta::new("t")).with_artifact(artifact).build().unwrap_err();
+            assert!(error.to_string().contains("require nonempty paths and ids"), "{error}");
         }
+    }
+
+    #[test]
+    fn checksum_has_a_stable_multi_artifact_encoding() {
+        let catalog = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::owned_file("a", "1"))
+            .with_artifact(Artifact::owned_file("b", "2"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            catalog.checksum(),
+            "sha256:6edb93e9f95756f0ee2f6ff9430f0eab2beb642d58234622ae6acee34fd9eb68"
+        );
     }
 
     #[cfg_attr(
@@ -652,5 +685,38 @@ mod tests {
         assert!(region_repr.contains("path:Cargo.toml"));
         assert!(!region_repr.contains("single_crate_cargo_toml"));
         assert!(region_repr.contains("slashslash"));
+    }
+
+    #[test]
+    fn canonical_repr_distinguishes_every_host_gate_and_syntax() {
+        let none = canonical_repr(&Artifact::owned_file("x.txt", "body"), None);
+        assert!(none.contains("gate=none"));
+
+        for (host, tag) in [
+            (crate::catalog::HostSelector::EachMemberManifest, "each_member_manifest"),
+            (crate::catalog::HostSelector::WorkspaceCargoToml, "workspace_cargo_toml"),
+            (crate::catalog::HostSelector::SingleCrateCargoToml, "single_crate_cargo_toml"),
+        ] {
+            let artifact = Artifact::region(crate::catalog::RegionSpec {
+                host,
+                id: crate::catalog::RegionId::new("test"),
+                body: "body".to_owned(),
+                syntax: crate::region::CommentSyntax::Hash,
+            });
+            let repr = canonical_repr(&artifact, None);
+            assert!(repr.contains(tag), "{repr}");
+            assert!(repr.contains("hash"), "{repr}");
+        }
+    }
+
+    #[test]
+    fn builder_sets_about_and_version_exactly() {
+        let catalog = Catalog::builder(CliMeta::new("tool"))
+            .about("specific help")
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        assert_eq!(catalog.cli().about, "specific help");
+        assert_eq!(catalog.cli().version, "1.2.3");
     }
 }

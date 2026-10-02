@@ -21,6 +21,7 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt as _;
 use tempfile::TempDir;
 
 /// Write `contents` to `path`, creating parent directories as needed.
@@ -123,7 +124,10 @@ fn apply_writes_files_then_dry_run_is_clean() {
     anvil(ws.path(), &["--no-backends"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("Will create"));
+        .stdout(predicates::str::contains("Will create"))
+        .stdout(predicates::str::contains("repo_root="))
+        .stdout(predicates::str::contains("INFO").not())
+        .stdout(predicates::str::contains("cargo_anvil::run").not());
     assert!(ws.path().join(".anvil/anvil.just").is_file());
     assert!(ws.path().join(".anvil/checks.just").is_file());
     assert!(ws.path().join(".anvil/setup.just").is_file());
@@ -218,4 +222,15 @@ fn autodetect_fails_without_origin_remote() {
         .expect("git should be on PATH");
     assert!(status.success());
     anvil(ws.path(), &["--dry-run"]).assert().failure();
+}
+
+#[test]
+fn missing_git_returns_an_error_instead_of_panicking() {
+    let ws = workspace();
+    anvil(ws.path(), &["--dry-run"])
+        .env("PATH", "")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("failed to invoke `git config`"))
+        .stderr(predicates::str::contains("panicked").not());
 }

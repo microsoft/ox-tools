@@ -81,6 +81,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_build_for_another_target_answers_about_that_target() {
         let host = for_build(&Build::default()).expect("the host answers");
         let (elsewhere, family) = if host.holds_str("windows") {

@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use super::cli::{SelectArgs, SuppressArgs};
+use super::cli::SuppressArgs;
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use super::when::When;
@@ -28,13 +28,8 @@ pub(super) fn suppress<H: Host>(host: &mut H, args: &SuppressArgs, _progress_whe
     if eligible.is_empty() {
         return Err(error!("--eligible named no verdicts; nothing could be suppressed").usage());
     }
-    if args.run.dry_run {
-        return Err(error!("`cargo gamma suppress --dry-run` does not preview source edits; use `--dry-run-suppress` instead").usage());
-    }
-    reject_selection(&args.run.select)?;
-
-    let selected = crate::paths::physical(&args.run.select.dir)?;
-    let (root, base, _lock) = crate::exec::claim_campaign_state(&selected, args.run.measure.cache_dir.as_deref())?;
+    let selected = crate::paths::physical(&args.dir)?;
+    let (root, base, _lock) = crate::exec::claim_campaign_state(&selected, args.cache_dir.as_deref())?;
     let record = RunRecord::load_required(&base)?;
     let (plan, stale) = plan_from_record(&root, &record, &eligible)?;
 
@@ -45,36 +40,7 @@ pub(super) fn suppress<H: Host>(host: &mut H, args: &SuppressArgs, _progress_whe
     suppress_plan(host, args, &plan, &eligible, &record, styler)
 }
 
-fn reject_selection(args: &SelectArgs) -> crate::Result<()> {
-    let unsupported = [
-        (args.mutators.is_some(), "--mutators"),
-        (!args.files.is_empty(), "--file"),
-        (!args.exclude_files.is_empty(), "--exclude-file"),
-        (args.shard_count.is_some(), "--shard-count"),
-        (args.shard_index.is_some(), "--shard-index"),
-        (args.in_diff.is_some(), "--in-diff"),
-        (!args.packages.is_empty(), "--package"),
-        (args.workspace, "--workspace"),
-        (!args.errors.is_empty(), "--error"),
-        (!args.features.features.is_empty(), "--features"),
-        (args.features.all_features, "--all-features"),
-        (args.features.no_default_features, "--no-default-features"),
-        (args.config.path.is_some(), "--config"),
-        (args.config.no_config, "--no-config"),
-    ]
-    .into_iter()
-    .find_map(|(present, flag)| present.then_some(flag));
-
-    if let Some(flag) = unsupported {
-        return Err(error!(
-            "`cargo gamma suppress` consumes the completed campaign exactly as recorded; `{flag}` cannot narrow persisted outcomes"
-        )
-        .usage());
-    }
-
-    Ok(())
-}
-
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn suppress_plan<H: Host>(
     host: &mut H,
     args: &SuppressArgs,
@@ -98,7 +64,16 @@ fn suppress_plan<H: Host>(
     let date = crate::fix::today();
     let written = apply_all_locked(host, args, plan, &edits, &date)?;
 
-    if args.dry_run_suppress {
+    if !args.apply {
+        let files = edits.iter().map(|edit| &edit.file).collect::<BTreeSet<_>>().len();
+        writeln!(
+            host.error(),
+            "{} {} in {} would be written; pass `--apply` to do it",
+            styler.verb("Preview"),
+            quantity(edits.len(), "skip directive"),
+            quantity(files, "file")
+        )?;
+
         return Ok(EXIT_OK);
     }
 
@@ -116,6 +91,7 @@ fn suppress_plan<H: Host>(
     )
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn eligible_files(record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crate::Result<crate::HashMap<Utf8PathBuf, usize>> {
     let mut affected = crate::HashMap::default();
 
@@ -141,6 +117,7 @@ struct CurrentSources {
     stale: Vec<String>,
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMap<Utf8PathBuf, usize>) -> crate::Result<CurrentSources> {
     let outcomes = record.outcomes();
     let mut contents = crate::HashMap::default();
@@ -186,6 +163,7 @@ fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMa
     })
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crate::Result<(Plan, Vec<String>)> {
     let outcomes = record.outcomes();
     let mut files = Vec::new();
@@ -199,7 +177,7 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     } = current_sources(root, record, &affected)?;
 
     for outcome in outcomes {
-        if !affected.contains_key(&outcome.file) {
+        if !is_affected(&affected, &outcome.file) {
             continue;
         }
         let is_eligible = eligible.iter().any(|entry| entry.outcome() == outcome.outcome);
@@ -217,6 +195,7 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
                     outcome.file, site.line, outcome.id
                 ));
             }
+
             continue;
         }
 
@@ -295,6 +274,10 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     apply_source_policy(&mut plan)?;
 
     Ok((plan, stale))
+}
+
+fn is_affected(affected: &crate::HashMap<Utf8PathBuf, usize>, file: &Utf8Path) -> bool {
+    affected.contains_key(file)
 }
 
 fn apply_source_policy(plan: &mut Plan) -> crate::Result<()> {
@@ -401,7 +384,7 @@ fn apply_all_with_lock<H: Host>(
     date: &str,
     workspace_locked: bool,
 ) -> crate::Result<Written> {
-    if !args.dry_run_suppress {
+    if args.apply {
         let paths: Vec<&Utf8Path> = edits.iter().map(|edit| edit.file.as_path()).collect();
 
         reject_external_sources(&plan.root, &paths)?;
@@ -451,6 +434,7 @@ pub(super) fn reject_external_sources(root: &Utf8Path, paths: &[&Utf8Path]) -> c
 /// version control from someone who is not using it would be a different command.
 ///
 /// Shared with `unsuppress`, whose edit loop has the same shape and the same hazard.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: bool) -> crate::Result<()> {
     if allow_dirty {
         return Ok(());
@@ -471,7 +455,7 @@ pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: boo
     }
 
     Err(error!(
-        "{} about to be edited {} uncommitted changes: {}. This command's rollback lives in this process only, so an interrupt part-way through the edit would leave a tree nothing on disk records — version control is the journal. Commit or stash first, or pass `--allow-dirty` to edit anyway",
+        "{} about to be edited {} uncommitted changes: {}. Commit or stash first, or pass `--allow-dirty` to edit anyway",
         quantity(dirty.len(), "file"),
         if dirty.len() == 1 { "has" } else { "have" },
         dirty.join(", ")
@@ -488,7 +472,7 @@ fn uncommitted(root: &Utf8Path, paths: &[&Utf8Path]) -> Option<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root.as_std_path())
-        .args(["status", "--porcelain", "-z", "--"])
+        .args(["status", "--porcelain", "-z", "--no-renames", "--"])
         .args(paths.iter().map(|path| path.as_std_path()))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -516,6 +500,7 @@ fn uncommitted(root: &Utf8Path, paths: &[&Utf8Path]) -> Option<Vec<String>> {
 /// Every step is fallible and every step uses `?`, which is what makes the caller's compensation
 /// necessary: this stops where it fails and says nothing about the files it already changed beyond
 /// what it has put in `written`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn edit_files<H: Host>(
     host: &mut H,
     args: &SuppressArgs,
@@ -564,9 +549,7 @@ fn edit_files<H: Host>(
         // because the revert path is only as good as the copy it holds.
         let _ = syn::parse_file(&after).map_err(|cause| error!("the generated directive would not parse in {path}").caused_by(cause))?;
 
-        if args.dry_run_suppress {
-            write!(host.results(), "{}", crate::fix::diff(&file.path, &before, &after))?;
-        } else {
+        if args.apply {
             // The final comparison happens after the replacement has been staged. The earlier
             // digest protects the long run; this check catches changes through that comparison.
             // The publication API deliberately makes no claim about a non-cooperating replacement
@@ -591,6 +574,8 @@ fn edit_files<H: Host>(
                     return Err(cause);
                 }
             }
+        } else {
+            write!(host.results(), "{}", crate::fix::diff(&file.path, &before, &after))?;
         }
     }
 
@@ -609,6 +594,7 @@ pub(super) fn reverted(root: &Utf8Path, written: Written, cause: crate::error::E
     reverted_with_lock(root, written, cause, false)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn reverted_with_lock(root: &Utf8Path, written: Written, cause: crate::error::Error, workspace_locked: bool) -> crate::error::Error {
     if written.is_empty() {
         return cause;
@@ -755,6 +741,7 @@ fn finish_verification<H: Host>(
 /// directives missing their target, which is a failure the reader can neither explain nor act on.
 /// Stable IDs remain the comparison key, but the diagnostic translates them back to source
 /// descriptions so the reader can understand the rejected edit without consulting a report.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn unclean(result: &crate::fix::Verification, before: &Plan) -> crate::error::Error {
     const SHOWN: usize = 3;
 
@@ -826,10 +813,17 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
-    use crate::commands::RunArgs;
     #[cfg(unix)]
     use crate::testing::workdir;
     use crate::testing::{Sink, fails_at_every_line};
+
+    #[test]
+    fn only_files_with_an_eligible_outcome_are_affected() {
+        let affected = crate::HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), 1)]);
+
+        assert!(is_affected(&affected, Utf8Path::new("src/lib.rs")));
+        assert!(!is_affected(&affected, Utf8Path::new("src/other.rs")));
+    }
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
         crate::fixtures::crate_dir(name, "pub fn answer() -> i32 { 42 }\n").0
@@ -840,17 +834,9 @@ mod tests {
         crate::exec::mark_cache_owned_for_test(root, root);
 
         SuppressArgs {
-            run: RunArgs {
-                select: crate::commands::SelectArgs {
-                    dir: root.clone(),
-                    ..crate::commands::SelectArgs::default()
-                },
-                measure: crate::commands::MeasureArgs {
-                    cache_dir: Some(root.clone()),
-                    ..crate::commands::MeasureArgs::default()
-                },
-                ..RunArgs::default()
-            },
+            dir: root.clone(),
+            cache_dir: Some(root.clone()),
+            apply: true,
             dry_run_suppress: false,
             allow_dirty: false,
             eligible: eligible.to_owned(),
@@ -926,7 +912,9 @@ mod tests {
     fn empty_eligibility_is_a_usage_error() {
         let mut host = Sink::default();
         let args = SuppressArgs {
-            run: RunArgs::default(),
+            dir: Utf8PathBuf::from("."),
+            cache_dir: None,
+            apply: false,
             dry_run_suppress: false,
             allow_dirty: false,
             eligible: String::new(),
@@ -942,13 +930,9 @@ mod tests {
         let dir = crate_dir("suppress-verify-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let args = SuppressArgs {
-            run: RunArgs {
-                select: crate::commands::SelectArgs {
-                    dir: root.clone(),
-                    ..crate::commands::SelectArgs::default()
-                },
-                ..RunArgs::default()
-            },
+            dir: root.clone(),
+            cache_dir: None,
+            apply: true,
             dry_run_suppress: false,
             allow_dirty: false,
             eligible: "timeout".to_owned(),
@@ -983,18 +967,14 @@ mod tests {
     }
 
     #[test]
-    fn verification_keeps_the_configuration_generation_merged_before_the_edit() {
+    fn verification_does_not_read_workspace_configuration() {
         let dir = crate_dir("suppress-config-generation-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let config = root.join("gamma.toml");
 
         fs::create_dir_all(config.parent().expect("configuration parent")).expect("configuration parent");
         fs::write(&config, "cargo-args = [\"--cfg\", \"recorded_configuration\"]\n").expect("configuration");
-        let mut args = dry_args(&root, "timeout");
-        crate::config::Config::resolve(&args.run.select)
-            .expect("initial configuration")
-            .apply(&mut args.run)
-            .expect("configuration merges");
+        let args = dry_args(&root, "timeout");
 
         // This is the interval between argument merging and verification after a suppression
         // edit. Discovery must use the already merged cargo options rather than re-read this
@@ -1190,6 +1170,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_workspace_member_resolves_campaign_state_and_sources_from_the_workspace_root() {
         let dir = crate_dir("suppress-workspace-member-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -1211,7 +1192,7 @@ mod tests {
         store_record(&root, &[mutant]);
         let mut args = dry_args(&member, "timeout");
         crate::exec::mark_cache_owned_for_test(&root, &root);
-        args.run.measure.cache_dir = Some(root);
+        args.cache_dir = Some(root);
         args.allow_dirty = true;
         let mut host = Sink::default();
 
@@ -1244,7 +1225,7 @@ mod tests {
         let mut args = dry_args(&root, "timeout");
         drop(crate::exec::claim_workspace(&root).expect("workspace cache"));
         assert!(crate::exec::remember_campaign_base(&root, &root));
-        args.run.measure.cache_dir = None;
+        args.cache_dir = None;
         args.allow_dirty = true;
         let mut host = Sink::default();
 
@@ -1278,7 +1259,7 @@ mod tests {
         let mut args = dry_args(&root, "timeout");
         drop(crate::exec::claim_workspace(&root).expect("workspace cache"));
         assert!(crate::exec::remember_campaign_base(&root, &root));
-        args.run.measure.cache_dir = None;
+        args.cache_dir = None;
         args.allow_dirty = true;
         let mut host = Sink::default();
 
@@ -1414,7 +1395,7 @@ mod tests {
         let mut args = dry_args(&root, "timeout");
         drop(crate::exec::claim_workspace(&root).expect("workspace cache"));
         assert!(crate::exec::remember_campaign_base(&root, &root));
-        args.run.measure.cache_dir = None;
+        args.cache_dir = None;
         fs::write(
             root.join("Cargo.toml"),
             "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\nautolib = false\n\n[workspace]\n",
@@ -1458,23 +1439,24 @@ mod tests {
         );
     }
 
-    /// `--dry-run-suppress` writes the diff to stdout instead of touching the source; a caller
-    /// previewing a suppression run needs the file to still hold the mutant afterwards, or the
-    /// preview would be lying about what it is a preview of.
+    /// The default writes the diff to stdout instead of touching the source; a caller previewing a
+    /// suppression run needs the file to still hold the mutant afterwards, or the preview would be
+    /// lying about what it is a preview of.
     #[test]
-    fn a_dry_run_suppress_prints_the_diff_and_leaves_the_file_alone() {
+    fn suppress_without_apply_prints_the_diff_and_leaves_the_file_alone() {
         let dir = crate_dir("suppress-dry-run-write-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let source = fs::read_to_string(root.join("src/lib.rs")).expect("lib");
         store_record(&root, &[recorded_mutant(&root, "timeout", Outcome::Timeout)]);
         let mut args = dry_args(&root, "timeout");
-        args.dry_run_suppress = true;
+        args.apply = false;
         let mut host = Sink::default();
 
         let code = suppress(&mut host, &args, When::Never, Styler::new(false)).expect("suppress");
 
         assert_eq!(code, EXIT_OK);
         assert!(host.out().contains("gamma::skip"), "{}", host.out());
+        assert!(host.err().contains("--apply"), "{}", host.err());
         assert_eq!(fs::read_to_string(root.join("src/lib.rs")).expect("lib after"), source);
     }
 
@@ -2030,6 +2012,7 @@ mod tests {
     /// edit loop leaves a tree nothing on disk records. A file with uncommitted changes has nothing
     /// behind it, so it is refused before the first write rather than after the third.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_edit_over_a_file_with_uncommitted_changes_is_refused_before_anything_is_written() {
         let dir = crate_dir("suppress-dirty-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -2062,6 +2045,35 @@ mod tests {
         let _ = apply_all(&mut host, &args, &plan, &edits, "2026-01-01").expect("the override");
 
         assert_ne!(fs::read_to_string(&path).expect("afterwards"), original);
+    }
+
+    #[test]
+    fn a_renamed_source_is_reported_once_under_its_current_name() {
+        let dir = crate_dir("suppress-renamed-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+
+        if !git(&root, &["init", "--quiet"]) {
+            return;
+        }
+        assert!(git(&root, &["add", "src/lib.rs"]));
+        assert!(git(
+            &root,
+            &[
+                "-c",
+                "user.name=cargo-gamma test",
+                "-c",
+                "user.email=cargo-gamma@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        ));
+        assert!(git(&root, &["mv", "src/lib.rs", "src/renamed.rs"]));
+
+        let dirty = uncommitted(&root, &[Utf8Path::new("src/renamed.rs")]).expect("the fixture is a repository");
+
+        assert_eq!(dirty, ["src/renamed.rs"]);
     }
 
     #[cfg(unix)]

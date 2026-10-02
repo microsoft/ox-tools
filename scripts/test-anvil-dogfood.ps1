@@ -438,7 +438,7 @@ function Invoke-Suite([string]$EngineName) {
     # it actually occurred in: a group drops a check's `-setup` dependency, so
     # the image installs one tool fewer, while tools.just and versions.just are
     # untouched. The tag has to move or the reduced image is reused forever.
-    $group = Join-Path $RepoRoot '.anvil/checks.just'
+    $group = Join-Path $RepoRoot '.anvil/setup.just'
     if (Test-Path -LiteralPath $group -PathType Leaf) {
         $groupBackup = [System.IO.Path]::GetTempFileName()
         Copy-Item -LiteralPath $group -Destination $groupBackup -Force

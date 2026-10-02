@@ -464,6 +464,16 @@ version = "0.1.0"
     }
 
     #[test]
+    fn malformed_toml_is_returned_as_an_error() {
+        let error = validate_dependencies("[workspace", &[]).expect_err("malformed TOML must be rejected");
+
+        assert!(
+            error.to_string().contains("Failed to parse Cargo.toml"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_validate_package_dependencies_with_exceptions() {
         let content = r#"
 [package]

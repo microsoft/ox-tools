@@ -194,7 +194,7 @@ the declared root MSRV from `Cargo.toml`, hashes that declaration, and passes it
 as `ANVIL_RUST_VERSION`. The root manifest and workspace members are not copied
 into the build context. Inside a running container, workspace validation
 executes against `/workspace` — the mounted checkout.
-keeps the tag honest: it hashes the declared MSRV rather than the file, so a dependency edit computes the same tag,
+This keeps the tag honest: it hashes the declared MSRV rather than the file, so a dependency edit computes the same tag,
 and nothing is left behind for that tag to misdescribe.
 
 **The image names its default toolchain.** `rustup` is initialized with `--default-toolchain none`, and rustup then
@@ -202,9 +202,13 @@ sets the default as a side effect of the first `rustup toolchain install` that f
 but only because of the order `anvil-setup` reaches the install recipes in. A checkout with a root toolchain file never
 notices, because the file overrides the default; a checkout without one has nothing else to select a compiler, so plain
 `cargo` inside the container would follow whichever toolchain the setup graph installed first. The setup region
-therefore runs `rustup default` on the declared MSRV, read from the manifest before it is deleted, so an arbitrary
-Rust command in the container uses the compiler the repository declared. A repository declaring no MSRV is left alone;
-the setup installs no stable toolchain for it either.
+therefore runs `rustup default` on the declared MSRV passed in
+`ANVIL_RUST_VERSION`, so an arbitrary Rust command in the container uses the
+compiler the repository declared. For a repository declaring no MSRV the driver
+passes `none`. If that repository also has no root toolchain file,
+the setup region explicitly installs and selects current `stable` as its
+bootstrap compiler; this avoids metadata-based toolchain resolution against the
+narrow build context, which intentionally contains no workspace manifests.
 
 The setup region copies the context whole rather than naming each input, because one input is optional. A repository
 that pins its compiler by other means owns no root toolchain file, and a `COPY` of a path that may not exist is not
@@ -418,7 +422,7 @@ It also forwards the recipe contract's own inputs when they are set — `PR_TITL
 natively must read the same value in a container. `anvil-pr-title` is the sharp case: with `PR_TITLE` unset it exits 0
 with a skip notice, so dropping it at the boundary would let a title a native run rejects pass in a container while the
 tier still reported green. `ANVIL_IMPACT` controls whether a CI group trusts its downloaded impact artifact.
-`ANVIL_MIRI_JOBS` caps the number of memory-heavy artifact workers used by Miri; dropping it could turn a deliberately bounded
+`ANVIL_MIRI_JOBS` caps the number of memory-heavy package processes used by Miri; dropping it could turn a deliberately bounded
 container run into one worker per logical processor. They are forwarded by name and only when set, so an unset variable
 stays unset rather than arriving empty.
 

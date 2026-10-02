@@ -256,12 +256,10 @@
 //!
 //! ### Miri
 //!
-//! Anvil compiles the selected scope together once with all features enabled,
-//! preserving Cargo feature unification, and runs the resulting Miri test
-//! executables concurrently.
-//! Each executable is one Cargo test target containing one or more libtest
-//! tests.
-//! `ANVIL_MIRI_JOBS` overrides the default worker count. Local callers can use
+//! Anvil uses cargo-each to run Miri once per selected package with all features
+//! enabled. `ANVIL_MIRI_JOBS` controls concurrent package processes while
+//! cargo-each provides deterministic output, process-tree cleanup, and
+//! aggregate failure. Local callers can use
 //! `--package` to override impact scope, `--test` to select libtest names, or
 //! `--example` with `--package` to run one example instead of the test suite.
 //!
@@ -420,7 +418,7 @@ pub mod test_support {
     pub use crate::checksum::checksum_str;
     pub use crate::cli::Cli;
     pub use crate::decision::Decision;
-    pub use crate::manifest::{MANIFEST_FILE_NAME, Manifest, RegionKey};
+    pub use crate::manifest::{MANIFEST_PATH, Manifest, RegionKey};
     pub use crate::plan::Target;
     pub use crate::region::upsert_region;
     pub use crate::run::{RunOutcome, run_update};
@@ -492,7 +490,8 @@ pub fn run_app(catalog: Catalog) -> ExitCode {
     };
 
     match run::run(&catalog, &cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
         Err(err) => {
             eprintln!("error: {err:#}");
             ExitCode::FAILURE

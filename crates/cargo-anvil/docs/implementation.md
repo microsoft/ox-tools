@@ -86,17 +86,14 @@ Canonical recipes and workflow fragments live under `templates/`. The artifact
 registry embeds those files, renderer tests pin conditional substitutions such
 as ADO's `pr-fast`-only title lookup, and snapshot tests pin complete emitted
 backends. After a canonical change, run cargo-anvil against this repository to
-refresh owned mirrors and `.anvil.lock`; regenerate crate README content from
+refresh owned mirrors and `.anvil/manifest.toml`; regenerate crate README content from
 `src/lib.rs`, never by editing `README.md`.
 
-## Miri compile-once runner
+## Miri package scheduler
 
-The public Miri contract is behavioral: compile the selected package scope
-together once, run the resulting Miri test executables concurrently, preserve
-workspace feature unification, honor package exclusions and worker limits, and
-report deterministic output with aggregate failure. The exact Cargo message
-schema and the hidden cargo-miri runner phase are implementation details tied
-to the catalog-pinned nightly.
+The public Miri contract delegates package selection, concurrency, process-tree
+cleanup, deterministic output, and aggregate failure to cargo-each. Anvil owns
+only the Miri-specific profile environment and command shape.
 
 ### Ownership and recipe graph
 
@@ -108,86 +105,41 @@ The canonical recipe set comprises
 shared implementation, while the three stricter profile templates contain only
 their public recipe and setup leaves. Each public recipe uses a parameterized
 `_anvil-miri-test` dependency, keeping the main execution path and failure
-propagation in Just's dependency graph. The shared recipe owns impact
-resolution, profile-specific environment setup, compilation, discovery,
-execution, reporting, and cleanup.
+propagation in Just's dependency graph. The shared recipe maps the profile to
+`MIRIFLAGS` and `RUSTFLAGS`, validates explicit test/example arguments, and
+invokes cargo-each.
 
 `src/anvil/artifacts/justfile.rs` registers these templates and structurally
 pins the public-to-private delegation. Full emitted-tree snapshots pin the
 canonical/generated boundary. Any template change must regenerate the in-tree
-copies and `.anvil.lock`.
+copies and `.anvil/manifest.toml`.
 
-### Scope, metadata, and compilation
+### Scope and execution
 
-The shared recipe gives `affected.packages` directly to cargo-each after its
-`anvil-impact` prerequisite has refreshed the cache. It maps the standard,
-Tree Borrows, strict-provenance, and race-coverage parameter values to their
-recipe names and profile flags before invoking Cargo.
+The shared recipe gives `affected.packages` directly to cargo-each after
+`anvil-impact` has refreshed the cache. A local `--package` replaces that
+selection. `[package.metadata.anvil.miri] exclude = true` is expressed as a
+cargo-each metadata filter, so excluded members remain available as
+dependencies while receiving no Miri invocation of their own.
 
-Cargo metadata and the compiler-artifact stream must come from the same pinned
-nightly Cargo. Cargo changed package-ID formatting in 1.78, so joining metadata
-from a stable or MSRV Cargo to nightly compiler artifacts would fail for older
-adopters. Metadata supplies the workspace-member set, package labels, manifest
-directories, and `[package.metadata.anvil.miri] exclude` policy. Full-workspace
-selection translates exclusions to Cargo `--exclude` arguments; impact-scoped
-selection removes excluded version-qualified package selectors before
-compilation. Excluded packages remain available as dependencies.
-
-The compile phase uses `cargo miri test --all-features --tests --no-run` with
-Cargo's JSON diagnostic stream. Executable `compiler-artifact` records whose
-test profile is active are admitted as Miri test executables; exact executable
-paths are de-duplicated defensively. Each admitted artifact must map back to
-workspace metadata so execution can restore its package working directory and
-produce a stable package/target label. Build scripts and ordinary executables
-are not admitted. A successful compile with no admitted artifacts is a
-successful no-op.
-
-### Pinned cargo-miri runner protocol
-
-The compile and execute phases form one protocol owned by the pinned Miri
-toolchain. Cargo-miri serializes the build-time invocation state used by its
-hidden runner phase. Before dispatching an artifact, the recipe prepares the
-Miri sysroot, resolves the pinned toolchain sysroot, locates cargo-miri under
-that toolchain, and establishes the ambient rustc-mode sentinel expected by
-the serialized run information. The runner then restores the recorded state
-and starts Miri interpretation from the artifact's package directory. Runtime
-arguments are not part of that serialized state when `--no-run` suppresses
-Cargo's runner invocation, so a requested libtest filter is passed explicitly
-to every hidden runner invocation.
-
-These steps are not a public cargo-anvil API and may change when the pinned
-nightly changes. A nightly update must therefore revalidate sysroot discovery,
-cargo-miri lookup, the ambient sentinel, serialized environment restoration,
-working-directory restoration, and hidden runner invocation through the
-executable contract tests.
-
-### Parallel execution and reporting
-
-Artifacts are sorted by package label, target kind, target name, and path
-before assigning stable indices. PowerShell dispatches them with
-`ForEach-Object -Parallel`, throttled by `ANVIL_MIRI_JOBS` or the host logical
-processor count and always clamped to the artifact count. Each worker restores
-the owning package directory, invokes cargo-miri for one executable, and writes
-combined output to an isolated log.
-
-After every worker completes, the parent replays logs by stable artifact index,
-using backend-native output groups when available. It reports all failed
-labels together and returns failure only after every executable has completed.
-A unique temporary directory owns the artifact manifest and worker logs and is
-removed from a `finally` block on every exit path.
+For tests, cargo-each starts one
+`cargo +<nightly> miri test --package <spec> --tests --all-features --locked`
+process per selected package. `ANVIL_MIRI_JOBS` controls package-level
+parallelism; `--keep-going` lets independent packages finish before cargo-each
+returns aggregate failure. A libtest filter is appended after `--`. An explicit
+example uses `cargo miri run --package <spec> --example <name>` and requires an
+explicit package.
 
 ### Verification boundaries
 
 Three layers guard different parts of the subsystem:
 
 - structural tests in `src/anvil/artifacts/justfile.rs` pin parameterized
-  delegation, bounded parallelism, deterministic ordering, and grouped output;
-- executable contracts in `tests/recipe_contracts.rs` fake Cargo, rustc, and
-  cargo-miri to verify metadata/artifact identity, exclusions, environment and
-  working-directory restoration, profile flags, concurrency, no-work behavior,
-  deterministic replay, and aggregate failure;
+  delegation and the cargo-each command shape;
+- executable contracts in `tests/recipe_contracts.rs` verify profile-specific
+  `MIRIFLAGS` and `RUSTFLAGS` at the child-command boundary;
 - backend snapshots pin every emitted recipe copy, while the regeneration
-  check verifies the repository copies and `.anvil.lock`.
+  check verifies the repository copies and `.anvil/manifest.toml`.
 
 ## Impact scoping and tier routing
 

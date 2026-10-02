@@ -10,6 +10,7 @@ use camino::Utf8PathBuf;
 use super::cargo_options::{BuildLimits, CargoOptions};
 use super::incremental_mode::IncrementalMode;
 use super::memory::MemoryPolicy;
+use super::resources::ResourceLimit;
 
 /// Knobs for a run.
 #[expect(
@@ -98,6 +99,9 @@ pub struct Config {
     /// Packages whose tests decide a verdict. Empty means each mutant's own package.
     pub test_packages: Vec<String>,
 
+    /// Whether only library unit-test harnesses may decide verdicts.
+    pub test_lib: bool,
+
     /// Test target name globs whose tests may decide a verdict. Empty means all of them.
     pub include_tests: Vec<String>,
 
@@ -123,6 +127,9 @@ pub struct Config {
     /// Whether to run test binaries through `cargo nextest`.
     pub nextest: bool,
 
+    /// Shared test-resource capacities, after command-line and file policy are merged.
+    pub resources: Vec<ResourceLimit>,
+
     /// How an incremental run reuses state from the previous run.
     pub incremental: IncrementalMode,
 }
@@ -145,12 +152,14 @@ impl Default for Config {
             cache_dir: None,
             copy_ignored: false,
             test_packages: Vec::new(),
+            test_lib: false,
             include_tests: Vec::new(),
             exclude_tests: Vec::new(),
             test_workspace: false,
             optimize_test_execution: false,
             whole_test_binaries: false,
             nextest: false,
+            resources: Vec::new(),
             incremental: IncrementalMode::default(),
         }
     }
@@ -224,6 +233,7 @@ mod tests {
         assert!(!config.optimize_test_execution);
         assert!(!config.whole_test_binaries);
         assert!(!config.nextest);
+        assert!(config.resources.is_empty());
     }
 
     /// The programmatic default is the 50% margin the command default and the documentation promise.

@@ -83,10 +83,9 @@ accumulated outcome files. Narrow campaigns can therefore retain unchanged
 outcomes for incremental execution without allowing state-only hint promotion
 to treat those carried entries as newly selected evidence.
 
-Version-1 generalized records migrate candidate identities as seed evidence
-and reset their conflated transfer counters and measured cost. Unsupported
-generalized versions remain fail-open for automatic scheduling and fail-closed
-for incremental promotion, which cannot safely round-trip unknown fields.
+Unsupported generalized versions remain fail-open for automatic scheduling
+and fail-closed for incremental promotion, which cannot safely round-trip
+unknown fields.
 Each generalized tier atomically reserves from a campaign-wide eight-attempt
 budget immediately before launching a hinted subprocess. A first hit makes the
 tier productive and removes that bound; concurrent zero-hit workers cannot
@@ -105,3 +104,9 @@ Loom models cover reader-accounting races with the smallest actor sets that
 create contention. Test-only command pauses synchronize on channels rather
 than elapsed time. Last-resort watchdogs are disabled under cargo-gamma so
 mutation campaign supervision, rather than a test deadline, classifies hangs.
+
+## Testing progress
+
+Sweep planning retains only the expected costs used to prioritize scheduling.
+The testing display reports completed and total mutants plus observed verdict
+counts; it does not compute or display a completion-time estimate.

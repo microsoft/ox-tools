@@ -134,6 +134,7 @@ impl Attempt<'_> {
     }
 
     /// The same attempt with several times the budget, which is how a suspected timeout is checked.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     const fn lengthened(self) -> Self {
         Self {
             timeout: match self.timeout {
@@ -313,6 +314,7 @@ pub(super) fn reach_hint_is_final(attempt: Attempt<'_>, confirm: bool) -> bool {
 }
 
 pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> BinaryRun {
+    let _resources = work.acquire_resources(binary, attempt.only);
     let mut reach = ReachObservation::Unknown;
     let confirmed = settle_suspicions(attempt, |attempt| {
         let observed = observe(work, binary, attempt);
@@ -376,6 +378,7 @@ fn spawn_patiently(command: Command, request: MemoryRequest) -> Result<SpawnedCo
     spawn_once(prepared).map_err(|failure| StartError::Spawn(failure.cause))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn start_or_verdict(command: Command, binary: &TestBinary, request: MemoryRequest) -> Result<SpawnedCommand, (Verdict, MemoryUsage)> {
     spawn_patiently(command, request).map_err(|reason| {
         // A spawn fails for reasons of the machine — descriptors, processes, address space, a
@@ -524,6 +527,7 @@ fn settle_suspicions(attempt: Attempt<'_>, mut run: impl FnMut(Attempt<'_>) -> V
 ///
 /// The question is settled the only way it can be: by running the same binary again with the
 /// mutant switched off. A suite that fails either way was not detecting anything.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, test: Option<String>) -> Verdict {
     // Nothing to exonerate. A run with no mutant active has already answered the question the
     // confirmation would ask, and asking it again would only pay for the same answer.
@@ -580,6 +584,7 @@ fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, tes
 }
 
 /// Confirms that nextest's inability to enumerate tests was caused by the active mutant.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn confirm_enumeration(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, output: String) -> Verdict {
     match observe(work, binary, attempt.exonerating()).verdict {
         Verdict::Passed => Verdict::TestEnumerationFailed(output),
@@ -630,15 +635,21 @@ pub(crate) const CONFIRM_FACTOR: u32 = 3;
 /// `cargo test` would have started it. Run under nextest, both are nextest's business: it forwards
 /// the arguments after `--` and sets each test's working directory to its own package root, so
 /// imposing one here would make it resolve the whole workspace relative to a single package.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bool) -> Result<Command, String> {
     let Some(harness) = work.runner() else {
         let mut command = Command::new(binary.path.as_std_path());
         let names = only.names();
+        let resource_bearing = !work.required_resources(binary, only).is_empty();
 
         if names.is_empty() {
             // The whole binary runs, so the user's arguments are the whole selection and go through
             // exactly as written.
-            let _ = command.args(work.test_arguments());
+            if resource_bearing {
+                let _ = command.args(HarnessFilters::parse(work.test_arguments()).without_test_threads());
+            } else {
+                let _ = command.args(work.test_arguments());
+            }
         } else {
             // libtest matches a test that any *one* positional filter matches, so appending the
             // name this run chose to the user's own filters would widen the set rather than narrow
@@ -659,8 +670,15 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
             // The user's positional filters are not repeated here: `admits` has already applied
             // them, and leaving them out is what lets `--exact` pin this run's own names without
             // also silently converting the user's substring filter into a whole-name match.
-            let _ = command.args(user.flags());
+            if resource_bearing {
+                let _ = command.args(user.flags_without_test_threads());
+            } else {
+                let _ = command.args(user.flags());
+            }
             let _ = command.args(allowed).arg("--exact");
+        }
+        if resource_bearing {
+            let _ = command.args(["--test-threads", "1"]);
         }
         let _ = command.current_dir(working_directory(work, binary).as_std_path());
         work.inherit_test_cache_home(&mut command);
@@ -668,8 +686,9 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
         return Ok(command);
     };
 
+    let resource_bearing = !work.required_resources(binary, only).is_empty();
     harness
-        .command(work, binary, &only.names(), fail_fast)
+        .command(work, binary, &only.names(), fail_fast, resource_bearing)
         .map_err(|cause| cause.to_string())
 }
 
@@ -863,6 +882,7 @@ fn configure(
     clippy::too_many_lines,
     reason = "one process lifecycle keeps launch, supervision, evidence collection, and cleanup in order"
 )]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_with(
     work: &Workspace,
     binary: &TestBinary,
@@ -885,7 +905,6 @@ fn run_with(
         Ok(command) => command,
         Err(reason) => return (Verdict::Unmetered(reason), MemoryUsage::default(), None),
     };
-
     let launch = work.launch();
 
     configure_loader(&mut command, launch);
@@ -897,7 +916,12 @@ fn run_with(
     let under_nextest = work.runner().is_some();
 
     work.configure_test_environment(&mut command, binary);
-    configure(&mut command, binary, launch, work.harness_threads(), active, attempt.census);
+    let threads = if work.required_resources(binary, attempt.only).is_empty() {
+        work.harness_threads()
+    } else {
+        Some("1")
+    };
+    configure(&mut command, binary, launch, threads, active, attempt.census);
 
     let spawned = match start_or_verdict(command, binary, request) {
         Ok(started) => started,
@@ -1180,6 +1204,7 @@ fn diagnostic_tail(bytes: &[u8]) -> (String, bool) {
     (tail(&text, OUTPUT_TAIL_LINES).into_owned(), truncated)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn termination(status: ExitStatus) -> Termination {
     if let Some(code) = status.code() {
         return Termination::ExitCode(code);
@@ -1262,6 +1287,7 @@ fn cut_by_named_failure(name: String, peak: Option<u64>, ceiling: Option<u64>) -
 /// symptom of it — reporting the stall instead would send the reader looking for a hang that is not
 /// there. `verdict_settled` affects only the cleanup-failure diagnostic: pre-verdict reader and
 /// observation failures must not claim that a verdict existed.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn cut_short(
     subtree: &mut ProcessTree,
     request: MemoryRequest,
@@ -1374,6 +1400,7 @@ pub(super) fn observe_baseline(work: &Workspace, binary: &TestBinary, attempt: A
     observe_with(work, binary, attempt, true)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn observe_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, retain_failure: bool) -> Observation {
     let capture = ReachCapture::new(work, attempt);
     let attempt = capture.as_ref().map_or(attempt, |capture| Attempt {
@@ -1406,6 +1433,7 @@ struct ReachCapture {
 }
 
 impl ReachCapture {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn new(work: &Workspace, attempt: Attempt<'_>) -> Option<Self> {
         let ordinal = attempt.active?;
         if attempt.census.is_some() {
@@ -1420,6 +1448,7 @@ impl ReachCapture {
         Some(Self { path, ordinal })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn finish(self) -> ReachObservation {
         let bytes = fs::read(self.path.as_std_path());
         let _removed = fs::remove_file(self.path.as_std_path());
@@ -1881,6 +1910,7 @@ mod fuzz {
     /// invalid-looking announcements, and a panic here would take down the run that was measuring
     /// it rather than the mutant.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn arbitrary_output_is_read_without_panicking() {
         bolero::check!().with_type::<String>().for_each(|output| {
             if let Some(name) = first_failure(output) {
@@ -2464,6 +2494,7 @@ mod tests {
     /// Every reader having sent and dropped its sender is the whole of the output, and the ordinary
     /// case must not be reported as partial or every run would warn about nothing.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn readers_that_all_returned_leave_the_collection_whole() {
         let (sink, drained) = mpsc::channel::<Drained>();
 
@@ -2545,6 +2576,7 @@ mod tests {
     /// lost stream, every run the user so much as resizes a terminal during would report its
     /// verdicts as reached on partial text.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_read_interrupted_by_a_signal_is_retried_rather_than_cut_short() {
         /// Interrupts once between two lines, then ends the stream.
         struct Interrupted(u8);
@@ -2625,6 +2657,7 @@ mod tests {
     /// choose. It also holds the write end of a pipe this run is reading, stranding the reader.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_exits_normally_still_has_its_survivors_killed() {
         // Run under the watchdog: everything here waits on a child, and a child that never reports
         // would otherwise stop the suite instead of failing this test. The budget is not the
@@ -2687,6 +2720,7 @@ mod tests {
     /// second attempt and is then believed. The reason travels so the run can say what happened
     /// rather than reporting a mutant killed by a test it cannot name.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_cannot_be_spawned_is_unjudged_rather_than_a_kill() {
         let (_directory, work) = scripted(&["exit:0"]);
         let missing = crate::testing::test_binary(work.root.join("no-such-binary").as_str());
@@ -2719,6 +2753,7 @@ mod tests {
     /// A run that asked to be protected has to know the protection never took effect, or a mutant
     /// would be scored by a spawn failure that has nothing to do with anything it changed.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_cannot_be_spawned_inside_its_memory_boundary_is_unjudged() {
         if crate::testing::without_memory_support("a run reporting the memory a mutant used") {
             return;
@@ -2767,6 +2802,7 @@ mod tests {
     /// persistent shortage on one mutant keeps every verdict it has already reached and records why
     /// that one has none, rather than discarding the lot.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_spawn_refused_every_time_leaves_the_mutant_unjudged() {
         let (_directory, work) = scripted(&["exit:0"]);
         let binary = crate::testing::helper();
@@ -2796,6 +2832,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reader_thread_creation_failure_leaves_the_attempt_unjudged() {
         let (_directory, work) = scripted(&["flood:5000000", "exit:1"]);
         let binary = crate::testing::helper();
@@ -2848,6 +2885,7 @@ mod tests {
     /// never actually watched, and a mutant that genuinely exhausted memory would simply be scored
     /// as an ordinary pass or failure with nothing left to explain why.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_undelegated_host_says_what_is_missing_before_anything_is_spawned() {
         if super::super::memory::support().is_ok() {
             return;
@@ -2882,6 +2920,7 @@ mod tests {
     /// because the real causes — a cgroup controller that is not delegated, a job object the system
     /// will not make — need a differently configured machine rather than a differently written test.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn containment_that_cannot_be_installed_is_reported_rather_than_run_without() {
         let (_directory, work) = scripted(&["exit:0"]);
         let ok = crate::testing::helper();
@@ -2915,6 +2954,7 @@ mod tests {
     /// job it never entered. Nothing but a seam can ask for this: it needs a cgroup removed, or a
     /// job object refused, between the spawn and the move.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_child_that_cannot_be_adopted_is_ended_rather_than_left_outside_the_boundary() {
         crate::testing::within(crate::testing::WATCHDOG, "ending an unadoptable child", || {
             let started = crate::testing::workdir("verdict-adopt");
@@ -2963,6 +3003,7 @@ mod tests {
     /// happens: a failing verdict here is read as a detection all the way out to the score, so the
     /// suite would be credited with a kill it never made on the strength of a broken wait.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_child_that_cannot_be_asked_after_is_unjudged_rather_than_a_failure() {
         crate::testing::within(crate::testing::WATCHDOG, "a wait that fails", || {
             let (_directory, work) = scripted(&["sleep:200", "exit:0"]);
@@ -3001,6 +3042,7 @@ mod tests {
     /// empty subtree and would pass whatever the arm did.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_wait_that_fails_still_takes_the_subtree_with_it() {
         crate::testing::within(crate::testing::WATCHDOG, "a wait that fails mid-run", || {
             let started = crate::testing::workdir("verdict-wait");
@@ -3480,6 +3522,7 @@ mod tests {
     /// something exceeding it, because both enforcement mechanisms cap usage *at* the ceiling —
     /// the kernel kills rather than letting the number climb past it — so a peak strictly greater
     /// than the limit is not a thing either platform can report.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_memory_verdict_reports_its_figures(verdict: &Verdict, expected: u64) {
         let Verdict::MemoryLimit { peak, limit } = verdict else {
             panic!("expected a memory verdict, got {verdict:?}");
@@ -3497,6 +3540,7 @@ mod tests {
 
     /// A binary that allocates past its ceiling is a memory verdict, not a failing test.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_passes_its_ceiling_is_a_memory_verdict() {
         if crate::testing::without_memory_support("a mutant stopped for passing its ceiling") {
             return;
@@ -3544,6 +3588,7 @@ mod tests {
     /// this test's own outcome does not depend on how fast the kernel's OOM path happens to run on
     /// whatever machine executes it.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_stalls_while_exhausting_its_ceiling_is_convicted_of_the_memory() {
         if crate::testing::without_memory_support("a stalling mutant convicted of its memory") {
             return;
@@ -3560,7 +3605,7 @@ mod tests {
                 active: Some(1),
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall {
-                    budget: Some(Duration::from_secs(2)),
+                    budget: Some(Duration::from_secs(10)),
                 },
                 request: MemoryRequest {
                     meter: true,
@@ -3579,6 +3624,7 @@ mod tests {
 
     /// A binary that stays under its ceiling is judged by its tests, not by its allocations.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_stays_under_its_ceiling_is_judged_normally() {
         if crate::testing::without_memory_support("a ceiling reported with the figure that crossed it") {
             return;
@@ -3727,6 +3773,7 @@ mod tests {
     /// test name alongside the memory ceiling.
     #[test]
     #[cfg(windows)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_named_failure_survives_crossing_a_memory_ceiling_end_to_end() {
         if crate::testing::without_memory_support("a named failure surviving a memory ceiling") {
             return;
@@ -4251,6 +4298,24 @@ mod tests {
     }
 
     #[test]
+    fn a_resource_bearing_direct_run_forces_one_harness_thread() {
+        let (_scratch, mut work) = crate::testing::helper_workspace("launch-direct-resource", &["exit:0"]);
+        let binary = crate::testing::helper();
+        work.set_test_args(vec!["--test-threads=8".to_owned()]);
+        work.set_resources(super::super::resources::Resources::fake_binary(&binary));
+
+        let command = launcher(&work, &binary, Only::All, true).expect("a direct launch needs nothing from a runner");
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        assert_eq!(
+            args.iter().filter(|arg| arg.starts_with("--test-threads")).collect::<Vec<_>>(),
+            ["--test-threads"]
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--test-threads", "1"]), "{args:?}");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_direct_mutant_launch_is_accepted_by_the_real_stable_libtest_harness() {
         let (_scratch, work) = crate::testing::helper_workspace("launch-direct-stable-libtest", &[]);
         let executable = std::env::current_exe().expect("the test harness has an executable path");
@@ -4454,6 +4519,7 @@ mod tests {
     /// that must return the gauge to where it started — if even that leaks a reader, the count
     /// reported under `--diag` would climb on every mutant and say nothing about stray descendants.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_ordinary_binary_leaves_no_reader_behind() {
         let before = READERS.live();
         let (_directory, work) = scripted(&["print:done", "exit:0"]);

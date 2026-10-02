@@ -24,20 +24,28 @@
 # and selecting it before setup gives Cargo a deterministic bootstrap without
 # copying workspace member manifests into the narrowed build context. When the
 # repository declares no MSRV, a copied root toolchain file remains responsible
-# for selecting Rust and the build argument is `none`.
+# for selecting Rust. If neither declaration exists, setup uses current stable
+# as an explicit bootstrap instead of asking cargo-each to inspect manifests
+# that are intentionally absent from the narrowed context.
 WORKDIR /opt/anvil
 COPY . ./
 ARG ANVIL_RUST_VERSION
 RUN : "${ANVIL_RUST_VERSION:?pass --build-arg ANVIL_RUST_VERSION=<declared-rust-version>}" \
-    && if [ "${ANVIL_RUST_VERSION}" != "none" ]; then \
-        rustup toolchain install "${ANVIL_RUST_VERSION}" --profile minimal \
-        && rustup default "${ANVIL_RUST_VERSION}"; \
+    && setup_toolchain="${ANVIL_RUST_VERSION}" \
+    && if [ "${setup_toolchain}" = "none" ] \
+        && [ ! -f rust-toolchain.toml ] \
+        && [ ! -f rust-toolchain ]; then \
+        setup_toolchain=stable; \
+    fi \
+    && if [ "${setup_toolchain}" != "none" ]; then \
+        rustup toolchain install "${setup_toolchain}" --profile minimal \
+        && rustup default "${setup_toolchain}"; \
     fi \
     && printf "import '.anvil/anvil.just'\n" > Justfile \
-    && if [ "${ANVIL_RUST_VERSION}" = "none" ]; then \
+    && if [ "${setup_toolchain}" = "none" ]; then \
         just anvil-setup binstall; \
     else \
-        RUSTUP_TOOLCHAIN="${ANVIL_RUST_VERSION}" just anvil-setup binstall; \
+        RUSTUP_TOOLCHAIN="${setup_toolchain}" just anvil-setup binstall; \
     fi \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \

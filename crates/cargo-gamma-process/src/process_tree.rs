@@ -32,6 +32,42 @@ pub const fn capacity() -> usize {
     interrupt::capacity()
 }
 
+#[cfg(windows)]
+fn release_child(child: u32) -> bool {
+    #[cfg(test)]
+    if faults::fired(faults::Fault::JobResume) {
+        return false;
+    }
+
+    job::release(child)
+}
+
+#[cfg(windows)]
+fn assign_and_release(job: &Job, child: &Child) -> Result<(), PlatformError> {
+    #[cfg(test)]
+    let assigned = !faults::fired(faults::Fault::JobAssign) && job.assign(child);
+    #[cfg(not(test))]
+    let assigned = job.assign(child);
+    if !assigned {
+        return Err(PlatformError::new_static(
+            Situation::Refused,
+            "a Windows job object could not be given the test binary it was created for, so its descendants could not be terminated safely",
+        ));
+    }
+
+    // The child has been waiting since it was created. It is now inside the new job, where
+    // termination can reach every descendant it creates.
+    // #[gamma::skip(cond.always_false, reason = "pretending the suspended child was resumed leaves it waiting forever")]
+    if release_child(child.id()) {
+        Ok(())
+    } else {
+        Err(PlatformError::new_static(
+            Situation::Refused,
+            "a Windows test binary could not be resumed inside the containment boundary holding it",
+        ))
+    }
+}
+
 /// Platforms without a shared interrupt registry have no process-wide watch limit.
 #[cfg(not(unix))]
 #[must_use]
@@ -160,6 +196,7 @@ impl SpawnGuard {
             reason = "only the cgroup and job platforms have a boundary to report, and the signature is shared"
         )
     )]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) const fn sealed(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -294,6 +331,7 @@ impl PreparedCommand {
     /// `setsid`. [`containment`] says so once per run, before anything the repository controls has
     /// been executed; this reports the same fact for one launch.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub const fn sealed(&self) -> bool {
         self.guard.sealed()
     }
@@ -563,6 +601,7 @@ pub fn output(mut command: Command, request: MemoryRequest) -> Result<Output, Ou
 /// let spawned = prepared.spawn().expect("spawn");
 /// let another = prepared.spawn();
 /// ```
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedCommand, PlatformError> {
     // Rebound as a unique borrow for the platform arms below, which reach into the command to add
     // the pre-exec step or the suspended-start flag. The value itself never leaves this function
@@ -642,7 +681,15 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // rather than run with its descendants unreachable. Nesting has been permitted since
         // Windows 8, so this is a genuine host failure rather than the ordinary case of a run
         // started inside somebody else's job.
-        let Some(job) = Job::create(request.limit) else {
+        #[cfg(test)]
+        let job = if faults::fired(faults::Fault::JobCreate) {
+            None
+        } else {
+            Job::create(request.limit)
+        };
+        #[cfg(not(test))]
+        let job = Job::create(request.limit);
+        let Some(job) = job else {
             return Err(PlatformError::new_static(
                 Situation::Refused,
                 "a Windows job object could not be created, so this test binary's descendants could not be contained",
@@ -806,6 +853,7 @@ impl ProcessTree {
                       shared"
         )
     )]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn adopt(spawned: SpawnedCommand) -> Result<Self, PlatformError> {
         let (mut child, mut guard) = spawned.into_parts();
 
@@ -886,31 +934,10 @@ impl ProcessTree {
 
         #[cfg(windows)]
         {
-            if let Some(job) = guard.job.as_ref() {
-                if !job.assign(&child) {
-                    return Err(abandoning(
-                        PlatformError::new_static(
-                            Situation::Refused,
-                            "a Windows job object could not be given the test binary it was created for, so its descendants could not be terminated safely",
-                        ),
-                        &mut child,
-                        &guard,
-                    ));
-                }
-
-                // The child has been waiting since it was created. It is now inside the new job,
-                // where termination can reach every descendant it creates.
-                // #[gamma::skip(cond.always_false, reason = "pretending the suspended child was resumed leaves it waiting forever")]
-                if !job::release(child.id()) {
-                    return Err(abandoning(
-                        PlatformError::new_static(
-                            Situation::Refused,
-                            "a Windows test binary could not be resumed inside the containment boundary holding it",
-                        ),
-                        &mut child,
-                        &guard,
-                    ));
-                }
+            if let Some(job) = guard.job.as_ref()
+                && let Err(refusal) = assign_and_release(job, &child)
+            {
+                return Err(abandoning(refusal, &mut child, &guard));
             }
 
             Ok(Self {
@@ -959,12 +986,19 @@ impl ProcessTree {
     /// reported as [`io::ErrorKind::Other`].
     pub fn wait_with_output(mut self) -> io::Result<Output> {
         let stdout = output_reader(self.take_stdout(), STDOUT_READER_THREAD)?;
-        let stderr = match output_reader(self.take_stderr(), STDERR_READER_THREAD) {
+        #[cfg(test)]
+        let stderr = if faults::fired(faults::Fault::StderrReader) {
+            Err(io::Error::other("stderr reader creation failed as requested by a test"))
+        } else {
+            output_reader(self.take_stderr(), STDERR_READER_THREAD)
+        };
+        #[cfg(not(test))]
+        let stderr = output_reader(self.take_stderr(), STDERR_READER_THREAD);
+        let stderr = match stderr {
             Ok(stderr) => stderr,
             Err(cause) => {
                 if let Err(cleanup) = self.terminate() {
-                    discard_output_reader(stdout.as_ref());
-                    return Err(cleanup);
+                    return Err(discard_output_before_error(cleanup, stdout.as_ref(), None));
                 }
                 let _stdout = join_output_reader(stdout, STDOUT_STREAM)?;
 
@@ -977,15 +1011,11 @@ impl ProcessTree {
             Err(cause) => {
                 if self.output_cleanup_unproven {
                     // Cleanup could not prove that descendants released their pipe handles.
-                    discard_output_reader(stdout.as_ref());
-                    discard_output_reader(stderr.as_ref());
-                    return Err(cause);
+                    return Err(discard_output_before_error(cause, stdout.as_ref(), stderr.as_ref()));
                 }
 
                 if let Err(cleanup) = self.terminate() {
-                    discard_output_reader(stdout.as_ref());
-                    discard_output_reader(stderr.as_ref());
-                    return Err(cleanup);
+                    return Err(discard_output_before_error(cleanup, stdout.as_ref(), stderr.as_ref()));
                 }
 
                 Err(cause)
@@ -1017,6 +1047,7 @@ impl ProcessTree {
             reason = "only the cgroup and job platforms have a boundary to report, and the signature is shared"
         )
     )]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub const fn sealed(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -1139,6 +1170,7 @@ impl ProcessTree {
     /// capability naming either of them is revoked before this returns, and every later lifecycle
     /// call on this subtree then reports an already-reaped leader rather than signalling a stranger.
     // #[gamma::skip(fn_value.ok, reason = "returning without observing and cleaning the process tree leaves descendants running and their output readers blocked")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
         let mut child = self
             .child
@@ -1204,7 +1236,15 @@ impl ProcessTree {
 
         #[cfg(not(unix))]
         {
-            let status = match child.try_wait() {
+            #[cfg(test)]
+            let status = if faults::fired(faults::Fault::TryWait) {
+                Err(io::Error::other("child status failed as requested by a test"))
+            } else {
+                child.try_wait()
+            };
+            #[cfg(not(test))]
+            let status = child.try_wait();
+            let status = match status {
                 Ok(status) => status,
                 Err(cause) => {
                     self.child = Some(child);
@@ -1304,6 +1344,11 @@ impl ProcessTree {
     /// primitive is reachable only from [`Self::observe`] and [`Self::terminate`], which signal
     /// before reaping that leader, so `killpg` cannot name a replacement group.
     fn sweep(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if faults::fired(faults::Fault::Sweep) {
+            return Err(io::Error::other("subtree sweep failed as requested by a test"));
+        }
+
         // The cgroup reaches further than the process group does: a descendant that called
         // `setsid` has left the group but cannot leave the cgroup, so this goes first where it
         // exists.
@@ -1402,6 +1447,12 @@ fn discard_output_reader(reader: Option<&OutputReader>) {
     }
 }
 
+fn discard_output_before_error(error: io::Error, stdout: Option<&OutputReader>, stderr: Option<&OutputReader>) -> io::Error {
+    discard_output_reader(stdout);
+    discard_output_reader(stderr);
+    error
+}
+
 fn join_output_reader(reader: Option<OutputReader>, stream: &str) -> io::Result<Vec<u8>> {
     match reader {
         Some(reader) => {
@@ -1420,6 +1471,11 @@ fn join_output_reader(reader: Option<OutputReader>, stream: &str) -> io::Result<
 
 fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
     loop {
+        #[cfg(test)]
+        if faults::fired(faults::Fault::OutputWait) {
+            return Err(io::Error::other("output wait failed as requested by a test"));
+        }
+
         if let Some(status) = subtree.observe()? {
             return Ok(status);
         }
@@ -1456,7 +1512,15 @@ fn group_id(child_id: u32) -> Result<i32, PlatformError> {
 
 /// Preserves a containment refusal while reporting failure to clean up its child.
 fn abandoning(refusal: PlatformError, child: &mut Child, guard: &SpawnGuard) -> PlatformError {
-    match abandon(child, guard) {
+    let cleanup = abandon(child, guard);
+    #[cfg(test)]
+    let cleanup = if faults::fired(faults::Fault::AbandonCleanup) {
+        Err(io::Error::other("abandonment cleanup failed as requested by a test"))
+    } else {
+        cleanup
+    };
+
+    match cleanup {
         Ok(()) => refusal,
         Err(cause) => PlatformError::because(
             Situation::Refused,
@@ -1510,12 +1574,25 @@ fn abandon(child: &mut Child, guard: &SpawnGuard) -> io::Result<()> {
 
 /// Kills a child unless the failed kill proves to have raced with its exit.
 fn kill_if_running(child: &mut Child) -> io::Result<()> {
-    match child.kill() {
+    #[cfg(test)]
+    let killed = if faults::fired(faults::Fault::Kill) {
+        Err(io::Error::other("child kill failed as requested by a test"))
+    } else {
+        child.kill()
+    };
+    #[cfg(not(test))]
+    let killed = child.kill();
+
+    match killed {
         Ok(()) => Ok(()),
-        Err(kill_error) => match child.try_wait() {
-            Ok(Some(_status)) => Ok(()),
-            Ok(None) | Err(_) => Err(kill_error),
-        },
+        Err(kill_error) => resolve_kill_failure(kill_error, &child.try_wait()),
+    }
+}
+
+fn resolve_kill_failure(kill_error: io::Error, status: &io::Result<Option<ExitStatus>>) -> io::Result<()> {
+    match status {
+        Ok(Some(_status)) => Ok(()),
+        Ok(None) | Err(_) => Err(kill_error),
     }
 }
 
@@ -1657,6 +1734,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn error_cleanup_discards_every_started_output_reader() {
+        let bytes = Arc::new(Mutex::new(vec![1_u8, 2, 3]));
+        let retaining = Arc::new(AtomicBool::new(true));
+        let reader = OutputReader {
+            thread: thread::spawn(|| Ok(())),
+            bytes: Arc::clone(&bytes),
+            retaining: Arc::clone(&retaining),
+        };
+
+        let error = discard_output_before_error(io::Error::other("cleanup failed"), Some(&reader), None);
+
+        assert_eq!(error.to_string(), "cleanup failed");
+        assert!(!retaining.load(Ordering::Acquire));
+        assert!(bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+        reader.thread.join().expect("reader thread").expect("reader result");
+    }
+
     struct FailingReader;
 
     impl io::Read for FailingReader {
@@ -1744,6 +1839,30 @@ mod tests {
         assert_eq!(reason.to_string(), "the subtree leader was already reaped");
     }
 
+    #[test]
+    fn observing_an_already_reaped_subtree_reports_the_exact_reason() {
+        let mut subtree = ProcessTree {
+            child: None,
+            output_cleanup_unproven: false,
+            #[cfg(unix)]
+            group: None,
+            #[cfg(unix)]
+            slot: None,
+            #[cfg(target_os = "linux")]
+            cgroup: None,
+            #[cfg(target_os = "linux")]
+            metered: false,
+            #[cfg(windows)]
+            job: None,
+            #[cfg(windows)]
+            metered: false,
+        };
+
+        let reason = subtree.observe().expect_err("an absent leader was already reaped");
+
+        assert_eq!(reason.to_string(), "the subtree leader was already reaped");
+    }
+
     /// Why the containment tests below are ignored by default, and how to run them.
     ///
     /// A boundary a member cannot leave is not something every host has to offer. On Linux it needs
@@ -1769,6 +1888,7 @@ mod tests {
     /// Reached only when somebody asked for these by name, so the answer is a failure rather than a
     /// skip: they asked for coverage of containment and did not get it, and the reason is the same
     /// one the tool itself would give a user who asked to be protected here.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn demand_containment() {
         #[cfg(not(windows))]
         assert!(containment().is_ok(), "{NEEDS_CONTAINMENT}: {:?}", containment().err());
@@ -1924,20 +2044,25 @@ mod tests {
         ));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the unreachable closure must match cleanup_after_observation's fallible callback"
+    )]
+    fn unexpected_observation_step(flag: &RefCell<bool>) -> io::Result<()> {
+        *flag.borrow_mut() = true;
+        Ok(())
+    }
+
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_pending_observation_neither_cleans_nor_reaps() {
         let cleaned = RefCell::new(false);
         let reaped = RefCell::new(false);
         let result = cleanup_after_observation(
             false,
-            || {
-                *cleaned.borrow_mut() = true;
-                Ok(())
-            },
-            || {
-                *reaped.borrow_mut() = true;
-                Ok(())
-            },
+            || unexpected_observation_step(&cleaned),
+            || unexpected_observation_step(&reaped),
         );
 
         assert!(matches!(result, Observation::Pending));
@@ -1951,6 +2076,38 @@ mod tests {
         let _status = child.wait().expect("the no-op child exits");
 
         kill_if_running(&mut child).expect("an already-exited child needs no further kill");
+    }
+
+    #[test]
+    fn a_failed_kill_of_a_running_child_preserves_the_kill_error() {
+        let kill_error = io::Error::new(io::ErrorKind::PermissionDenied, "kill denied");
+
+        let error = resolve_kill_failure(kill_error, &Ok(None)).expect_err("a live child still needs to be killed");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "kill denied");
+    }
+
+    #[test]
+    fn a_failed_kill_that_raced_with_exit_is_accepted() {
+        let status = no_op_command().status().expect("the no-op child exits");
+        let kill_error = io::Error::new(io::ErrorKind::PermissionDenied, "kill denied");
+
+        resolve_kill_failure(kill_error, &Ok(Some(status))).expect("the observed exit wins the kill race");
+    }
+
+    #[test]
+    fn an_injected_kill_failure_is_preserved_for_a_live_child() {
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.args([testing::directive("sleep:30000"), testing::directive("exit:0")]);
+        let mut child = command.spawn().expect("the child starts");
+        let _armed = faults::arm(faults::Fault::Kill);
+
+        let reason = kill_if_running(&mut child).expect_err("the injected kill failure is reported");
+
+        assert!(reason.to_string().contains("child kill failed"), "{reason}");
+        child.kill().expect("the fixture is cleaned up");
+        let _status = child.wait().expect("the fixture is reaped");
     }
 
     /// A request that asks for nothing gets containment without an accounting boundary.
@@ -1984,12 +2141,18 @@ mod tests {
 
     /// Asking for accounting on a host that cannot provide it fails rather than running anyway.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn asking_for_accounting_a_host_cannot_provide_fails_the_spawn() {
         let command = no_op_command();
 
         // Either the host can meter and this succeeds, or it cannot and the caller is told why.
         // What must never happen is the third thing: a run that believes it is bounded, is not,
         // and finds out when the machine runs out of memory.
+        #[cfg(windows)]
+        {
+            prepare(command, MemoryRequest { meter: true, limit: None }).expect("Windows always supplies job-object accounting");
+        }
+        #[cfg(not(windows))]
         match prepare(command, MemoryRequest { meter: true, limit: None }) {
             Ok(_guard) => crate::support().expect("metering succeeded, so it is supported"),
             Err(reason) => assert!(!reason.to_string().is_empty(), "a refusal has to say why"),
@@ -2016,6 +2179,7 @@ mod tests {
     /// A separate question from sealing, even where the two are answered by the same facility: a
     /// host could grow a boundary it cannot meter, and a test about the reading would then fail for
     /// a reason that has nothing to do with the reading.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn demand_measurement() {
         #[cfg(not(windows))]
         assert!(crate::support().is_ok(), "{NEEDS_CONTAINMENT}: {:?}", crate::support().err());
@@ -2124,6 +2288,21 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn adopting_the_test_only_jobless_state_preserves_the_running_child() {
+        let child = no_op_command().spawn().expect("spawn");
+        let spawned = SpawnedCommand {
+            child: Some(child),
+            guard: Some(SpawnGuard { job: None, metered: false }),
+        };
+        let mut subtree = ProcessTree::adopt(spawned).expect("jobless test adoption");
+
+        assert!(!subtree.sealed());
+        assert!(wait_for(&mut subtree).success());
+    }
+
+    #[cfg(windows)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delayed_marker_child(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf, Child) {
         let work = testing::workdir(prefix);
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
@@ -2523,10 +2702,14 @@ mod tests {
     /// A run announces best-effort containment once, before it executes anything the repository
     /// controls, and that announcement is worth nothing if the per-launch answer can differ from it.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_host_answer_about_sealing_matches_what_a_launch_gets() {
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
         let _ = command.arg(testing::directive("exit:0"));
 
+        #[cfg(windows)]
+        let prepared = prepare(command, MemoryRequest::default()).expect("Windows always seals launches with a job object");
+        #[cfg(not(windows))]
         let Ok(prepared) = prepare(command, MemoryRequest::default()) else {
             // A refusal is the other permitted answer, and never a silent degradation.
             return;
@@ -2579,6 +2762,7 @@ mod tests {
     /// Without this, a helper whose `spawn` quietly did nothing would make that test pass by
     /// producing no grandchild to reach — the exact shape of a test that cannot fail.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_unkilled_grandchild_outlives_its_parent_and_finishes() {
         let work = testing::workdir("gamma-grandchild-control");
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
@@ -2608,15 +2792,17 @@ mod tests {
         fs::write(release.as_std_path(), "").expect("release the orphaned grandchild");
         assert!(grandchild_started, "the grandchild never started after its parent exited");
 
+        let mut finished_in_time = false;
         for _attempt in 0..600 {
             if finished.exists() {
-                return;
+                finished_in_time = true;
+                break;
             }
 
             thread::sleep(Duration::from_millis(10));
         }
 
-        panic!("the orphaned grandchild never finished its work");
+        assert!(finished_in_time, "the orphaned grandchild never finished its work");
     }
 
     /// Runs one of the self-interrupting inner tests below, and reports the pid it spawned.
@@ -2755,6 +2941,7 @@ mod tests {
     /// Inert unless the outer test asked for it, since it deliberately kills the process it runs in.
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spawns_a_child_then_interrupts_itself() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -2789,6 +2976,7 @@ mod tests {
     /// it is running on.
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn interrupts_itself_between_the_spawn_and_the_registration() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -2857,6 +3045,7 @@ mod tests {
     /// Inert unless the outer test asked for it, since it deliberately kills the process it runs in.
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spawns_a_child_then_quits_itself() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -2890,6 +3079,7 @@ mod tests {
     /// signal. Closing that window is what finally performs the death, and the sweep with it.
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn interrupts_itself_twice_with_a_window_open() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -3016,6 +3206,18 @@ mod tests {
         drop(armed);
     }
 
+    #[test]
+    fn an_adopt_refusal_preserves_an_additional_cleanup_failure() {
+        let prepared = prepare(no_op_command(), MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let _adopt = faults::arm(faults::Fault::Adopt);
+        let _cleanup = faults::arm(faults::Fault::AbandonCleanup);
+
+        let reason = ProcessTree::adopt(spawned).expect_err("the adoption and cleanup faults are reported");
+
+        assert!(reason.to_string().contains("cleanup of the refused child also failed"), "{reason}");
+    }
+
     /// Once a real interrupt has begun, a fresh window refuses to open — proven with a real signal
     /// rather than a fault, since the two checks inside `window` are otherwise indistinguishable.
     ///
@@ -3074,6 +3276,19 @@ mod tests {
         assert!(reason.to_string().contains("could not be installed"), "{reason}");
 
         drop(armed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_job_creation_failure_reports_the_exact_containment_reason() {
+        let _armed = faults::arm(faults::Fault::JobCreate);
+
+        let reason = prepare(no_op_command(), MemoryRequest::default()).expect_err("the job creation fault refuses containment");
+
+        assert_eq!(
+            reason.to_string(),
+            "a Windows job object could not be created, so this test binary's descendants could not be contained"
+        );
     }
 
     /// A failed spawn returns the one preparation so the same launch can be attempted again.
@@ -3136,6 +3351,130 @@ mod tests {
         assert!(gone_soon(pid), "an adopt fault must still kill the child it refused");
 
         drop(armed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_job_assignment_failure_reports_the_exact_cleanup_reason() {
+        let prepared = prepare(no_op_command(), MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let _armed = faults::arm(faults::Fault::JobAssign);
+
+        let reason = ProcessTree::adopt(spawned).expect_err("the assignment fault refuses adoption");
+
+        assert_eq!(
+            reason.to_string(),
+            "a Windows job object could not be given the test binary it was created for, so its descendants could not be terminated safely"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_child_resume_failure_reports_the_exact_cleanup_reason() {
+        let prepared = prepare(no_op_command(), MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let _armed = faults::arm(faults::Fault::JobResume);
+
+        let reason = ProcessTree::adopt(spawned).expect_err("the resume fault refuses adoption");
+
+        assert_eq!(
+            reason.to_string(),
+            "a Windows test binary could not be resumed inside the containment boundary holding it"
+        );
+    }
+
+    fn captured_no_op_subtree() -> ProcessTree {
+        let mut command = no_op_command();
+        let _ = command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+
+        ProcessTree::adopt(spawned).expect("adoption")
+    }
+
+    #[test]
+    fn stderr_reader_start_failure_cleans_up_and_preserves_its_reason() {
+        let subtree = captured_no_op_subtree();
+        let _armed = faults::arm(faults::Fault::StderrReader);
+
+        let reason = subtree.wait_with_output().expect_err("the stderr reader fault is reported");
+
+        assert!(reason.to_string().contains("stderr reader creation failed"), "{reason}");
+    }
+
+    #[test]
+    fn stderr_reader_start_failure_reports_cleanup_failure_first() {
+        let subtree = captured_no_op_subtree();
+        let _reader = faults::arm(faults::Fault::StderrReader);
+        let _cleanup = faults::arm(faults::Fault::Terminate);
+
+        let reason = subtree.wait_with_output().expect_err("the cleanup fault is reported");
+
+        assert!(reason.to_string().contains("subtree termination failed"), "{reason}");
+    }
+
+    #[test]
+    fn output_wait_failure_cleans_up_and_preserves_its_reason() {
+        let subtree = captured_no_op_subtree();
+        let _armed = faults::arm(faults::Fault::OutputWait);
+
+        let reason = subtree.wait_with_output().expect_err("the output wait fault is reported");
+
+        assert!(reason.to_string().contains("output wait failed"), "{reason}");
+    }
+
+    #[test]
+    fn output_wait_failure_reports_cleanup_failure_first() {
+        let subtree = captured_no_op_subtree();
+        let _wait = faults::arm(faults::Fault::OutputWait);
+        let _cleanup = faults::arm(faults::Fault::Terminate);
+
+        let reason = subtree.wait_with_output().expect_err("the cleanup fault is reported");
+
+        assert!(reason.to_string().contains("subtree termination failed"), "{reason}");
+    }
+
+    #[test]
+    fn unproven_output_cleanup_discards_readers_without_retrying_cleanup() {
+        let mut subtree = captured_no_op_subtree();
+        subtree.output_cleanup_unproven = true;
+        let _wait = faults::arm(faults::Fault::OutputWait);
+
+        let reason = subtree.wait_with_output().expect_err("the output wait fault is reported");
+
+        assert!(reason.to_string().contains("output wait failed"), "{reason}");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_observed_exit_reports_a_sweep_failure() {
+        let mut subtree = captured_no_op_subtree();
+        let _sweep = faults::arm(faults::Fault::Sweep);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let reason = loop {
+            match subtree.observe() {
+                Err(reason) => break reason,
+                Ok(None) if Instant::now() < deadline => thread::yield_now(),
+                Ok(None) => panic!("the child did not exit before the test deadline"),
+                Ok(Some(status)) => panic!("the sweep fault did not fire for completed child {status}"),
+            }
+        };
+
+        assert!(reason.to_string().contains("subtree sweep failed"), "{reason}");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_child_status_failure_restores_the_child_for_cleanup() {
+        let mut subtree = captured_no_op_subtree();
+        let _status = faults::arm(faults::Fault::TryWait);
+
+        let reason = subtree.observe().expect_err("the child status fault is reported");
+
+        assert!(reason.to_string().contains("child status failed"), "{reason}");
+        assert!(subtree.child.is_some(), "the failed status query lost the live child");
+        subtree.terminate().expect("the restored child remains cleanable");
     }
 
     #[test]

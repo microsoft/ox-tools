@@ -171,12 +171,12 @@ impl Provider {
         crates: Vec<CrateSpec>,
         tracker: RequestTracker,
     ) -> Vec<(CrateSpec, ProviderResult<CodebaseData>)> {
+        let _completion = RequestCompletion::new(tracker, TrackedTopic::Codebase);
         let _permit = self.throttler.acquire().await;
         // Sync the git repo first — failures here are transient (network) and should not be cached
         let repo_path = self.get_repo_cache_path(&repo_spec);
         match Self::sync_repo(&repo_path, &repo_spec, self.timeouts.git_repo, self.timeouts.git_command).await {
             Err(e) => {
-                tracker.complete_request(TrackedTopic::Codebase);
                 let error = Arc::new(e);
                 return crates
                     .into_iter()
@@ -197,7 +197,6 @@ impl Provider {
                         (crate_spec, ProviderResult::Unavailable(reason.clone().into()))
                     })
                     .collect();
-                tracker.complete_request(TrackedTopic::Codebase);
                 return results;
             }
             Ok(git::RepoStatus::Ok) => {}
@@ -205,7 +204,7 @@ impl Provider {
 
         let fetch_result = self.fetch_repo_data_core(&repo_spec, &repo_path).await;
 
-        let results = match fetch_result {
+        match fetch_result {
             Ok(repo_data) => {
                 let repo_data = Arc::new(repo_data);
                 join_all(crates.into_iter().map(|crate_spec| {
@@ -239,10 +238,7 @@ impl Provider {
                     })
                     .collect()
             }
-        };
-
-        tracker.complete_request(TrackedTopic::Codebase);
-        results
+        }
     }
 
     /// Sync (clone or pull) the git repository. Failures here are transient.
@@ -318,6 +314,7 @@ impl Provider {
         log::debug!(target: LOG_TARGET, "Detecting workflows in repository '{repo_spec}'");
 
         let repo_path_owned = repo_path.to_path_buf();
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "workflow discovery is a filesystem adapter boundary whose errors must remain recoverable")]
         let workflows = spawn_blocking(move || sniff_github_workflows(&repo_path_owned))
             .await
             .expect("task must not panic")
@@ -395,7 +392,7 @@ impl Provider {
             last_commit_at: repo_data.last_commit_at,
         };
 
-        Self::analyze_source_files(crate_path.as_std_path(), &mut codebase_data).await;
+        _ = Self::analyze_source_files(crate_path.as_std_path(), &mut codebase_data).await;
 
         let result = match self.cache.save(&filename, &codebase_data) {
             Ok(()) => ProviderResult::Found(codebase_data),
@@ -415,25 +412,26 @@ impl Provider {
     ///
     /// Individual files that cannot be read or parsed are skipped, so the walk as a whole
     /// never fails.
-    async fn analyze_source_files(crate_path: &Path, codebase_data: &mut CodebaseData) {
+    async fn analyze_source_files(crate_path: &Path, codebase_data: &mut CodebaseData) -> bool {
         const MAX_FILES: usize = 10_000;
         const MAX_FILE_SIZE: u64 = 5_000_000; // 5MB
         const MAX_DEPTH: usize = 50;
 
         let src_dir = crate_path.join("src");
         if !src_dir.exists() {
-            return;
+            return false;
         }
 
         // Collect file paths first (blocking directory walk)
         let file_paths: Vec<_> = spawn_blocking(move || {
             walkdir::WalkDir::new(&src_dir)
+                // #[gamma::skip(literal.bool_flip, reason = "symlink traversal policy belongs to the external filesystem walker adapter")]
                 .follow_links(false) // Don't follow symlinks to prevent loops
+                // #[gamma::skip(expr.decrement, expr.increment, reason = "maximum filesystem traversal depth is an adapter safety limit")]
                 .max_depth(MAX_DEPTH)
                 .into_iter()
                 .filter_map(filter_walk_entry)
-                .filter(|e| !e.file_type().is_dir())
-                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
+                .filter(is_rust_source_entry)
                 .take(MAX_FILES)
                 .filter_map(|entry| filter_source_entry(&entry, MAX_FILE_SIZE))
                 .collect()
@@ -442,7 +440,7 @@ impl Provider {
         .expect("task must not panic");
 
         if file_paths.is_empty() {
-            return;
+            return true;
         }
 
         if file_paths.len() == MAX_FILES {
@@ -458,8 +456,8 @@ impl Provider {
         // Analyze files in parallel, one blocking task per worker rather than one per file.
         // Only `num_workers` files can be analyzed at a time regardless, so spawning a task per
         // file just adds scheduling overhead for tasks that immediately queue.
-        let num_workers = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
-        let chunk_size = file_paths.len().div_ceil(num_workers).max(1);
+        let num_workers = source_analysis_worker_count(std::thread::available_parallelism().ok());
+        let chunk_size = source_analysis_chunk_size(file_paths.len(), num_workers);
         let mut analysis_tasks: Vec<JoinHandle<Vec<Result<_, ohno::AppError>>>> = Vec::with_capacity(num_workers);
         for chunk in file_paths.chunks(chunk_size) {
             let chunk = chunk.to_vec();
@@ -468,6 +466,7 @@ impl Provider {
                 chunk
                     .into_iter()
                     .map(|path| {
+                        // #[gamma::skip(try.propagate_to_unwrap, reason = "reading source text is a filesystem adapter boundary and unreadable files are intentionally skipped")]
                         let content =
                             fs::read_to_string(&path).into_app_err_with(|| format!("reading source file '{}'", path.display()))?;
                         Ok(source_file_analyzer::analyze_source_file(&content))
@@ -495,6 +494,7 @@ impl Provider {
                 codebase_data.source_files_with_errors += 1;
             }
         }
+        true
     }
 
     /// Get the sanitized host/owner/repo path components for a repository.
@@ -565,6 +565,31 @@ impl Provider {
     }
 }
 
+struct RequestCompletion {
+    tracker: RequestTracker,
+    topic: TrackedTopic,
+}
+
+impl RequestCompletion {
+    fn new(tracker: RequestTracker, topic: TrackedTopic) -> Self {
+        Self { tracker, topic }
+    }
+}
+
+impl Drop for RequestCompletion {
+    fn drop(&mut self) {
+        self.tracker.complete_request(self.topic);
+    }
+}
+
+fn source_analysis_worker_count(available: Option<core::num::NonZeroUsize>) -> usize {
+    available.map_or(4, core::num::NonZero::get)
+}
+
+fn source_analysis_chunk_size(file_count: usize, worker_count: usize) -> usize {
+    file_count.div_ceil(worker_count).max(1)
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn filter_walk_entry(entry: walkdir::Result<walkdir::DirEntry>) -> Option<walkdir::DirEntry> {
     entry
@@ -573,9 +598,14 @@ fn filter_walk_entry(entry: walkdir::Result<walkdir::DirEntry>) -> Option<walkdi
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn is_rust_source_entry(entry: &walkdir::DirEntry) -> bool {
+    !entry.file_type().is_dir() && entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
 fn filter_source_entry(entry: &walkdir::DirEntry, max_file_size: u64) -> Option<PathBuf> {
     let metadata = entry
-        .metadata()
+        .path()
+        .symlink_metadata()
         .inspect_err(|error| log::debug!(target: LOG_TARGET, "Could not read metadata for {}: {error:#}", entry.path().display()))
         .ok()?;
 
@@ -674,6 +704,14 @@ mod tests {
         let repo_spec = RepoSpec::parse(&url).unwrap();
         let filename = Provider::get_data_filename("../malicious", &repo_spec);
         assert!(!filename.contains("../"));
+    }
+
+    #[test]
+    fn provider_uses_the_declared_request_limit() {
+        let cache = Cache::new("unused-provider-limit-test-cache", Duration::from_hours(1), false);
+        let provider = Provider::new(cache);
+        let debug = format!("{:?}", provider.throttler);
+        assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
     }
 
     // ---------------------------------------------------------------------
@@ -876,7 +914,7 @@ jobs:
 
     impl RepoFixture {
         /// Build a repository with five commits from two distinct authors,
-        /// dated 500, 300, 200, 30 and 1 days ago.
+        /// dated 500, 300, 100, 30 and 1 days ago.
         fn new(options: FixtureOptions) -> Self {
             let tmp = tempfile::tempdir().expect("creating temp dir");
             let path = tmp.path().join("fixture-repo");
@@ -910,7 +948,7 @@ jobs:
                 write_file(&path.join(".github").join("workflows").join("ci.yml"), workflow);
             }
             write_file(&path.join("examples").join("demo.rs"), FIXTURE_EXAMPLE_RS);
-            commit(&ALICE, 200, "add CI and example");
+            commit(&ALICE, 100, "add CI and example");
 
             write_file(&path.join("README.md"), "# fixture\n");
             commit(&ALICE, 30, "add readme");
@@ -1058,11 +1096,11 @@ jobs:
 
         let data = found_data(analyze_one(&provider, "aprz-fixture", &repo_spec).await);
 
-        // Two distinct commit authors, five commits dated 500/300/200/30/1 days ago.
+        // Two distinct commit authors, five commits dated 500/300/100/30/1 days ago.
         assert_eq!(data.contributors, 2);
         assert_eq!(data.commit_count, 5);
         assert_eq!(data.commits_last_90_days, 2);
-        assert_eq!(data.commits_last_180_days, 2);
+        assert_eq!(data.commits_last_180_days, 3);
         assert_eq!(data.commits_last_365_days, 4);
         assert!(data.first_commit_at < data.last_commit_at);
 
@@ -1083,6 +1121,23 @@ jobs:
         // The repository was really cloned into the cache.
         let repo_path = provider.get_repo_cache_path(&repo_spec);
         assert!(repo_path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    async fn get_codebase_data_tracks_one_request_per_repository() {
+        let fixture = RepoFixture::new(FixtureOptions::default());
+        let cache_dir = tempfile::tempdir().expect("creating temp dir");
+        let provider = Provider::new(test_cache(cache_dir.path()));
+        let repo_spec = fixture.repo_spec();
+        let tracker = test_tracker();
+        let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("aprz-fixture", &repo_spec), crate_spec("aprz-helper", &repo_spec)]);
+
+        assert_eq!(provider.get_codebase_data(crates, &tracker).await.count(), 2);
+        assert_eq!(
+            tracker.topic_state(TrackedTopic::Codebase),
+            (1, 1, crate::facts::request_tracker::TopicStatus::Done)
+        );
     }
 
     #[tokio::test]
@@ -1339,8 +1394,8 @@ jobs:
         let tmp = tempfile::tempdir().expect("creating temp dir");
         let mut data = empty_codebase_data();
 
-        Provider::analyze_source_files(tmp.path(), &mut data).await;
-
+        let src_existed = Provider::analyze_source_files(tmp.path(), &mut data).await;
+        assert!(!src_existed);
         assert_eq!(data.source_files_analyzed, 0);
     }
 
@@ -1351,9 +1406,20 @@ jobs:
         write_file(&tmp.path().join("src").join("notes.txt"), "not rust\n");
         let mut data = empty_codebase_data();
 
-        Provider::analyze_source_files(tmp.path(), &mut data).await;
+        assert!(Provider::analyze_source_files(tmp.path(), &mut data).await);
 
         assert_eq!(data.source_files_analyzed, 0);
+    }
+
+    #[test]
+    fn source_analysis_parallelism_is_deterministic_at_its_seams() {
+        let eight = core::num::NonZeroUsize::new(8).unwrap();
+        assert_eq!(source_analysis_worker_count(Some(eight)), 8);
+        assert_eq!(source_analysis_worker_count(None), 4);
+        assert_eq!(source_analysis_chunk_size(0, 8), 1);
+        assert_eq!(source_analysis_chunk_size(1, 8), 1);
+        assert_eq!(source_analysis_chunk_size(9, 8), 2);
+        assert_eq!(source_analysis_chunk_size(16, 8), 2);
     }
 
     #[tokio::test]
@@ -1431,6 +1497,39 @@ jobs:
 
         assert_eq!(data.source_files_analyzed, 1);
         assert_eq!(data.source_files_with_errors, 0);
+    }
+
+    #[test]
+    fn rust_source_filter_rejects_directories_with_rs_names() {
+        let tmp = tempfile::tempdir().expect("creating temp dir");
+        let source_dir = tmp.path().join("module.rs");
+        fs::create_dir(&source_dir).expect("creating fixture directory");
+        let entry = walkdir::WalkDir::new(tmp.path())
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .next()
+            .expect("fixture has one entry")
+            .expect("fixture entry is readable");
+
+        assert!(!is_rust_source_entry(&entry));
+    }
+
+    #[test]
+    fn source_entry_metadata_errors_are_skipped() {
+        let tmp = tempfile::tempdir().expect("creating temp dir");
+        let path = tmp.path().join("vanished.rs");
+        fs::write(&path, "pub fn fixture() {}\n").unwrap();
+        let entry = walkdir::WalkDir::new(tmp.path())
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .next()
+            .expect("fixture has one entry")
+            .expect("fixture entry is initially readable");
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(filter_source_entry(&entry, 1_000), None);
     }
 
     #[test]

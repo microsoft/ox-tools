@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use core::fmt::{Debug, Formatter};
+#[cfg(test)]
+use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::sync::{Arc, Mutex};
@@ -22,27 +24,53 @@ type LineSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Refresh rate for progress updates (10 Hz).
 const REFRESH_INTERVAL_MS: u64 = 100;
+const REFRESHES_PER_SECOND: u8 = 10;
+
+fn refresh_interval() -> Duration {
+    Duration::from_millis(REFRESH_INTERVAL_MS)
+}
 
 const DETERMINATE_TEMPLATE: &str = "{prefix:>12.bold.cyan} [{bar:25}] {msg}";
 const DETERMINATE_TEMPLATE_NO_COLOR: &str = "{prefix:>12} [{bar:25}] {msg}";
 const INDETERMINATE_TEMPLATE: &str = "{prefix:>12.bold.cyan} [{spinner}] {msg}";
 const INDETERMINATE_TEMPLATE_NO_COLOR: &str = "{prefix:>12} [{spinner}] {msg}";
 
+const fn determinate_template(use_colors: bool) -> &'static str {
+    if use_colors {
+        DETERMINATE_TEMPLATE
+    } else {
+        DETERMINATE_TEMPLATE_NO_COLOR
+    }
+}
+
+const fn indeterminate_template(use_colors: bool) -> &'static str {
+    if use_colors {
+        INDETERMINATE_TEMPLATE
+    } else {
+        INDETERMINATE_TEMPLATE_NO_COLOR
+    }
+}
+
 struct DelayedProgressState {
     visible_after: Instant,
     visible: AtomicBool,
     is_indeterminate: AtomicBool,
     phase_start_time: Mutex<Instant>,
+    #[cfg(test)]
+    refreshes: AtomicUsize,
 }
 
 impl Debug for DelayedProgressState {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DelayedProgressState")
+        let mut debug = f.debug_struct("DelayedProgressState");
+        debug
             .field("visible_after", &self.visible_after)
             .field("visible", &self.visible)
             .field("is_indeterminate", &self.is_indeterminate)
-            .field("phase_start_time", &"<Instant>")
-            .finish()
+            .field("phase_start_time", &"<Instant>");
+        #[cfg(test)]
+        debug.field("refreshes", &self.refreshes);
+        debug.finish()
     }
 }
 
@@ -75,13 +103,14 @@ impl ProgressReporter {
 
     fn with_draw_target_and_line_sink(delay: Duration, use_colors: bool, make_draw_target: DrawTargetFactory, line_sink: LineSink) -> Self {
         let bar = ProgressBar::hidden();
-        bar.set_draw_target(ProgressDrawTarget::hidden());
 
         let state = Arc::new(DelayedProgressState {
             visible_after: Instant::now() + delay,
             visible: AtomicBool::new(false),
             is_indeterminate: AtomicBool::new(false),
             phase_start_time: Mutex::new(Instant::now()),
+            #[cfg(test)]
+            refreshes: AtomicUsize::new(0),
         });
 
         let message_callback = Arc::new(Mutex::new(Box::new(|| (0u64, 0u64, String::new())) as ProgressCallback));
@@ -113,20 +142,10 @@ impl Progress for ProgressReporter {
     fn set_determinate(&self, callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {
         *self.message_callback.lock().expect("lock poisoned") = callback;
         self.state.is_indeterminate.store(false, Ordering::Relaxed);
-        self.bar.disable_steady_tick();
         self.bar.set_length(0);
         self.bar.set_position(0);
-        let template = if self.use_colors {
-            DETERMINATE_TEMPLATE
-        } else {
-            DETERMINATE_TEMPLATE_NO_COLOR
-        };
-        self.bar.set_style(
-            ProgressStyle::default_bar()
-                .template(template)
-                .expect("could not create progress bar style")
-                .progress_chars("=> "),
-        );
+        // #[gamma::skip(bool_expr.negate, tag = "trivial", reason = "indicatif strips ANSI styling from injected test terminals; the selected colored and plain templates are asserted directly")]
+        self.bar.set_style(determinate_style(self.use_colors));
     }
 
     /// Configure indeterminate progress reporting with a message-only callback.
@@ -137,78 +156,9 @@ impl Progress for ProgressReporter {
         });
         *self.state.phase_start_time.lock().expect("lock poisoned") = Instant::now();
         self.state.is_indeterminate.store(true, Ordering::Relaxed);
-        self.bar.enable_steady_tick(Duration::from_millis(REFRESH_INTERVAL_MS));
 
-        let template = if self.use_colors {
-            INDETERMINATE_TEMPLATE
-        } else {
-            INDETERMINATE_TEMPLATE_NO_COLOR
-        };
-        self.bar.set_style(
-            ProgressStyle::default_spinner()
-                .template(template)
-                .expect("could not create progress bar style")
-                .tick_strings(&[
-                    ">                        ", // 1–4 chars padded with spaces to total 25 characters
-                    "=>                       ",
-                    "==>                      ",
-                    "===>                     ",
-                    " ===>                    ",
-                    "  ===>                   ",
-                    "   ===>                  ",
-                    "    ===>                 ",
-                    "     ===>                ",
-                    "      ===>               ",
-                    "       ===>              ",
-                    "        ===>             ",
-                    "         ===>            ",
-                    "          ===>           ",
-                    "           ===>          ",
-                    "            ===>         ",
-                    "             ===>        ",
-                    "              ===>       ",
-                    "               ===>      ",
-                    "                ===>     ",
-                    "                 ===>    ",
-                    "                  ===>   ",
-                    "                   ===>  ",
-                    "                    ===> ",
-                    "                     ===>",
-                    "                      ===",
-                    "                       ==",
-                    "                        =",
-                    "                         ",
-                    "                        <",
-                    "                       <=",
-                    "                      <==",
-                    "                     <===",
-                    "                    <=== ",
-                    "                   <===  ",
-                    "                  <===   ",
-                    "                 <===    ",
-                    "                <===     ",
-                    "               <===      ",
-                    "              <===       ",
-                    "             <===        ",
-                    "            <===         ",
-                    "           <===          ",
-                    "          <===           ",
-                    "         <===            ",
-                    "        <===             ",
-                    "       <===              ",
-                    "      <===               ",
-                    "     <===                ",
-                    "    <===                 ",
-                    "   <===                  ",
-                    "  <===                   ",
-                    " <===                    ",
-                    "<===                     ",
-                    "===                      ",
-                    "==                       ",
-                    "=                        ",
-                    "                         ",
-                ]),
-        );
+        // #[gamma::skip(bool_expr.negate, tag = "trivial", reason = "indicatif strips ANSI styling from injected test terminals; the selected colored and plain templates are asserted directly")]
+        self.bar.set_style(indeterminate_style(self.use_colors));
     }
 
     /// Print a message line without disrupting the progress indicator.
@@ -230,6 +180,81 @@ impl Progress for ProgressReporter {
     }
 }
 
+fn determinate_style(use_colors: bool) -> ProgressStyle {
+    // #[gamma::skip(parameter.default_shadow, bool_expr.negate, tag = "trivial", reason = "this thin indicatif adapter has no observable color difference on injected test terminals; determinate_template tests the complete selection truth table")]
+    ProgressStyle::default_bar()
+        .template(determinate_template(use_colors))
+        .expect("could not create progress bar style")
+        .progress_chars("=> ")
+}
+
+fn indeterminate_style(use_colors: bool) -> ProgressStyle {
+    // #[gamma::skip(parameter.default_shadow, bool_expr.negate, tag = "trivial", reason = "this thin indicatif adapter has no observable color difference on injected test terminals; indeterminate_template tests the complete selection truth table")]
+    ProgressStyle::default_spinner()
+        .template(indeterminate_template(use_colors))
+        .expect("could not create progress bar style")
+        .tick_strings(&[
+            ">                        ", // 1–4 chars padded with spaces to total 25 characters
+            "=>                       ",
+            "==>                      ",
+            "===>                     ",
+            " ===>                    ",
+            "  ===>                   ",
+            "   ===>                  ",
+            "    ===>                 ",
+            "     ===>                ",
+            "      ===>               ",
+            "       ===>              ",
+            "        ===>             ",
+            "         ===>            ",
+            "          ===>           ",
+            "           ===>          ",
+            "            ===>         ",
+            "             ===>        ",
+            "              ===>       ",
+            "               ===>      ",
+            "                ===>     ",
+            "                 ===>    ",
+            "                  ===>   ",
+            "                   ===>  ",
+            "                    ===> ",
+            "                     ===>",
+            "                      ===",
+            "                       ==",
+            "                        =",
+            "                         ",
+            "                        <",
+            "                       <=",
+            "                      <==",
+            "                     <===",
+            "                    <=== ",
+            "                   <===  ",
+            "                  <===   ",
+            "                 <===    ",
+            "                <===     ",
+            "               <===      ",
+            "              <===       ",
+            "             <===        ",
+            "            <===         ",
+            "           <===          ",
+            "          <===           ",
+            "         <===            ",
+            "        <===             ",
+            "       <===              ",
+            "      <===               ",
+            "     <===                ",
+            "    <===                 ",
+            "   <===                  ",
+            "  <===                   ",
+            " <===                    ",
+            "<===                     ",
+            "===                      ",
+            "==                       ",
+            "=                        ",
+            "                         ",
+        ])
+}
+
 impl Debug for ProgressReporter {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ProgressReporter")
@@ -247,7 +272,12 @@ impl Debug for ProgressReporter {
 // Not covered: installing this target renders to the real stderr, which tests must not do.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn stderr_draw_target() -> ProgressDrawTarget {
-    ProgressDrawTarget::stderr_with_hz(10)
+    // #[gamma::skip(call.replace_with_default, call_result.default, tag = "trivial", reason = "constructing the production draw target writes to real stderr; refresh frequency is tested independently and tests inject non-stderr targets")]
+    ProgressDrawTarget::stderr_with_hz(refreshes_per_second())
+}
+
+const fn refreshes_per_second() -> u8 {
+    REFRESHES_PER_SECOND
 }
 
 /// Background refresh task that periodically updates the progress bar.
@@ -257,12 +287,13 @@ async fn refresh_task(
     callback: Arc<Mutex<ProgressCallback>>,
     make_draw_target: DrawTargetFactory,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_millis(REFRESH_INTERVAL_MS));
+    let mut interval = tokio::time::interval(refresh_interval());
     #[expect(clippy::infinite_loop, reason = "task runs until aborted")]
     loop {
         let _ = interval.tick().await;
 
-        if !state.visible.load(Ordering::Relaxed) && Instant::now() >= state.visible_after {
+        // #[gamma::skip(relational.le_to_lt, tag = "trivial", reason = "equality between two independently sampled monotonic instants is not controllable or observably distinct from the next refresh tick")]
+        if !state.visible.load(Ordering::Relaxed) && state.visible_after <= Instant::now() {
             state.visible.store(true, Ordering::Relaxed);
             bar.set_draw_target(make_draw_target());
         }
@@ -275,6 +306,7 @@ async fn refresh_task(
 
             // In indeterminate mode, prepend elapsed seconds to the message
             if state.is_indeterminate.load(Ordering::Relaxed) {
+                bar.tick();
                 let elapsed_secs = {
                     let start_time = state.phase_start_time.lock().expect("lock poisoned");
                     start_time.elapsed().as_secs()
@@ -287,6 +319,8 @@ async fn refresh_task(
                 bar.set_position(position);
             }
             bar.set_message(message);
+            #[cfg(test)]
+            state.refreshes.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -296,17 +330,135 @@ async fn refresh_task(
 mod tests {
     use core::sync::atomic::Ordering;
     use core::time::Duration;
+    use std::fmt::Debug;
+    use std::io;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
-    use indicatif::ProgressDrawTarget;
+    use indicatif::{ProgressDrawTarget, TermLike};
 
-    use super::{DrawTargetFactory, ProgressReporter};
+    use super::{
+        DETERMINATE_TEMPLATE, DETERMINATE_TEMPLATE_NO_COLOR, DrawTargetFactory, INDETERMINATE_TEMPLATE, INDETERMINATE_TEMPLATE_NO_COLOR,
+        ProgressReporter, REFRESHES_PER_SECOND, determinate_template, indeterminate_template, refresh_interval, refreshes_per_second,
+    };
     use crate::facts::Progress;
+
+    #[derive(Clone, Debug, Default)]
+    struct CaptureTerm {
+        contents: Arc<Mutex<String>>,
+    }
+
+    impl CaptureTerm {
+        fn contents(&self) -> String {
+            self.contents.lock().expect("capture lock is not poisoned").clone()
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl TermLike for CaptureTerm {
+        fn width(&self) -> u16 {
+            80
+        }
+
+        fn move_cursor_up(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, s: &str) -> io::Result<()> {
+            let mut contents = self.contents.lock().expect("capture lock is not poisoned");
+            contents.push_str(s);
+            contents.push('\n');
+            Ok(())
+        }
+
+        fn write_str(&self, s: &str) -> io::Result<()> {
+            self.contents.lock().expect("capture lock is not poisoned").push_str(s);
+            Ok(())
+        }
+
+        fn clear_line(&self) -> io::Result<()> {
+            self.contents.lock().expect("capture lock is not poisoned").clear();
+            Ok(())
+        }
+
+        fn flush(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// A reporter whose visible draw target is hidden, so nothing ever reaches stderr.
     fn hidden_reporter(delay: Duration, use_colors: bool) -> ProgressReporter {
         let factory: DrawTargetFactory = Box::new(ProgressDrawTarget::hidden);
         ProgressReporter::with_draw_target(delay, use_colors, factory)
+    }
+
+    #[test]
+    fn refresh_interval_is_one_tenth_of_a_second() {
+        assert_eq!(refresh_interval(), Duration::from_millis(100));
+        assert_eq!(REFRESHES_PER_SECOND, 10);
+        assert_eq!(refreshes_per_second(), 10);
+    }
+
+    #[tokio::test]
+    async fn reporter_starts_hidden() {
+        let reporter = hidden_reporter(Duration::from_hours(1), false);
+        assert!(reporter.bar.is_hidden());
+        assert!(!reporter.state.visible.load(Ordering::Relaxed));
+        reporter.done();
+    }
+
+    #[test]
+    fn templates_follow_the_color_setting() {
+        assert_eq!(determinate_template(true), DETERMINATE_TEMPLATE);
+        assert_eq!(determinate_template(false), DETERMINATE_TEMPLATE_NO_COLOR);
+        assert_eq!(indeterminate_template(true), INDETERMINATE_TEMPLATE);
+        assert_eq!(indeterminate_template(false), INDETERMINATE_TEMPLATE_NO_COLOR);
+    }
+
+    #[tokio::test]
+    async fn callbacks_start_at_zero_and_indeterminate_callbacks_keep_zero_counts() {
+        let reporter = hidden_reporter(Duration::from_hours(1), false);
+        assert_eq!(
+            reporter.message_callback.lock().expect("lock is not poisoned")(),
+            (0, 0, String::new())
+        );
+
+        reporter.set_indeterminate(Box::new(|| "working".to_owned()));
+        assert_eq!(
+            reporter.message_callback.lock().expect("lock is not poisoned")(),
+            (0, 0, "working".to_owned())
+        );
+        reporter.done();
+    }
+
+    #[tokio::test]
+    async fn phase_changes_reset_elapsed_time() {
+        let reporter = hidden_reporter(Duration::from_hours(1), false);
+        *reporter.state.phase_start_time.lock().expect("lock is not poisoned") = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("the current instant is more than ten seconds after the monotonic clock epoch");
+        reporter.set_phase("new phase");
+        assert!(reporter.state.phase_start_time.lock().expect("lock is not poisoned").elapsed() < Duration::from_secs(1));
+
+        *reporter.state.phase_start_time.lock().expect("lock is not poisoned") = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("the current instant is more than ten seconds after the monotonic clock epoch");
+        reporter.set_indeterminate(Box::new(|| "working".to_owned()));
+        assert!(reporter.state.phase_start_time.lock().expect("lock is not poisoned").elapsed() < Duration::from_secs(1));
+        reporter.done();
     }
 
     /// Poll until `predicate` holds or the deadline passes, so tests don't depend on exact timing.
@@ -343,6 +495,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_styles_render_the_expected_chrome() {
+        let determinate_term = CaptureTerm::default();
+        let determinate_target = determinate_term.clone();
+        let determinate = ProgressReporter::with_draw_target(
+            Duration::ZERO,
+            false,
+            Box::new(move || ProgressDrawTarget::term_like(Box::new(determinate_target.clone()))),
+        );
+        determinate.set_phase("Collecting");
+        determinate.set_determinate(Box::new(|| (10, 4, "crates".to_owned())));
+        assert!(wait_until(&determinate, |_| determinate_term.contents().contains("crates")).await);
+        let rendered = determinate_term.contents();
+        assert!(rendered.contains("Collecting ["), "{rendered:?}");
+        assert!(rendered.contains("=>"), "{rendered:?}");
+        determinate.done();
+
+        let indeterminate_term = CaptureTerm::default();
+        let indeterminate_target = indeterminate_term.clone();
+        let indeterminate = ProgressReporter::with_draw_target(
+            Duration::ZERO,
+            false,
+            Box::new(move || ProgressDrawTarget::term_like(Box::new(indeterminate_target.clone()))),
+        );
+        indeterminate.set_phase("Fetching");
+        indeterminate.set_indeterminate(Box::new(|| "data".to_owned()));
+        assert!(wait_until(&indeterminate, |_| indeterminate_term.contents().contains("data")).await);
+        let rendered = indeterminate_term.contents();
+        assert!(rendered.contains("Fetching ["), "{rendered:?}");
+        indeterminate.done();
+    }
+
+    #[tokio::test]
+    async fn refresh_loop_advances_only_indeterminate_animation() {
+        let term = CaptureTerm::default();
+        let target = term.clone();
+        let reporter = ProgressReporter::with_draw_target(
+            Duration::ZERO,
+            false,
+            Box::new(move || ProgressDrawTarget::term_like(Box::new(target.clone()))),
+        );
+        reporter.set_indeterminate(Box::new(|| "working".to_owned()));
+        assert!(wait_until(&reporter, |_| term.contents().contains("working")).await);
+        let first_frame = term.contents();
+        assert!(
+            wait_until(&reporter, |_| term.contents() != first_frame).await,
+            "the indeterminate spinner did not advance"
+        );
+
+        reporter.set_determinate(Box::new(|| (10, 4, "steady".to_owned())));
+        assert!(wait_until(&reporter, |_| term.contents().contains("steady")).await);
+        let determinate_frame = term.contents();
+        let completed = reporter.state.refreshes.load(Ordering::Relaxed);
+        assert!(
+            wait_until(&reporter, |r| r.state.refreshes.load(Ordering::Relaxed) >= completed + 2).await,
+            "two determinate refreshes did not complete"
+        );
+        assert_eq!(term.contents(), determinate_frame, "determinate progress kept animating");
+        reporter.done();
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "requires tokio timers and threads")]
     async fn determinate_progress_with_zero_length_leaves_bar_untouched() {
         let reporter = hidden_reporter(Duration::from_millis(1), false);
@@ -353,6 +566,29 @@ mod tests {
         assert_eq!(0, reporter.bar.position());
         assert!(!reporter.use_colors());
 
+        reporter.done();
+    }
+
+    #[tokio::test]
+    async fn determinate_transition_resets_mode_and_position() {
+        let reporter = hidden_reporter(Duration::from_hours(1), false);
+        reporter.set_indeterminate(Box::new(|| "working".to_owned()));
+        reporter.bar.set_position(7);
+
+        reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
+
+        assert!(!reporter.state.is_indeterminate.load(Ordering::Relaxed));
+        assert_eq!(reporter.bar.position(), 0);
+        reporter.done();
+    }
+
+    #[tokio::test]
+    async fn one_item_progress_updates_length_and_position() {
+        let reporter = hidden_reporter(Duration::ZERO, false);
+        reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
+
+        assert!(wait_until(&reporter, |item| item.bar.position() == 1).await);
+        assert_eq!(reporter.bar.length(), Some(1));
         reporter.done();
     }
 
@@ -403,6 +639,7 @@ mod tests {
         // `done` on an invisible bar must not touch the bar.
         reporter.done();
         assert!(!reporter.state.visible.load(Ordering::Relaxed));
+        assert!(!reporter.bar.is_finished(), "an invisible bar is aborted without being finished");
     }
 
     #[tokio::test]
@@ -451,21 +688,48 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "requires tokio timers and threads")]
     async fn done_aborts_the_refresh_task() {
-        let reporter = hidden_reporter(Duration::from_hours(1), true);
+        let reporter = hidden_reporter(Duration::ZERO, true);
+        reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
+        assert!(wait_until(&reporter, |r| r.state.visible.load(Ordering::Relaxed)).await);
         assert!(!reporter.refresh_task.is_finished());
 
         reporter.done();
 
         assert!(wait_until(&reporter, |r| r.refresh_task.is_finished()).await);
+        assert!(reporter.bar.is_finished(), "a visible bar is finished and cleared");
+    }
+
+    #[tokio::test]
+    async fn draw_target_is_installed_only_once_after_becoming_visible() {
+        let installations = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&installations);
+        let reporter = ProgressReporter::with_draw_target(
+            Duration::ZERO,
+            false,
+            Box::new(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                ProgressDrawTarget::hidden()
+            }),
+        );
+        reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
+        assert!(wait_until(&reporter, |r| r.state.visible.load(Ordering::Relaxed)).await);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(installations.load(Ordering::Relaxed), 1);
+        reporter.done();
     }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore = "requires tokio timers and threads")]
     async fn public_constructor_stays_hidden_for_a_long_delay() {
         let reporter = ProgressReporter::new(Duration::from_hours(1), true);
+        assert!(reporter.use_colors());
         reporter.set_phase("Preparing");
         reporter.done();
 
         assert!(!reporter.state.visible.load(Ordering::Relaxed));
+
+        let reporter = ProgressReporter::new(Duration::from_hours(1), false);
+        assert!(!reporter.use_colors());
+        reporter.done();
     }
 }

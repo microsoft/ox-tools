@@ -41,3 +41,21 @@ impl CliMeta {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_derives_the_complete_default_identity() {
+        assert_eq!(
+            CliMeta::new("forge"),
+            CliMeta {
+                subcommand: "forge".to_owned(),
+                bin_name: "cargo-forge".to_owned(),
+                about: String::new(),
+                version: "0.0.0".to_owned(),
+            }
+        );
+    }
+}

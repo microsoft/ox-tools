@@ -187,7 +187,7 @@ impl Mutant {
             // The `Either` wrapper an `IterBlock` splices around both arms is scaffolding the
             // reader never wrote and cannot act on, so the change is reported as the replacement
             // alone, exactly as for any other body.
-            Shape::Expr | Shape::Block | Shape::IterBlock | Shape::Continue | Shape::Break => {
+            Shape::Expr | Shape::Block | Shape::IterBlock | Shape::IterExpr | Shape::Continue | Shape::Break => {
                 format!("replace {} with {}", one_line(&self.original, 40), one_line(&self.replacement, 32))
             }
         }

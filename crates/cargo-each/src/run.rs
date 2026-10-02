@@ -5,7 +5,7 @@
 //! apply filters, build the plan, and run it.
 
 use std::collections::BTreeSet;
-use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
@@ -32,11 +32,28 @@ const WORKER_PANIC_TEST_PROGRAM: &str = "__cargo_each_injected_worker_panic";
 const WORKER_SPAWN_ERROR_TEST_PROGRAM: &str = "__cargo_each_injected_worker_spawn_error";
 const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const REAPER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WORKER_READY_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const CHILD_OBSERVATION: &str = "observe child process";
+const CHILD_LEADER_OBSERVATION: &str = "observe child process leader";
+const STDOUT_STREAM: &str = "stdout";
+const STDERR_STREAM: &str = "stderr";
+const PROCESS_REAPER_THREAD: &str = "cargo-each-process-reaper";
+const FALLBACK_GROUP_REAPER_THREAD: &str = "cargo-each-fallback-reaper";
+const FALLBACK_CHILD_REAPER_THREAD: &str = "cargo-each-fallback-child-reaper";
+const REAPER_DIAGNOSTIC_THREAD: &str = "cargo-each-reaper-diagnostic";
+const DISCONNECTED_REAPER_MESSAGE: &str = "process reaper channel disconnected; a persistent fallback retained the wait handle";
+const SNAPSHOT_EOF_MESSAGE: &str = "captured output ended before its finalized snapshot length";
+const SELECTION_READ_CONTEXT: &str = "failed to read package selection";
+const EXECUTION_CONFIGURATION_CONTEXT: &str = "invalid execution configuration";
+const WORKSPACE_RUST_VERSION_CONTEXT: &str = "failed to resolve workspace Rust version";
+const PLAN_BUILD_CONTEXT: &str = "failed to build command plan";
+const REAPER_START_CONTEXT: &str = "failed to start cargo-each process reaper";
 
 type ReaperJob = Box<dyn FnOnce() + Send + 'static>;
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
-    let selection = build_selection(args).into_app_err("failed to read package selection")?;
+    let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
     let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
@@ -60,7 +77,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         Mode::PerTarget
     };
     if mode == Mode::Once && args.jobs.get() != 1 {
-        return Err(JobsConflictWithOnceError::new()).into_app_err("invalid execution configuration");
+        return Err(JobsConflictWithOnceError::new()).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
     }
 
     let mut build_options = BuildOptions {
@@ -71,23 +88,20 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         target_required_features: &target_required_features,
         workspace_rust_version: None,
     };
-    if Plan::is_empty(&members, &args.command, build_options).into_app_err("failed to build command plan")? {
+    if Plan::is_empty(&members, &args.command, build_options).into_app_err(PLAN_BUILD_CONTEXT)? {
         eprintln!("cargo each: selection resolved to no work; nothing to do");
         return Ok(ExitCode::SUCCESS);
     }
 
     let workspace_rust_version = if uses_workspace_rust_version(&args.command) {
-        Some(
-            workspace
-                .workspace_rust_version()
-                .into_app_err("failed to resolve workspace Rust version")?,
-        )
+        Some(workspace.workspace_rust_version().into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?)
     } else {
         None
     };
     build_options.workspace_rust_version = workspace_rust_version.as_deref();
 
-    let plan = Plan::build(&members, &args.command, build_options).into_app_err("failed to build command plan")?;
+    let plan = Plan::build(&members, &args.command, build_options)
+        .expect("Plan::is_empty above validates the same build options before a nonempty plan is built");
 
     if args.dry_run {
         for inv in &plan.invocations {
@@ -140,7 +154,17 @@ fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError
 }
 
 fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
-    let reaper = ProcessReaper::start().into_app_err("failed to start cargo-each process reaper")?;
+    execute_with_reaper(plan, keep_going, jobs, timeout, ProcessReaper::start)
+}
+
+fn execute_with_reaper(
+    plan: &Plan,
+    keep_going: bool,
+    jobs: NonZeroUsize,
+    timeout: Option<Duration>,
+    start_reaper: impl FnOnce() -> io::Result<ProcessReaper>,
+) -> Result<ExitCode, AppError> {
+    let reaper = start_reaper().into_app_err(REAPER_START_CONTEXT)?;
     let worker_count = effective_worker_count(jobs, plan.invocations.len());
     if worker_count.get() == 1 {
         Ok(execute_sequential(plan, keep_going, timeout, &reaper))
@@ -207,6 +231,24 @@ fn execute_parallel(
     timeout: Option<Duration>,
     reaper: &ProcessReaper,
 ) -> Result<ExitCode, AppError> {
+    execute_parallel_with(
+        plan,
+        keep_going,
+        worker_count,
+        timeout,
+        |index, invocation, timeout| spawn_worker(index, invocation, timeout, reaper.clone()),
+        emit_buffered,
+    )
+}
+
+fn execute_parallel_with(
+    plan: &Plan,
+    keep_going: bool,
+    worker_count: NonZeroUsize,
+    timeout: Option<Duration>,
+    mut spawn: impl FnMut(usize, Invocation, Option<Duration>) -> io::Result<RunningWorker>,
+    mut emit: impl FnMut(&Invocation, &mut BufferedOutcome) -> io::Result<()>,
+) -> Result<ExitCode, AppError> {
     let invocations = plan.invocations.clone();
     let mut workers = Vec::with_capacity(worker_count.get());
     let mut outcomes = Vec::with_capacity(worker_count.get());
@@ -217,39 +259,29 @@ fn execute_parallel(
 
     for wave in invocations.chunks(worker_count.get()) {
         for invocation in wave.iter().cloned() {
-            if stop_launching {
-                break;
-            }
             let index = next_index;
             next_index += 1;
-            match spawn_worker(index, invocation, timeout, reaper.clone()) {
+            match spawn(index, invocation, timeout) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
                     outcomes.push(IndexedOutcome {
                         index,
                         outcome: BufferedOutcome::infrastructure(format!("failed to create cargo-each worker thread: {error}")),
                     });
-                    any_failed = true;
-                    if failure_stops_launching(keep_going, true) {
-                        stop_launching = true;
+                    if !keep_going {
+                        break;
                     }
                 }
             }
         }
 
         while let Some(outcome) = wait_for_worker(&mut workers) {
-            if outcome.outcome.result.failed() {
-                any_failed = true;
-                if failure_stops_launching(keep_going, true) {
-                    stop_launching = true;
-                }
-            }
             outcomes.push(outcome);
         }
 
         outcomes.sort_by_key(|outcome| outcome.index);
         for indexed in &mut outcomes {
-            emit_buffered(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
+            emit(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
             record_emitted_failure(
                 &indexed.outcome.result,
                 keep_going,
@@ -307,6 +339,18 @@ fn failure_stops_launching(keep_going: bool, failed: bool) -> bool {
 }
 
 fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>, reaper: ProcessReaper) -> io::Result<RunningWorker> {
+    spawn_worker_with(index, invocation, timeout, reaper, |name, job| {
+        thread::Builder::new().name(name).spawn(job)
+    })
+}
+
+fn spawn_worker_with(
+    index: usize,
+    invocation: Invocation,
+    timeout: Option<Duration>,
+    reaper: ProcessReaper,
+    spawn: impl FnOnce(String, Box<dyn FnOnce() + Send>) -> io::Result<thread::JoinHandle<()>>,
+) -> io::Result<RunningWorker> {
     #[cfg(test)]
     if invocation
         .argv
@@ -317,9 +361,10 @@ fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>,
     }
 
     let (sender, receiver) = mpsc::channel();
-    let thread = thread::Builder::new().name(format!("cargo-each-worker-{index}")).spawn(move || {
+    let job = Box::new(move || {
         complete_worker(&sender, move || run_captured(&invocation, timeout, &reaper));
-    })?;
+    });
+    let thread = spawn(format!("cargo-each-worker-{index}"), job)?;
     Ok(RunningWorker { index, receiver, thread })
 }
 
@@ -335,6 +380,11 @@ fn complete_worker(sender: &mpsc::Sender<BufferedOutcome>, work: impl FnOnce() -
 }
 
 fn wait_for_worker(workers: &mut Vec<RunningWorker>) -> Option<IndexedOutcome> {
+    wait_for_worker_with(workers, thread::sleep)
+}
+
+fn wait_for_worker_with(workers: &mut Vec<RunningWorker>, mut sleep: impl FnMut(Duration)) -> Option<IndexedOutcome> {
+    // #[gamma::skip(cond.always_false, reason = "an empty worker set has no receiver to become ready, so entering the polling loop would never terminate")]
     if workers.is_empty() {
         return None;
     }
@@ -344,11 +394,12 @@ fn wait_for_worker(workers: &mut Vec<RunningWorker>) -> Option<IndexedOutcome> {
             .enumerate()
             .find_map(|(position, worker)| match worker.receiver.try_recv() {
                 Ok(outcome) => Some((position, Some(outcome))),
+                // #[gamma::skip(option.some_to_none, tag = "timeout", reason = "a disconnected worker must be selected so the polling loop can remove and join it")]
                 Err(mpsc::TryRecvError::Disconnected) => Some((position, None)),
                 Err(mpsc::TryRecvError::Empty) => None,
             });
         let Some((position, reported)) = ready else {
-            thread::sleep(Duration::from_millis(1));
+            sleep(WORKER_READY_POLL_INTERVAL);
             continue;
         };
 
@@ -395,14 +446,7 @@ fn run_streamed_with(
         }
     };
     let control = StreamedChild { child, reaper };
-    wait_for_process(
-        control,
-        None,
-        observe_streamed_child,
-        terminate_streamed_child,
-        "observe child process",
-    )
-    .result
+    wait_for_process(control, None, observe_streamed_child, terminate_streamed_child, CHILD_OBSERVATION).result
 }
 
 struct StreamedChild<'a> {
@@ -454,7 +498,7 @@ fn run_streamed_group_with(
         timeout,
         |process| process.inner().try_wait(),
         |process| terminate_group_bounded(process, reaper),
-        "observe child process leader",
+        CHILD_LEADER_OBSERVATION,
     )
     .result
 }
@@ -480,13 +524,13 @@ fn run_captured_with(
         Ok(command) => command,
         Err(message) => return BufferedOutcome::infrastructure(message),
     };
-    let (stdout, stdout_stdio) = match capture("stdout") {
+    let (stdout, stdout_stdio) = match capture(STDOUT_STREAM) {
         Ok(capture) => capture,
         Err(error) => {
             return BufferedOutcome::infrastructure(format!("failed to prepare child stdout capture: {error}"));
         }
     };
-    let (stderr, stderr_stdio) = match capture("stderr") {
+    let (stderr, stderr_stdio) = match capture(STDERR_STREAM) {
         Ok(capture) => capture,
         Err(error) => {
             return BufferedOutcome::infrastructure(format!("failed to prepare child stderr capture: {error}"));
@@ -505,11 +549,11 @@ fn run_captured_with(
         timeout,
         |process| process.inner().try_wait(),
         |process| terminate_group_bounded(process, reaper),
-        "observe child process leader",
+        CHILD_LEADER_OBSERVATION,
     );
     combine_captured_output(
-        finish_capture(stdout, "stdout"),
-        finish_capture(stderr, "stderr"),
+        finish_capture(stdout, STDOUT_STREAM),
+        finish_capture(stderr, STDERR_STREAM),
         process_outcome.result,
     )
 }
@@ -565,9 +609,16 @@ fn spawn_child(mut command: Command) -> Result<Child, String> {
 }
 
 fn create_output_capture(_stream: &'static str) -> io::Result<(Box<dyn SnapshotSource>, Stdio)> {
-    let temporary = tempfile::NamedTempFile::new()?;
-    let reader = temporary.reopen()?;
-    let child = temporary.reopen()?;
+    create_output_capture_with(tempfile::NamedTempFile::new, tempfile::NamedTempFile::reopen)
+}
+
+fn create_output_capture_with(
+    create: impl FnOnce() -> io::Result<tempfile::NamedTempFile>,
+    mut reopen: impl FnMut(&tempfile::NamedTempFile) -> io::Result<std::fs::File>,
+) -> io::Result<(Box<dyn SnapshotSource>, Stdio)> {
+    let temporary = create()?;
+    let reader = reopen(&temporary)?;
+    let child = reopen(&temporary)?;
     let path = temporary.into_temp_path();
     Ok((Box::new(TemporarySnapshot { _path: path, reader }), Stdio::from(child)))
 }
@@ -588,18 +639,32 @@ fn finish_capture(mut source: Box<dyn SnapshotSource>, stream: &str) -> Captured
     }
 }
 
+// #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "the production wrapper must forward the real process control and callbacks")]
 fn wait_for_process<T>(
+    control: T,
+    timeout: Option<Duration>,
+    observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    terminate: impl FnOnce(T) -> io::Result<ExitStatus>,
+    operation: &str,
+) -> TreeOutcome {
+    let started = Instant::now();
+    wait_for_process_with(control, timeout, observe, terminate, operation, || started.elapsed(), thread::sleep)
+}
+
+// #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "replacing process-control callbacks with defaults prevents the polling loop from observing progress")]
+fn wait_for_process_with<T>(
     mut control: T,
     timeout: Option<Duration>,
     mut observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
     terminate: impl FnOnce(T) -> io::Result<ExitStatus>,
     operation: &str,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(Duration),
 ) -> TreeOutcome {
-    let started = Instant::now();
     let mut terminate = Some(terminate);
     loop {
         if let Some(timeout) = timeout
-            && timeout.checked_sub(started.elapsed()).is_none()
+            && timeout.checked_sub(elapsed()).is_none()
         {
             return match terminate.take().expect("termination is consumed only on a returning branch")(control) {
                 Ok(_) => TreeOutcome::new(InvocationResult::TimedOut(timeout)),
@@ -623,9 +688,9 @@ fn wait_for_process<T>(
         }
 
         let pause = timeout
-            .and_then(|timeout| timeout.checked_sub(started.elapsed()))
-            .map_or(Duration::from_millis(10), |remaining| remaining.min(Duration::from_millis(10)));
-        thread::sleep(pause);
+            .and_then(|timeout| timeout.checked_sub(elapsed()))
+            .map_or(PROCESS_POLL_INTERVAL, |remaining| remaining.min(PROCESS_POLL_INTERVAL));
+        sleep(pause);
     }
 }
 
@@ -701,12 +766,7 @@ impl Clone for ProcessReaper {
 
 impl ProcessReaper {
     fn start() -> io::Result<Self> {
-        Self::start_with(|job| {
-            thread::Builder::new()
-                .name("cargo-each-process-reaper".to_owned())
-                .spawn(job)
-                .map(drop)
-        })
+        Self::start_with(|job| thread::Builder::new().name(PROCESS_REAPER_THREAD.to_owned()).spawn(job).map(drop))
     }
 
     fn start_with(mut spawn: impl FnMut(ReaperJob) -> io::Result<()>) -> io::Result<Self> {
@@ -744,7 +804,7 @@ fn start_failed_handoff_reaper(retained: &'static Mutex<Vec<GroupChild>>) -> io:
     static RUNNING: AtomicBool = AtomicBool::new(false);
     start_failed_handoff_reaper_with(retained, &RUNNING, GroupChild::try_wait, report_reaper_failure, |job| {
         thread::Builder::new()
-            .name("cargo-each-fallback-reaper".to_owned())
+            .name(FALLBACK_GROUP_REAPER_THREAD.to_owned())
             .spawn(job)
             .map(drop)
     })
@@ -759,7 +819,7 @@ fn start_failed_child_handoff_reaper(retained: &'static Mutex<Vec<Child>>) -> io
     static RUNNING: AtomicBool = AtomicBool::new(false);
     start_failed_handoff_reaper_with(retained, &RUNNING, Child::try_wait, report_reaper_failure, |job| {
         thread::Builder::new()
-            .name("cargo-each-fallback-child-reaper".to_owned())
+            .name(FALLBACK_CHILD_REAPER_THREAD.to_owned())
             .spawn(job)
             .map(drop)
     })
@@ -792,6 +852,16 @@ fn poll_failed_handoffs<T>(
     mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
     mut report_failure: impl FnMut(&io::Error),
 ) {
+    poll_failed_handoffs_with(retained, running, &mut try_wait, &mut report_failure, thread::sleep);
+}
+
+fn poll_failed_handoffs_with<T>(
+    retained: &Mutex<Vec<T>>,
+    running: &AtomicBool,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut report_failure: impl FnMut(&io::Error),
+    mut sleep: impl FnMut(Duration),
+) {
     loop {
         let mut children = retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         children.retain_mut(|child| retain_after_reaper_observation(try_wait(child), &mut report_failure));
@@ -800,7 +870,7 @@ fn poll_failed_handoffs<T>(
             return;
         }
         drop(children);
-        thread::sleep(REAPER_POLL_INTERVAL);
+        sleep(REAPER_POLL_INTERVAL);
     }
 }
 
@@ -809,10 +879,7 @@ fn handoff_group<T>(sender: &mpsc::Sender<T>, retained: &Mutex<Vec<T>>, child: T
         Ok(()) => Ok(()),
         Err(error) => {
             retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(error.0);
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "process reaper channel disconnected; a persistent fallback retained the wait handle",
-            ))
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, DISCONNECTED_REAPER_MESSAGE))
         }
     }
 }
@@ -836,17 +903,30 @@ fn handoff_group_with_fallback<T>(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(fn_value.unit, reason = "the OS-thread adapter is covered through reaper_diagnostic_job's injected reporter seam")]
 #[mutants::skip] // Process-thread diagnostic for an OS observation failure; behavior is covered through the injected reporter seam.
 fn report_reaper_failure(error: &io::Error) {
     let message = error.to_string();
-    let _ = thread::Builder::new()
-        .name("cargo-each-reaper-diagnostic".to_owned())
-        .spawn(move || {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "cargo each: process reaper failed to observe a retained wait handle: {message}"
-            );
-        });
+    let job = reaper_diagnostic_job(message, write_reaper_diagnostic);
+    let _ = thread::Builder::new().name(REAPER_DIAGNOSTIC_THREAD.to_owned()).spawn(job);
+}
+
+fn reaper_diagnostic_job(message: String, report: impl FnOnce(&str) + Send + 'static) -> ReaperJob {
+    Box::new(move || report(&message))
+}
+
+// #[gamma::skip(fn_value.unit, reason = "the OS-stderr adapter is covered through write_reaper_diagnostic_to's injected writer seam")]
+#[mutants::skip] // The stderr-locking adapter is covered through the injected writer seam below.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn write_reaper_diagnostic(message: &str) {
+    let _ = write_reaper_diagnostic_to(message, &mut io::stderr().lock());
+}
+
+fn write_reaper_diagnostic_to(message: &str, stderr: &mut dyn io::Write) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "cargo each: process reaper failed to observe a retained wait handle: {message}"
+    )
 }
 
 #[mutants::skip] // Deleting the disconnected-and-empty shutdown arm hangs by definition; deterministic tests cover polling and exit.
@@ -855,24 +935,36 @@ fn poll_reaper<T>(
     mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
     mut report_failure: impl FnMut(&io::Error),
 ) {
+    poll_reaper_with(receiver, &mut try_wait, &mut report_failure, thread::sleep);
+}
+
+fn poll_reaper_with<T>(
+    receiver: &mpsc::Receiver<T>,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut report_failure: impl FnMut(&io::Error),
+    mut sleep: impl FnMut(Duration),
+) {
     let mut retained: Vec<T> = Vec::new();
     let mut connected = true;
     loop {
-        if connected {
-            match receiver.recv_timeout(REAPER_POLL_INTERVAL) {
-                Ok(child) => retained.push(child),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => connected = false,
-            }
+        match receiver.recv_timeout(REAPER_POLL_INTERVAL) {
+            Ok(child) => retained.push(child),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => connected = false,
         }
 
         retained.retain_mut(|child| retain_after_reaper_observation(try_wait(child), &mut report_failure));
 
-        match (connected, retained.is_empty()) {
-            (false, true) => return,
-            _ => thread::sleep(REAPER_POLL_INTERVAL),
+        if reaper_is_finished(connected, retained.is_empty()) {
+            return;
         }
+        sleep(REAPER_POLL_INTERVAL);
     }
+}
+
+#[mutants::skip] // Negating this shutdown predicate hangs until the mutation timeout; its complete truth table is tested directly.
+fn reaper_is_finished(connected: bool, retained_is_empty: bool) -> bool {
+    !connected && retained_is_empty
 }
 
 fn retain_after_reaper_observation(observation: io::Result<Option<ExitStatus>>, report_failure: &mut impl FnMut(&io::Error)) -> bool {
@@ -900,14 +992,25 @@ fn poll_process_exit<T>(
     mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
 ) -> io::Result<Option<ExitStatus>> {
     let started = Instant::now();
+    poll_process_exit_with(control, grace, &mut try_wait, || started.elapsed(), thread::sleep)
+}
+
+fn poll_process_exit_with<T>(
+    control: &mut T,
+    grace: Duration,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<Option<ExitStatus>> {
     loop {
         if let Some(status) = try_wait(control)? {
             return Ok(Some(status));
         }
-        let Some(remaining) = grace.checked_sub(started.elapsed()) else {
+        let Some(remaining) = grace.checked_sub(elapsed()) else {
             return Ok(None);
         };
-        thread::sleep(remaining.min(Duration::from_millis(10)));
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "polling must yield between observations instead of spinning until the grace period expires")]
+        sleep(remaining.min(PROCESS_POLL_INTERVAL));
     }
 }
 
@@ -919,9 +1022,15 @@ fn with_cleanup_failure<T>(message: String, cleanup: &io::Result<T>) -> String {
 }
 
 fn emit_label(invocation: &Invocation) {
+    let mut stderr = io::stderr().lock();
+    let _ = emit_label_to(invocation, &mut stderr);
+}
+
+fn emit_label_to(invocation: &Invocation, stderr: &mut dyn io::Write) -> io::Result<()> {
     if let Some(label) = &invocation.label {
-        eprintln!("cargo each: {label}");
+        writeln!(stderr, "cargo each: {label}")?;
     }
+    Ok(())
 }
 
 fn emit_buffered(invocation: &Invocation, outcome: &mut BufferedOutcome) -> io::Result<()> {
@@ -936,7 +1045,7 @@ fn emit_buffered_to(
     stdout: &mut dyn io::Write,
     stderr: &mut dyn io::Write,
 ) -> io::Result<()> {
-    emit_label(invocation);
+    emit_label_to(invocation, stderr)?;
     let mut source_failures = Vec::new();
     match outcome.stdout.emit_to(stdout) {
         Ok(()) => {}
@@ -954,11 +1063,14 @@ fn emit_buffered_to(
         Err(OutputEmitError::Destination(error)) => return Err(error),
     }
     if !source_failures.is_empty() {
-        let original = std::mem::replace(
-            &mut outcome.result,
-            InvocationResult::Infrastructure("output emission failed".to_owned()),
-        );
-        outcome.result = add_infrastructure_failure(original, source_failures.join("; "));
+        let failure = source_failures.join("; ");
+        outcome.result = InvocationResult::Infrastructure(match &outcome.result {
+            InvocationResult::Infrastructure(primary) => format!("{primary}; {failure}"),
+            InvocationResult::TimedOut(duration) => {
+                format!("invocation timed out after {}; {failure}", display_duration(*duration))
+            }
+            InvocationResult::Exited(_) => failure,
+        });
     }
     match &outcome.result {
         InvocationResult::TimedOut(duration) => {
@@ -1047,7 +1159,7 @@ impl CapturedOutput {
             Self::Empty => Ok(()),
             Self::Snapshot { source, length } => {
                 source.seek(SeekFrom::Start(0)).map_err(OutputEmitError::Source)?;
-                let mut buffer = [0_u8; 8192];
+                let mut buffer = [u8::default(); 8192];
                 let mut remaining = *length;
                 while remaining > 0 {
                     let limit = usize::try_from(remaining.min(buffer.len() as u64))
@@ -1056,7 +1168,7 @@ impl CapturedOutput {
                     let Some(read) = NonZeroUsize::new(read) else {
                         return Err(OutputEmitError::Source(io::Error::new(
                             io::ErrorKind::UnexpectedEof,
-                            "captured output ended before its finalized snapshot length",
+                            SNAPSHOT_EOF_MESSAGE,
                         )));
                     };
                     destination.write_all(&buffer[..read.get()]).map_err(OutputEmitError::Destination)?;
@@ -1149,6 +1261,7 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::io::{Read as _, Seek as _};
     use std::num::NonZeroUsize;
@@ -1162,17 +1275,26 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::{io, thread};
 
+    use clap::Parser as _;
+
     use super::{
-        BufferedOutcome, CapturedOutput, CapturedStream, Invocation, InvocationResult, OutputEmitError, Plan, ProcessReaper, RunningWorker,
-        SnapshotSource, StreamedChild, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
-        add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
-        exit_byte, failed_child_handoffs, failed_handoffs, failure_stops_launching, finish_capture, handoff_group,
-        handoff_group_with_fallback, observe_streamed_child, panic_description, parallel_failure_exit_code, parse_predicates,
-        parse_target_kinds, poll_process_exit, poll_reaper, record_emitted_failure, retain_after_reaper_observation, run_captured,
-        run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker,
-        start_failed_handoff_reaper_with, terminate_child_bounded, terminate_group_bounded, terminate_group_with, wait_for_process,
-        wait_for_worker, with_cleanup_failure, with_reaper_handoff,
+        BufferedOutcome, CHILD_LEADER_OBSERVATION, CHILD_OBSERVATION, CapturedOutput, CapturedStream, DISCONNECTED_REAPER_MESSAGE,
+        EXECUTION_CONFIGURATION_CONTEXT, FALLBACK_CHILD_REAPER_THREAD, FALLBACK_GROUP_REAPER_THREAD, Invocation, InvocationResult,
+        OutputEmitError, PLAN_BUILD_CONTEXT, PROCESS_POLL_INTERVAL, PROCESS_REAPER_THREAD, Plan, ProcessReaper, REAPER_DIAGNOSTIC_THREAD,
+        REAPER_POLL_INTERVAL, REAPER_START_CONTEXT, RunningWorker, SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM,
+        STDOUT_STREAM, SnapshotSource, StreamedChild, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM,
+        WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT, add_infrastructure_failure,
+        apply_filters, combine_captured_output, create_output_capture_with, display_duration, effective_worker_count, emit_buffered_to,
+        emit_label_to, execute_parallel, execute_parallel_with, execute_with_reaper, exit_byte, failed_child_handoffs, failed_handoffs,
+        failure_stops_launching, finish_capture, handoff_group, handoff_group_with_fallback, observe_streamed_child, panic_description,
+        parallel_failure_exit_code, parse_predicates, parse_target_kinds, poll_failed_handoffs_with, poll_process_exit,
+        poll_process_exit_with, poll_reaper, poll_reaper_with, reaper_diagnostic_job, reaper_is_finished, record_emitted_failure,
+        retain_after_reaper_observation, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, start_failed_handoff_reaper_with,
+        terminate_child_bounded, terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_process_with, wait_for_worker,
+        wait_for_worker_with, with_cleanup_failure, with_reaper_handoff, write_reaper_diagnostic_to,
     };
+    use crate::cli::CargoCli;
 
     fn invocation(argv: &[&str]) -> Invocation {
         Invocation {
@@ -1257,6 +1379,22 @@ mod tests {
         }
     }
 
+    fn ready_worker(index: usize, outcome: BufferedOutcome) -> RunningWorker {
+        let (sender, receiver) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            sender.send(outcome).expect("the scheduler keeps the receiver alive");
+        });
+        RunningWorker { index, receiver, thread }
+    }
+
+    fn buffered(result: InvocationResult) -> BufferedOutcome {
+        BufferedOutcome {
+            stdout: CapturedOutput::empty(),
+            stderr: CapturedOutput::empty(),
+            result,
+        }
+    }
+
     fn test_reaper() -> ProcessReaper {
         ProcessReaper::start().expect("the test process can start its reaper")
     }
@@ -1329,6 +1467,54 @@ mod tests {
         }
     }
 
+    struct FailingFlushWriter;
+
+    impl io::Write for FailingFlushWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("injected destination flush failure"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ExactReadSize {
+        bytes: Vec<u8>,
+        position: usize,
+        first_read_size: usize,
+    }
+
+    impl io::Read for ExactReadSize {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.position == 0 && buf.len() != self.first_read_size {
+                return Err(io::Error::other(format!("expected first read size {}", self.first_read_size)));
+            }
+            let remaining = &self.bytes[self.position..];
+            let count = remaining.len().min(buf.len());
+            buf[..count].copy_from_slice(&remaining[..count]);
+            self.position += count;
+            Ok(count)
+        }
+    }
+
+    impl io::Seek for ExactReadSize {
+        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            let io::SeekFrom::Start(position) = pos else {
+                return Err(io::Error::other("the test source only supports absolute seeks"));
+            };
+            self.position = usize::try_from(position).map_err(io::Error::other)?;
+            Ok(position)
+        }
+    }
+
+    impl SnapshotSource for ExactReadSize {
+        fn snapshot_len(&self) -> io::Result<u64> {
+            u64::try_from(self.bytes.len()).map_err(io::Error::other)
+        }
+    }
+
     fn sleeping_test_command() -> Command {
         let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
         let _ = command
@@ -1342,8 +1528,14 @@ mod tests {
     #[test]
     fn child_sleep_probe() {
         if let Some(duration) = std::env::var_os("CARGO_EACH_CHILD_SLEEP_MS") {
+            if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_STARTED_MARKER") {
+                std::fs::write(marker, b"started").expect("the parent passes a writable start marker path");
+            }
             let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
             thread::sleep(Duration::from_millis(millis));
+        }
+        if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_MARKER") {
+            std::fs::write(marker, b"completed").expect("the parent passes a writable marker path");
         }
     }
 
@@ -1361,6 +1553,7 @@ mod tests {
     #[test]
     fn worker_count_and_launch_policy_are_plan_bounded() {
         let four = NonZeroUsize::new(4).expect("literal four is nonzero");
+        assert_eq!(WORKER_READY_POLL_INTERVAL, Duration::from_millis(1));
         assert_eq!(effective_worker_count(four, 1), NonZeroUsize::MIN);
         assert_eq!(effective_worker_count(four, 8), four);
         assert!(failure_stops_launching(false, true));
@@ -1406,6 +1599,165 @@ mod tests {
             &mut keep_going_first,
         );
         assert_eq!(keep_going_first, Some(ExitCode::from(2)), "the first plan-order failure wins");
+    }
+
+    #[test]
+    fn parallel_scheduler_launches_emits_and_stops_by_policy() {
+        let plan = Plan {
+            invocations: (0..5).map(|index| invocation(&[&index.to_string()])).collect(),
+        };
+        let workers = NonZeroUsize::new(2).expect("literal two is nonzero");
+
+        let mut launched = Vec::new();
+        let mut emitted = Vec::new();
+        let code = execute_parallel_with(
+            &plan,
+            false,
+            workers,
+            None,
+            |index, _, _| {
+                launched.push(index);
+                let outcome = match index {
+                    0 => BufferedOutcome::infrastructure("first failure".to_owned()),
+                    1 => buffered(InvocationResult::Exited(successful_status())),
+                    _ => panic!("fail-fast must not launch later waves"),
+                };
+                Ok(ready_worker(index, outcome))
+            },
+            |invocation, _| {
+                emitted.push(invocation.argv[0].parse::<usize>().expect("numeric test invocation"));
+                Ok(())
+            },
+        )
+        .expect("emission succeeds");
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(launched, [0, 1], "only the initial wave may launch before its failure is observed");
+        assert_eq!(emitted, [0, 1], "each completed initial-wave outcome is emitted once");
+
+        launched.clear();
+        emitted.clear();
+        let code = execute_parallel_with(
+            &plan,
+            true,
+            workers,
+            None,
+            |index, _, _| {
+                launched.push(index);
+                let outcome = if index == 0 {
+                    BufferedOutcome::infrastructure("first failure".to_owned())
+                } else {
+                    buffered(InvocationResult::Exited(successful_status()))
+                };
+                Ok(ready_worker(index, outcome))
+            },
+            |invocation, _| {
+                emitted.push(invocation.argv[0].parse::<usize>().expect("numeric test invocation"));
+                Ok(())
+            },
+        )
+        .expect("emission succeeds");
+        assert_eq!(code, ExitCode::from(1));
+        assert_eq!(launched, [0, 1, 2, 3, 4]);
+        assert_eq!(emitted, [0, 1, 2, 3, 4], "completed outcomes must be cleared between waves");
+    }
+
+    #[test]
+    fn parallel_scheduler_stops_the_current_wave_after_a_spawn_failure() {
+        let plan = Plan {
+            invocations: (0..4).map(|index| invocation(&[&index.to_string()])).collect(),
+        };
+        let workers = NonZeroUsize::new(3).expect("literal three is nonzero");
+        let mut launched = Vec::new();
+        let mut emitted = Vec::new();
+        let code = execute_parallel_with(
+            &plan,
+            false,
+            workers,
+            None,
+            |index, _, _| {
+                launched.push(index);
+                assert_eq!(index, 0, "fail-fast spawn failure must stop the current wave immediately");
+                Err(io::Error::other("injected spawn failure"))
+            },
+            |invocation, _| {
+                emitted.push(invocation.argv[0].parse::<usize>().expect("numeric test invocation"));
+                Ok(())
+            },
+        )
+        .expect("spawn failures are emitted as invocation outcomes");
+
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(launched, [0], "fail-fast must not launch the rest of the current wave");
+        assert_eq!(emitted, [0], "the failed spawn is emitted exactly once");
+
+        launched.clear();
+        emitted.clear();
+        let code = execute_parallel_with(
+            &plan,
+            true,
+            workers,
+            None,
+            |index, _, _| {
+                launched.push(index);
+                if index == 0 {
+                    Err(io::Error::other("injected spawn failure"))
+                } else {
+                    Ok(ready_worker(index, buffered(InvocationResult::Exited(successful_status()))))
+                }
+            },
+            |invocation, _| {
+                emitted.push(invocation.argv[0].parse::<usize>().expect("numeric test invocation"));
+                Ok(())
+            },
+        )
+        .expect("keep-going retains spawn failures");
+
+        assert_eq!(code, ExitCode::from(1));
+        assert_eq!(launched, [0, 1, 2, 3]);
+        assert_eq!(emitted, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn parallel_scheduler_stops_after_a_worker_or_emission_failure() {
+        let plan = Plan {
+            invocations: (0..3).map(|index| invocation(&[&index.to_string()])).collect(),
+        };
+        let workers = NonZeroUsize::new(2).expect("literal two is nonzero");
+        let mut launched = Vec::new();
+        let code = execute_parallel_with(
+            &plan,
+            false,
+            workers,
+            None,
+            |index, _, _| {
+                launched.push(index);
+                let result = if index == 0 {
+                    InvocationResult::Exited(failed_status(7))
+                } else {
+                    InvocationResult::Exited(successful_status())
+                };
+                Ok(ready_worker(index, buffered(result)))
+            },
+            |_, _| Ok(()),
+        )
+        .expect("emission succeeds");
+        assert_eq!(code, ExitCode::from(7));
+        assert_eq!(launched, [0, 1]);
+
+        let error = execute_parallel_with(
+            &Plan {
+                invocations: vec![invocation(&["only"])],
+            },
+            false,
+            NonZeroUsize::MIN,
+            None,
+            |index, _, _| Ok(ready_worker(index, buffered(InvocationResult::Exited(successful_status())))),
+            |_, _| Err(io::Error::other("injected emission failure")),
+        )
+        .expect_err("emission I/O errors must propagate rather than panic");
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("injected emission failure\n"), "{rendered}");
+        assert!(rendered.contains("> failed to emit buffered command output"), "{rendered}");
     }
 
     #[test]
@@ -1538,6 +1890,49 @@ mod tests {
     }
 
     #[test]
+    fn process_polling_uses_the_bounded_ten_millisecond_cadence() {
+        assert_eq!(PROCESS_POLL_INTERVAL, Duration::from_millis(10));
+        let elapsed = Cell::new(Duration::ZERO);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        let process = FakeProcess {
+            observations: VecDeque::from([Ok(None), Ok(None), Ok(Some(successful_status()))]),
+            termination: None,
+        };
+        let outcome = wait_for_process_with(
+            process,
+            Some(Duration::from_millis(25)),
+            FakeProcess::observe,
+            FakeProcess::terminate,
+            "observe fake process",
+            || elapsed.get(),
+            |pause| {
+                pauses.borrow_mut().push(pause);
+                elapsed.set(elapsed.get() + pause.max(Duration::from_nanos(1)));
+            },
+        );
+        assert!(matches!(outcome.result, InvocationResult::Exited(status) if status.success()));
+        assert_eq!(*pauses.borrow(), [Duration::from_millis(10), Duration::from_millis(10)]);
+
+        let elapsed = Cell::new(Duration::ZERO);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        let process = FakeProcess {
+            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
+            termination: None,
+        };
+        let outcome = wait_for_process_with(
+            process,
+            None,
+            FakeProcess::observe,
+            FakeProcess::terminate,
+            "observe fake process",
+            || elapsed.get(),
+            |pause| pauses.borrow_mut().push(pause),
+        );
+        assert!(matches!(outcome.result, InvocationResult::Exited(status) if status.success()));
+        assert_eq!(*pauses.borrow(), [Duration::from_millis(10)]);
+    }
+
+    #[test]
     fn bounded_polling_stops_on_exit_error_or_deadline() {
         let mut exited = VecDeque::from([Ok(None), Ok(Some(successful_status()))]);
         let status = poll_process_exit(&mut exited, Duration::from_secs(1), |observations| {
@@ -1560,6 +1955,39 @@ mod tests {
                 .expect("deadline is not an I/O failure")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn termination_polling_caps_each_pause_and_observes_the_deadline() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        let mut polls = 0;
+        let mut control = ();
+        let result = poll_process_exit_with(
+            &mut control,
+            Duration::from_millis(25),
+            |()| {
+                polls += 1;
+                Ok(None)
+            },
+            || elapsed.get(),
+            |pause| {
+                pauses.borrow_mut().push(pause);
+                elapsed.set(elapsed.get() + pause.max(Duration::from_nanos(1)));
+            },
+        )
+        .expect("the deadline is not an I/O failure");
+        assert!(result.is_none());
+        assert_eq!(
+            *pauses.borrow(),
+            [
+                Duration::from_millis(10),
+                Duration::from_millis(10),
+                Duration::from_millis(5),
+                Duration::ZERO,
+            ]
+        );
+        assert_eq!(polls, 5);
     }
 
     #[test]
@@ -1624,6 +2052,109 @@ mod tests {
         })
         .expect_err("child-reaper startup failure must be returned");
         assert!(error.to_string().contains("injected child-reaper startup failure"));
+
+        let error = execute_with_reaper(
+            &Plan {
+                invocations: vec![invocation(&["probe"])],
+            },
+            false,
+            NonZeroUsize::MIN,
+            None,
+            || Err(io::Error::other("injected process reaper failure")),
+        )
+        .expect_err("execution must preserve reaper startup errors");
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("injected process reaper failure\n"), "{rendered}");
+        assert!(rendered.contains("> failed to start cargo-each process reaper"), "{rendered}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a process group")]
+    fn process_reaper_job_observes_children_before_returning() {
+        let mut jobs = Vec::new();
+        let reaper = ProcessReaper::start_with(|job| {
+            jobs.push(job);
+            Ok(())
+        })
+        .expect("capturing reaper jobs succeeds");
+        assert_eq!(jobs.len(), 2);
+
+        let temporary = tempfile::tempdir().expect("create marker directory");
+        let group_marker = temporary.path().join("group-completed");
+        let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
+        let _ = command
+            .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
+            .env("CARGO_EACH_CHILD_SLEEP_MS", "20")
+            .env("CARGO_EACH_CHILD_MARKER", &group_marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let group = spawn_group(command).expect("spawn marker process group");
+        reaper.handoff_group(group).expect("captured receiver remains connected");
+
+        let child_marker = temporary.path().join("child-completed");
+        let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
+        let child = command
+            .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
+            .env("CARGO_EACH_CHILD_SLEEP_MS", "20")
+            .env("CARGO_EACH_CHILD_MARKER", &child_marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn marker child");
+        reaper.handoff_child(child).expect("captured receiver remains connected");
+        drop(reaper);
+
+        let group_job = jobs.remove(0);
+        group_job();
+        assert_eq!(
+            std::fs::read(&group_marker).expect("group reaper waits for marker process"),
+            b"completed"
+        );
+        let child_job = jobs.remove(0);
+        child_job();
+        assert_eq!(
+            std::fs::read(&child_marker).expect("child reaper waits for marker process"),
+            b"completed"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a child process")]
+    fn child_reaper_job_waits_for_its_child() {
+        let mut jobs = Vec::new();
+        let reaper = ProcessReaper::start_with(|job| {
+            jobs.push(job);
+            Ok(())
+        })
+        .expect("capturing reaper jobs succeeds");
+
+        let temporary = tempfile::tempdir().expect("create marker directory");
+        let started_marker = temporary.path().join("child-started");
+        let marker = temporary.path().join("child-completed");
+        let child = Command::new(std::env::current_exe().expect("the test binary knows its path"))
+            .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
+            .env("CARGO_EACH_CHILD_SLEEP_MS", "1000")
+            .env("CARGO_EACH_CHILD_STARTED_MARKER", &started_marker)
+            .env("CARGO_EACH_CHILD_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn marker child");
+        reaper.handoff_child(child).expect("captured receiver remains connected");
+        drop(reaper);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !started_marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(started_marker.exists(), "the child must report that its timed sleep has started");
+        assert!(!marker.exists(), "the child must still be running before its reaper job starts");
+        let child_job = jobs.pop().expect("child reaper job is captured last");
+        child_job();
+        assert_eq!(
+            std::fs::read(&marker).expect("child reaper job must wait for the marker process"),
+            b"completed"
+        );
     }
 
     #[test]
@@ -1702,6 +2233,92 @@ mod tests {
         worker.join().expect("the finite fake reaper exits");
         assert_eq!(collected.load(Ordering::SeqCst), 2);
         assert_eq!(reports.load(Ordering::SeqCst), 1, "each failing group is reported once");
+    }
+
+    #[test]
+    fn reaper_loops_pause_between_pending_observations() {
+        assert_eq!(REAPER_POLL_INTERVAL, Duration::from_millis(10));
+        let retained = Mutex::new(vec![1_usize]);
+        let running = AtomicBool::new(true);
+        let pauses = Cell::new(0);
+        poll_failed_handoffs_with(
+            &retained,
+            &running,
+            |remaining| {
+                *remaining -= 1;
+                Ok((*remaining == 0).then(successful_status))
+            },
+            |_| panic!("the fake observation succeeds"),
+            |pause| {
+                assert_eq!(pause, Duration::from_millis(10));
+                pauses.set(pauses.get() + 1);
+            },
+        );
+        assert_eq!(pauses.get(), 0, "a group collected on its first observation needs no pause");
+
+        retained.lock().expect("test mutex is not poisoned").push(2);
+        running.store(true, Ordering::Release);
+        poll_failed_handoffs_with(
+            &retained,
+            &running,
+            |remaining| {
+                *remaining -= 1;
+                Ok((*remaining == 0).then(successful_status))
+            },
+            |_| panic!("the fake observation succeeds"),
+            |pause| {
+                assert_eq!(pause, Duration::from_millis(10));
+                pauses.set(pauses.get() + 1);
+            },
+        );
+        assert_eq!(pauses.get(), 1);
+
+        let (sender, receiver) = mpsc::channel();
+        sender.send(2_usize).expect("receiver is connected");
+        drop(sender);
+        let reaper_pauses = Cell::new(0);
+        poll_reaper_with(
+            &receiver,
+            |remaining| {
+                *remaining -= 1;
+                Ok((*remaining == 0).then(successful_status))
+            },
+            |_| panic!("the fake observation succeeds"),
+            |pause| {
+                assert_eq!(pause, Duration::from_millis(10));
+                reaper_pauses.set(reaper_pauses.get() + 1);
+            },
+        );
+        assert_eq!(reaper_pauses.get(), 1);
+    }
+
+    #[test]
+    fn reaper_only_finishes_after_disconnect_and_collection() {
+        assert!(!reaper_is_finished(true, true));
+        assert!(!reaper_is_finished(true, false));
+        assert!(!reaper_is_finished(false, false));
+        assert!(reaper_is_finished(false, true));
+    }
+
+    #[test]
+    fn polling_reaper_exits_when_an_empty_channel_disconnects() {
+        let (sender, receiver) = mpsc::channel::<usize>();
+        drop(sender);
+        let (done_sender, done_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            poll_reaper_with(
+                &receiver,
+                |_| panic!("an empty channel has no retained values"),
+                |_| panic!("an empty channel has no observation failures"),
+                |_| {},
+            );
+            done_sender.send(()).expect("the test keeps the completion receiver alive");
+        });
+
+        assert!(
+            done_receiver.recv_timeout(Duration::from_millis(100)).is_ok(),
+            "the reaper must stop after observing that its empty input channel disconnected"
+        );
     }
 
     #[test]
@@ -2007,7 +2624,10 @@ mod tests {
                 Err("spawn must not be reached".to_owned())
             },
         );
-        assert!(infrastructure_message(outcome).contains("injected capture setup failure"));
+        assert_eq!(
+            infrastructure_message(outcome),
+            "failed to prepare child stdout capture: injected capture setup failure"
+        );
         assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
 
         let stderr_failure = run_captured_with(
@@ -2036,6 +2656,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem-backed temporary files; Miri isolation forbids them")]
+    fn output_capture_creation_propagates_each_filesystem_failure() {
+        let create_error = create_output_capture_with(
+            || Err(io::Error::other("injected create failure")),
+            |_| panic!("reopen must not follow create failure"),
+        )
+        .expect_err("create failure propagates");
+        assert_eq!(create_error.to_string(), "injected create failure");
+
+        let temporary = tempfile::NamedTempFile::new().expect("create test temporary file");
+        let path = temporary.path().to_owned();
+        drop(temporary);
+        let mut calls = 0;
+        let first_reopen = create_output_capture_with(
+            || tempfile::NamedTempFile::new_in(path.parent().expect("temporary path has a parent")),
+            |_| {
+                calls += 1;
+                Err(io::Error::other("injected first reopen failure"))
+            },
+        )
+        .expect_err("first reopen failure propagates");
+        assert_eq!(first_reopen.to_string(), "injected first reopen failure");
+        assert_eq!(calls, 1);
+
+        let mut calls = 0;
+        let second_reopen = create_output_capture_with(tempfile::NamedTempFile::new, |temporary| {
+            calls += 1;
+            if calls == 2 {
+                Err(io::Error::other("injected second reopen failure"))
+            } else {
+                temporary.reopen()
+            }
+        })
+        .expect_err("second reopen failure propagates");
+        assert_eq!(second_reopen.to_string(), "injected second reopen failure");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
     fn capture_finalization_and_emission_use_a_finite_snapshot() {
         let source = FaultySnapshot {
             cursor: io::Cursor::new(b"snapshot-later".to_vec()),
@@ -2046,6 +2705,10 @@ mod tests {
         };
         let mut captured = finish_capture(Box::new(source), "stdout");
         assert!(captured.failure.is_none());
+        let CapturedOutput::Snapshot { source, .. } = &mut captured.output else {
+            panic!("successful finalization retains the snapshot");
+        };
+        assert_eq!(source.stream_position().expect("snapshot position"), 0);
         assert_eq!(output_bytes(&mut captured.output), b"snapshot");
 
         let failed_length = finish_capture(
@@ -2116,7 +2779,10 @@ mod tests {
             result: InvocationResult::Exited(successful_status()),
         };
         emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut Vec::new(), &mut Vec::new()).expect("destinations remain writable");
-        assert!(infrastructure_message(outcome).contains("injected snapshot read failure"));
+        assert_eq!(
+            infrastructure_message(outcome),
+            "failed to read captured child stdout: injected snapshot read failure"
+        );
 
         let mut stderr_outcome = BufferedOutcome {
             stdout: CapturedOutput::empty(),
@@ -2134,14 +2800,92 @@ mod tests {
         };
         emit_buffered_to(&invocation(&["probe"]), &mut stderr_outcome, &mut Vec::new(), &mut Vec::new())
             .expect("destinations remain writable");
-        assert!(infrastructure_message(stderr_outcome).contains("injected snapshot read failure"));
+        assert_eq!(
+            infrastructure_message(stderr_outcome),
+            "failed to read captured child stderr: injected snapshot read failure"
+        );
+
+        let failing_source = || CapturedOutput::Snapshot {
+            source: Box::new(FaultySnapshot {
+                cursor: io::Cursor::new(Vec::new()),
+                reported_length: 1,
+                fail_length: false,
+                fail_seek: false,
+                fail_read: true,
+            }),
+            length: 1,
+        };
+        let mut both = BufferedOutcome {
+            stdout: failing_source(),
+            stderr: failing_source(),
+            result: InvocationResult::Infrastructure("process failed".to_owned()),
+        };
+        emit_buffered_to(&invocation(&["probe"]), &mut both, &mut Vec::new(), &mut Vec::new())
+            .expect("source failures become an outcome rather than an emission error");
+        assert_eq!(
+            infrastructure_message(both),
+            "process failed; failed to read captured child stdout: injected snapshot read failure; failed to read captured child stderr: injected snapshot read failure"
+        );
 
         let mut short = CapturedOutput::Snapshot {
             source: Box::new(io::Cursor::new(Vec::new())),
             length: 1,
         };
         let error = short.emit_to(&mut Vec::new()).expect_err("short snapshots are reported");
-        assert!(matches!(error, OutputEmitError::Source(error) if error.kind() == io::ErrorKind::UnexpectedEof));
+        assert!(matches!(error, OutputEmitError::Source(error)
+                if error.kind() == io::ErrorKind::UnexpectedEof && error.to_string() == SNAPSHOT_EOF_MESSAGE));
+
+        let mut failed_seek = CapturedOutput::Snapshot {
+            source: Box::new(FaultySnapshot {
+                cursor: io::Cursor::new(Vec::new()),
+                reported_length: 0,
+                fail_length: false,
+                fail_seek: true,
+                fail_read: false,
+            }),
+            length: 0,
+        };
+        let error = failed_seek.emit_to(&mut Vec::new()).expect_err("snapshot seek failures propagate");
+        assert!(matches!(error, OutputEmitError::Source(error) if error.to_string() == "injected snapshot seek failure"));
+
+        let bytes = vec![b'x'; 8192];
+        let mut exact_buffer = CapturedOutput::Snapshot {
+            source: Box::new(ExactReadSize {
+                bytes: bytes.clone(),
+                position: 0,
+                first_read_size: 8192,
+            }),
+            length: 8192,
+        };
+        let mut destination = Vec::new();
+        exact_buffer
+            .emit_to(&mut destination)
+            .expect("the first read uses the complete buffer");
+        assert_eq!(destination, bytes);
+    }
+
+    #[test]
+    fn timed_out_capture_source_failure_preserves_timeout_context() {
+        let mut outcome = BufferedOutcome {
+            stdout: CapturedOutput::Snapshot {
+                source: Box::new(FaultySnapshot {
+                    cursor: io::Cursor::new(Vec::new()),
+                    reported_length: 1,
+                    fail_length: false,
+                    fail_seek: false,
+                    fail_read: true,
+                }),
+                length: 1,
+            },
+            stderr: CapturedOutput::empty(),
+            result: InvocationResult::TimedOut(Duration::from_millis(10)),
+        };
+        emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut Vec::new(), &mut Vec::new())
+            .expect("source failures become an outcome rather than an emission error");
+        assert_eq!(
+            infrastructure_message(outcome),
+            "invocation timed out after 10ms; failed to read captured child stdout: injected snapshot read failure"
+        );
     }
 
     #[test]
@@ -2177,6 +2921,29 @@ mod tests {
             .expect_err("stderr destination failure propagates");
         assert!(error.to_string().contains("injected destination write failure"));
 
+        let mut flush_failure = BufferedOutcome {
+            stdout: CapturedOutput::empty(),
+            stderr: CapturedOutput::empty(),
+            result: InvocationResult::Exited(successful_status()),
+        };
+        let error = emit_buffered_to(
+            &invocation(&["probe"]),
+            &mut flush_failure,
+            &mut FailingFlushWriter,
+            &mut Vec::new(),
+        )
+        .expect_err("stdout flush failure propagates");
+        assert_eq!(error.to_string(), "injected destination flush failure");
+
+        let mut success = BufferedOutcome {
+            stdout: CapturedOutput::empty(),
+            stderr: CapturedOutput::empty(),
+            result: InvocationResult::Exited(successful_status()),
+        };
+        emit_buffered_to(&invocation(&["probe"]), &mut success, &mut Vec::new(), &mut Vec::new())
+            .expect("empty successful output emits cleanly");
+        assert!(matches!(success.result, InvocationResult::Exited(status) if status.success()));
+
         for result in [
             InvocationResult::TimedOut(Duration::from_millis(10)),
             InvocationResult::Infrastructure("infrastructure".to_owned()),
@@ -2190,6 +2957,44 @@ mod tests {
             emit_buffered_to(&invocation(&["probe"]), &mut diagnostic, &mut Vec::new(), &mut stderr).expect("memory output succeeds");
             assert!(!stderr.is_empty());
         }
+
+        for result in [
+            InvocationResult::TimedOut(Duration::from_millis(10)),
+            InvocationResult::Infrastructure("infrastructure".to_owned()),
+        ] {
+            let mut diagnostic = buffered(result);
+            let error = emit_buffered_to(&invocation(&["probe"]), &mut diagnostic, &mut Vec::new(), &mut FailingWriter)
+                .expect_err("diagnostic write failures propagate");
+            assert_eq!(error.to_string(), "injected destination write failure");
+        }
+
+        let mut labeled = buffered(InvocationResult::Exited(successful_status()));
+        let mut stderr = Vec::new();
+        emit_buffered_to(
+            &Invocation {
+                label: Some("alpha".to_owned()),
+                argv: vec!["probe".to_owned()],
+                work_dir: None,
+            },
+            &mut labeled,
+            &mut Vec::new(),
+            &mut stderr,
+        )
+        .expect("label emission succeeds");
+        assert_eq!(stderr, b"cargo each: alpha\n");
+
+        let labeled = Invocation {
+            label: Some("alpha".to_owned()),
+            argv: vec!["probe".to_owned()],
+            work_dir: None,
+        };
+        let error = emit_label_to(&labeled, &mut FailingWriter).expect_err("label write failures propagate");
+        assert_eq!(error.to_string(), "injected destination write failure");
+
+        let mut labeled_outcome = buffered(InvocationResult::Exited(successful_status()));
+        let error = emit_buffered_to(&labeled, &mut labeled_outcome, &mut Vec::new(), &mut FailingWriter)
+            .expect_err("buffered emission propagates label write failures");
+        assert_eq!(error.to_string(), "injected destination write failure");
     }
 
     #[test]
@@ -2265,6 +3070,39 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_a_worker_yields_until_an_outcome_is_ready() {
+        let (sender, receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            release_receiver.recv().expect("the test releases the worker");
+            sender
+                .send(buffered(InvocationResult::Exited(successful_status())))
+                .expect("the scheduler keeps the outcome receiver alive");
+        });
+        let mut workers = vec![RunningWorker {
+            index: 9,
+            receiver,
+            thread,
+        }];
+        let pauses = Cell::new(0);
+        let mut release_sender = Some(release_sender);
+        let outcome = wait_for_worker_with(&mut workers, |pause| {
+            assert_eq!(pause, WORKER_READY_POLL_INTERVAL);
+            pauses.set(pauses.get() + 1);
+            if let Some(sender) = release_sender.take() {
+                sender.send(()).expect("release the worker once");
+            }
+            thread::yield_now();
+        })
+        .expect("the released worker reports an outcome");
+
+        assert_eq!(outcome.index, 9);
+        assert!(pauses.get() >= 1);
+        assert!(workers.is_empty());
+        assert!(!outcome.outcome.result.failed());
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "spawns a rustc subprocess")]
     fn worker_spawn_errors_are_local_and_scheduler_visible() {
         let reaper = test_reaper();
@@ -2279,6 +3117,17 @@ mod tests {
     }
 
     #[test]
+    fn worker_thread_creation_failure_is_returned_without_running_the_job() {
+        let error = spawn_worker_with(7, invocation(&["rustc", "--version"]), None, test_reaper(), |name, _job| {
+            assert_eq!(name, "cargo-each-worker-7");
+            Err(io::Error::other("injected thread creation failure"))
+        })
+        .expect_err("thread creation failure propagates");
+
+        assert_eq!(error.to_string(), "injected thread creation failure");
+    }
+
+    #[test]
     fn helper_diagnostics_preserve_cleanup_and_reaper_context() {
         assert_eq!(with_cleanup_failure("primary".to_owned(), &Ok::<_, io::Error>(())), "primary");
         assert_eq!(
@@ -2290,6 +3139,40 @@ mod tests {
         assert_eq!(panic_description(&"borrowed panic"), "borrowed panic");
         assert_eq!(panic_description(&"owned panic".to_owned()), "owned panic");
         assert_eq!(panic_description(&7_u8), "non-string panic payload");
+        assert_eq!(CHILD_OBSERVATION, "observe child process");
+        assert_eq!(CHILD_LEADER_OBSERVATION, "observe child process leader");
+        assert_eq!(STDOUT_STREAM, "stdout");
+        assert_eq!(STDERR_STREAM, "stderr");
+        assert_eq!(PROCESS_REAPER_THREAD, "cargo-each-process-reaper");
+        assert_eq!(FALLBACK_GROUP_REAPER_THREAD, "cargo-each-fallback-reaper");
+        assert_eq!(FALLBACK_CHILD_REAPER_THREAD, "cargo-each-fallback-child-reaper");
+        assert_eq!(REAPER_DIAGNOSTIC_THREAD, "cargo-each-reaper-diagnostic");
+        assert_eq!(
+            DISCONNECTED_REAPER_MESSAGE,
+            "process reaper channel disconnected; a persistent fallback retained the wait handle"
+        );
+        assert_eq!(SELECTION_READ_CONTEXT, "failed to read package selection");
+        assert_eq!(EXECUTION_CONFIGURATION_CONTEXT, "invalid execution configuration");
+        assert_eq!(WORKSPACE_RUST_VERSION_CONTEXT, "failed to resolve workspace Rust version");
+        assert_eq!(PLAN_BUILD_CONTEXT, "failed to build command plan");
+        assert_eq!(REAPER_START_CONTEXT, "failed to start cargo-each process reaper");
+
+        let reported = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&reported);
+        reaper_diagnostic_job("observation failed".to_owned(), move |message| {
+            *captured.lock().expect("diagnostic capture mutex is not poisoned") = Some(message.to_owned());
+        })();
+        assert_eq!(
+            *reported.lock().expect("diagnostic capture mutex is not poisoned"),
+            Some("observation failed".to_owned())
+        );
+
+        let mut diagnostic = Vec::new();
+        write_reaper_diagnostic_to("observation failed", &mut diagnostic).expect("memory diagnostic succeeds");
+        assert_eq!(
+            diagnostic,
+            b"cargo each: process reaper failed to observe a retained wait handle: observation failed\n"
+        );
     }
 
     #[test]
@@ -2321,6 +3204,17 @@ mod tests {
             rendered.contains("invalid filter expression `feature:`: empty feature name"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn invalid_exclude_filter_propagates_through_filter_application() {
+        let CargoCli::Each(args) = CargoCli::try_parse_from(["cargo", "each", "--exclude-filter", "feature:", "--", "echo"])
+            .expect("the parser leaves expression validation to execution");
+        let mut members = Vec::new();
+
+        let error = apply_filters(&mut members, &args).expect_err("invalid exclusion expression");
+
+        assert!(error.to_string().contains("empty feature name"), "{error}");
     }
 
     #[test]

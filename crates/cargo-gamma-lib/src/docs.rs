@@ -71,8 +71,8 @@ fn options() -> String {
     let command = <crate::commands::Cli as clap::CommandFactory>::command();
     let mut out = String::new();
 
-    // The globals are declared on the root rather than on any subcommand, so walking the
-    // subcommands alone would silently omit the two options that apply to all of them.
+    // Globals are declared on the root rather than on any subcommand, so walking the subcommands
+    // alone would silently omit the options that apply to all of them.
     let _ = writeln!(out, "### Accepted by every subcommand\n");
 
     for (heading, arguments) in grouped(&command) {
@@ -94,42 +94,51 @@ fn options() -> String {
     }
 
     for sub in command.get_subcommands() {
-        let _ = writeln!(out, "### `gamma {}`\n", sub.get_name());
+        render_options(&mut out, &format!("gamma {}", sub.get_name()), sub);
 
-        if let Some(about) = sub.get_about() {
-            let _ = writeln!(out, "{about}\n");
-        }
-
-        let _ = writeln!(out, "```text\n{}\n```\n", usage(sub));
-
-        for (heading, arguments) in grouped(sub) {
-            let _ = writeln!(out, "**{heading}**\n");
-            let _ = writeln!(out, "| Option | Value | What it does |");
-            let _ = writeln!(out, "| --- | --- | --- |");
-
-            for argument in arguments {
-                let _ = writeln!(
-                    out,
-                    "| {} | {} | {} |",
-                    spelling(argument),
-                    value_of(argument),
-                    escape(&help_of(argument))
-                );
-            }
-
-            out.push('\n');
+        for nested in sub.get_subcommands() {
+            render_options(&mut out, &format!("gamma {} {}", sub.get_name(), nested.get_name()), nested);
         }
     }
 
     out.trim_end().to_owned()
 }
 
-/// The usage line clap would print for `sub`, spelled the way a user types it.
-fn usage(sub: &clap::Command) -> String {
+fn render_options(out: &mut String, invocation: &str, command: &clap::Command) {
+    let _ = writeln!(out, "### `{invocation}`\n");
+
+    if let Some(about) = command.get_about() {
+        let _ = writeln!(out, "{about}\n");
+    }
+
+    let _ = writeln!(out, "```text\n{}\n```\n", usage(invocation, command));
+
+    for (heading, arguments) in grouped(command) {
+        let _ = writeln!(out, "**{heading}**\n");
+        let _ = writeln!(out, "| Option | Value | What it does |");
+        let _ = writeln!(out, "| --- | --- | --- |");
+
+        for argument in arguments {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} |",
+                spelling(argument),
+                value_of(argument),
+                escape(&help_of(argument))
+            );
+        }
+
+        out.push('\n');
+    }
+}
+
+/// The usage line clap would print for `sub`, spelled with its complete command path.
+fn usage(invocation: &str, sub: &clap::Command) -> String {
     let mut sub = sub.clone();
     let rendered = sub.render_usage().to_string().replace("Usage: ", "");
+    let suffix = rendered.strip_prefix(sub.get_name()).unwrap_or(&rendered);
 
-    format!("cargo gamma {rendered}")
+    format!("cargo {invocation}{suffix}")
 }
 
 /// The arguments of `sub`, grouped by help heading in the order the headings first appear.
@@ -303,10 +312,12 @@ fn question(family: &str) -> &'static str {
         "assign" => "Does this compound assignment's operator matter?",
         "assign_value" => "Is the value assigned here ever read in a way that would notice?",
         "logical" => "Is this `&&` really an `&&`?",
+        "bool_expr" => "Does anything observe this boolean value's polarity?",
         "cond" => "Does anything depend on this branch being taken?",
         "match_guard" => "Does anything depend on this guard being right?",
         "match_arm" => "Is this arm reachable, and does anything notice when it stops matching?",
         "loop" => "Does this `break` or `continue` carry the loop's meaning?",
+        "return_value" => "Does this early return carry the value its caller needs?",
         "range" => "Is this bound inclusive on purpose?",
         "literal" => "Does this constant's exact value matter?",
         "expr" => "Would an off-by-one here be caught?",
@@ -315,9 +326,15 @@ fn question(family: &str) -> &'static str {
         "struct_field" => "Does this field's value matter, or is the default good enough?",
         "option" => "Is the present case distinguished from the absent one?",
         "result" => "Is success distinguished from failure?",
+        "try" => "Is graceful propagation distinguished from a panic?",
+        "fallback" => "Does the absent or error path produce the right fallback value?",
         "iter" => "Does anything observe that this was ordered, deduplicated, or taken from one end?",
         "string" => "Does the prefix, the case, or the trimmed end actually matter?",
         "collection" => "Does every element of this literal earn its place?",
+        "call" => "Does this call's execution matter?",
+        "call_result" => "Does this call's result matter independently of its side effects?",
+        "parameter" => "Does this function parameter contribute to behavior?",
+        "regex" => "Does this pattern's matching semantics matter?",
         _ => "",
     }
 }

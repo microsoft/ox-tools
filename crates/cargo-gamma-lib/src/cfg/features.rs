@@ -41,14 +41,18 @@ use crate::{HashMap, HashSet};
 /// interest, and guessing at them would cost a full resolve.
 ///
 /// ```rust,no_run
-/// # use cargo_gamma_lib::internals::cfg::features::enabled;
-/// # use cargo_gamma_lib::internals::commands::FeatureArgs;
-/// # fn example(metadata: &cargo_metadata::Metadata) {
+/// # #[cfg(feature = "internals")]
+/// # fn main() {
+/// use cargo_gamma_lib::internals::cfg::features::enabled;
+/// use cargo_gamma_lib::internals::commands::FeatureArgs;
+/// # let metadata: &cargo_metadata::Metadata = todo!();
 /// let features = enabled(metadata, &FeatureArgs::default());
 ///
 /// // Every member is present, even one with no features at all.
 /// assert!(features.contains_key("my-crate"));
 /// # }
+/// # #[cfg(not(feature = "internals"))]
+/// # fn main() {}
 /// ```
 #[must_use]
 pub fn enabled(metadata: &Metadata, args: &FeatureArgs) -> HashMap<String, Vec<String>> {
@@ -163,9 +167,10 @@ fn propagate_worklist(members: &[&Package], renames: &Renames, on: &mut HashMap<
     }
 
     while let Some((package_name, feature)) = queue.pop_front() {
-        let Some(package) = packages.get(package_name.as_str()).copied() else {
-            continue;
-        };
+        let package = packages
+            .get(package_name.as_str())
+            .copied()
+            .expect("the worklist only receives features for workspace members");
 
         // A feature's own entries: `foo = ["bar", "dep/baz"]`.
         if let Some(entries) = package.features.get(&feature) {
@@ -205,6 +210,7 @@ fn apply_worklist(entry: &str, owner: &str, renames: &Renames, on: &mut HashMap<
 /// Retained for the test that exercises cycle termination; the worklist above is what `enabled`
 /// actually calls.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn propagate(members: &[&Package], renames: &Renames, on: &mut HashMap<String, HashSet<String>>) -> bool {
     let mut changed = false;
 
@@ -287,6 +293,7 @@ fn renames(members: &[&Package]) -> Renames {
 /// The token before the slash is whatever `owner`'s manifest calls the dependency, so it is
 /// resolved through that manifest's renames before anything is looked up.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn apply(entry: &str, owner: &str, renames: &Renames, on: &mut HashMap<String, HashSet<String>>) -> bool {
     if entry.starts_with("dep:") {
         return false;

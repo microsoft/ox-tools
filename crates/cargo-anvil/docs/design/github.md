@@ -914,10 +914,10 @@ users that need additional preparation take ownership of the generated reusable
 implementation workflow and add the preparation there. The generated composite
 actions remain implementation details rather than a separately supported API.
 
-Prerequisite validation remains read-only. For the root-MSRV fallback, it
-requires rustup and verifies the exact MSRV toolchain is already installed
-before running Cargo metadata, preventing validation from auto-installing a
-compiler.
+Prerequisite validation remains read-only. The generated recipe entry point
+exports `RUSTUP_AUTO_INSTALL=0`, so a missing selected toolchain fails
+validation instead of being downloaded implicitly. Setup recipes install
+toolchains explicitly through rustup.
 
 ## 8. Caching
 

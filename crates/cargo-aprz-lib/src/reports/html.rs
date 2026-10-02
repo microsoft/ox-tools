@@ -37,6 +37,15 @@ use strum::IntoEnumIterator;
 
 const FERRIS_FAVICON: &str = "data:image/svg+xml,%3Csvg viewBox='0 0 1200 800' xmlns='http://www.w3.org/2000/svg'%3E%3Cg%3E%3Cg transform='matrix(1,0,0,1,654.172,668.359)'%3E%3Cpath d='M0,-322.648C-114.597,-322.648 -218.172,-308.869 -296.172,-286.419L-296.172,-291.49C-374.172,-266.395 -423.853,-231.531 -423.853,-192.984C-423.853,-186.907 -422.508,-180.922 -420.15,-175.053L-428.134,-160.732C-428.134,-160.732 -434.547,-152.373 -423.199,-134.733C-413.189,-119.179 -363.035,-58.295 -336.571,-26.413C-325.204,-10.065 -317.488,0 -316.814,-0.973C-315.753,-2.516 -323.878,-33.202 -346.453,-68.215C-356.986,-87.02 -369.811,-111.934 -377.361,-130.335C-356.28,-116.993 -328.172,-104.89 -296.172,-94.474L-296.172,-94.633C-218.172,-72.18 -114.597,-58.404 0,-58.404C131.156,-58.404 248.828,-76.45 327.828,-104.895L327.828,-276.153C248.828,-304.6 131.156,-322.648 0,-322.648' fill='%23a52b00'/%3E%3C/g%3E%3Cg transform='matrix(1,0,0,1,1177.87,277.21)'%3E%3Cpath d='M0,227.175L-88.296,162.132C-89.126,159.237 -89.956,156.345 -90.812,153.474L-61.81,111.458C-58.849,107.184 -58.252,101.629 -60.175,96.755C-62.1,91.905 -66.311,88.428 -71.292,87.576L-120.335,79.255C-122.233,75.376 -124.225,71.557 -126.224,67.771L-105.62,20.599C-103.501,15.793 -103.947,10.209 -106.759,5.848C-109.556,1.465 -114.31,-1.094 -119.376,-0.895L-169.146,0.914C-171.723,-2.442 -174.34,-5.766 -177.012,-9.032L-165.574,-59.592C-164.415,-64.724 -165.876,-70.1 -169.453,-73.83C-173.008,-77.546 -178.175,-79.084 -183.089,-77.88L-231.567,-65.961C-234.707,-68.736 -237.897,-71.474 -241.126,-74.157L-239.381,-126.064C-239.193,-131.318 -241.643,-136.311 -245.849,-139.227C-250.053,-142.161 -255.389,-142.603 -259.987,-140.423L-305.213,-118.921C-308.853,-121.011 -312.515,-123.081 -316.218,-125.084L-324.209,-176.232C-325.021,-181.413 -328.355,-185.816 -333.024,-187.826C-337.679,-189.848 -343.014,-189.193 -347.101,-186.116L-387.422,-155.863C-391.392,-157.181 -395.38,-158.446 -399.418,-159.655L-416.798,-208.159C-418.564,-213.104 -422.64,-216.735 -427.608,-217.756C-432.561,-218.768 -437.656,-217.053 -441.091,-213.217L-475.029,-175.246C-479.133,-175.717 -483.239,-176.147 -487.356,-176.505L-513.564,-220.659C-516.22,-225.131 -520.908,-227.852 -525.961,-227.852C-531.002,-227.852 -535.7,-225.131 -538.333,-220.659L-564.547,-176.505C-568.666,-176.147 -572.791,-175.717 -576.888,-175.246L-610.831,-213.217C-614.268,-217.053 -619.382,-218.768 -624.318,-217.756C-629.284,-216.721 -633.363,-213.104 -635.124,-208.159L-652.517,-159.655C-656.544,-158.446 -660.534,-157.173 -664.514,-155.863L-704.822,-186.116C-708.92,-189.204 -714.254,-189.857 -718.92,-187.826C-723.57,-185.816 -726.917,-181.413 -727.723,-176.232L-735.72,-125.084C-739.42,-123.081 -743.083,-121.022 -746.734,-118.921L-791.956,-140.423C-796.548,-142.612 -801.908,-142.161 -806.091,-139.227C-810.292,-136.311 -812.747,-131.318 -812.557,-126.064L-810.821,-74.157C-814.04,-71.474 -817.224,-68.736 -820.379,-65.961L-868.849,-77.88C-873.774,-79.075 -878.935,-77.546 -882.499,-73.83C-886.084,-70.1 -887.538,-64.724 -886.384,-59.592L-874.969,-9.032C-877.618,-5.753 -880.239,-2.442 -882.808,0.914L-932.579,-0.895C-937.602,-1.043 -942.396,1.465 -945.202,5.848C-948.014,10.209 -948.439,15.793 -946.348,20.599L-925.729,67.771C-927.732,71.557 -929.721,75.376 -931.635,79.255L-980.675,87.576C-985.657,88.417 -989.858,91.892 -991.795,96.755C-993.72,101.629 -993.095,107.184 -990.156,111.458L-961.146,153.474C-961.37,154.215 -961.576,154.964 -961.799,155.707L-1043.82,242.829C-1043.82,242.829 -1056.38,252.68 -1038.09,275.831C-1021.95,296.252 -939.097,377.207 -895.338,419.62C-876.855,441.152 -864.195,454.486 -862.872,453.332C-860.784,451.5 -871.743,412.326 -908.147,366.362C-936.207,325.123 -972.625,261.696 -964.086,254.385C-964.086,254.385 -954.372,242.054 -934.882,233.178C-934.169,233.749 -935.619,232.613 -934.882,233.178C-934.882,233.178 -523.568,422.914 -142.036,236.388C-98.452,228.571 -72.068,251.917 -72.068,251.917C-62.969,257.193 -86.531,322.412 -105.906,365.583C-132.259,414.606 -136.123,452.859 -133.888,454.185C-132.479,455.027 -122.89,440.438 -109.214,417.219C-75.469,370.196 -11.675,280.554 0,258.781C13.239,234.094 0,227.175 0,227.175' fill='%23f74c00'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E";
 
+fn crate_description(c: &ReportableCrate) -> String {
+    c.metrics
+        .iter()
+        .find(|m| m.name() == "crate.description")
+        .and_then(|m| m.value.as_ref())
+        .map(common::format_metric_value)
+        .unwrap_or_default()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "HTML generation is inherently sequential; splitting would reduce readability"
@@ -44,14 +53,6 @@ const FERRIS_FAVICON: &str = "data:image/svg+xml,%3Csvg viewBox='0 0 1200 800' x
 pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>, writer: &mut W) -> Result<()> {
     let has_appraisals = crates.iter().any(|c| c.appraisal.is_some());
     let total = crates.len();
-    let crate_description = |c: &ReportableCrate| -> String {
-        c.metrics
-            .iter()
-            .find(|m| m.name() == "crate.description")
-            .and_then(|m| m.value.as_ref())
-            .map(common::format_metric_value)
-            .unwrap_or_default()
-    };
     let crates_by_risk = |risk: Risk| -> Vec<(&str, String, String, f64)> {
         let mut v: Vec<_> = crates
             .iter()
@@ -115,7 +116,6 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>
             .first()
             .or_else(|| medium_risk_crates.first())
             .or_else(|| low_risk_crates.first())
-            .or_else(|| not_evaluated_crates.first())
             .map(|(name, version, _, _)| crate_anchor_id(name, version))
     } else {
         None
@@ -152,21 +152,24 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>
         let card_id = format!("card-{crate_index}");
         writeln!(writer, "      <div class=\"tabs\">")?;
         writeln!(writer, "        <div class=\"tab-nav\">")?;
-        let mut tab_index = 0u32;
+        let mut has_active_tab = has_appraisal_tab;
         if has_appraisal_tab {
             writeln!(
                 writer,
                 "          <button class=\"tab-btn active\" data-tab=\"{card_id}-appraisal\" onclick=\"switchTab(this)\">Appraisal</button>"
             )?;
-            tab_index += 1;
         }
         for cat in &crate_categories {
-            let active = if tab_index == 0 { " active" } else { "" };
+            let active = if has_active_tab {
+                ""
+            } else {
+                has_active_tab = true;
+                " active"
+            };
             writeln!(
                 writer,
                 "          <button class=\"tab-btn{active}\" data-tab=\"{card_id}-{cat}\" onclick=\"switchTab(this)\">{cat}</button>"
             )?;
-            tab_index += 1;
         }
         writeln!(writer, "        </div>")?;
 
@@ -716,17 +719,15 @@ fn write_summary<W: Write>(
     };
 
     let mut first_pill_emitted = false;
-    let mut first_panel = true;
     if !high_risk_crates.is_empty() {
         write_risk_crate_list(
             writer,
             "high",
             &panel_title(high, "High Risk"),
             high_risk_crates,
-            first_panel,
+            true,
             &mut first_pill_emitted,
         )?;
-        first_panel = false;
     }
     if !medium_risk_crates.is_empty() {
         write_risk_crate_list(
@@ -734,10 +735,9 @@ fn write_summary<W: Write>(
             "medium",
             &panel_title(medium, "Medium Risk"),
             medium_risk_crates,
-            first_panel,
+            high_risk_crates.is_empty(),
             &mut first_pill_emitted,
         )?;
-        first_panel = false;
     }
     if !low_risk_crates.is_empty() {
         write_risk_crate_list(
@@ -745,10 +745,9 @@ fn write_summary<W: Write>(
             "low",
             &panel_title(low, "Low Risk"),
             low_risk_crates,
-            first_panel,
+            high_risk_crates.is_empty() && medium_risk_crates.is_empty(),
             &mut first_pill_emitted,
         )?;
-        first_panel = false;
     }
     if !not_evaluated_crates.is_empty() {
         write_risk_crate_list(
@@ -756,11 +755,10 @@ fn write_summary<W: Write>(
             "not-eval",
             &panel_title(not_evaluated, "Not Evaluated"),
             not_evaluated_crates,
-            first_panel,
+            high_risk_crates.is_empty() && medium_risk_crates.is_empty() && low_risk_crates.is_empty(),
             &mut first_pill_emitted,
         )?;
     }
-    let _ = first_panel;
     Ok(())
 }
 
@@ -1013,9 +1011,10 @@ fn write_metrics_category<W: Write>(
 }
 
 fn crate_anchor_id(name: &str, version: &str) -> String {
-    let mut id = String::with_capacity(name.len() + version.len() + 7);
+    let mut id = String::new();
     id.push_str("crate-");
     for c in name.chars() {
+        // #[gamma::skip(logical.or_remove_right, literal.char_to_distinct, literal.char_to_nul, reason = "a name hyphen is preserved by the true branch and replaced with the same hyphen by the false branch, so these condition mutations are behavior-equivalent")]
         if c.is_ascii_alphanumeric() || c == '-' {
             id.push(c);
         } else {
@@ -1246,6 +1245,14 @@ mod tests {
         default_value: || None,
     };
 
+    static CRATE_DESCRIPTION_DEF: MetricDef = MetricDef {
+        name: "crate.description",
+        description: "Crate description",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
     fn create_test_crate(name: &str, version: &str, evaluation: Option<Appraisal>) -> ReportableCrate {
         let metrics = vec![
             Metric::with_value(&NAME_DEF, MetricValue::String(name.into())),
@@ -1256,7 +1263,9 @@ mod tests {
 
     #[test]
     fn test_html_escape_basic() {
-        assert_eq!(html_escape("hello"), "hello");
+        let escaped = html_escape("hello");
+        assert_eq!(escaped, "hello");
+        assert!(matches!(escaped, Cow::Borrowed(_)));
     }
 
     #[test]
@@ -1307,6 +1316,35 @@ mod tests {
         assert!(output.contains("<!DOCTYPE html>"));
         assert!(output.contains("Crate Appraisal Report"));
         assert!(output.contains("cargo-aprz"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn crate_description_is_rendered_in_the_risk_list() {
+        let metrics = vec![Metric::with_value(
+            &CRATE_DESCRIPTION_DEF,
+            MetricValue::String("A precise crate description".into()),
+        )];
+        let crates = vec![ReportableCrate::new(
+            "described".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+        assert!(output.contains("A precise crate description"), "{output}");
+    }
+
+    #[test]
+    fn crate_description_selects_only_the_description_metric() {
+        let metrics = vec![
+            Metric::with_value(&CRATE_NAME_DEF, MetricValue::String("not the description".into())),
+            Metric::with_value(&CRATE_DESCRIPTION_DEF, MetricValue::String("the description".into())),
+        ];
+        let crate_info = ReportableCrate::new("described".into(), Arc::new("1.0.0".parse().unwrap()), metrics, None);
+
+        assert_eq!(crate_description(&crate_info), "the description");
     }
 
     #[test]
@@ -1428,6 +1466,13 @@ mod tests {
     }
 
     #[test]
+    fn test_format_keywords_or_categories_preserves_empty_items_input() {
+        let mut output = String::new();
+        format_keywords_or_categories(" , ", "keywords", &mut output).unwrap();
+        assert_eq!(output, " , ");
+    }
+
+    #[test]
     fn test_format_keywords_with_special_chars() {
         let mut output = String::new();
         let result = format_keywords_or_categories("A&B, C<D", "keywords", &mut output);
@@ -1468,6 +1513,11 @@ mod tests {
     fn test_crate_anchor_id_special_chars_in_version() {
         // Non-alphanumeric/non-dot chars in version become hyphens
         assert_eq!(crate_anchor_id("crate", "1.0.0-beta"), "crate-crate-1.0.0-beta");
+    }
+
+    #[test]
+    fn crate_anchor_id_replaces_disallowed_version_characters_but_preserves_dots() {
+        assert_eq!(crate_anchor_id("crate", "1.0+meta_build"), "crate-crate-1.0-meta-build");
     }
 
     // --- generate with all risk levels ---
@@ -1531,6 +1581,8 @@ mod tests {
         // Summary section should be present
         assert!(output.contains("class=\"summary\""));
         assert!(output.contains("class=\"summary-row\""));
+        assert!(output.contains(r#"<div class="summary-card medium""#));
+        assert!(output.contains(r#"<details id="risk-medium" class="risk-list medium""#));
         assert!(output.contains("Low Risk"));
         assert!(output.contains("Medium Risk"));
         assert!(output.contains("High Risk"));
@@ -1575,6 +1627,10 @@ mod tests {
         assert!(output.contains("v1.0.0"));
         assert!(output.contains("v2.0.0"));
         assert!(output.contains("v3.0.0"));
+        assert!(
+            output.contains(r#"<div class="crate-card-header risk-medium">"#),
+            "medium-risk cards need their styling hook: {output}"
+        );
     }
 
     // --- appraisal table disposition variants ---
@@ -1772,6 +1828,7 @@ mod tests {
 
         // No summary when no appraisals
         assert!(!output.contains("class=\"summary\""));
+        assert!(!output.contains("function sortCrates"));
     }
 
     // --- anchor navigation ---
@@ -1833,6 +1890,53 @@ mod tests {
         assert!(output.contains("selectCrate('crate-risky-crate-0.5.0'"));
         // Card should have matching id
         assert!(output.contains("id=\"crate-risky-crate-0.5.0\""));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn first_low_risk_crate_is_the_default_visible_card() {
+        let crates = vec![
+            create_test_crate("first", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            create_test_crate("second", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains(r#"<div class="crate-card" id="crate-first-1.0.0">"#), "{output}");
+        assert!(
+            output.contains(r#"<div class="crate-card" id="crate-second-1.0.0" style="display:none">"#),
+            "{output}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn sorted_risk_and_unevaluated_lists_choose_the_first_visible_crate() {
+        let crates = vec![
+            create_test_crate("medium-later", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 10, 9, 90.0))),
+            create_test_crate("medium-first", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 10, 1, 10.0))),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+        assert!(
+            output.contains(r#"<div class="crate-card" id="crate-medium-first-1.0.0">"#),
+            "{output}"
+        );
+        assert!(
+            output.contains(r#"<div class="crate-card" id="crate-medium-later-1.0.0" style="display:none">"#),
+            "{output}"
+        );
+
+        let crates = vec![
+            create_test_crate("risk", "1.0.0", Some(Appraisal::new(Risk::High, vec![], 1, 0, 0.0))),
+            create_test_crate("zeta", "1.0.0", None),
+            create_test_crate("alpha", "1.0.0", None),
+        ];
+        output.clear();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+        let alpha = output.find(r#"data-name="alpha""#).expect("alpha must be listed");
+        let zeta = output.find(r#"data-name="zeta""#).expect("zeta must be listed");
+        assert!(alpha < zeta, "unevaluated crates must be sorted alphabetically: {output}");
     }
 
     #[test]
@@ -2055,6 +2159,73 @@ mod tests {
     }
 
     #[test]
+    fn only_the_first_nonempty_risk_panel_is_expanded() {
+        let high = vec![("high", "1.0.0".to_owned(), String::new(), 0.0)];
+        let medium = vec![("medium", "1.0.0".to_owned(), String::new(), 50.0)];
+        let empty = Vec::new();
+        let mut output = String::new();
+        write_summary(&mut output, 2, &high, &medium, &empty, &empty).unwrap();
+        assert_eq!(output.matches(" open>").count(), 1);
+        assert!(output.contains(r#"<details id="risk-high" class="risk-list high" open>"#));
+    }
+
+    #[test]
+    fn low_risk_panel_is_omitted_when_only_higher_risks_are_present() {
+        let high = vec![("high", "1.0.0".to_owned(), String::new(), 0.0)];
+        let medium = vec![("medium", "1.0.0".to_owned(), String::new(), 50.0)];
+        let empty = Vec::new();
+        let mut output = String::new();
+
+        write_summary(&mut output, 2, &high, &medium, &empty, &empty).unwrap();
+
+        assert!(!output.contains(r#"<details id="risk-low""#), "{output}");
+    }
+
+    #[test]
+    fn medium_panel_prevents_later_panels_from_being_expanded() {
+        let medium = vec![("medium", "1.0.0".to_owned(), String::new(), 50.0)];
+        let low = vec![("low", "1.0.0".to_owned(), String::new(), 100.0)];
+        let not_evaluated = vec![("plain", "1.0.0".to_owned(), String::new(), 0.0)];
+        let empty = Vec::new();
+        let mut output = String::new();
+
+        write_summary(&mut output, 3, &empty, &medium, &low, &not_evaluated).unwrap();
+
+        assert!(output.contains(r#"<details id="risk-medium" class="risk-list medium" open>"#));
+        assert!(output.contains(r#"<details id="risk-low" class="risk-list low">"#));
+        assert!(output.contains(r#"<details id="risk-not-eval" class="risk-list not-eval">"#));
+        assert_eq!(output.matches(" open>").count(), 1);
+    }
+
+    #[test]
+    fn low_panel_prevents_unevaluated_panel_from_being_expanded() {
+        let low = vec![("low", "1.0.0".to_owned(), String::new(), 100.0)];
+        let not_evaluated = vec![("plain", "1.0.0".to_owned(), String::new(), 0.0)];
+        let empty = Vec::new();
+        let mut output = String::new();
+
+        write_summary(&mut output, 2, &empty, &empty, &low, &not_evaluated).unwrap();
+
+        assert!(output.contains(r#"<details id="risk-low" class="risk-list low" open>"#));
+        assert!(output.contains(r#"<details id="risk-not-eval" class="risk-list not-eval">"#));
+        assert_eq!(output.matches(" open>").count(), 1);
+    }
+
+    #[test]
+    fn unevaluated_panel_is_not_expanded_after_a_high_risk_panel() {
+        let high = vec![("high", "1.0.0".to_owned(), String::new(), 0.0)];
+        let not_evaluated = vec![("plain", "1.0.0".to_owned(), String::new(), 0.0)];
+        let empty = Vec::new();
+        let mut output = String::new();
+
+        write_summary(&mut output, 2, &high, &empty, &empty, &not_evaluated).unwrap();
+
+        assert_eq!(output.matches(" open>").count(), 1);
+        assert!(output.contains(r#"<details id="risk-high" class="risk-list high" open>"#));
+        assert!(output.contains(r#"<details id="risk-not-eval" class="risk-list not-eval">"#));
+    }
+
+    #[test]
     fn test_pie_chart_half_circle_uses_small_arc_flag() {
         let mut output = String::new();
 
@@ -2065,6 +2236,28 @@ mod tests {
             "a half-pie slice must not use the large-arc flag: {output}"
         );
         assert!(!output.contains(" A 72,72 0 1,1 "), "{output}");
+    }
+
+    #[test]
+    fn pie_chart_counts_medium_risk_crates() {
+        let mut output = String::new();
+        write_pie_chart(&mut output, 0, 1, 1, 0).unwrap();
+        assert!(output.contains("var(--risk-high)"), "{output}");
+        assert!(output.contains("var(--risk-medium)"), "{output}");
+        assert_eq!(output.matches("<path ").count(), 2, "{output}");
+    }
+
+    #[test]
+    fn single_slice_pie_chart_write_failure_is_returned() {
+        struct FailOnCircle;
+
+        impl Write for FailOnCircle {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                if s.contains("<circle cx=") { Err(core::fmt::Error) } else { Ok(()) }
+            }
+        }
+
+        assert!(write_pie_chart(&mut FailOnCircle, 0, 0, 1, 0).is_err());
     }
 
     #[test]
@@ -2144,6 +2337,12 @@ mod tests {
             self.writes += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn empty_keyword_fallback_propagates_writer_errors() {
+        let mut writer = FailAfter { budget: 0, writes: 0 };
+        assert!(format_keywords_or_categories(" , ", "keywords", &mut writer).is_err());
     }
 
     /// A report that reaches every conditional rendering path: all three risk levels, an
@@ -2249,5 +2448,63 @@ mod tests {
         .unwrap();
 
         assert!(output.is_empty(), "a category with no metrics has no table: {output}");
+    }
+
+    #[test]
+    fn missing_metric_does_not_hide_later_metrics_in_the_category() {
+        static PRESENT_DEF: MetricDef = MetricDef {
+            name: "present",
+            description: "Present metric",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        let metrics = [Metric::with_value(&PRESENT_DEF, MetricValue::String("visible".into()))];
+        let mut metrics_by_category = crate::HashMap::default();
+        let _ = metrics_by_category.insert(MetricCategory::Metadata, vec!["missing", PRESENT_DEF.name]);
+        let mut metric_map = crate::HashMap::default();
+        let _ = metric_map.insert(PRESENT_DEF.name, &metrics[0]);
+        let mut output = String::new();
+
+        write_metrics_category(&mut output, MetricCategory::Metadata, &metrics_by_category, &metric_map).unwrap();
+
+        assert!(output.contains("present"), "{output}");
+        assert!(output.contains("visible"), "{output}");
+    }
+
+    #[test]
+    fn plain_metric_value_write_failure_is_returned() {
+        static PLAIN_DEF: MetricDef = MetricDef {
+            name: "plain",
+            description: "Plain metric",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        struct FailOnValue;
+
+        impl Write for FailOnValue {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                if s == "visible" { Err(core::fmt::Error) } else { Ok(()) }
+            }
+        }
+
+        let metrics = [Metric::with_value(&PLAIN_DEF, MetricValue::String("visible".into()))];
+        let mut metrics_by_category = crate::HashMap::default();
+        let _ = metrics_by_category.insert(MetricCategory::Metadata, vec![PLAIN_DEF.name]);
+        let mut metric_map = crate::HashMap::default();
+        let _ = metric_map.insert(PLAIN_DEF.name, &metrics[0]);
+
+        assert!(write_metrics_category(&mut FailOnValue, MetricCategory::Metadata, &metrics_by_category, &metric_map).is_err());
+    }
+
+    #[test]
+    fn medium_risk_header_uses_the_medium_class_and_label() {
+        let crate_info = create_test_crate("medium", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 2, 1, 50.0)));
+        let mut output = String::new();
+
+        write_crate_card_header(&mut output, &crate_info).unwrap();
+
+        assert!(output.contains(r#"<span class="risk-badge medium">MEDIUM RISK</span>"#));
     }
 }

@@ -496,6 +496,55 @@ edition = "2021"
         assert_eq!(ws.members.len(), 1);
     }
 
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata")]
+    fn metadata_loading_errors_are_returned() {
+        let error = Workspace::load_with_target_resolver(Some(Path::new("missing-workspace/Cargo.toml")), || {
+            panic!("metadata failure must occur before target resolution")
+        })
+        .expect_err("missing manifest must fail");
+        assert!(error.to_string().contains("workspace metadata"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
+    #[test]
+    fn target_resolution_errors_are_returned() {
+        let tmp = tempdir().expect("tempdir");
+        let root = "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n";
+        let alpha = member_with_gate(
+            "alpha",
+            "min-lines-percent = 90\n\n[package.metadata.coverage-gate.target.'cfg(unix)']\nmin-lines-percent = 75",
+        );
+        write_workspace(tmp.path(), root, &[("alpha", &alpha)]);
+
+        let error = Workspace::load_with_target_resolver(Some(&tmp.path().join("Cargo.toml")), || {
+            Err(InvalidThresholdValueError::new("target resolver".to_owned(), json!("injected")).into())
+        })
+        .expect_err("target resolution error must propagate");
+        assert!(error.to_string().contains("target resolver"));
+    }
+
+    #[test]
+    fn target_policy_value_errors_are_returned_without_panicking() {
+        let invalid_threshold = json!({
+            "target": {
+                "cfg(unix)": { "min-lines-percent": "high" }
+            }
+        });
+        let threshold_error =
+            extract_target_policies(&invalid_threshold, "alpha", Scope::Package).expect_err("invalid target threshold must be returned");
+        assert!(threshold_error.to_string().contains("min-lines-percent"));
+
+        let invalid_assertion = json!({
+            "target": {
+                "cfg(unix)": { "expect-no-coverable-lines": "yes" }
+            }
+        });
+        let assertion_error =
+            extract_target_policies(&invalid_assertion, "alpha", Scope::Package).expect_err("invalid target assertion must be returned");
+        assert!(assertion_error.to_string().contains("expect-no-coverable-lines"));
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
     fn picks_up_workspace_level_default() {

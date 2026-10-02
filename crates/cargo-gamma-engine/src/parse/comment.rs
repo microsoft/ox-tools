@@ -446,6 +446,8 @@ mod tests {
 
             assert!(quote_end(bytes, 0) <= bytes.len(), "{text} ran past the end");
         }
+
+        assert_eq!(quote_end(br"'\'xyz", 0), br"'\'xyz".len());
     }
 
     #[test]
@@ -593,6 +595,12 @@ mod tests {
         let bodies: Vec<&str> = file.comments.iter().map(|c| file.slice(&c.body)).collect();
 
         assert_eq!(bodies, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_comment_immediately_after_ordinary_text_is_not_skipped() {
+        assert_eq!(comment_spans("x// comment"), vec![1..11]);
+        assert_eq!(comment_spans("x/* comment */"), vec![1..14]);
     }
 
     #[test]

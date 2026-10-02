@@ -93,6 +93,7 @@ pub(super) fn supervise(command: Command, work: &Workspace, budget: Option<Durat
 }
 
 /// Runs a build with explicit limits for retained and narrated output.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn supervise_with_limits(
     command: Command,
     work: &Workspace,
@@ -507,6 +508,7 @@ pub(super) enum Stream {
 /// the lesser cost, and the caller reports the loss rather than passing off a truncated stream as
 /// the build's output.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn drained(handle: Option<JoinHandle<Pipe>>, deadline: Instant) -> Option<Vec<u8>> {
     let Some(handle) = handle else {
         return Some(Vec::new());
@@ -536,6 +538,7 @@ pub(super) fn drained(handle: Option<JoinHandle<Pipe>>, deadline: Instant) -> Op
 /// A reader can legitimately be blocked on the synchronous channel when a compiler is noisy.
 /// Draining that channel here is therefore part of joining it: waiting for the thread without
 /// narrating would deadlock at a full, deliberately bounded backlog.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn finish_readers(
     stdout: Option<io::Result<JoinHandle<Pipe>>>,
     stderr: Option<io::Result<JoinHandle<Pipe>>>,
@@ -615,6 +618,7 @@ pub(super) struct Compiled {
 }
 
 /// Runs one cargo command in the tree under the build budget.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn run_cargo(
     work: &Workspace,
     plan: &Plan,
@@ -729,6 +733,7 @@ mod mutation_tests {
     }
 
     impl Events for Recorded {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn phase(&mut self, _verb: &str, _detail: &str) {}
         fn build_progress(&mut self, line: &str) {
             self.progress.push(line.to_owned());
@@ -742,6 +747,7 @@ mod mutation_tests {
         fn build_finished(&mut self) {
             self.finished += 1;
         }
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn mutant(&mut self, _mutant: &Mutant) {}
     }
 

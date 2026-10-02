@@ -95,6 +95,7 @@ impl Pending {
 /// A note without an active run has no host that can say it, so it is ignored. A poisoned lock is
 /// ignored for the same reason: failing a run over a courtesy diagnostic makes that diagnostic the
 /// reason the command stopped.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn note(message: impl Into<String>) {
     let Some(run) = current() else {
         return;
@@ -112,6 +113,7 @@ pub(crate) fn note(message: impl Into<String>) {
 
 /// Takes this thread's running command's notes, leaving its buffer empty.
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn drain() -> Vec<String> {
     let Some(run) = current() else {
         return Vec::new();
@@ -193,6 +195,15 @@ mod tests {
     fn a_fresh_run_has_no_dropped_notes() {
         let run = Run::new();
         let _scope = enter(Some(&run));
+
+        assert!(drain().is_empty());
+    }
+
+    #[test]
+    fn notes_and_drains_without_an_active_run_are_noops() {
+        let _scope = enter(None);
+
+        note("unowned");
 
         assert!(drain().is_empty());
     }

@@ -169,6 +169,7 @@ impl Manifest {
     /// inherits from `workspace_features`, whatever it carries: that table only ever describes
     /// what a `workspace = true` entry would otherwise be missing, not a default every member
     /// picks up regardless of its own declaration.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn link_runtime_inheriting(&mut self, runtime: &Utf8Path, workspace_features: &WorkspaceRuntimeFeatures) -> Result<()> {
         let runtime = absolute(runtime);
 
@@ -507,6 +508,7 @@ fn dependency_points_to(item: Option<&Item>, runtime: &Utf8Path) -> bool {
 }
 
 /// Rewrites every escaping path in one dependency table.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn anchor_dependencies(table: &mut dyn toml_edit::TableLike, original: &Utf8Path, within: &Utf8Path, changed: &mut bool) {
     let names: Vec<String> = table.iter().map(|(name, _entry)| name.to_owned()).collect();
 
@@ -651,6 +653,7 @@ pub(super) const CAP_LINTS: &str = "--cap-lints=allow";
 /// them — `target.<triple>` over `target.<cfg>` over `build` — and which one is not knowable here
 /// without resolving the target triple. Appending to all of them means the winner carries the flag
 /// whichever it turns out to be. If none is configured, `build.rustflags` is created.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     let path = root.join(".cargo").join("config.toml");
     let legacy = root.join(".cargo").join("config");

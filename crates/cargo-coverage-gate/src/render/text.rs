@@ -398,6 +398,44 @@ mod tests {
         }
     }
 
+    struct ByteLimitedWriter {
+        remaining: usize,
+    }
+
+    impl io::Write for ByteLimitedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("injected write limit"));
+            }
+            let written = buf.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn every_truncated_text_write_propagates_an_error() {
+        let mut failed = outcome("beta", 120, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (1..=120).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 2,
+        };
+        let complete = render_to_string(&report);
+
+        for limit in 0..complete.len() {
+            let mut writer = ByteLimitedWriter { remaining: limit };
+            assert!(render(&mut writer, &report).is_err(), "limit {limit} unexpectedly succeeded");
+        }
+    }
+
     #[test]
     fn propagates_error_from_unattributed_note_write() {
         // "had paths" appears only in the unattributed-note `writeln!`,

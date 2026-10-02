@@ -7,9 +7,9 @@ use syn::{GenericParam, Generics, ReturnType, Type};
 
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
 use super::predicates::payload;
-use super::values::{Kind, resolve_type, strip};
-use crate::HashMap;
+use super::values::{Kind, resolve_type, strip, type_name};
 use crate::ops::collect::Defaults;
+use crate::{HashMap, HashSet};
 
 /// What the value-choosing functions know about the file they are reasoning inside.
 ///
@@ -20,11 +20,17 @@ pub(super) struct Types<'a> {
     /// associated types, and trait objects.
     pub(super) abstracts: &'a [String],
 
+    /// Type parameters carrying an applicable standard `Default` bound.
+    pub(super) defaulted: &'a [String],
+
     /// The module path each imported name came from, so a bare type name can be traced to its crate.
     pub(super) imports: &'a HashMap<String, Option<Vec<String>>>,
 
     /// What the workspace's own sources say about which of their types implement `Default`.
     pub(super) defaults: &'a Defaults,
+
+    /// Locally visible aliases, used to preserve their declared shape.
+    pub(super) aliases: Option<&'a HashMap<String, Option<Type>>>,
 
     /// The concrete type named by `Self` inside an `impl` block.
     pub(super) self_type: Option<&'a Type>,
@@ -34,6 +40,108 @@ pub(super) struct Types<'a> {
 }
 
 impl Types<'_> {
+    pub(super) fn resolve_alias<'a>(&'a self, ty: &'a Type) -> &'a Type {
+        let Some(aliases) = self.aliases else {
+            return ty;
+        };
+        let mut resolved = ty;
+        let mut visited = HashSet::default();
+
+        loop {
+            let Type::Path(path) = strip(resolved) else {
+                return resolved;
+            };
+            let Some(name) = (path.path.segments.len() == 1).then(|| path.path.segments[0].ident.to_string()) else {
+                return resolved;
+            };
+            if !visited.insert(name.clone()) {
+                return ty;
+            }
+            let Some(target) = aliases.get(&name).and_then(Option::as_ref) else {
+                return resolved;
+            };
+            resolved = target;
+        }
+    }
+
+    pub(super) fn payload<'a>(&'a self, ty: &'a Type, index: usize) -> Option<&'a Type> {
+        let resolved = self.resolve_alias(ty);
+        let payload = payload(resolved, index)?;
+        let Type::Path(path) = strip(payload) else {
+            return Some(payload);
+        };
+
+        if !core::ptr::eq(ty, resolved) && path.path.get_ident().is_some() {
+            return super::values::type_argument(ty, index).or(Some(payload));
+        }
+
+        Some(payload)
+    }
+
+    /// Returns positive source-visible evidence that a value of `ty` can be defaulted.
+    pub(super) fn has_default(&self, ty: &Type) -> bool {
+        let ty = self.resolve_alias(ty);
+        let concrete = self
+            .concrete_self_type(ty)
+            .or_else(|| self.concrete_self_associated_type(ty))
+            .unwrap_or(ty);
+
+        match resolve_type(concrete) {
+            Kind::Unit | Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float | Kind::String | Kind::Option | Kind::Result => true,
+            Kind::Collection => {
+                let name = type_name(concrete).map(ToString::to_string).unwrap_or_default();
+                if name == "HashSet" {
+                    payload(concrete, 1).is_none_or(|hasher| self.has_default(hasher))
+                } else {
+                    true
+                }
+            }
+            Kind::Map => {
+                let name = type_name(concrete).map(ToString::to_string).unwrap_or_default();
+                if name == "HashMap" {
+                    payload(concrete, 2).is_none_or(|hasher| self.has_default(hasher))
+                } else {
+                    true
+                }
+            }
+            Kind::Wrapper => payload(concrete, 0).is_some_and(|inner| self.has_default(inner)),
+            Kind::Tuple => {
+                matches!(strip(concrete), Type::Tuple(tuple) if tuple.elems.iter().all(|element| self.has_default(element)))
+            }
+            Kind::Unknown => {
+                let Type::Path(path) = strip(concrete) else {
+                    return false;
+                };
+                let segments = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                if matches!(segments.as_slice(), [root, module, error] if matches!(root.as_str(), "std" | "core") && module == "fmt" && error == "Error")
+                    || matches!(segments.as_slice(), [module, error] if module == "fmt" && error == "Error")
+                {
+                    return true;
+                }
+                if path.path.is_ident("Error")
+                    && self.imports.get("Error").and_then(Option::as_ref).is_some_and(
+                        |prefix| matches!(prefix.as_slice(), [root, module] if matches!(root.as_str(), "std" | "core") && module == "fmt"),
+                    )
+                {
+                    return true;
+                }
+                if path.path.segments.last().is_some_and(|segment| segment.ident == "RandomState") {
+                    return true;
+                }
+                path.path
+                    .get_ident()
+                    .is_some_and(|ident| self.defaulted.contains(&ident.to_string()))
+                    || self.defaults.has_default(concrete)
+            }
+            Kind::StaticStr | Kind::MutStr | Kind::NonZero | Kind::Cow | Kind::Iterator | Kind::Reference => false,
+        }
+    }
+
     /// Returns whether a type has no `Default` to reach for.
     ///
     /// Two independent readings say so, and either is enough: an error type from another crate,
@@ -43,6 +151,7 @@ impl Types<'_> {
             .concrete_self_type(ty)
             .or_else(|| self.concrete_self_associated_type(ty))
             .unwrap_or(ty);
+        let concrete = self.resolve_alias(concrete);
 
         is_foreign_error(concrete, self.imports)
             || Self::is_standard_time_without_default(concrete, self.imports)
@@ -202,6 +311,9 @@ pub(super) fn returns_undefaultable_error(output: &ReturnType, types: &Types<'_>
         return false;
     };
 
+    let Type::Path(path) = strip(ty) else {
+        return false;
+    };
     if resolve_type(ty) != Kind::Result {
         return false;
     }
@@ -212,9 +324,6 @@ pub(super) fn returns_undefaultable_error(output: &ReturnType, types: &Types<'_>
 
     // No second argument, so the error type is whatever an alias fixed it to. The alias is named by
     // the return type's last segment, and the index answers for the name it resolved to.
-    let Type::Path(path) = strip(ty) else {
-        unreachable!("a type resolved as Result must be a path after wrappers are stripped");
-    };
     let alias = path
         .path
         .segments
@@ -311,26 +420,79 @@ mod tests {
 
         assert!(!is_foreign_error(&empty_path_type(), &HashMap::default()));
         assert!(!is_foreign_error(&imported_error, &imports));
+        assert!(is_foreign_error(&parse_quote!(std::num::ParseIntError), &HashMap::default()));
     }
 
     #[test]
     fn standard_time_detection_handles_unknown_and_imported_names() {
         let defaults = Defaults::default();
         let abstracts = Vec::new();
+        let defaulted = Vec::new();
+        let aliases = HashMap::default();
         let mut imports = HashMap::default();
         let _old = imports.insert("Instant".to_owned(), Some(vec!["std".to_owned(), "time".to_owned()]));
         let types = Types {
             abstracts: &abstracts,
+            defaulted: &defaulted,
             imports: &imports,
             defaults: &defaults,
+            aliases: Some(&aliases),
             self_type: None,
             self_associated: None,
         };
 
         assert!(!types.lacks_default(&empty_path_type()));
         assert!(types.lacks_default(&parse_quote!(Instant)));
+        assert!(types.lacks_default(&parse_quote!(std::time::SystemTime)));
         assert!(!types.lacks_default(&parse_quote!(SystemTime)));
         assert!(!types.lacks_default(&parse_quote!(&'static str)));
+    }
+
+    #[test]
+    fn positive_default_evidence_covers_containers_wrappers_and_tuples() {
+        let defaults = Defaults::default();
+        let abstracts = Vec::new();
+        let defaulted = Vec::new();
+        let aliases = HashMap::default();
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &abstracts,
+            defaulted: &defaulted,
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: None,
+            self_associated: None,
+        };
+
+        for ty in [
+            parse_quote!(std::collections::BTreeMap<u8, u8>),
+            parse_quote!(Box<bool>),
+            parse_quote!((bool, String)),
+        ] {
+            assert!(types.has_default(&ty), "{ty:?}");
+        }
+    }
+
+    #[test]
+    fn cyclic_file_wide_aliases_stop_at_the_original_type() {
+        let defaults = Defaults::default();
+        let abstracts = Vec::new();
+        let defaulted = Vec::new();
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([("A".to_owned(), Some(parse_quote!(B))), ("B".to_owned(), Some(parse_quote!(A)))]);
+        let types = Types {
+            abstracts: &abstracts,
+            defaulted: &defaulted,
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: None,
+            self_associated: None,
+        };
+        let original: Type = parse_quote!(A);
+
+        assert_eq!(types.resolve_alias(&original), &original);
     }
 
     #[test]
@@ -342,18 +504,22 @@ mod tests {
             ",
         );
         let abstracts = Vec::new();
+        let defaulted = Vec::new();
+        let aliases = HashMap::default();
         let imports = HashMap::default();
         let types = Types {
             abstracts: &abstracts,
+            defaulted: &defaulted,
             imports: &imports,
             defaults: &defaults,
+            aliases: Some(&aliases),
             self_type: None,
             self_associated: None,
         };
-        let aliased: ReturnType = parse_quote!(-> Result<bool>);
+        let alias_output: ReturnType = parse_quote!(-> Result<bool>);
         let direct: ReturnType = parse_quote!(-> Result<bool, std::io::Error>);
 
-        assert!(returns_undefaultable_error(&aliased, &types));
+        assert!(returns_undefaultable_error(&alias_output, &types));
         assert!(returns_undefaultable_error(&direct, &types));
     }
 
@@ -361,5 +527,9 @@ mod tests {
     fn abstract_type_detection_handles_empty_paths_and_boxed_trait_objects() {
         assert!(!is_abstract_type(&empty_path_type(), &[]));
         assert!(is_abstract_type(&parse_quote!(Box<dyn core::fmt::Debug>), &[]));
+        assert!(!is_abstract_type(
+            &parse_quote!(<Concrete as Abstract>::Item),
+            &[String::from("Abstract")]
+        ));
     }
 }

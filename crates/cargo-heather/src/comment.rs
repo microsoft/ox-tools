@@ -43,7 +43,7 @@ impl FileKind {
             return Some(Self::Env);
         }
 
-        match path.extension()?.to_str()? {
+        match utf8_extension(path)? {
             ext if ext.eq_ignore_ascii_case("rs") => {
                 if content.is_some_and(is_cargo_script) {
                     Some(Self::CargoScript)
@@ -68,6 +68,10 @@ impl FileKind {
             Self::Toml | Self::PowerShell | Self::Just | Self::Env | Self::CargoScript => CommentStyle::Hash,
         }
     }
+}
+
+fn utf8_extension(path: &Path) -> Option<&str> {
+    path.extension()?.to_str()
 }
 
 /// Returns `true` if the content looks like a cargo-script file.
@@ -175,6 +179,9 @@ impl CommentStyle {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -263,5 +270,52 @@ mod tests {
         assert_eq!(FileKind::detect(Path::new("a.psd"), None), None);
         assert_eq!(FileKind::detect(Path::new("a.psm"), None), None);
         assert_eq!(CommentStyle::from_path(Path::new("notes.txt")), None);
+    }
+
+    #[test]
+    fn detect_returns_none_when_path_has_no_file_name_or_extension() {
+        assert_eq!(FileKind::detect(Path::new(""), None), None);
+        assert_eq!(FileKind::detect(Path::new("LICENSE"), None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_returns_none_for_non_utf8_file_name_and_extension() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let invalid_name = PathBuf::from(OsString::from_vec(vec![0xff]));
+        assert_eq!(FileKind::detect(&invalid_name, None), None);
+
+        let invalid_extension = PathBuf::from(OsString::from_vec(b"file.\xff".to_vec()));
+        let extension = invalid_extension
+            .extension()
+            .expect("constructed path contains a dot-delimited extension");
+        assert!(extension.to_str().is_none());
+        assert_eq!(utf8_extension(&invalid_extension), None);
+        assert_eq!(FileKind::detect(&invalid_extension, None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detect_returns_none_for_non_utf8_file_name_and_extension() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let invalid_name = PathBuf::from(OsString::from_wide(&[0xd800]));
+        assert_eq!(FileKind::detect(&invalid_name, None), None);
+
+        let invalid_extension = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'f'),
+            u16::from(b'i'),
+            u16::from(b'l'),
+            u16::from(b'e'),
+            u16::from(b'.'),
+            0xd800,
+        ]));
+        let extension = invalid_extension
+            .extension()
+            .expect("constructed path contains a dot-delimited extension");
+        assert!(extension.to_str().is_none());
+        assert_eq!(utf8_extension(&invalid_extension), None);
+        assert_eq!(FileKind::detect(&invalid_extension, None), None);
     }
 }

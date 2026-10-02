@@ -83,6 +83,9 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         // A UTF-8 continuation or lead byte of anything above the C1 block is ordinary text, and
         // stepping over it one byte at a time is safe because no byte of a multi-byte character can
         // be confused with an ASCII control.
+        // A `0x80` byte can only be a UTF-8 continuation byte here. Sending it through the
+        // printable-byte arm below advances the cursor by the same one byte.
+        // #[gamma::skip(relational.ge_to_gt, reason = "the boundary byte takes an equivalent one-byte advance through the next branch")]
         if byte >= 0x80 {
             if byte == C1_LEAD && bytes.get(cursor + 1).is_some_and(|&low| (0x80..=0x9F).contains(&low)) {
                 let control = char::from(bytes[cursor + 1]);
@@ -330,6 +333,11 @@ mod tests {
     }
 
     #[test]
+    fn a_non_color_colon_parameter_is_not_sgr() {
+        assert!(!allowed_colon_color("31:5:1"));
+    }
+
+    #[test]
     fn every_c1_control_is_encoded() {
         for code in 0x80..=0x9f_u32 {
             let control = char::from_u32(code).expect("the C1 block is valid");
@@ -375,6 +383,11 @@ mod tests {
     }
 
     #[test]
+    fn an_escape_followed_by_a_non_csi_introducer_is_not_styling() {
+        assert_eq!(encode_preserving_color("\u{1b}Xm"), "\\eXm");
+    }
+
+    #[test]
     fn relayed_color_around_encoded_controls_keeps_both_decisions() {
         assert_eq!(
             encode_preserving_color("\u{1b}[31merror\u{1b}[0m: src/\u{9b}2K.rs\n"),
@@ -414,5 +427,6 @@ mod tests {
         assert!(!allowed_style("2"));
         assert!(!allowed_style("38:5:256"));
         assert!(!allowed_style("48:2:1:2"));
+        assert!(!allowed_style("38:5:7;2"));
     }
 }

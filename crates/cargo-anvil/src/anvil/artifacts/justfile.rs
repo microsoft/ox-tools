@@ -167,7 +167,7 @@ fn recipe_name(line: &str) -> Option<&str> {
     (generated_recipe_name && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))).then_some(name)
 }
 
-pub(crate) fn without_generated_header(body: &str) -> String {
+fn without_generated_header(body: &str) -> String {
     let normalized = body.replace("\r\n", "\n");
     normalized.strip_prefix(REPEATED_TEMPLATE_HEADER).unwrap_or(&normalized).to_owned()
 }
@@ -499,6 +499,47 @@ mod tests {
         assert_eq!(section.id, "recipe:anvil-clippy");
         assert!(section.body.contains("anvil-clippy:"));
         assert!(!section.body.contains("anvil-clippy-setup"));
+    }
+
+    #[test]
+    fn setup_helpers_are_independently_addressable_and_replaceable() {
+        let helper = recipe("_install-component").expect("the component installer must be addressable");
+        let Artifact::OwnedFileSection(section) = &helper else {
+            panic!("a Just helper must be an owned-file section");
+        };
+        assert_eq!(section.path, SETUP_JUST_PATH);
+        assert_eq!(section.id, "recipe:_install-component");
+        assert!(section.body.contains("_install-component toolchain component:"));
+        assert!(!section.body.contains("anvil-component-default-clippy-install"));
+
+        let neighbor = recipe("anvil-component-default-clippy-install").expect("the neighboring component setup must be addressable");
+        let replacement = helper.with_body("_install-component toolchain component:\n    echo replaced\n");
+        let catalog = Catalog::anvil().into_builder().replace_artifact(replacement).build().unwrap();
+        let replaced = catalog
+            .artifacts()
+            .iter()
+            .find(|artifact| {
+                matches!(
+                    artifact,
+                    Artifact::OwnedFileSection(section)
+                        if section.path == SETUP_JUST_PATH && section.id == "recipe:_install-component"
+                )
+            })
+            .expect("the replacement must retain the helper identity");
+        let unchanged_neighbor = catalog
+            .artifacts()
+            .iter()
+            .find(|artifact| {
+                matches!(
+                    artifact,
+                    Artifact::OwnedFileSection(section)
+                        if section.path == SETUP_JUST_PATH
+                            && section.id == "recipe:anvil-component-default-clippy-install"
+                )
+            })
+            .expect("the neighboring helper must remain present");
+        assert!(replaced.body().contains("echo replaced"));
+        assert_eq!(unchanged_neighbor.body(), neighbor.body());
     }
 
     #[test]
@@ -1053,7 +1094,11 @@ mod tests {
         assert!(IMPACT_JUST.contains("anvil_stable_toolchain_arg :="));
         assert!(IMPACT_JUST.contains("+{workspace-rust-version}"));
         assert!(!TOOLS_JUST.contains("_anvil-resolve-stable"));
-        assert!(!TOOLS_JUST.contains("[script(\"pwsh\""));
+        assert_eq!(
+            TOOLS_JUST.matches("[script(\"pwsh\", \"-NoProfile\")]").count(),
+            3,
+            "only native-failure-preserving stable validation commands need a shell boundary"
+        );
         assert!(TOOLS_JUST.contains("cargo each --workspace --once -- cargo "));
         assert!(TOOLS_JUST.contains("rustup component add --toolchain"));
         assert!(!TOOLS_JUST.contains("rustup target add --toolchain"));
@@ -1124,9 +1169,10 @@ mod tests {
     #[test]
     fn entry_section_imports_generated_recipe_files_and_defines_alias() {
         assert!(ENTRY_JUST.contains("alias anvil := anvil-pr"));
-        for import in ["setup.just", "checks.just", "container.just"] {
+        for import in ["setup.just", "checks.just"] {
             assert!(ENTRY_JUST.contains(&format!("import '{import}'")));
         }
+        assert!(ENTRY_JUST.contains("import? 'container.just'"));
     }
 
     #[test]

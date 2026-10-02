@@ -3,21 +3,23 @@
 
 //! Binary table infrastructure for crates.io database dump.
 //!
-//! This module provides efficient access to crates.io data via memory-mapped
-//! binary tables. The main entry point is [`TableMgr`], which provides
-//! methods to access individual tables.
+//! This module provides efficient access to crates.io data through immutable
+//! binary-table snapshots. The main entry point is [`TableMgr`], which provides methods to access
+//! individual tables.
 //!
 //! # Architecture Overview
 //!
 //! The tables infrastructure downloads the crates.io database dump (around 1 GB gzipped tarball
-//! containing 15 CSV files), converts it to an optimized binary format, and provides
-//! zero-copy access to those tables via memory-mapped files.
+//! containing 15 CSV files), converts it to an optimized binary format, and loads each table into
+//! an independently owned, read-only anonymous mapping. Rows borrow directly from that immutable
+//! snapshot without further copying.
 //!
 //! When creating a `TableMgr`, it first attempts to open existing tables from disk.
 //! If the tables are missing or stale (based on a configurable TTL), it streams
 //! the download, decompresses it, extracts each CSV file, converts rows to binary,
-//! and writes the binary tables to disk. Finally, it memory-maps the tables for
-//! efficient access.
+//! and writes the binary tables to disk. Finally, it copies each complete table file into an
+//! anonymous mapping and protects that snapshot read-only. The snapshot remains valid if another
+//! process replaces or truncates the on-disk cache file.
 //!
 //! This codebase tries to be as efficient as possible in terms of both speed and memory usage.
 //! As the download is streamed off the network, it is decompressed and parsed line-by-line
@@ -78,7 +80,7 @@ pub use row_iter::RowIter;
 use row_reader::RowReader;
 use row_writer::RowWriter;
 pub use table::Table;
-use table::{TABLE_HEADER_SIZE, define_rows, define_table, validate_table_header};
+use table::{TABLE_HEADER_SIZE, define_rows, define_table, map_table_file, validate_table_header};
 pub use table_mgr::TableMgr;
 pub use teams_table::{TeamsTable, TeamsTableIndex};
 pub use users_table::{UsersTable, UsersTableIndex};

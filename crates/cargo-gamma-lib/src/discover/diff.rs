@@ -47,6 +47,7 @@ impl Diff {
     /// Returns an error when `path` is `-` and reading `input` fails or its bytes are not UTF-8, or
     /// when another path cannot be opened, read, or decoded as UTF-8. Inputs larger than
     /// [`input::MAX_BYTES`] are refused before they can exhaust the process's memory.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn read_from(path: &Utf8Path, mut input: impl Read) -> Result<Self> {
         let text = if path == "-" {
             input::text(&mut input).map_err(|cause| error!("could not read a diff from standard input").caused_by(cause))?
@@ -249,6 +250,7 @@ impl Diff {
     /// A mutation site is matched by its whole extent rather than by its first line, so editing
     /// the middle of a multi-line condition still selects the mutants on it.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn touches(&self, path: &Utf8Path, start: u32, end: u32) -> bool {
         if start > end {
             return false;
@@ -282,6 +284,7 @@ fn header_path(rest: &str) -> Option<&str> {
 /// `dst_prefix` is what the `diff --git` header revealed, and `pre_image` is the `---` path this
 /// one is paired with. Either identifies the prefix; failing both, git's default `b/` is stripped
 /// when it is there, which is what a `diff -u` with no prefixes at all needs left alone.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn new_file_path(rest: &str, dst_prefix: Option<&str>, pre_image: Option<&str>) -> Option<(Utf8PathBuf, Utf8PathBuf)> {
     let raw = header_path(rest)?;
 
@@ -307,6 +310,7 @@ fn new_file_path(rest: &str, dst_prefix: Option<&str>, pre_image: Option<&str>) 
 /// the header self-describing: `diff --git i/x.rs w/x.rs` says the post-image prefix is `w/` as
 /// plainly as `diff --git a/x.rs b/x.rs` says it is `b/`, and `diff --git x.rs x.rs` says there is
 /// none. Returns `None` for a rename, where the two paths carry no common suffix to compare.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn git_prefix(rest: &str) -> Option<String> {
     // A path may contain spaces, so the split is found by trying each one and keeping the split
     // whose halves agree once their first segment is removed, rather than by taking two tokens.
@@ -349,6 +353,7 @@ fn split_first_segment(path: &str) -> Option<(&str, &str)> {
 }
 
 /// Finds the workspace file a diff path refers to, if any.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf8Path>, candidates: &[Utf8PathBuf]) -> Option<Utf8PathBuf> {
     for candidate in [path, raw] {
         if candidate.is_absolute() {
@@ -419,6 +424,7 @@ fn safe_relative(path: &Utf8Path) -> bool {
 }
 
 /// Whether `path` ends with `suffix` at a segment boundary.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn ends_with_path(path: &Utf8Path, suffix: &Utf8Path) -> bool {
     let (path, suffix) = (path.as_str(), suffix.as_str());
 
@@ -467,6 +473,7 @@ mod fuzz {
     /// accumulated with `u32` arithmetic driven entirely by the input, so a hunk header claiming a
     /// start near the maximum is a real input rather than a hypothetical one.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn arbitrary_text_is_parsed_without_panicking() {
         bolero::check!().with_type::<String>().for_each(|text| {
             let diff = Diff::parse(text);
@@ -485,6 +492,7 @@ mod fuzz {
     /// it would silently narrow a `--in-diff` run to nothing and report a perfect score for a
     /// population nobody looked at.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_added_line_survives_surrounding_prose() {
         bolero::check!()
             .with_type::<(Vec<String>, String, u16)>()
@@ -542,6 +550,13 @@ index 1234567..89abcde 100644
         assert!(diff.touches(path, 13, 13));
         assert!(!diff.touches(path, 11, 11));
         assert!(!diff.touches(path, 14, 20));
+    }
+
+    #[test]
+    fn added_text_before_any_file_header_is_not_attributed_to_an_empty_path() {
+        let diff = Diff::parse("@@ -0,0 +1 @@\n+orphan\n");
+
+        assert!(!diff.touches_file(Utf8Path::new("")));
     }
 
     #[test]
@@ -610,6 +625,24 @@ index 1234567..89abcde 100644
             .expect("the path names a workspace file");
 
         assert!(diff.touches(Utf8Path::new("src/lib.rs"), 12, 12));
+    }
+
+    #[test]
+    fn a_relative_non_rust_workspace_file_resolves_without_becoming_absolute() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"subject\"\n").expect("manifest");
+
+        assert_eq!(
+            locate(
+                Utf8Path::new("Cargo.toml"),
+                Utf8Path::new("Cargo.toml"),
+                &root,
+                &HashSet::default(),
+                &[]
+            ),
+            Some(Utf8PathBuf::from("Cargo.toml"))
+        );
     }
 
     #[test]

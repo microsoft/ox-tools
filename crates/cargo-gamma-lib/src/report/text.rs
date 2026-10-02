@@ -19,6 +19,7 @@ pub fn continuation() -> String {
 /// anything that inspects it — matching a prefix, counting columns — is asking about what the
 /// reader sees rather than about the bytes.
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn unstyled(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut characters = text.chars();

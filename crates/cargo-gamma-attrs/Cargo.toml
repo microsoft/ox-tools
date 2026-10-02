@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-gamma-attrs"
-description = "Inert attribute macros for suppressing cargo-gamma mutations"
+description = "Attribute macros for controlling cargo-gamma mutations and test resources"
 version = "0.2.1"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]

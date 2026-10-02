@@ -330,7 +330,9 @@ mod tests {
             matches!(
                 recipe(),
                 Artifact::OwnedFileSection(section)
-                    if section.path == CONTAINER_JUST_PATH && section.id == "recipe:anvil-container"
+                    if section.path == CONTAINER_JUST_PATH
+                        && section.id == "recipe:anvil-container"
+                        && section.body.contains("anvil-container *command:")
             ),
             "the container recipe must be a section of the composed Justfile"
         );

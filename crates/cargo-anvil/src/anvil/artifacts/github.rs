@@ -157,6 +157,34 @@ mod tests {
     ];
 
     #[test]
+    fn artifacts_keep_their_emission_order() {
+        let paths: Vec<_> = all()
+            .into_iter()
+            .map(|artifact| match artifact {
+                Artifact::OwnedFile(spec) => spec.path,
+                Artifact::OwnedFileSection(_) | Artifact::Region(_) => {
+                    panic!("GitHub artifacts must be owned files")
+                }
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ".anvil/github/actions/setup/action.yml",
+                ".anvil/github/actions/setup/just-problem-matcher.json",
+                ".anvil/github/actions/run-group/action.yml",
+                ".anvil/github/actions/report-status/action.yml",
+                ".anvil/github/actions/impact/action.yml",
+                ".github/workflows/anvil-pr-impl.yml",
+                ".github/workflows/anvil-scheduled-impl.yml",
+                ".github/workflows/anvil-pr.yml",
+                ".github/workflows/anvil-scheduled.yml",
+                ".github/skills/code-review/SKILL.md",
+            ]
+        );
+    }
+
+    #[test]
     fn shared_action_templates_are_non_empty() {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
         assert!(JUST_PROBLEM_MATCHER.contains("\"owner\": \"anvil-just\""));

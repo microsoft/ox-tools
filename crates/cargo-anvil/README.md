@@ -256,12 +256,10 @@ source of the verdict.
 
 #### Miri
 
-Anvil compiles the selected scope together once with all features enabled,
-preserving Cargo feature unification, and runs the resulting Miri test
-executables concurrently.
-Each executable is one Cargo test target containing one or more libtest
-tests.
-`ANVIL_MIRI_JOBS` overrides the default worker count. Local callers can use
+Anvil uses cargo-each to run Miri once per selected package with all features
+enabled. `ANVIL_MIRI_JOBS` controls concurrent package processes while
+cargo-each provides deterministic output, process-tree cleanup, and
+aggregate failure. Local callers can use
 `--package` to override impact scope, `--test` to select libtest names, or
 `--example` with `--package` to run one example instead of the test suite.
 
@@ -400,7 +398,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbxfWZcTSDcP8bY0QjF3ywzm8bojyGUnDJD_gbkUjTMo4P0hlhZIGDa2NhcmdvLWFudmlsZjAuMTMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb_P5eacUGqYEbo9SF34bEioobUPg7IgLah4gbvRjT1-jMdDhhZIGDa2NhcmdvLWFudmlsZjAuMTMuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/

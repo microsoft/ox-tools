@@ -23,9 +23,9 @@ all-features = true
 # This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
 disable = true
 
-# Establish the lowest cross-platform baseline for this new crate. Raise it as coverage improves.
+# Require every retained source line to be exercised across the package coverage configurations.
 [package.metadata.coverage-gate]
-min-lines-percent = 86.5
+min-lines-percent = 100.0
 
 [features]
 # Selects the dedicated Loom integration target. The scheduler itself is still activated through

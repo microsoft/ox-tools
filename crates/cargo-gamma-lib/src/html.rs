@@ -68,6 +68,7 @@ pub fn write_page(report: &Report, path: &Utf8Path) -> Result<()> {
 /// The report is written through [`EscapeScript`] so that a `</script>` in a string literal cannot
 /// terminate the element carrying it, matching the escaping the whole-string form used. Splitting
 /// the page this way is what keeps neither the report JSON nor the page held whole in memory.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn stream(report: &Report, writer: &mut dyn io::Write) -> io::Result<()> {
     write!(
         writer,
@@ -175,6 +176,7 @@ impl<W: io::Write> io::Write for EscapeScript<W> {
         Ok(buf.len())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }

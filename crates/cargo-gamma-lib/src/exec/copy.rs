@@ -118,6 +118,7 @@ pub(super) fn copy_tree(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path) -> Resu
 /// mutates it. Leaving it out of the copy would fail the build over a file the real tree has.
 ///
 /// `reflinks` is shared with every copy path in the current synchronization operation.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, options: CopyOptions, reflinks: &Reflinks) -> Result<()> {
     fs::create_dir_all(to.as_std_path()).map_err(|cause| error!("could not create the scratch tree at `{to}`").caused_by(cause))?;
 
@@ -234,6 +235,7 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
 /// Only files an ignore rule hid are still missing at this point, which is a handful in the trees
 /// where it happens and none at all in the rest, so each candidate is settled by a single stat
 /// rather than by re-deriving what the walk decided.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_tracked(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let Some(tracked) = tracked_files(from)? else {
         return Ok(());
@@ -270,6 +272,7 @@ fn copy_tracked(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, reflinks: &Refl
 /// submodule and a repository whose index format is newer than any library would understand. A
 /// directory that is not a repository, or a machine with no git at all, gets `None` and the
 /// ignore walk's answer stands on its own.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn tracked_files(root: &Utf8Path) -> Result<Option<Vec<Utf8PathBuf>>> {
     let output = Command::new("git")
         .arg("-C")
@@ -353,6 +356,7 @@ pub(super) fn is_pruned(source: &Utf8Path, relative: &Utf8Path, excluded: &Utf8P
 }
 
 /// Copies one entry, preserving what it is.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let metadata = fs::symlink_metadata(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
 
@@ -416,6 +420,7 @@ fn copy_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
 }
 
 /// Copies one file, cloning it if the filesystem can.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_file(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if reflinks.worth_trying() {
@@ -503,6 +508,7 @@ mod tests {
 
     /// Builds a repository holding one tracked and one untracked file, both matching an ignore
     /// rule. Returns `false` when git is unavailable.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ignored_repository(from: &Utf8Path) -> bool {
         if !git(from, &["init"]) {
             return false;
@@ -520,6 +526,7 @@ mod tests {
     /// discovery walks the tree rather than asking git, so leaving it out of the copy fails the
     /// build over a file the real tree has.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_tracked_file_is_copied_even_when_an_ignore_rule_matches_it() {
         let (_temporary, from, to) = tree();
 
@@ -537,6 +544,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_tracked_ignored_file_with_a_non_utf8_name_is_reported() {
         use std::os::unix::ffi::OsStrExt as _;
 
@@ -570,6 +578,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_untracked_ignored_file_is_not_copied() {
         let (_temporary, from, to) = tree();
 
@@ -583,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn copying_ignored_files_takes_the_untracked_ones_too() {
         let (_temporary, from, to) = tree();
 
@@ -743,6 +753,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_relative_directory_symlink_is_recreated_as_a_directory_link() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let root = Utf8Path::from_path(temporary.path()).expect("utf8");

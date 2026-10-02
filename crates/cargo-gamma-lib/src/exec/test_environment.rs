@@ -72,6 +72,7 @@ impl TestEnvironment {
         })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn configure(&self, command: &mut Command, binary: &TestBinary) {
         let _ = command.envs(&self.common);
 
@@ -147,6 +148,7 @@ fn package_environments(metadata: &Value) -> HashMap<String, PackageEnvironment>
         .collect()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn apply_build_messages(
     artifacts: &str,
     packages: &mut HashMap<String, PackageEnvironment>,
@@ -171,6 +173,7 @@ fn apply_build_messages(
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn apply_build_script(message: &Value, package: &mut PackageEnvironment) {
     if let Some(out_dir) = message.get("out_dir").and_then(Value::as_str) {
         insert(&mut package.variables, "OUT_DIR", out_dir);
@@ -218,6 +221,7 @@ fn apply_artifact(message: &Value, package: &mut PackageEnvironment, integration
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn common_environment(root: &Utf8Path, cargo: &OsStr) -> BTreeMap<OsString, OsString> {
     let mut variables = BTreeMap::new();
     let rustup = rustup_environment(root);
@@ -257,6 +261,7 @@ struct RustupEnvironment {
     sysroot: PathBuf,
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn rustup_environment(root: &Utf8Path) -> Option<RustupEnvironment> {
     let active = quiet("rustup", &["show", "active-toolchain"], root)?;
     let toolchain = active.split_whitespace().next()?.to_owned();
@@ -287,6 +292,7 @@ fn rustup_environment(root: &Utf8Path) -> Option<RustupEnvironment> {
     })
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn quiet(program: &str, arguments: &[&str], root: &Utf8Path) -> Option<String> {
     let output = Command::new(program)
         .args(arguments)
@@ -304,10 +310,12 @@ fn quiet(program: &str, arguments: &[&str], root: &Utf8Path) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_cargo_home() -> Option<OsString> {
     env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|home| PathBuf::from(home).join(".cargo").into())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn resolve_executable(program: &OsStr) -> Option<OsString> {
     let path = Path::new(program);
     if path.components().count() > 1 {
@@ -418,6 +426,19 @@ mod tests {
         assert_eq!(value(package, "CARGO_PKG_LICENSE_FILE"), Some("/workspace/LICENSE"));
         assert_eq!(value(package, "CARGO_PKG_README"), Some("/workspace/README.md"));
         assert_eq!(value(package, "CARGO_PKG_RUST_VERSION"), Some("1.90"));
+    }
+
+    #[test]
+    fn absent_optional_package_strings_become_empty_cargo_variables() {
+        let mut metadata = metadata();
+        let package = metadata["packages"][0].as_object_mut().expect("package object");
+        let _ = package.remove("description");
+        let _ = package.remove("homepage");
+        let packages = package_environments(&metadata);
+        let package = &packages[PACKAGE_ID];
+
+        assert_eq!(value(package, "CARGO_PKG_DESCRIPTION"), Some(""));
+        assert_eq!(value(package, "CARGO_PKG_HOMEPAGE"), Some(""));
     }
 
     #[test]

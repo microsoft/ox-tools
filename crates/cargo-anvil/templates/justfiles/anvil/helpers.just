@@ -17,6 +17,10 @@ _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutant
 [private]
 [script("pwsh", "-NoProfile")]
 _anvil-root-msrv:
+    if ($env:ANVIL_RUST_VERSION) {
+        Write-Output $env:ANVIL_RUST_VERSION
+        exit 0
+    }
     $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
     $values = @{}
     $section = ''

@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cargo_anvil::test_support::{Cli, MANIFEST_FILE_NAME, run_update};
+use cargo_anvil::test_support::{Cli, MANIFEST_PATH, run_update};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {
@@ -67,7 +67,7 @@ fn render_tree(root: &Path) -> String {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| *p != root.join(MANIFEST_FILE_NAME))
+        .filter(|p| *p != root.join(MANIFEST_PATH))
         .collect();
     paths.sort();
 

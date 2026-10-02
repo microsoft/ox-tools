@@ -151,8 +151,7 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
             eprintln!("error: could not load coverage information");
             return Err("requested no-coverage-data report failure".to_owned());
         }
-        let output =
-            value_after(args, "--output-path").ok_or_else(|| "cargo llvm-cov report did not receive --output-path".to_owned())?;
+        let output = value_after(args, "--output-path").ok_or_else(|| "cargo llvm-cov report did not receive --output-path".to_owned())?;
         let contents = if env::var_os("FAKE_EMPTY_LCOV").is_some() {
             String::new()
         } else {
@@ -178,18 +177,14 @@ fn run_rustc(args: &[std::ffi::OsString]) -> Result<(), String> {
     if env::var_os("FAKE_FAIL_RUSTC").is_some() {
         return Err("requested rustc failure".to_owned());
     }
-    if env::var_os("FAKE_FAIL_TARGET_LIBDIR").is_some()
-        && args.iter().any(|arg| arg == "target-libdir")
-    {
+    if env::var_os("FAKE_FAIL_TARGET_LIBDIR").is_some() && args.iter().any(|arg| arg == "target-libdir") {
         return Err("requested target-libdir failure".to_owned());
     }
     if env::var_os("FAKE_INVALID_RUSTC_OUTPUT").is_some() {
         std::io::stdout().write_all(&[0xFF]).map_err(|error| error.to_string())?;
         return Ok(());
     }
-    if env::var_os("FAKE_EMPTY_TARGET_LIBDIR").is_some()
-        && args.iter().any(|arg| arg == "target-libdir")
-    {
+    if env::var_os("FAKE_EMPTY_TARGET_LIBDIR").is_some() && args.iter().any(|arg| arg == "target-libdir") {
         println!();
         return Ok(());
     }
@@ -240,6 +235,9 @@ fn run_cov(args: &[std::ffi::OsString]) -> Result<(), String> {
     }
 
     if env::var_os("FAKE_FALLBACK_NO_COVERAGE_DATA").is_some() {
+        if env::var_os("FAKE_REPORT_STDOUT").is_some() {
+            print!("fallback-report-stdout");
+        }
         eprintln!("error: failed to load coverage: 'empty': no coverage data found");
         eprintln!("error: could not load coverage information");
         return Err("requested fallback no-coverage-data failure".to_owned());
@@ -273,15 +271,11 @@ fn fake_lcov() -> Result<String, String> {
 }
 
 fn value_after<'a>(args: &'a [std::ffi::OsString], expected: &str) -> Option<&'a Path> {
-    args.windows(2)
-        .find(|pair| pair[0] == expected)
-        .map(|pair| Path::new(&pair[1]))
+    args.windows(2).find(|pair| pair[0] == expected).map(|pair| Path::new(&pair[1]))
 }
 
 fn string_value_after<'a>(args: &'a [String], expected: &str) -> Option<&'a str> {
-    args.windows(2)
-        .find(|pair| pair[0] == expected)
-        .map(|pair| pair[1].as_str())
+    args.windows(2).find(|pair| pair[0] == expected).map(|pair| pair[1].as_str())
 }
 
 fn render_windows_command_line(arguments: &[&str]) -> String {

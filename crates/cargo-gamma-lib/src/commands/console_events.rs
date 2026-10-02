@@ -2,10 +2,10 @@
 // Licensed under the MIT License.
 
 use core::fmt::Write as _;
-use std::io::Write as _;
 
 use camino::Utf8Path;
 
+use super::dashboard::Dashboard;
 use super::host::Host;
 use super::verdict_log::VerdictLog;
 use crate::model::Outcome;
@@ -15,10 +15,8 @@ use crate::report::{Progress, Styler};
 pub(super) struct ConsoleEvents<'host, H: Host> {
     pub(super) host: &'host mut H,
     pub(super) progress: Progress,
+    pub(super) dashboard: Dashboard,
     pub(super) styler: Styler,
-
-    /// Whether `--estimate` asked for a projection of the wait still to come.
-    pub(super) estimate: bool,
 
     /// Whether `--show-build` asked for cargo's own narration of the build.
     pub(super) show_build: bool,
@@ -29,12 +27,20 @@ pub(super) struct ConsoleEvents<'host, H: Host> {
 impl<H: Host> ConsoleEvents<'_, H> {
     /// Closes a phase line whose phase failed, so the error that follows starts on its own line.
     pub(super) fn abandon(&mut self) {
+        self.dashboard.finish(self.host);
         self.progress.abandon(self.host);
     }
 
     // #[gamma::skip(fn_value.ok, reason = "the optional progress log is auxiliary and best-effort; command correctness is unchanged when no log was opened or its final flush is already complete")]
     pub(super) fn finish_verdict_log(&mut self) -> crate::Result<()> {
         self.verdict_log.finish()
+    }
+
+    fn sync_testing_status(&mut self) {
+        self.progress.resize(self.host.terminal_width());
+        if self.dashboard.is_active() {
+            self.dashboard.testing_status(self.progress.render());
+        }
     }
 }
 
@@ -44,30 +50,57 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
         self.verdict_log.start(scratch)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn phase(&mut self, verb: &str, detail: &str) {
+        if self.dashboard.is_active() {
+            self.dashboard.status(self.host, verb, detail);
+            return;
+        }
         self.progress.status(self.host, verb, detail);
     }
 
     fn begin(&mut self, active: &str, completed: &str, detail: &str) {
+        if self.dashboard.is_active() {
+            self.dashboard.status(self.host, active, detail);
+            return;
+        }
         self.progress.begin(self.host, active, completed, detail);
     }
 
     fn end(&mut self, detail: &str) {
+        if self.dashboard.is_active() {
+            self.dashboard.status(self.host, "Planning", detail.trim_start_matches(',').trim());
+            return;
+        }
         self.progress.end(self.host, detail);
     }
 
     fn complete(&mut self, detail: &str) {
+        if self.dashboard.is_active() {
+            self.dashboard.status(self.host, "Planning", detail);
+            return;
+        }
         self.progress.complete(self.host, detail);
     }
 
     fn phase_progress(&mut self, completed: usize, total: usize, unit: &str) {
+        if self.dashboard.is_active() {
+            self.dashboard.phase_progress(self.host, completed, total, unit);
+            return;
+        }
         self.progress.phase_progress(self.host, completed, total, unit);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn outcome(&mut self, detail: &str) {
+        if self.dashboard.is_active() {
+            self.dashboard.status(self.host, "Planning", detail.trim_start_matches(',').trim());
+            return;
+        }
         self.progress.labelled(self.host, &crate::report::continuation(), detail);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn build_progress(&mut self, bar: &str) {
         // Suppressed while cargo's own output is coming through, because both redraw the same line.
         if self.show_build {
@@ -97,14 +130,20 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
         self.progress.restore(self.host);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn warn(&mut self, message: &str) {
         let label = self.styler.warning();
 
         for line in message.lines() {
-            self.progress.insist(self.host, &label, line);
+            if self.dashboard.is_active() {
+                self.dashboard.line(self.host, &label, line);
+            } else {
+                self.progress.insist(self.host, &label, line);
+            }
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn mutant(&mut self, mutant: &crate::model::Mutant) {
         self.verdict_log.record(mutant);
 
@@ -114,10 +153,15 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
         // than held back for the summary. Everything else only moves the bar. The label is the one
         // the summary would use, so the same mutant is never named two different things.
         match mutant.outcome {
-            Outcome::Survived => {
-                let label = self.styler.outcome(Outcome::Survived);
+            Outcome::Survived | Outcome::Flaky => {
+                let label = self.styler.outcome(mutant.outcome);
+                let detail = mutant_detail(mutant);
 
-                self.progress.labelled(self.host, &label, &mutant.describe());
+                if self.dashboard.is_active() {
+                    self.dashboard.line(self.host, &label, &detail);
+                } else {
+                    self.progress.labelled(self.host, &label, &detail);
+                }
             }
 
             // Both carry a note that says something the label cannot: which test a timeout stalled
@@ -127,50 +171,100 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
                 let label = self.styler.outcome(outcome);
                 let detail = mutant_detail(mutant);
 
-                self.progress.labelled(self.host, &label, &detail);
+                if self.dashboard.is_active() {
+                    self.dashboard.line(self.host, &label, &detail);
+                } else {
+                    self.progress.labelled(self.host, &label, &detail);
+                }
             }
 
             _ => {}
         }
 
         self.progress.record_mutant(mutant);
-        self.progress.tick(self.host);
+        self.dashboard.record(mutant);
+        self.sync_testing_status();
+        if self.dashboard.is_active() {
+            self.dashboard.tick(self.host);
+        } else {
+            self.progress.tick(self.host);
+        }
     }
 
+    fn selection_attempt(&mut self, attempt: &crate::exec::SelectionAttempt) {
+        self.verdict_log.record_selection(attempt);
+        self.dashboard.record_selection(attempt);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sweep_planned(&mut self, work: &[crate::estimate::MutationWork], jobs: usize) {
-        self.progress.set_workload(work, jobs);
+        if !self.dashboard.enabled() {
+            self.progress.complete(self.host, &crate::report::quantity(work.len(), "mutant"));
+        }
+        self.progress.set_total(work.len());
+        if self.dashboard.enabled() {
+            self.progress.finish(self.host);
+            self.progress.resize(self.host.terminal_width());
+            self.dashboard.start_testing(self.host, jobs, self.progress.render());
+        }
     }
 
-    fn mutant_started(&mut self, ordinal: u32, elapsed: core::time::Duration) {
-        self.progress.mutant_started(ordinal, elapsed);
+    fn mutant_started(&mut self) {
+        self.dashboard.mutant_started();
+        self.sync_testing_status();
+        self.dashboard.tick(self.host);
     }
 
-    fn measured(&mut self, plan: &crate::discover::Plan, _session: &crate::exec::Session, estimate: &crate::estimate::Estimate) {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn heartbeat(&mut self) {
+        if self.dashboard.is_active() {
+            self.sync_testing_status();
+            self.dashboard.tick(self.host);
+        }
+    }
+
+    fn sweep_planning(&mut self, plan: &crate::discover::Plan, binaries: usize, jobs: usize) {
+        if self.dashboard.enabled() {
+            self.progress.finish(self.host);
+            self.dashboard.start_planning(self.host, plan, binaries, jobs);
+        } else {
+            let pending = plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Pending).count();
+            let binaries = if binaries == 1 {
+                "1 test binary".to_owned()
+            } else {
+                format!("{binaries} test binaries")
+            };
+            self.progress.begin(
+                self.host,
+                "Planning",
+                "Planned",
+                &format!("0/{pending} mutants across {binaries} using {jobs} jobs"),
+            );
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sweep_plan_progress(&mut self, completed: usize, total: usize) {
+        if self.dashboard.is_active() {
+            self.dashboard.phase_progress(self.host, completed, total, "mutants planned");
+        } else {
+            self.progress.phase_progress(self.host, completed, total, "mutants planned");
+        }
+    }
+
+    fn measured(&mut self, plan: &crate::discover::Plan, session: &crate::exec::Session) {
+        self.dashboard.measured(plan, session);
         for mutant in &plan.mutants {
             if mutant.outcome != Outcome::Pending {
                 self.verdict_log.record(mutant);
             }
         }
-
-        if !self.estimate {
-            return;
-        }
-
-        // Written straight to the stream rather than through the progress display, because the
-        // display goes quiet when output is piped and an explicitly requested estimate must not.
-        self.progress.clear(self.host);
-
-        let projection = format!("{} {}", self.styler.verb("Estimate"), crate::estimate::render(estimate));
-        let mut stream = self.host.error();
-
-        let _ = writeln!(stream, "{projection}");
-        let _ = stream.flush();
     }
 }
 
 pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
     let mut detail = match mutant.outcome {
-        Outcome::Timeout | Outcome::OutOfMemory | Outcome::Flaky => mutant
+        Outcome::Timeout | Outcome::OutOfMemory | Outcome::Flaky | Outcome::CompileError => mutant
             .note
             .as_deref()
             .map_or_else(|| mutant.describe(), |note| format!("{}: {note}", mutant.describe())),
@@ -216,26 +310,76 @@ mod tests {
         }
     }
 
+    fn empty_plan() -> crate::discover::Plan {
+        crate::discover::Plan {
+            skipped: Vec::new(),
+            digests: crate::HashMap::default(),
+            root: Utf8PathBuf::from("C:/workspace"),
+            files: Vec::new(),
+            mutants: Vec::new(),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        }
+    }
+
     #[test]
-    fn survivors_and_timeouts_are_announced_as_they_happen() {
+    fn dashboard_starts_while_the_sweep_is_still_being_planned() {
+        let mut host = Sink::default().terminal(160);
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(true, Styler::new(false), Some(160)),
+            dashboard: Dashboard::new(true, Some(160), Styler::new(false)),
+            styler: Styler::new(false),
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+
+        let mut plan = empty_plan();
+        plan.mutants.push(mutant(Outcome::Pending, None));
+        events.sweep_planning(&plan, 12, 4);
+        let planning_draw = events.host.err.len();
+        let rendered = String::from_utf8_lossy(&events.host.err);
+        assert!(rendered.contains("    Planning 0/1 mutants planned"), "{rendered}");
+
+        events.begin("Census", "Censused", "selecting useful tests");
+        events.phase_progress(2, 10, "tests");
+        events.end(", selected 4 tests");
+        events.complete("reachability index ready");
+
+        assert_eq!(
+            events.host.err.len(),
+            planning_draw,
+            "planning events must update dashboard state without writing a competing progress line"
+        );
+    }
+
+    #[test]
+    fn exceptional_outcomes_are_announced_as_they_happen() {
         let mut host = Sink::default();
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(80)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
 
         events.mutant(&mutant(Outcome::Survived, None));
         events.mutant(&mutant(Outcome::Timeout, Some("stalled, last test named was `slow`")));
+        events.mutant(&mutant(Outcome::Flaky, Some("test `unstable` also failed without a mutant")));
 
         let err = String::from_utf8(host.err).expect("utf-8");
 
         assert!(err.contains("SURVIVED"), "{err}");
         assert!(err.contains("TIMEOUT"), "{err}");
+        assert!(err.contains("FLAKY"), "{err}");
         assert!(err.contains("stalled, last test named was `slow`"), "{err}");
+        assert!(err.contains("test `unstable` also failed without a mutant"), "{err}");
     }
 
     /// A timeout says how long the mutant was given, alongside whatever the note already said.
@@ -248,8 +392,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -275,8 +419,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -296,31 +440,40 @@ mod tests {
     }
 
     #[test]
-    fn sweep_events_drive_the_weighted_live_estimate() {
+    fn sweep_events_drive_testing_progress_without_an_eta() {
         let work = (1..=12)
-            .map(|ordinal| {
-                crate::estimate::MutationWork::new(
-                    ordinal,
-                    crate::estimate::WorkKind::Whole,
-                    core::time::Duration::from_secs(10),
-                    core::time::Duration::from_secs(100),
-                    crate::exec::CONFIRM_FACTOR,
-                )
-            })
+            .map(|_| crate::estimate::MutationWork::new(crate::estimate::WorkKind::Whole, core::time::Duration::from_secs(10)))
             .collect::<Vec<_>>();
         let mut host = Sink::default().terminal(200);
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
 
+        let mut plan = empty_plan();
+        plan.mutants.extend((1..=12).map(|ordinal| {
+            let mut mutant = mutant(Outcome::Pending, None);
+            mutant.ordinal = ordinal;
+            mutant
+        }));
+        events.sweep_planning(&plan, 7, 4);
+        events.sweep_plan_progress(6, 12);
         events.sweep_planned(&work, 4);
+
+        let planning = String::from_utf8_lossy(&events.host.err);
+        assert!(
+            planning.contains("Planning 0/12 mutants across 7 test binaries using 4 jobs"),
+            "{planning}"
+        );
+        assert!(planning.contains("6/12 mutants planned"), "{planning}");
+        assert!(planning.contains("Planned 12 mutants"), "{planning}");
+
         for ordinal in 1..=8 {
-            events.mutant_started(ordinal, core::time::Duration::ZERO);
+            events.mutant_started();
             let mut completed = timed(Outcome::Killed, None, 6_000);
             completed.ordinal = ordinal;
             events.mutant(&completed);
@@ -328,11 +481,7 @@ mod tests {
 
         let rendered = events.progress.render();
         assert!(rendered.contains("8/12 mutants evaluated"), "{rendered}");
-        assert!(rendered.contains("ETA ~"), "{rendered}");
-        assert!(
-            rendered.split_once("ETA ~").is_some_and(|(_head, eta)| eta.contains('-')),
-            "{rendered}"
-        );
+        assert!(!rendered.contains("ETA"), "{rendered}");
     }
 
     /// The phase verbs all reach the display, and a caught mutant is left for the summary.
@@ -342,8 +491,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(80)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -371,8 +520,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
+            dashboard: Dashboard::new(false, None, Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: true,
             verdict_log: VerdictLog::default(),
         };
@@ -398,8 +547,8 @@ mod tests {
                 let mut events = ConsoleEvents {
                     host: &mut host,
                     progress: Progress::new(false, Styler::new(false), None),
+                    dashboard: Dashboard::new(false, None, Styler::new(false)),
                     styler: Styler::new(false),
-                    estimate: false,
                     show_build,
                     verdict_log: VerdictLog::default(),
                 };
@@ -420,8 +569,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
+            dashboard: Dashboard::new(false, None, Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -440,8 +589,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
+            dashboard: Dashboard::new(false, None, Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -456,13 +605,14 @@ mod tests {
     /// message written as one string would put the second line under the label rather than beside
     /// it.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_multi_line_warning_is_labelled_on_every_line() {
         let mut host = Sink::default();
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
+            dashboard: Dashboard::new(false, None, Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -489,8 +639,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
+            dashboard: Dashboard::new(false, None, Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };

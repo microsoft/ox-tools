@@ -137,7 +137,7 @@ fn resolve_config(raw: RawConfig) -> Result<HeatherConfig, HeatherError> {
     Ok(HeatherConfig {
         header_text: base,
         scripts: raw.scripts.unwrap_or(true),
-        dot_toml: raw.dot_toml.unwrap_or(false),
+        dot_toml: raw.dot_toml.unwrap_or_default(),
         exclude: raw.exclude.unwrap_or_default(),
     })
 }
@@ -276,6 +276,23 @@ mod tests {
         assert!(matches!(err, HeatherError::FileRead { .. }), "{err}");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn load_config_from_path_propagates_read_error() {
+        let tmp = TempDir::new().unwrap();
+        let err = load_config_from_path(tmp.path()).expect_err("reading a directory as config must fail");
+        assert!(matches!(err, HeatherError::FileRead { .. }), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn load_config_from_path_propagates_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(tmp.path(), ".cargo-heather.toml", "not = = toml");
+        let err = load_config_from_path(&path).expect_err("malformed config must fail");
+        assert!(matches!(err, HeatherError::ConfigParse { .. }), "{err}");
+    }
+
     #[test]
     fn parse_raw_config_rejects_malformed_toml() {
         let err = parse_raw_config(Path::new("x.toml"), "this = = not toml").unwrap_err();
@@ -335,6 +352,21 @@ mod tests {
     }
 
     #[test]
+    fn resolve_config_propagates_unknown_license() {
+        let raw = RawConfig {
+            license: Some("not-an-spdx-id".into()),
+            header: None,
+            scripts: None,
+            dot_toml: None,
+            exclude: None,
+        };
+
+        let err = resolve_config(raw).expect_err("unknown configured license must be returned");
+
+        assert!(matches!(err, HeatherError::UnknownLicense(id) if id == "not-an-spdx-id"));
+    }
+
+    #[test]
     fn inherited_license_defaults_enable_scripts_and_disable_dot_toml() {
         let cfg = HeatherConfig::with_defaults("header".to_owned());
 
@@ -378,6 +410,15 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn load_config_propagates_cargo_manifest_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "Cargo.toml", "not = = toml");
+        let err = load_config(tmp.path()).expect_err("malformed Cargo.toml must fail");
+        assert!(matches!(err, HeatherError::ConfigParse { .. }), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn try_load_from_cargo_toml_rejects_malformed() {
         let tmp = TempDir::new().unwrap();
         let p = write(tmp.path(), "Cargo.toml", "not = = toml");
@@ -412,6 +453,28 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn try_load_from_cargo_toml_propagates_unknown_package_license() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\nlicense = \"not-an-spdx-id\"\n");
+        let err = try_load_from_cargo_toml(&path).expect_err("unknown package license must be returned");
+        assert!(matches!(err, HeatherError::UnknownLicense(id) if id == "not-an-spdx-id"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_propagates_unknown_workspace_package_license() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = []\n[workspace.package]\nlicense = \"not-an-spdx-id\"\n",
+        );
+        let err = try_load_from_cargo_toml(&path).expect_err("unknown workspace license must be returned");
+        assert!(matches!(err, HeatherError::UnknownLicense(id) if id == "not-an-spdx-id"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn try_load_from_cargo_toml_resolves_workspace_inherited_license() {
         // package license = { workspace = true } walks up to the workspace root.
         let tmp = TempDir::new().unwrap();
@@ -436,6 +499,59 @@ mod tests {
         let p = write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
         let err = find_workspace_root(&p).unwrap_err();
         assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+    }
+
+    #[test]
+    fn find_workspace_root_rejects_path_without_parent() {
+        let err = find_workspace_root(Path::new("")).expect_err("a parentless path must be rejected");
+        assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn find_workspace_root_propagates_ancestor_manifest_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "Cargo.toml", "not = = toml");
+        let package = write(tmp.path(), "member/Cargo.toml", "[package]\nname = \"member\"\n");
+
+        let err = find_workspace_root(&package).expect_err("malformed ancestor manifest must be returned");
+
+        assert!(matches!(err, HeatherError::ConfigParse { .. }), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn inherited_license_propagates_missing_workspace_root() {
+        let tmp = TempDir::new().unwrap();
+        let member = write(
+            tmp.path(),
+            "member/Cargo.toml",
+            "[package]\nname = \"member\"\nlicense.workspace = true\n",
+        );
+
+        let err = try_load_from_cargo_toml(&member).expect_err("missing workspace root must be returned");
+
+        assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn inherited_license_propagates_unknown_workspace_license() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"member\"]\n[workspace.package]\nlicense = \"not-an-spdx-id\"\n",
+        );
+        let member = write(
+            tmp.path(),
+            "member/Cargo.toml",
+            "[package]\nname = \"member\"\nlicense.workspace = true\n",
+        );
+
+        let err = try_load_from_cargo_toml(&member).expect_err("unknown inherited license must be returned");
+
+        assert!(matches!(err, HeatherError::UnknownLicense(id) if id == "not-an-spdx-id"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

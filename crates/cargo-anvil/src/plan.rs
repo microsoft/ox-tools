@@ -545,6 +545,7 @@ fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> 
                 return Err(error).into_app_err_with(|| format!("failed to resolve {} while checking containment", probe.display()));
             }
         }
+        // #[gamma::skip(stmt.delete_assign, reason = "without advancing to the parent, a missing target path is canonicalized forever")]
         probe = probe
             .parent()
             .expect("the walk reaches a filesystem root, which always resolves, before running out of components");
@@ -570,9 +571,13 @@ fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
             return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
         }
     }
-    std::fs::write(&tmp, content).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+    write_temporary_file(&tmp, content)?;
     std::fs::rename(&tmp, path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+fn write_temporary_file(path: &Path, content: &str) -> Result<(), AppError> {
+    std::fs::write(path, content).into_app_err_with(|| format!("failed to write {}", path.display()))
 }
 
 fn make_temp_path(path: &Path) -> PathBuf {
@@ -691,6 +696,12 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "canonicalizes a missing path; miri isolation forbids it")]
+    #[test]
+    fn a_missing_repository_root_returns_an_error() {
+        contained_path(Path::new("a-directory-that-does-not-exist"), "file.txt").unwrap_err();
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn a_path_that_resolves_outside_the_repository_is_refused() {
@@ -770,6 +781,53 @@ mod tests {
         let plan = Plan::default();
         assert!(!plan.has_changes());
         assert_eq!(plan.dry_run_exit_code(), 0);
+        assert_eq!(plan.summary(None), "cargo-anvil plan: 0 item(s)\n");
+    }
+
+    #[test]
+    fn plan_item_constructors_set_only_their_documented_payloads() {
+        let cases = [
+            PlanItem::repair_region("host", "id", "spliced".to_owned()),
+            PlanItem::noop(Target::File { path: "noop".to_owned() }, Decision::LeaveAlone),
+            PlanItem::insync(Target::File { path: "sync".to_owned() }, "sync-sum".to_owned()),
+            PlanItem::write_file("write", "body".to_owned(), "body-sum".to_owned()),
+            PlanItem::propose_file("propose", "proposal".to_owned(), "proposal-sum".to_owned()),
+            PlanItem::write_region(
+                "host",
+                "id",
+                "region-body".to_owned(),
+                "region-splice".to_owned(),
+                "region-sum".to_owned(),
+            ),
+            PlanItem::remove_file("remove"),
+            PlanItem::remove_region("host", "id", "removed-splice".to_owned()),
+            PlanItem::orphaned_kept(Target::File { path: "orphan".to_owned() }),
+        ];
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|item| {
+                (
+                    item.decision,
+                    item.rendered.as_deref(),
+                    item.spliced_host.as_deref(),
+                    item.rendered_checksum.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                (Decision::Write, None, Some("spliced"), None),
+                (Decision::LeaveAlone, None, None, None),
+                (Decision::InSync, None, None, Some("sync-sum")),
+                (Decision::Write, Some("body"), None, Some("body-sum")),
+                (Decision::Propose, Some("proposal"), None, Some("proposal-sum")),
+                (Decision::Write, Some("region-body"), Some("region-splice"), Some("region-sum")),
+                (Decision::Remove, None, None, None),
+                (Decision::Remove, None, Some("removed-splice"), None),
+                (Decision::OrphanedKept, None, None, None),
+            ]
+        );
     }
 
     #[test]
@@ -1233,5 +1291,99 @@ mod tests {
         let target = tmp.path().join("occupied").join("child.txt");
         let err = write_file(&target, "data").unwrap_err();
         assert!(err.to_string().contains("failed to create parent directory"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_returns_a_write_failure_instead_of_panicking() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("blocked")).unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem::write_file("blocked", "data".to_owned(), "sha256:data".to_owned()));
+
+        let err = plan.apply(tmp.path(), &Manifest::default()).unwrap_err();
+        assert!(err.to_string().contains("failed to rename"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn owned_file_write_propagates_containment_failure() {
+        let tmp = TempDir::new().unwrap();
+        let missing_root = tmp.path().join("missing");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::write_file("file.txt", "data".to_owned(), "sha256:data".to_owned()));
+
+        let err = plan.apply_files(&missing_root).unwrap_err();
+        assert!(err.to_string().contains("failed to resolve the repository root"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn proposed_file_propagates_containment_failure() {
+        let tmp = TempDir::new().unwrap();
+        let missing_root = tmp.path().join("missing");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::propose_file(
+            "file.txt",
+            "proposal".to_owned(),
+            "sha256:proposal".to_owned(),
+        ));
+
+        let err = plan.apply_files(&missing_root).unwrap_err();
+        assert!(err.to_string().contains("failed to resolve the repository root"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn proposed_file_propagates_write_failure() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("file.txt.anvil-proposed.anvil-tmp")).unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem::propose_file(
+            "file.txt",
+            "proposal".to_owned(),
+            "sha256:proposal".to_owned(),
+        ));
+
+        let err = plan.apply_files(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("failed to clear the temporary file"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn region_write_propagates_write_failure() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem::write_region(
+            "Justfile",
+            "anvil-imports",
+            "body".to_owned(),
+            "spliced".to_owned(),
+            "sha256:body".to_owned(),
+        ));
+
+        let err = plan.apply_files(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("failed to clear the temporary file"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn region_removal_propagates_write_failure() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_region("Justfile", "anvil-imports", "spliced".to_owned()));
+
+        let err = plan.apply_files(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("failed to clear the temporary file"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn temporary_write_failure_is_returned_instead_of_panicking() {
+        let tmp = TempDir::new().unwrap();
+        let err = write_temporary_file(tmp.path(), "data").unwrap_err();
+        assert!(err.to_string().contains("failed to write"), "{err}");
     }
 }
