@@ -15,7 +15,7 @@ inputs:
           flows.
         - "none": skip tool installation entirely; just restore the
           Cargo cache and bootstrap just + binstall. Used by
-          anvil-impact, which installs only cargo-delta afterwards.
+          anvil-impact, which installs cargo-each and cargo-delta afterwards.
         - a name containing only lowercase letters, digits, and hyphens:
           install only that group's prerequisites via
           `just anvil-<group>-setup`.

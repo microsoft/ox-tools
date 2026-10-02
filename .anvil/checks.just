@@ -483,7 +483,7 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
 [arg("timeout", long, pattern='(?:[1-9][0-9]{0,2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)')]
 anvil-examples run="false" package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
     cargo each {{ if example == "" { if package == "" { anvil_affected_selection } else { "--package " + quote(package) } } else if package == "" { error("--example requires --package") } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if example == "" { "--examples" } else { "--example " + quote(example) } }} --all-features --locked
-    {{ if run == "true" { if example == "" { "& " + quote(just_executable()) + " _anvil-examples-run " + quote(package) + " " + quote(timeout) } else { "# explicit example selected below" } } else { "# example execution not requested" } }}
+    {{ if run == "true" { if example == "" { "just _anvil-examples-run " + quote(package) + " " + quote(timeout) } else { "# explicit example selected below" } } else { "# example execution not requested" } }}
     {{ if run == "true" { if example == "" { "# " } else { "" } } else { "# " } }}cargo each --package {{ quote(package) }} --timeout {{ timeout }}s -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{spec}' --example {{ quote(example) }} --all-features --locked
 
 # Run automatically eligible examples while honoring each package's

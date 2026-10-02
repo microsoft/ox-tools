@@ -10,7 +10,7 @@
 #       `just anvil-setup` -- use for "give me everything" flows.
 #     - "none": skip tool installation entirely; just restore the
 #       Cargo cache and bootstrap libclang + just. Used by impact.yml,
-#       which installs only cargo-delta afterwards.
+#       which installs cargo-each and cargo-delta afterwards.
 #     - anything else (e.g. "pr-fast"): install only that group's
 #       prerequisites via `just anvil-<group>-setup`.
 parameters:

@@ -9,13 +9,11 @@ description: |
   `anvil-impact-<runner.os>` workflow artifact.
 
   This runs the same `anvil-impact` recipe adopters run locally: it snapshots
-  the base ref and the working tree, runs `cargo delta impact`, and
-  writes the durable cache under `target/anvil/impact/` (the per-tier
-  `include_<tier>.txt` lists, `impact.json`, and the `snapshots/`). The whole
-  directory is uploaded so each downstream group job can download it and read
-  the cache exactly as a local run does -- rather than threading the include
-  lists through job outputs / environment variables. This keeps CI and local
-  execution identical by construction.
+  the base ref and the working tree, runs `cargo delta impact`, and writes the
+  durable package files and cargo-delta cache under `target/anvil/impact/`. The
+  whole directory is uploaded so each downstream group job can download it and
+  read the cache exactly as a local run does. This keeps CI and local execution
+  identical by construction.
 
   Computed once per OS family (see anvil-pr-impl.yml) because an
   OS-conditional dependency changes the reverse-dep set only in that host's
@@ -25,15 +23,17 @@ runs:
   steps:
     # anvil-setup with group=none bootstraps the rust toolchain +
     # just + binstall + cache, but skips the full catalog install.
-    # We follow it with just the cargo-delta install (the only tool
-    # this composite needs). This keeps the impact stage lean -- it's
+    # We follow it with the two tools used by the shared recipe. This keeps the
+    # impact stage lean -- it's
     # the critical-path gating dep for every PR-tier group job.
     - uses: ./.anvil/github/actions/setup
       with:
         group: none
-    - name: Install cargo-delta
+    - name: Install impact tools
       shell: bash
-      run: just anvil-tool-cargo-delta-install binstall
+      run: |
+        just anvil-tool-cargo-each-install binstall
+        just anvil-tool-cargo-delta-install binstall
     - name: Compute impact
       shell: bash
       # Run the shared anvil-impact recipe -- the same impact building block

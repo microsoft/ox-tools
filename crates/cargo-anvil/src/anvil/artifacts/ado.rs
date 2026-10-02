@@ -401,8 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn impact_step_uses_group_none_and_installs_only_cargo_delta() {
+    fn impact_step_uses_group_none_and_installs_only_impact_tools() {
         assert!(IMPACT_STEP.contains("group: none"));
+        assert!(IMPACT_STEP.contains("anvil-tool-cargo-each-install"));
         assert!(IMPACT_STEP.contains("anvil-tool-cargo-delta-install"));
         assert!(!IMPACT_STEP.contains("cargo install --locked cargo-delta"));
     }

@@ -783,11 +783,12 @@ by the template's toolchain fingerprinting step, so Windows agents do not need
 Bash. ADO uses the default `install` backend (source builds) so adopters do not
 need to approve a binary-installation service.
 
-`impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
-via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
-recipe — the same building block adopters run locally. The recipe resolves the base
-ref (`_anvil-base-ref`, which reads `$(System.PullRequest.TargetBranch)` or `$BASE_REF`),
-uses cargo-delta managed mode and writes `modified.packages`,
+`impact.yml` invokes `setup.yml` with `group: none`, installs cargo-each and
+cargo-delta through their generated setup recipes, and runs the shared
+**`just anvil-impact`** recipe — the same building block adopters run locally.
+The recipe resolves the base ref (`_anvil-base-ref`, which reads
+`$(System.PullRequest.TargetBranch)` or `$BASE_REF`), uses cargo-delta managed
+mode and writes `modified.packages`,
 `affected.packages`, and `required.packages` under `target/anvil/impact/`.
 The `compute_<os>` job then publishes that whole
 directory as the `anvil-impact-<os>` pipeline artifact (via `job.yml`'s `artifacts:`

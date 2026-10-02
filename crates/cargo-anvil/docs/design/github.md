@@ -814,10 +814,11 @@ Other groups retain the action's disabled default.
 
 1. `./.anvil/github/actions/setup` with `group: none` (bootstrap rust + just +
    cache; no catalog tools).
-2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
-   needs. **This is the only job that runs cargo-delta to compute the impact
-   set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
-   `consume` mode they never run it -- they read the downloaded impact cache.)
+2. Installs cargo-each and cargo-delta through their generated setup recipes.
+   These are the only catalog tools the shared recipe needs. **This is the only
+   job that runs cargo-delta to compute the impact set.** (Group setup jobs also
+   install cargo-delta as a prerequisite, but in `consume` mode they never run
+   it -- they read the downloaded impact cache.)
 3. `just anvil-impact`, which invokes cargo-delta managed mode and writes one
    canonical `name@version` per line to `modified.packages`,
    `affected.packages`, and `required.packages` under

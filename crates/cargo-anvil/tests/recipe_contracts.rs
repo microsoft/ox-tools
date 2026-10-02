@@ -149,7 +149,7 @@ if ($env:FAKE_CARGO_EXIT) { exit [int]$env:FAKE_CARGO_EXIT }
         let executable = bin.join("cargo");
         write(
             &executable,
-            "#!/usr/bin/env pwsh\n& \"$PSScriptRoot/cargo.ps1\" @args\nexit $LASTEXITCODE\n",
+            "#!/bin/sh\nexec pwsh -NoProfile -File \"$(dirname \"$0\")/cargo.ps1\" \"$@\"\n",
         );
         let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -185,7 +185,7 @@ if ($env:FAKE_RUSTUP_EXIT) { exit [int]$env:FAKE_RUSTUP_EXIT }
         let executable = bin.join("rustup");
         write(
             &executable,
-            "#!/usr/bin/env pwsh\n& \"$PSScriptRoot/rustup.ps1\" @args\nexit $LASTEXITCODE\n",
+            "#!/bin/sh\nexec pwsh -NoProfile -File \"$(dirname \"$0\")/rustup.ps1\" \"$@\"\n",
         );
         let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
