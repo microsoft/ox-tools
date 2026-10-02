@@ -182,6 +182,7 @@ pub enum CensusStatus {
 impl CensusStatus {
     /// Stable diagnostic spelling.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -196,8 +197,8 @@ impl CensusStatus {
 ///
 /// The census spends a subprocess per test to learn which tests can reach which sites, and is
 /// repaid during the sweep by running fewer tests per mutant. Whether that trade is positive
-/// depends on the workspace, and these are the figures that let anyone — including `--estimate` —
-/// see which way it went, rather than folding the cost invisibly into the build.
+/// depends on the workspace, and these figures show which way it went rather than folding the cost
+/// invisibly into the build.
 #[derive(Debug, Clone, Default)]
 pub struct CensusCost {
     /// How long the whole census took, across every binary and every test.

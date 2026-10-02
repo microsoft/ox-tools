@@ -247,11 +247,11 @@ impl CatalogBuilder {
 /// assets live.
 fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
     let Artifact::OwnedFile(spec) = artifact else {
-        return None;
+        return Option::default();
     };
     let path = std::path::Path::new(spec.path);
     if !spec.path.starts_with("justfiles/") || path.extension().is_some_and(|extension| extension == "just") {
-        return None;
+        return Option::default();
     }
     Some(format!(
         "owned file '{}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (it is the recipe tree, not an asset directory)",
@@ -307,6 +307,22 @@ mod tests {
             .unwrap()
             .body();
         assert_eq!(body, "custom = true\n");
+    }
+
+    #[test]
+    fn replace_artifact_updates_the_exact_nonzero_index() {
+        let first = Artifact::owned_file("first", "first-body");
+        let second = Artifact::owned_file("second", "second-body");
+        let catalog = Catalog::builder(CliMeta::new("tool"))
+            .with_artifact(first.clone())
+            .with_artifact(second)
+            .replace_artifact(Artifact::owned_file("second", "replacement"))
+            .build()
+            .unwrap();
+
+        assert_eq!(catalog.artifacts()[0].key(), first.key());
+        assert_eq!(catalog.artifacts()[0].body(), "first-body");
+        assert_eq!(catalog.artifacts()[1].body(), "replacement");
     }
 
     #[test]
@@ -408,6 +424,19 @@ mod tests {
         assert!(one.checksum().starts_with("sha256:"));
     }
 
+    #[test]
+    fn checksum_has_a_stable_multi_artifact_encoding() {
+        let catalog = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::owned_file("a", "1"))
+            .with_artifact(Artifact::owned_file("b", "2"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            catalog.checksum(),
+            "sha256:6edb93e9f95756f0ee2f6ff9430f0eab2beb642d58234622ae6acee34fd9eb68"
+        );
+    }
+
     #[cfg_attr(
         miri,
         ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
@@ -484,5 +513,38 @@ mod tests {
         assert!(region_repr.contains("path:Cargo.toml"));
         assert!(!region_repr.contains("single_crate_cargo_toml"));
         assert!(region_repr.contains("slashslash"));
+    }
+
+    #[test]
+    fn canonical_repr_distinguishes_every_host_gate_and_syntax() {
+        let none = canonical_repr(&Artifact::owned_file("x.txt", "body"));
+        assert!(none.contains("gate=none"));
+
+        for (host, tag) in [
+            (crate::catalog::HostSelector::EachMemberManifest, "each_member_manifest"),
+            (crate::catalog::HostSelector::WorkspaceCargoToml, "workspace_cargo_toml"),
+            (crate::catalog::HostSelector::SingleCrateCargoToml, "single_crate_cargo_toml"),
+        ] {
+            let artifact = Artifact::region(crate::catalog::RegionSpec {
+                host,
+                id: crate::catalog::RegionId::new("test"),
+                body: "body".to_owned(),
+                syntax: crate::region::CommentSyntax::Hash,
+            });
+            let repr = canonical_repr(&artifact);
+            assert!(repr.contains(tag), "{repr}");
+            assert!(repr.contains("hash"), "{repr}");
+        }
+    }
+
+    #[test]
+    fn builder_sets_about_and_version_exactly() {
+        let catalog = Catalog::builder(CliMeta::new("tool"))
+            .about("specific help")
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        assert_eq!(catalog.cli().about, "specific help");
+        assert_eq!(catalog.cli().version, "1.2.3");
     }
 }

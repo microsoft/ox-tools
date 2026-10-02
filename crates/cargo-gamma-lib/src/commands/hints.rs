@@ -30,6 +30,7 @@ use crate::report::{Styler, quantity};
 /// Publication compares against the exact bytes used for the merge so concurrent writers cannot
 /// silently replace one another.
 /// Implements `hints` with the configuration generation dispatch already resolved.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn hints<H: Host>(host: &mut H, args: &HintsArgs, styler: Styler) -> crate::Result<i32> {
     let selected = crate::paths::physical(&args.dir)?;
     let (root, base, _lock) = crate::exec::claim_campaign_state(&selected, args.cache_dir.as_deref())?;

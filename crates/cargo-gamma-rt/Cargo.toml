@@ -23,9 +23,9 @@ all-features = true
 # This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
 disable = true
 
-# Establish the lowest Windows baseline for this new crate. Raise it as coverage improves.
+# Require every retained source line to be exercised across the package coverage configurations.
 [package.metadata.coverage-gate]
-min-lines-percent = 89.0
+min-lines-percent = 100.0
 
 # HARD CONSTRAINT: zero production dependencies and no build.rs. This crate is injected into the
 # dependency graph of the crate under test; anything else perturbs feature unification and breaks

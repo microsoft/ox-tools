@@ -157,4 +157,20 @@ mod tests {
         assert!(round_trip("1.0.0-alpha") < round_trip("1.0.0-beta"));
         assert!(round_trip("1.0.0") < round_trip("2.0.0-alpha"));
     }
+
+    #[test]
+    fn datetime_decoding_uses_zero_nanoseconds() {
+        let mut buffer = Vec::new();
+        {
+            let mut writer = RowWriter::new(&mut buffer);
+            writer.write_u64(1);
+            writer.row_done().expect("writing to a Vec cannot fail");
+        }
+        buffer.extend_from_slice(&[0u8; 10]);
+
+        assert_eq!(
+            RowReader::new(&buffer).read_datetime(),
+            Utc.timestamp_opt(1, 0).single().expect("one second after the epoch is valid")
+        );
+    }
 }

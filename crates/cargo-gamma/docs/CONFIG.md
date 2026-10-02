@@ -60,8 +60,7 @@ bytes.
 
 The independently versioned generalized section is schema version 2. It separates seed
 observations from transfer hits and misses and interns repeated test and binary identities.
-Version-1 candidate identities migrate as seeds; their conflated transfer statistics and measured
-cost are reset.
+Older generalized schemas are unsupported.
 
 Runs read the artifact automatically and it needs no setting here. Malformed artifacts, unsupported
 versions, and artifacts whose producer is not cargo-gamma are ignored safely. See
@@ -221,6 +220,10 @@ test-packages = ["my-integration-tests"]
 # Default: false.
 test-workspace = false
 
+# Compile and run only library unit-test harnesses when deciding verdicts.
+# Default: false.
+test-lib = false
+
 # Experimentally measure case-level reachability before testing mutants.
 # Default: false.
 optimize-test-execution = false
@@ -235,7 +238,33 @@ exclude-tests = ["*_slow", "e2e_*"]
 
 # Run tests with nextest for per-test process isolation. Default: false.
 nextest = false
+
+# Capacities for shared resources declared beside tests. A declared resource omitted here has a
+# conservative capacity of one.
+[resources]
+cargo-subprocess = 2
+powershell = 1
 ```
+
+A test declares only the stable resource identity:
+
+```rust
+#[gamma::resource("cargo-subprocess")]
+#[test]
+fn resolves_metadata() {
+    // ...
+}
+```
+
+An annotation on a test function applies to that case. An annotation on an inline test module
+applies to every execution of the containing test target, which is useful when a whole
+integration-test binary shares the same expensive fixture. An integration target may use an empty
+inline module solely to declare that binary-wide resource. Command-line
+`--resource-concurrency NAME=N` settings override this table. Every admission atomically reserves
+all resources needed by the selected tests, so tests requiring more than one resource cannot
+deadlock by acquiring them in different orders. A capacity whose resource is not active in the
+selected packages is ignored, allowing workspace-wide configuration to apply to package-scoped
+campaigns.
 
 A derived budget adapts to the machine it runs on and to each specific test binary.
 `minimum-test-timeout` exists because a test binary finishing in milliseconds would otherwise get a budget of
@@ -328,6 +357,10 @@ incremental = "build"
 
 # Fail the run if the assertion-killed mutation score is below this percentage.
 min-score = 70.0
+
+# Fail independently if more than this many flaky outcomes remain.
+# Requires confirmation to stay enabled.
+max-flaky = 0
 ```
 
 | Mode | Reuses unviability | Reuses killer hints | Reuses test verdicts |
@@ -345,8 +378,11 @@ build red on the day it lands, and a gate that is red by default gets switched o
 Only mutants rejected by a failing test assertion enter the score's numerator. Survivors,
 uncovered mutants, timeouts, and out-of-memory mutants remain in its denominator, so
 `min-score = 100.0` fails closed on any of those outcomes.
-If any selected mutant remains pending, the gate fails as incomplete rather than evaluating a
-score over only the completed subset.
+If any selected mutant remains pending, either gate fails as incomplete rather than evaluating a
+score or flaky count over only the completed subset.
+`max-flaky` is independent of the score because flaky outcomes are inconclusive and excluded from
+its denominator. `max-flaky = 0` requires a fully conclusive population; it cannot be combined with
+`no-confirm = true`, which removes the observation needed to identify a flaky outcome.
 
 ## `[shard]`
 

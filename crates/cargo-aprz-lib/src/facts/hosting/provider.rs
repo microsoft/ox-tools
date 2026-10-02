@@ -202,9 +202,8 @@ impl Provider {
         let repo_to_crates = crate_spec::by_repo(crates.iter().cloned());
 
         // Group repos by host domain
-        let mut repos_by_host: HashMap<&'static str, Vec<RepoSpec>> = crate::hash_map_with_capacity(SUPPORTED_HOSTS.len());
-        let mut crates_by_host: HashMap<&'static str, HashMap<RepoSpec, Vec<CrateSpec>>> =
-            crate::hash_map_with_capacity(SUPPORTED_HOSTS.len());
+        let mut repos_by_host: HashMap<&'static str, Vec<RepoSpec>> = HashMap::default();
+        let mut crates_by_host: HashMap<&'static str, HashMap<RepoSpec, Vec<CrateSpec>>> = HashMap::default();
         let mut unknown_host_crates: Vec<(CrateSpec, CompactString)> = Vec::new();
 
         for (repo_spec, crate_specs) in repo_to_crates {
@@ -235,9 +234,7 @@ impl Provider {
         }
 
         // Track requests for each supported host
-        for repos in repos_by_host.values() {
-            tracker.add_requests(TrackedTopic::Repos, repos.len() as u64);
-        }
+        track_repo_requests(tracker, repos_by_host.values().map(Vec::len));
 
         // Process each supported host in parallel
         // Dispatch all repos across all hosts through the throttler
@@ -290,6 +287,7 @@ impl Provider {
             let _permit = self.throttler.acquire().await;
             let result = self.fetch_hosting_data_for_repo(client, host, &repo_spec).await;
 
+            // #[gamma::skip(cond.always_true, tag = "timeout", reason = "treating every response as rate limited retries forever")]
             if result.is_rate_limited {
                 if let Some(rl) = &result.rate_limit {
                     log::debug!(
@@ -324,6 +322,7 @@ impl Provider {
     /// forced deterministically from a test, so the `false` path is unreachable in practice
     /// under measurement.
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, stmt.delete_call, bool_expr.negate, literal.int_decrement, literal.int_increment, reason = "rate-limit status rendering is a logging/progress adapter that depends on process-wide logger state and a detached real-time task")]
     fn begin_rate_limit_pause(
         &self,
         host: &Host,
@@ -337,12 +336,9 @@ impl Provider {
             tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
             let formatted_time = wait_until.with_timezone(&chrono::Local).format("%T").to_string();
             log::warn!(target: LOG_TARGET, "Hit {} rate limit for repository '{repo_spec}'", host.display_name);
-            if should_print_to_tracker(log::log_enabled!(log::Level::Warn)) {
-                tracker.println(&format!(
-                    "{} rate limit exceeded: Waiting until {formatted_time}...",
-                    host.display_name
-                ));
-            }
+            print_to_tracker_if_needed(tracker, log::log_enabled!(log::Level::Warn), || {
+                format!("{} rate limit exceeded: Waiting until {formatted_time}...", host.display_name)
+            });
 
             drop(tokio::spawn(Self::report_rate_limit_progress(
                 Arc::clone(&self.throttler),
@@ -362,6 +358,7 @@ impl Provider {
     /// out real minute-long sleeps, and its two `log_enabled` branches depend on
     /// process-wide logger state that tests cannot own.
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(parameter.default_shadow, stmt.delete_call, bool_expr.negate, call.replace_with_default, call_result.default, expr.decrement, expr.increment, reason = "detached rate-limit progress reporting is a logging adapter driven by process-wide logger state and real-time sleeps")]
     async fn report_rate_limit_progress(
         throttler: Arc<Throttler>,
         tracker: RequestTracker,
@@ -375,23 +372,19 @@ impl Provider {
             if !throttler.is_paused() {
                 tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Active);
                 log::info!(target: LOG_TARGET, "{display_name} rate limit lifted, resuming requests");
-                if should_print_to_tracker(log::log_enabled!(log::Level::Info)) {
-                    tracker.println(&format!("{display_name} rate limit lifted, resuming requests"));
-                }
+                print_to_tracker_if_needed(&tracker, log::log_enabled!(log::Level::Info), || {
+                    format!("{display_name} rate limit lifted, resuming requests")
+                });
                 break;
             }
             let remaining = wait_until - Utc::now();
             let remaining_mins = remaining.num_minutes();
-            if should_report_remaining_minutes(remaining_mins) {
+            if let Some(message) = remaining_progress_message(display_name, remaining_mins, &formatted_time) {
                 log::info!(
                     target: LOG_TARGET,
                     "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                 );
-                if should_print_to_tracker(log::log_enabled!(log::Level::Info)) {
-                    tracker.println(&format!(
-                        "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
-                    ));
-                }
+                print_to_tracker_if_needed(&tracker, log::log_enabled!(log::Level::Info), || message);
             }
         }
     }
@@ -445,10 +438,7 @@ impl Provider {
         );
 
         // Use the most conservative rate limit info (the one with the least remaining quota)
-        let rate_limit = [issues_rate_limit, repo_rate_limit]
-            .into_iter()
-            .flatten()
-            .min_by_key(|rl| rl.remaining);
+        let rate_limit = most_constrained_rate_limit(issues_rate_limit, repo_rate_limit);
 
         // GitHub uses subscribers_count, Codeberg uses watchers_count
         let subscribers = if host.use_watchers_for_subscribers {
@@ -466,8 +456,14 @@ impl Provider {
             issues: raw_issues.issues,
         };
 
-        let total_requests = total_hosting_requests(raw_issues.request_count);
-        log::debug!(target: LOG_TARGET, "Completed {total_requests} {} API request(s) for repository '{repo_spec}'", host.display_name);
+        #[cfg(all(test, not(miri)))]
+        crate::facts::test_logging::enable_log_argument_evaluation();
+        log::debug!(
+            target: LOG_TARGET,
+            "Completed one repository API request and {} issue API request(s) to {} for '{repo_spec}'",
+            raw_issues.request_count,
+            host.display_name
+        );
 
         let result = match self.cache.save(&filename, &cached_repo) {
             Ok(()) => ProviderResult::Found(compute_hosting_data(&cached_repo, &self.bug_labels)),
@@ -529,7 +525,7 @@ impl Provider {
             let (resp, rate_limit) = unwrap_or_return!(client.api_call(&url).await);
 
             // Update rate limit info - keep the most conservative (lowest remaining)
-            latest_rate_limit = [latest_rate_limit, rate_limit].into_iter().flatten().min_by_key(|rl| rl.remaining);
+            latest_rate_limit = most_constrained_rate_limit(latest_rate_limit, rate_limit);
 
             // Parse next page link if present
             let has_next_page = resp
@@ -550,6 +546,7 @@ impl Provider {
             all_issues.extend(issues.into_iter().map(CachedIssue::from));
 
             if !has_next_page {
+                // #[gamma::skip(loop.break_to_continue, tag = "outofmem", reason = "written by cargo gamma suppress 2026-09-27")]
                 break;
             }
 
@@ -566,8 +563,10 @@ impl Provider {
 
             page_num += 1;
 
+            // #[gamma::skip(cond.always_false, tag = "outofmem", reason = "written by cargo gamma suppress 2026-09-27")]
             if page_num > MAX_ISSUE_PAGES {
                 log::debug!(target: LOG_TARGET, "Reached maximum issue page limit ({MAX_ISSUE_PAGES}) for '{owner}/{repo}', stopping pagination after {} issues", all_issues.len());
+                // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "outofmem", reason = "written by cargo gamma suppress 2026-09-27")]
                 break;
             }
         }
@@ -579,6 +578,12 @@ impl Provider {
             },
             latest_rate_limit,
         )
+    }
+}
+
+fn track_repo_requests(tracker: &RequestTracker, request_counts: impl Iterator<Item = usize>) {
+    for count in request_counts {
+        tracker.add_requests(TrackedTopic::Repos, count as u64);
     }
 }
 
@@ -596,16 +601,27 @@ fn should_start_rate_limit_pause(now: DateTime<Utc>, wait_until: DateTime<Utc>) 
     wait_until > now
 }
 
-const fn should_print_to_tracker(log_enabled: bool) -> bool {
-    !log_enabled
+fn print_to_tracker_if_needed(tracker: &RequestTracker, log_enabled: bool, message: impl FnOnce() -> String) {
+    if !log_enabled {
+        tracker.println(&message());
+    }
 }
 
 const fn should_report_remaining_minutes(remaining_mins: i64) -> bool {
     remaining_mins > 0
 }
 
-const fn total_hosting_requests(issue_request_count: u32) -> u32 {
-    1 + issue_request_count
+fn remaining_progress_message(display_name: &str, remaining_mins: i64, formatted_time: &str) -> Option<String> {
+    should_report_remaining_minutes(remaining_mins)
+        .then(|| format!("{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"))
+}
+
+fn most_constrained_rate_limit(first: Option<RateLimitInfo>, second: Option<RateLimitInfo>) -> Option<RateLimitInfo> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(if first.remaining <= second.remaining { first } else { second }),
+        (Some(rate_limit), None) | (None, Some(rate_limit)) => Some(rate_limit),
+        (None, None) => None,
+    }
 }
 
 /// Compute age statistics from an iterator of durations in seconds.
@@ -621,14 +637,11 @@ fn compute_age_stats(seconds_iter: impl Iterator<Item = f64>) -> AgeStats {
 #[expect(clippy::cast_possible_truncation, reason = "acceptable for day conversion")]
 #[expect(clippy::cast_sign_loss, reason = "values are filtered to be non-negative")]
 fn compute_age_stats_from_vec(seconds: &mut [f64]) -> AgeStats {
-    if seconds.is_empty() {
-        return AgeStats::default();
-    }
-
     seconds.sort_by(|a, b| a.partial_cmp(b).expect("no NaN values should be present"));
+    let sample_count = seconds.len().max(1) as f64;
 
     AgeStats {
-        avg: (seconds.iter().sum::<f64>() / seconds.len() as f64 / SECONDS_PER_DAY) as u32,
+        avg: (seconds.iter().sum::<f64>() / sample_count / SECONDS_PER_DAY) as u32,
         p50: (percentile(seconds, 50.0) / SECONDS_PER_DAY) as u32,
         p75: (percentile(seconds, 75.0) / SECONDS_PER_DAY) as u32,
         p90: (percentile(seconds, 90.0) / SECONDS_PER_DAY) as u32,
@@ -850,12 +863,9 @@ fn compute_pull_request_stats(pulls: &[&CachedIssue], now: DateTime<Utc>) -> Pul
 #[expect(clippy::cast_possible_truncation, reason = "value is clamped to 0-100")]
 #[expect(clippy::cast_sign_loss, reason = "value is non-negative")]
 fn compute_labeled_issue_ratio(issues: &[&CachedIssue]) -> u32 {
-    if issues.is_empty() {
-        return 0;
-    }
-
     let labeled = issues.iter().filter(|issue| !issue.labels.is_empty()).count();
-    ((labeled as f64 / issues.len() as f64) * 100.0).round().clamp(0.0, 100.0) as u32
+    let issue_count = issues.len().max(1);
+    ((labeled as f64 / issue_count as f64) * 100.0).round().clamp(0.0, 100.0) as u32
 }
 
 /// Compute the full set of hosting metrics from raw cached repository data.
@@ -1083,6 +1093,47 @@ mod tests {
         assert_eq!(provider.hosts.len(), 2); // GitHub and Codeberg
     }
 
+    #[tokio::test]
+    async fn provider_uses_exactly_the_configured_request_concurrency() {
+        let provider = Provider::new(
+            None,
+            None,
+            test_cache(),
+            Arc::new(BugLabelMatcher::default()),
+            &Endpoints::default(),
+        )
+        .expect("default provider configuration is valid");
+
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_REQUESTS {
+            permits.push(
+                tokio::time::timeout(Duration::from_millis(100), provider.throttler.acquire())
+                    .await
+                    .expect("every configured permit must be immediately available"),
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), provider.throttler.acquire())
+                .await
+                .is_err(),
+            "one request beyond the configured limit must wait"
+        );
+
+        drop(permits.pop());
+        let _permit = tokio::time::timeout(Duration::from_millis(100), provider.throttler.acquire())
+            .await
+            .expect("releasing one permit must admit one waiting request");
+    }
+
+    #[test]
+    fn repository_request_tracking_uses_the_exact_total() {
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+
+        track_repo_requests(&tracker, [2, 3].into_iter());
+
+        assert_eq!(tracker.topic_state(TrackedTopic::Repos), (5, 0, TopicStatus::Active));
+    }
+
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime")]
     fn test_provider_new_with_tokens() {
@@ -1132,16 +1183,37 @@ mod tests {
 
     #[test]
     fn test_rate_limit_progress_helpers() {
-        assert!(should_print_to_tracker(false));
-        assert!(!should_print_to_tracker(true));
         assert!(should_report_remaining_minutes(1));
         assert!(!should_report_remaining_minutes(0));
         assert!(!should_report_remaining_minutes(-1));
+        assert_eq!(
+            remaining_progress_message("GitHub", 1, "12:34").as_deref(),
+            Some("GitHub rate limit: ~1 minute(s) remaining until 12:34")
+        );
+        assert!(remaining_progress_message("GitHub", 0, "12:34").is_none());
     }
 
     #[test]
-    fn test_total_hosting_requests_counts_repo_request_plus_issue_pages() {
-        assert_eq!(total_hosting_requests(3), 4);
+    fn test_most_constrained_rate_limit_is_order_independent() {
+        let reset_at = DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid");
+        let low = RateLimitInfo { remaining: 2, reset_at };
+        let high = RateLimitInfo { remaining: 50, reset_at };
+
+        assert_eq!(most_constrained_rate_limit(Some(low), Some(high)).unwrap().remaining, 2);
+        assert_eq!(most_constrained_rate_limit(Some(high), Some(low)).unwrap().remaining, 2);
+        let same_remaining_earlier = RateLimitInfo {
+            remaining: 2,
+            reset_at: reset_at - chrono::Duration::seconds(1),
+        };
+        assert_eq!(
+            most_constrained_rate_limit(Some(same_remaining_earlier), Some(low))
+                .expect("two rate limits produce one result")
+                .reset_at,
+            same_remaining_earlier.reset_at,
+            "ties must preserve the first observation"
+        );
+        assert_eq!(most_constrained_rate_limit(Some(low), None).unwrap().remaining, 2);
+        assert!(most_constrained_rate_limit(None, None).is_none());
     }
 
     fn bug_patterns() -> BugLabelMatcher {
@@ -1222,6 +1294,52 @@ mod tests {
         assert_eq!(stats.last_90_days, 0);
         assert_eq!(stats.last_180_days, 0);
         assert_eq!(stats.last_365_days, 0);
+    }
+
+    #[test]
+    fn test_increment_window_includes_the_exact_365_day_boundary() {
+        let now = Utc::now();
+        let cutoffs = Cutoffs::new(now);
+        let mut stats = TimeWindowStats::default();
+        increment_window(&mut stats, cutoffs.days_365, cutoffs);
+        assert_eq!(stats.last_365_days, 1);
+    }
+
+    #[test]
+    fn time_windows_include_every_exact_boundary() {
+        let now = Utc::now();
+        let cutoffs = Cutoffs::new(now);
+
+        let mut at_90 = TimeWindowStats::default();
+        increment_window(&mut at_90, cutoffs.days_90, cutoffs);
+        assert_eq!(
+            (at_90.total, at_90.last_365_days, at_90.last_180_days, at_90.last_90_days),
+            (1, 1, 1, 1)
+        );
+
+        let mut at_180 = TimeWindowStats::default();
+        increment_window(&mut at_180, cutoffs.days_180, cutoffs);
+        assert_eq!(
+            (at_180.total, at_180.last_365_days, at_180.last_180_days, at_180.last_90_days),
+            (1, 1, 1, 0)
+        );
+
+        let mut at_365 = TimeWindowStats::default();
+        increment_window(&mut at_365, cutoffs.days_365, cutoffs);
+        assert_eq!(
+            (at_365.total, at_365.last_365_days, at_365.last_180_days, at_365.last_90_days),
+            (1, 1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn cutoffs_are_exactly_90_180_and_365_days_old() {
+        let now = DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid");
+        let cutoffs = Cutoffs::new(now);
+
+        assert_eq!(now - cutoffs.days_90, chrono::Duration::days(90));
+        assert_eq!(now - cutoffs.days_180, chrono::Duration::days(180));
+        assert_eq!(now - cutoffs.days_365, chrono::Duration::days(365));
     }
 
     #[test]
@@ -1545,6 +1663,7 @@ mod tests {
 
     /// A provider whose GitHub client points at `github_url`.
     fn test_provider(cache_dir: &std::path::Path, github_url: &str) -> Provider {
+        crate::facts::test_logging::enable_log_argument_evaluation();
         let endpoints = Endpoints::default().with_github_url(github_url);
         Provider::new(
             None,
@@ -1606,7 +1725,6 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn issue_pagination_uses_ten_year_lookback_next_page_number_and_request_count() {
         let server = wiremock::MockServer::start().await;
         let issue = serde_json::json!([{
@@ -1654,12 +1772,87 @@ mod tests {
         let since = DateTime::parse_from_rfc3339(first_query.get("since").expect("issues request includes the since query parameter"))
             .expect("since is RFC3339")
             .with_timezone(&Utc);
-        let age_days = (Utc::now() - since).num_days();
-        let expected_ten_year_lookback_days = 3_650;
+        let age = Utc::now() - since;
+        let expected = chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
         assert!(
-            ((expected_ten_year_lookback_days - 1)..=(expected_ten_year_lookback_days + 1)).contains(&age_days),
-            "since should be about {expected_ten_year_lookback_days} days ago, got {age_days}"
+            age >= expected && age < expected + chrono::Duration::seconds(5),
+            "since should be exactly {ISSUE_LOOKBACK_DAYS} days ago within request latency, got {age:?}"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn an_empty_page_stops_even_when_it_advertises_a_next_page() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("link", r#"<https://example.invalid/next>; rel="next""#)
+                    .set_body_json(serde_json::json!([])),
+            )
+            .mount(&server)
+            .await;
+
+        let cache_dir = test_cache_dir("empty-pagination-page");
+        let provider = test_provider(&cache_dir, &server.uri());
+        let (_, client) = github_client(&provider);
+
+        let (raw_issues, _) = expect_api_success(provider.get_issues_and_pulls(client, "owner", "repo").await);
+
+        assert_eq!(raw_issues.request_count, 1);
+        assert!(raw_issues.issues.is_empty());
+        assert_eq!(server.received_requests().await.map_or(0, |requests| requests.len()), 1);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn pagination_keeps_the_lowest_remaining_rate_limit() {
+        let server = wiremock::MockServer::start().await;
+        let issue = serde_json::json!([{
+            "created_at": "2024-01-01T00:00:00Z",
+            "closed_at": null,
+            "state": "open",
+            "pull_request": null,
+            "labels": [],
+        }]);
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("link", r#"<https://example.invalid/next>; rel="next""#)
+                    .insert_header("x-ratelimit-remaining", "50")
+                    .insert_header("x-ratelimit-reset", "1704067200")
+                    .set_body_json(issue),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "7")
+                    .insert_header("x-ratelimit-reset", "1704067200")
+                    .set_body_json(serde_json::json!([])),
+            )
+            .mount(&server)
+            .await;
+
+        let cache_dir = test_cache_dir("pagination-rate-limit");
+        let provider = test_provider(&cache_dir, &server.uri());
+        let (_, client) = github_client(&provider);
+
+        let (raw_issues, rate_limit) = expect_api_success(provider.get_issues_and_pulls(client, "owner", "repo").await);
+
+        assert_eq!(raw_issues.request_count, 2);
+        assert_eq!(rate_limit.expect("both pages provide rate-limit information").remaining, 7);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_api_success<T>(result: HostingApiResult<T>) -> (T, Option<RateLimitInfo>) {
+        match result {
+            HostingApiResult::Success(value, rate_limit) => (value, rate_limit),
+            _ => panic!("the hosting API fixture should succeed"),
+        }
     }
 
     #[tokio::test]
@@ -1695,6 +1888,81 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn successful_repository_fetch_returns_and_caches_hosting_data() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/owner/repo"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stargazers_count": 1,
+                "forks_count": 2,
+                "subscribers_count": 3
+            })))
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/owner/repo/issues"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let cache_dir = test_cache_dir("successful-repository-fetch");
+        let provider = test_provider(&cache_dir, &server.uri());
+        let (host, client) = github_client(&provider);
+        let repo_spec = github_repo_spec();
+
+        let result = provider.fetch_hosting_data_for_repo(client, host, &repo_spec).await;
+
+        assert!(matches!(result.result, ProviderResult::Found(_)));
+        let filename = Provider::get_cache_filename("github.com", "owner", "repo");
+        assert!(matches!(provider.cache.load::<CachedRepo>(&filename), CacheResult::Data(_)));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn repository_fetch_returns_the_most_constrained_rate_limit() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/owner/repo"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "50")
+                    .insert_header("x-ratelimit-reset", "1704067200")
+                    .set_body_json(serde_json::json!({
+                        "stargazers_count": 1,
+                        "forks_count": 2,
+                        "subscribers_count": 3
+                    })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/owner/repo/issues"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "7")
+                    .insert_header("x-ratelimit-reset", "1704067200")
+                    .set_body_json(serde_json::json!([])),
+            )
+            .mount(&server)
+            .await;
+
+        let cache_dir = test_cache_dir("repository-rate-limit");
+        let provider = test_provider(&cache_dir, &server.uri());
+        let (host, client) = github_client(&provider);
+
+        let result = provider.fetch_hosting_data_for_repo(client, host, &github_repo_spec()).await;
+
+        assert_eq!(
+            result
+                .rate_limit
+                .expect("both successful calls provide rate-limit information")
+                .remaining,
+            7
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn begin_rate_limit_pause_pauses_the_throttler() {
         let cache_dir = test_cache_dir("begin-rate-limit-pause");
         let provider = test_provider(&cache_dir, "http://127.0.0.1:1");
@@ -1710,6 +1978,7 @@ mod tests {
         );
 
         assert!(provider.throttler.is_paused());
+        assert_eq!(tracker.topic_state(TrackedTopic::Repos).2, TopicStatus::Blocked);
     }
 
     #[tokio::test]
@@ -1717,6 +1986,8 @@ mod tests {
     async fn rate_limit_progress_waits_until_the_throttler_resumes() {
         let throttler = Throttler::new(1);
         let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        tracker.add_requests(TrackedTopic::Repos, 1);
+        tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
         assert!(throttler.pause_for(Duration::from_millis(40)));
 
         let started = std::time::Instant::now();
@@ -1724,9 +1995,9 @@ mod tests {
             Duration::from_millis(250),
             Provider::report_rate_limit_progress(
                 Arc::clone(&throttler),
-                tracker,
+                tracker.clone(),
                 "GitHub",
-                Utc::now() + chrono::Duration::minutes(1),
+                Utc::now() + chrono::Duration::seconds(61),
                 "soon".to_string(),
                 Duration::from_millis(1),
             ),
@@ -1739,6 +2010,38 @@ mod tests {
             "progress reporting must wait for the active pause to lift"
         );
         assert!(!throttler.is_paused());
+        assert_eq!(tracker.topic_state(TrackedTopic::Repos).2, TopicStatus::Active);
+    }
+
+    #[test]
+    fn tracker_fallback_prints_only_when_the_same_message_was_not_logged() {
+        let progress = Arc::new(RecordingProgress::default());
+        let tracker = RequestTracker::new(&(Arc::clone(&progress) as Arc<dyn crate::facts::Progress>));
+
+        print_to_tracker_if_needed(&tracker, false, || "fallback".to_string());
+        print_to_tracker_if_needed(&tracker, true, || "duplicate".to_string());
+
+        assert_eq!(progress.messages(), vec!["fallback"]);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn completed_fetch_marks_the_repository_request_done() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let cache_dir = test_cache_dir("completed-fetch");
+        let provider = test_provider(&cache_dir, &server.uri());
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        tracker.add_requests(TrackedTopic::Repos, 1);
+        let (host, client) = github_client(&provider);
+
+        let result = provider.fetch_with_retry(client, host, github_repo_spec(), &tracker).await;
+
+        assert!(matches!(result.result, ProviderResult::Unavailable(_)));
+        assert_eq!(tracker.topic_state(TrackedTopic::Repos), (1, 1, TopicStatus::Done));
     }
 
     #[tokio::test]
@@ -1788,6 +2091,28 @@ mod tests {
 
         assert!(matches!(result, HostingApiResult::RateLimited(_)));
         assert_eq!(server.received_requests().await.map_or(0, |r| r.len()), 1);
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingProgress {
+        messages: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingProgress {
+        fn messages(&self) -> Vec<String> {
+            self.messages.lock().expect("recording lock not poisoned").clone()
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl crate::facts::Progress for RecordingProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, msg: &str) {
+            self.messages.lock().expect("recording lock not poisoned").push(msg.to_string());
+        }
+        fn done(&self) {}
     }
 
     #[derive(Debug)]
@@ -1886,5 +2211,39 @@ mod tests {
         assert_eq!(buckets.days_365.len(), 4);
         assert_eq!(buckets.days_180.len(), 3);
         assert_eq!(buckets.days_90.len(), 2);
+    }
+
+    #[test]
+    fn age_buckets_include_the_exact_365_and_180_day_boundaries() {
+        let now = Utc::now();
+        let cutoffs = Cutoffs::new(now);
+        let mut buckets = AgeBuckets::default();
+
+        buckets.push(365.0, cutoffs.days_365, cutoffs);
+        buckets.push(180.0, cutoffs.days_180, cutoffs);
+
+        assert_eq!(buckets.all, vec![365.0, 180.0]);
+        assert_eq!(buckets.days_365, vec![365.0, 180.0]);
+        assert_eq!(buckets.days_180, vec![180.0]);
+        assert!(buckets.days_90.is_empty());
+    }
+
+    #[test]
+    fn age_buckets_include_the_exact_90_day_boundary() {
+        let now = Utc::now();
+        let cutoffs = Cutoffs::new(now);
+        let mut buckets = AgeBuckets::default();
+
+        buckets.push(90.0, cutoffs.days_90, cutoffs);
+
+        assert_eq!(buckets.days_90, vec![90.0]);
+    }
+
+    #[test]
+    fn zero_and_subsecond_ages_are_retained_in_statistics() {
+        let stats = compute_age_stats([0.0, 0.5, SECONDS_PER_DAY * 3.0].into_iter());
+
+        assert_eq!(stats.avg, 1, "retaining both small samples changes the three-day average");
+        assert_eq!(stats.p50, 0);
     }
 }

@@ -32,6 +32,12 @@ pub enum Shape {
     /// the compiler infers both parameters and carries `Send`, `Sync` and `Clone` across for free.
     IterBlock,
 
+    /// An iterator-valued expression whose replacement has a different concrete iterator type.
+    ///
+    /// Both branches are wrapped in [`gamma_rt::Either`](https://docs.rs/cargo-gamma-rt) exactly as for
+    /// [`Shape::IterBlock`], but the surrounding syntax remains an expression rather than a block.
+    IterExpr,
+
     /// A `continue` replaced with `break`.
     ///
     /// A generic expression guard makes the containing block appear to return `()`, even when the

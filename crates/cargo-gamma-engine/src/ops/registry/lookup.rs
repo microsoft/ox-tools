@@ -128,6 +128,7 @@ mod tests {
     fn selector_forms_and_catalog_order_have_exact_oracles() {
         assert_eq!(find("arith.add_to_sub").map(|m| m.name), Some("arith.add_to_sub"));
         assert_eq!(find_preset("default").map(|p| p.name), Some("default"));
+        assert_eq!(find_preset("extreme").map(|p| p.name), Some("extreme"));
         let families = families();
         let unique: HashSet<_> = families.iter().copied().collect();
         assert_eq!(families.len(), unique.len());
@@ -137,6 +138,7 @@ mod tests {
         assert_eq!(resolve("@pedantic").unwrap(), ["fn_value.some"]);
         assert_eq!(resolve("all").unwrap().len(), REGISTRY.len());
         assert_eq!(resolve("@all").unwrap().len(), REGISTRY.len());
+        assert_eq!(resolve("@extreme").unwrap(), resolve("@all").unwrap());
     }
 
     #[test]

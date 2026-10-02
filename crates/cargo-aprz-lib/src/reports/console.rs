@@ -95,6 +95,7 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &C
                 }
 
                 // Compute max metric name length for alignment
+                // #[gamma::skip(literal.int_increment, reason = "metric_names is nonempty whenever its category exists, so the unwrap_or fallback is unreachable")]
                 let max_name_len = metric_names.iter().map(|name| name.len()).max().unwrap_or(0);
 
                 // Get terminal width and calculate available space for values
@@ -134,7 +135,12 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &C
 
 /// Get the terminal width, defaulting to 80 if not detectable
 fn get_terminal_width() -> usize {
-    terminal_size().map_or(80, |(Width(w), _)| w as usize)
+    // #[gamma::skip(expr.decrement, expr.increment, reason = "the process terminal width is an OS adapter value that cannot be injected here; terminal_width_or_default tests detected and fallback widths deterministically")]
+    terminal_width_or_default(terminal_size().map(|(Width(width), _)| usize::from(width)))
+}
+
+fn terminal_width_or_default(width: Option<usize>) -> usize {
+    width.unwrap_or(80)
 }
 
 /// Word-wrap text to fit within a given width, with indentation for continuation lines
@@ -170,6 +176,7 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
             current_line = word.to_string();
         } else {
             // Add word to current line
+            // #[gamma::skip(cond.always_true, reason = "the true branch and the empty-lines fallback both append the same empty string when current_line is empty")]
             if !current_line.is_empty() {
                 current_line.push(' ');
             }
@@ -351,6 +358,12 @@ mod tests {
         assert_eq!(lines[0], "");
     }
 
+    #[test]
+    fn terminal_width_uses_detected_width_or_eighty_columns() {
+        assert_eq!(terminal_width_or_default(Some(132)), 132);
+        assert_eq!(terminal_width_or_default(None), 80);
+    }
+
     static SUMMARY_DEF: MetricDef = MetricDef {
         name: "summary",
         description: "Crate summary",
@@ -465,6 +478,30 @@ mod tests {
     }
 
     #[test]
+    fn generated_wrapped_metric_emits_every_word_once_in_order() {
+        let value = (0..80).map(|index| format!("token{index:02}")).collect::<Vec<_>>().join(" ");
+        let metrics = vec![Metric::with_value(&SUMMARY_DEF, MetricValue::String(value.into()))];
+        let crates = vec![ReportableCrate::new(
+            "test".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+
+        generate(&crates, false, &ConsoleOutputMode::full(), &mut output).unwrap();
+
+        let positions = (0..80)
+            .map(|index| {
+                let token = format!("token{index:02}");
+                assert_eq!(output.matches(&token).count(), 1, "{token} must occur exactly once in {output}");
+                output.find(&token).expect("checked above")
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{output}");
+    }
+
+    #[test]
     fn wrap_text_wraps_at_width_boundary_and_keeps_continuation_words_together() {
         let lines = wrap_text("aaaaa aaaa bbbb", 14, 4);
 
@@ -476,9 +513,81 @@ mod tests {
     }
 
     #[test]
+    fn wrap_text_keeps_an_oversized_first_word_on_the_first_line() {
+        assert_eq!(wrap_text("oversized tail", 5, 2), vec!["oversized".to_owned(), "  tail".to_owned()]);
+    }
+
+    #[test]
     fn test_wrap_text_when_indent_exceeds_width() {
         let lines = wrap_text("some text", 5, 10);
         assert_eq!(lines, vec!["some text".to_owned()]);
+    }
+
+    #[test]
+    fn wrap_text_does_not_wrap_when_width_equals_indent() {
+        assert_eq!(wrap_text("some text", 10, 10), vec!["some text".to_owned()]);
+    }
+
+    #[test]
+    fn equal_width_and_indent_take_the_single_line_fast_path() {
+        assert_eq!(wrap_text("alpha beta", 5, 5), vec!["alpha beta".to_owned()]);
+    }
+
+    #[test]
+    fn reasons_are_omitted_when_not_requested() {
+        let eval = Appraisal::new(
+            Risk::High,
+            vec![ExpressionOutcome::new(
+                "hidden reason".into(),
+                "hidden description".into(),
+                ExpressionDisposition::False,
+            )],
+            1,
+            0,
+            0.0,
+        );
+        let mode = ConsoleOutputMode {
+            appraisal: true,
+            reasons: false,
+            metrics: false,
+        };
+        let mut output = String::new();
+        generate(&[create_test_crate("test", "1.0.0", Some(eval))], false, &mode, &mut output).unwrap();
+        assert!(!output.contains("hidden reason"));
+    }
+
+    #[test]
+    fn appraisal_only_output_does_not_separate_crates() {
+        let crates = vec![
+            create_test_crate("first", "1.0.0", None),
+            create_test_crate("second", "1.0.0", None),
+        ];
+        let mode = ConsoleOutputMode {
+            appraisal: true,
+            reasons: false,
+            metrics: false,
+        };
+        let mut output = String::new();
+
+        generate(&crates, false, &mode, &mut output).unwrap();
+
+        assert!(!output.contains('═'), "{output}");
+    }
+
+    #[test]
+    fn missing_metric_values_are_rendered_as_na() {
+        let metrics = vec![Metric::new(&DESCRIPTION_DEF)];
+        let crates = vec![ReportableCrate::new(
+            "missing".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+
+        generate(&crates, false, &ConsoleOutputMode::full(), &mut output).unwrap();
+
+        assert!(output.contains(" : n/a"), "{output}");
     }
 
     #[test]
@@ -596,5 +705,50 @@ mod tests {
                 "the writer failed on write {budget} of {total}, so generation must fail too"
             );
         }
+    }
+
+    #[test]
+    fn metrics_only_output_still_separates_multiple_crates() {
+        let crates = vec![
+            create_test_crate("first", "1.0.0", None),
+            create_test_crate("second", "1.0.0", None),
+        ];
+        let mode = ConsoleOutputMode {
+            appraisal: false,
+            reasons: false,
+            metrics: true,
+        };
+        let mut output = String::new();
+
+        generate(&crates, false, &mode, &mut output).unwrap();
+
+        assert_eq!(output.matches("═══════════════════════════════════════").count(), 1);
+    }
+
+    #[test]
+    fn wrap_text_indents_every_continuation_after_the_first_line() {
+        assert_eq!(
+            wrap_text("aaaaa bbbbb ccccc ddddd", 11, 2),
+            vec!["aaaaa bbbbb".to_owned(), "  ccccc".to_owned(), "  ddddd".to_owned()]
+        );
+    }
+
+    #[test]
+    fn category_heading_write_failure_is_returned() {
+        struct FailOnCategory;
+
+        impl Write for FailOnCategory {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                if s == "Metadata" { Err(core::fmt::Error) } else { Ok(()) }
+            }
+        }
+
+        let crates = vec![create_test_crate("test", "1.0.0", None)];
+        let mode = ConsoleOutputMode {
+            appraisal: false,
+            reasons: false,
+            metrics: true,
+        };
+        assert!(generate(&crates, false, &mode, &mut FailOnCategory).is_err());
     }
 }

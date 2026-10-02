@@ -240,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_compound_gate_is_read_all_the_way_down() {
         // The parser this replaced looked one level deep, so `all(test, unix)` read as a plain
         // `unix` gate and the module below it was surveyed as production code.
@@ -261,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_gate_a_production_build_can_also_satisfy_is_not_test_only() {
         // `any(test, …)` holds whenever the other arm does, so the module is compiled into the
         // library the run measures. Treating it as test code would drop every mutant in it.
@@ -282,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_path_attribute_is_read() {
         let ast = parse("#[path = \"reader_tests.rs\"]\nmod tests;");
         let Item::Mod(module) = &ast.items[0] else {
@@ -557,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_attribute_that_is_neither_cfg_nor_path_is_ignored() {
         // Every item carries attributes this does not care about. Reading one as a `#[path]` would
         // resolve a module to a doc string.

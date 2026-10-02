@@ -33,14 +33,15 @@ pub fn collect(file: &SourceFile, selection: &Selection) -> Vec<Candidate> {
 /// there would never be compiled and its mutant could never be activated by any test.
 #[must_use]
 pub fn collect_in(file: &SourceFile, selection: &Selection, cfg: &CfgSet) -> Vec<Candidate> {
-    collect_with(file, selection, cfg, &Defaults::default())
+    collect_with(file, selection, cfg, &Defaults::optimistic_of_in(&file.ast, cfg))
 }
 
 /// Collects every candidate a file admits, told what the rest of the workspace implements.
 ///
 /// The extra argument is what lets a `Default::default()` be withheld for a type the workspace
-/// defines and gives no `Default`. An empty index is not a claim that nothing has one; it says
-/// nothing was looked at, and every type stays optimistic, which is what [`collect_in`] passes.
+/// defines and gives no `Default`. [`collect_in`] stays optimistic because an implementation may
+/// live in another file; callers that have indexed the wider workspace can pass conclusive evidence
+/// here.
 #[must_use]
 pub fn collect_with(file: &SourceFile, selection: &Selection, cfg: &CfgSet, defaults: &Defaults) -> Vec<Candidate> {
     let collector = Collector::new(file, selection, selection.errors(), cfg, defaults);

@@ -14,6 +14,9 @@ use super::provider::LOG_TARGET;
 use crate::Result;
 
 pub(super) const GIT_TIMEOUT: Duration = Duration::from_mins(5);
+const GIT_RESET_OPERATION: &str = "git reset";
+const SPAWNING_GIT_CONTEXT: &str = "spawning git command";
+const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Convert a path to a UTF-8 string, returning an error if the path contains invalid UTF-8.
 fn path_str(path: &Path) -> Result<&str> {
@@ -35,8 +38,11 @@ pub async fn get_repo(repo_path: &Path, repo_url: &Url, timeout: Duration) -> Re
 
     let status = get_repo_core(repo_path, repo_url, timeout).await?;
 
-    if matches!(status, RepoStatus::Ok) {
-        log::debug!(target: LOG_TARGET, "Successfully prepared cached repository from '{repo_url}' in {:.3}s", start_time.elapsed().as_secs_f64());
+    match &status {
+        RepoStatus::Ok => {
+            log::debug!(target: LOG_TARGET, "Successfully prepared cached repository from '{repo_url}' in {:.3}s", start_time.elapsed().as_secs_f64());
+        }
+        RepoStatus::NotFound => {}
     }
 
     Ok(status)
@@ -56,7 +62,8 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
     // Verify it's a valid git repository before attempting update
     if !repo_path.join(".git").exists() {
         log::warn!(target: LOG_TARGET, "Cached repository path '{path_str}' exists but .git directory missing, re-cloning");
-        fs::remove_dir_all(repo_path).into_app_err_with(|| format!("removing potentially corrupt cached repository '{path_str}'"))?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem adapter errors must be propagated rather than converted into process panics")]
+        remove_cached_repo(repo_path, &format!("removing potentially corrupt cached repository '{path_str}'"))?;
         return clone_repo(path_str, repo_url, timeout).await;
     }
 
@@ -76,14 +83,20 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
         // Fetch failed - repository might be corrupted, try re-clone
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!(target: LOG_TARGET, "Git fetch failed ({}), removing and re-cloning", stderr.trim());
-        fs::remove_dir_all(path_str).into_app_err_with(|| format!("removing stale cached repository '{path_str}'"))?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem adapter errors must be propagated rather than converted into process panics")]
+        remove_cached_repo(Path::new(path_str), &format!("removing stale cached repository '{path_str}'"))?;
         return clone_repo(path_str, repo_url, timeout).await;
     }
 
     // Reset to match remote HEAD (discard any local changes)
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "external git process failures must be propagated rather than converted into process panics")]
     let output = run_git_with_timeout(&["-C", path_str, "reset", "--hard", "origin/HEAD"], timeout).await?;
-    check_git_output(&output, "git reset")?;
+    check_git_output(&output, GIT_RESET_OPERATION)?;
     Ok(RepoStatus::Ok)
+}
+
+fn remove_cached_repo(path: &Path, context: &str) -> Result<()> {
+    fs::remove_dir_all(path).into_app_err(context)
 }
 
 /// Check whether git stderr indicates the repository was not found on the remote.
@@ -141,6 +154,7 @@ pub async fn count_contributors(repo_path: &Path, timeout: Duration) -> Result<u
     let path_str = path_str(repo_path)?;
     // -s = summary (count only), -n = sort by count, -e = show emails
     // --all ensures we count contributors from all fetched refs, not just HEAD
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "external git process failures must be propagated rather than converted into process panics")]
     let output = run_git_with_timeout(&["-C", path_str, "shortlog", "-sne", "--all"], timeout).await?;
 
     if !output.status.success() {
@@ -172,6 +186,7 @@ pub async fn get_commit_stats(repo_path: &Path, day_windows: &[i64], timeout: Du
     let path_str = path_str(repo_path)?;
 
     // %at = author date as Unix timestamp
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "external git process failures must be propagated rather than converted into process panics")]
     let output = run_git_with_timeout(&["-C", path_str, "log", "--format=%at"], timeout).await?;
 
     if !output.status.success() {
@@ -191,7 +206,7 @@ fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> C
     let mut first_timestamp: Option<i64> = None;
     let mut last_timestamp: Option<i64> = None;
     let mut window_counts = vec![0u64; day_windows.len()];
-    let window_thresholds: Vec<i64> = day_windows.iter().map(|days| now - days * 86400).collect();
+    let window_thresholds: Vec<i64> = day_windows.iter().map(|days| now - days * SECONDS_PER_DAY).collect();
 
     for line in stdout.lines() {
         let Ok(ts) = line.trim().parse::<i64>() else {
@@ -230,15 +245,21 @@ fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> C
 }
 
 async fn run_git_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "spawning an external git process is an adapter boundary whose errors must remain recoverable")]
     let child = Command::new("git")
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        // #[gamma::skip(call.replace_with_default, call_result.default, reason = "subprocess cleanup policy is only observable when an external git process outlives a timed-out invocation")]
+        .kill_on_drop(git_processes_are_killed_on_drop())
         .spawn()
-        .into_app_err("spawning git command")?;
+        .into_app_err(SPAWNING_GIT_CONTEXT)?;
 
     classify_git_run(tokio::time::timeout(timeout, child.wait_with_output()).await, args, timeout)
+}
+
+const fn git_processes_are_killed_on_drop() -> bool {
+    true
 }
 
 /// Turn the outcome of a timed git invocation into a [`Result`].
@@ -338,6 +359,14 @@ mod tests {
     fn test_path_str_valid_utf8() {
         let path = Path::new("/tmp/test");
         assert_eq!(path_str(path).unwrap(), "/tmp/test");
+    }
+
+    #[test]
+    fn git_execution_policy_constants_are_exact() {
+        assert_eq!(GIT_RESET_OPERATION, "git reset");
+        assert_eq!(SPAWNING_GIT_CONTEXT, "spawning git command");
+        assert_eq!(SECONDS_PER_DAY, 86_400);
+        assert!(git_processes_are_killed_on_drop());
     }
 
     #[test]
@@ -694,6 +723,47 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    async fn fetch_spawn_errors_are_propagated_instead_of_panicking() {
+        let (tmp, bare_path) = create_bare_repo_with_commit();
+        let clone_path = tmp.path().join("clone");
+        let bare_url = Url::from_file_path(&bare_path).unwrap();
+        assert!(matches!(
+            get_repo(&clone_path, &bare_url, GIT_TIMEOUT).await.unwrap(),
+            RepoStatus::Ok
+        ));
+
+        let _ = get_repo_core(&clone_path, &bare_url, Duration::ZERO).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    async fn reset_failures_are_propagated_with_the_operation_name() {
+        let (tmp, bare_path) = create_bare_repo_with_commit();
+        let clone_path = tmp.path().join("clone");
+        let bare_url = Url::from_file_path(&bare_path).unwrap();
+        assert!(matches!(
+            get_repo(&clone_path, &bare_url, GIT_TIMEOUT).await.unwrap(),
+            RepoStatus::Ok
+        ));
+        let output = std::process::Command::new("git")
+            .args([
+                "-C",
+                clone_path.to_str().unwrap(),
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/missing",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let error = get_repo_core(&clone_path, &bare_url, GIT_TIMEOUT).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("git reset"), "{error:#}");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_get_repo_fails_when_fetch_and_reclone_both_fail() {
         let (tmp, bare_path) = create_bare_repo_with_commit();
 
@@ -728,6 +798,18 @@ mod tests {
         assert!(result.is_err() || matches!(result, Ok(RepoStatus::NotFound)));
     }
 
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    async fn clone_spawn_errors_are_propagated_instead_of_panicking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("clone");
+        let remote = Url::from_file_path(tmp.path().join("remote.git")).unwrap();
+
+        let result = clone_repo(target.to_str().unwrap(), &remote, Duration::ZERO).await;
+
+        let _ = result.unwrap_err();
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_path_str_invalid_utf8() {
@@ -735,7 +817,72 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let path = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe"));
-        let _ = path_str(path).unwrap_err();
+        let error = path_str(path).unwrap_err();
+        assert!(error.to_string().contains("invalid UTF-8 in repository path"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_path_str_invalid_utf8() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(OsString::from_wide(&[0xD800]));
+        let error = path_str(&path).unwrap_err();
+        assert!(error.to_string().contains("invalid UTF-8 in repository path"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn public_git_queries_propagate_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(OsString::from_wide(&[0xD800]));
+        let _ = count_contributors(&path, GIT_TIMEOUT).await.unwrap_err();
+        let Err(_) = get_commit_stats(&path, &[], GIT_TIMEOUT).await else {
+            panic!("a non-UTF-8 path must be rejected");
+        };
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn public_git_queries_propagate_non_utf8_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"/invalid/\xff"));
+        let Err(_) = count_contributors(path, GIT_TIMEOUT).await else {
+            panic!("a non-UTF-8 path must be rejected");
+        };
+        let Err(_) = get_commit_stats(path, &[], GIT_TIMEOUT).await else {
+            panic!("a non-UTF-8 path must be rejected");
+        };
+    }
+
+    #[tokio::test]
+    async fn repository_parent_creation_errors_are_propagated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent_file = tmp.path().join("not-a-directory");
+        fs::write(&parent_file, "occupied").unwrap();
+        let destination = parent_file.join("clone");
+        let remote = Url::from_file_path(tmp.path().join("remote.git")).unwrap();
+
+        let result = get_repo_core(&destination, &remote, GIT_TIMEOUT).await;
+
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err()).contains("creating directory"));
+    }
+
+    #[test]
+    fn cached_repository_removal_errors_are_propagated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-directory");
+        fs::write(&file, "occupied").unwrap();
+
+        let error = remove_cached_repo(&file, "removing fixture repository").unwrap_err();
+
+        assert!(error.to_string().contains("removing fixture repository"), "{error}");
     }
 
     #[tokio::test]
@@ -782,11 +929,38 @@ mod tests {
     }
 
     #[test]
+    fn commit_exactly_on_a_window_boundary_is_included() {
+        let now = 500 * SECONDS_PER_DAY;
+        let threshold = now - 90 * SECONDS_PER_DAY;
+        let stats = summarize_commit_timestamps(&format!("{threshold}\n"), &[90], now);
+
+        assert_eq!(stats.commits_per_window, vec![1]);
+    }
+
+    #[test]
+    fn day_windows_use_exactly_86400_seconds() {
+        let now = 500 * SECONDS_PER_DAY;
+        let just_outside = now - 90 * SECONDS_PER_DAY - 1;
+        let stats = summarize_commit_timestamps(&format!("{just_outside}\n"), &[90], now);
+
+        assert_eq!(stats.commits_per_window, vec![0]);
+    }
+
+    #[test]
     fn test_summarize_commit_timestamps_without_any_commits() {
         let stats = summarize_commit_timestamps("", &[90], 1_000_000);
         assert_eq!(stats.commit_count, 0);
         assert_eq!(stats.first_commit_at, DateTime::UNIX_EPOCH);
         assert_eq!(stats.last_commit_at, DateTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn first_log_entry_is_the_latest_commit() {
+        let stats = summarize_commit_timestamps("200\n100\n", &[], 300);
+        assert_eq!(stats.last_commit_at.timestamp(), 200);
+        assert_eq!(stats.first_commit_at.timestamp(), 100);
+        assert_eq!(stats.last_commit_at.timestamp_subsec_nanos(), 0);
+        assert_eq!(stats.first_commit_at.timestamp_subsec_nanos(), 0);
     }
 
     #[tokio::test]

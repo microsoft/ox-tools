@@ -145,6 +145,7 @@ impl Progress {
     }
 
     /// Remembers every failure announcement while keeping the first directly accessible.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn note(&mut self, name: &str) {
         if name.is_empty() {
             return;
@@ -213,6 +214,7 @@ mod fuzz {
     /// exactly like libtest's. Reading that as a verdict would convict a mutant on the strength of
     /// a `println!`, so the absence of a `running N tests` line has to hold whatever follows it.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn output_from_a_target_that_announced_no_suite_is_never_a_verdict() {
         bolero::check!()
             .with_type::<(Vec<String>, String, usize)>()

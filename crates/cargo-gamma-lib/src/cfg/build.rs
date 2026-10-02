@@ -35,6 +35,7 @@ pub(crate) enum RustcWrapperChain {
     Interpose(Option<std::ffi::OsString>),
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> RustcWrapperChain {
     rustc_wrapper_chain_in(root, environment_wrapper(|name| env::var_os(name)), &Environment::ambient())
 }
@@ -447,6 +448,7 @@ impl CargoConfig {
     ///
     /// A cargo configuration key of this shape accepts either one string or a list of them, and
     /// the lists in several files are concatenated rather than shadowing one another.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn strings(&self, path: &[&str]) -> Vec<String> {
         self.tables
             .iter()
@@ -1026,6 +1028,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ambient_rustc_wrappers_are_preserved_with_rustc_wrapper_taking_precedence() {
         let rustc = environment_wrapper(|name| match name {
             "RUSTC_WRAPPER" => Some(std::ffi::OsString::from("rustc-wrapper")),

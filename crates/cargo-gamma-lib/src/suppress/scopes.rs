@@ -83,6 +83,7 @@ impl Scopes {
     /// Because `spans` is sorted by `start`, a binary search locates the first span starting at or
     /// after the offset in `O(log n)`; only the short run of spans sharing that start is scanned to
     /// pick the widest.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn following(&self, offset: usize) -> Option<Range<usize>> {
         let index = self.spans.partition_point(|span| span.start < offset);
 
@@ -243,6 +244,7 @@ impl<'ast> Visit<'ast> for ScopeCollector {
 /// `Item` is non-exhaustive and `Item::Verbatim` is tokens `syn` could not parse, so the fallback
 /// yields nothing. That is the safe direction: a directive on such an item still governs the
 /// item's own span, which suppresses nothing, rather than reaching past it.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn item_attributes(item: &Item) -> &[Attribute] {
     match item {
         Item::Const(node) => &node.attrs,
@@ -265,6 +267,7 @@ fn item_attributes(item: &Item) -> &[Attribute] {
 }
 
 /// The attributes a member of an `impl` block carries. See [`item_attributes`].
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn impl_item_attributes(item: &ImplItem) -> &[Attribute] {
     match item {
         ImplItem::Const(node) => &node.attrs,
@@ -276,6 +279,7 @@ fn impl_item_attributes(item: &ImplItem) -> &[Attribute] {
 }
 
 /// The attributes a member of a trait carries. See [`item_attributes`].
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn trait_item_attributes(item: &TraitItem) -> &[Attribute] {
     match item {
         TraitItem::Const(node) => &node.attrs,
@@ -287,6 +291,7 @@ fn trait_item_attributes(item: &TraitItem) -> &[Attribute] {
 }
 
 /// The attributes a member of an `extern` block carries. See [`item_attributes`].
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn foreign_item_attributes(item: &ForeignItem) -> &[Attribute] {
     match item {
         ForeignItem::Fn(node) => &node.attrs,

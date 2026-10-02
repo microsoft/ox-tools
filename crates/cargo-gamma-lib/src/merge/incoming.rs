@@ -103,6 +103,7 @@ impl Incoming {
         crate::elements::supported_schema_version(&self.schema_version)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn schema_version(&self) -> &str {
         &self.schema_version
     }

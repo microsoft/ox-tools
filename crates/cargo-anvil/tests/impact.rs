@@ -1338,7 +1338,7 @@ fn consume_without_downloaded_cache_fails_loudly() {
         let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(!out.status.success(), "a missing explicit input must fail:\n{combined}");
         assert!(
-            combined.contains("missing input [cache]"),
+            combined.contains("missing input") && combined.contains("[cache]"),
             "the diagnostic must identify the selected input:\n{combined}"
         );
         // The remediation must name the variable that redirected the read and

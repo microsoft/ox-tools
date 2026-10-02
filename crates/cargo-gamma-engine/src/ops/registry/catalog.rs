@@ -85,6 +85,11 @@ mutators! {
     // ---- Logical and condition. --------------------------------------------------------------
     "logical.and_to_or",         true,  &["LCR"], "replace && with ||";
     "logical.or_to_and",         true,  &["LCR"], "replace || with &&";
+    "logical.and_remove_left",   true,  &["LOR"], "replace a && b with b";
+    "logical.and_remove_right",  true,  &["LOR"], "replace a && b with a";
+    "logical.or_remove_left",    true,  &["LOR"], "replace a || b with b";
+    "logical.or_remove_right",   true,  &["LOR"], "replace a || b with a";
+    "bool_expr.negate",          true,  &["UOI"], "negate a boolean value outside a branch condition";
     "cond.negate",               true,  &["COR"], "negate a branch condition";
     "cond.always_true",          true , &["COR"], "force a branch condition to true";
     "cond.always_false",         true , &["COR"], "force a branch condition to false";
@@ -109,6 +114,8 @@ mutators! {
     "loop.continue_to_break",    true,  &[],      "replace continue with break";
     "loop.delete_break",         true , &["SDL"], "delete a break statement";
     "loop.delete_continue",      true , &["SDL"], "delete a continue statement";
+    "loop.break_value_default",  true,  &["EVR"], "replace a value carried by break with its default";
+    "return_value.default",      true,  &["EVR"], "replace an early return value with its default";
 
     // ---- Unary. ------------------------------------------------------------------------------
     "unary.remove_neg",          true,  &["UOI"], "remove a unary minus";
@@ -122,6 +129,13 @@ mutators! {
     "literal.bool_flip",         true,  &["CRP"], "invert a boolean literal";
     "literal.str_to_empty",      true,  &["CRP"], "replace a string literal with an empty string";
     "literal.str_to_xyzzy",      true , &["CRP"], "replace a string literal with a different string";
+    "literal.float_to_zero",     true,  &["CRP"], "replace a floating-point literal with zero";
+    "literal.float_to_one",      true,  &["CRP"], "replace a floating-point literal with one";
+    "literal.float_negate",      true,  &["CRP"], "negate a floating-point literal";
+    "literal.char_to_nul",       true,  &["CRP"], "replace a character literal with NUL";
+    "literal.char_to_distinct",  true,  &["CRP"], "replace a character literal with a distinct character";
+    "literal.byte_to_nul",       true,  &["CRP"], "replace a byte literal with NUL";
+    "literal.byte_to_distinct",  true,  &["CRP"], "replace a byte literal with a distinct byte";
 
     // ---- Statement deletion and side-effect removal. ------------------------------------------
     "stmt.delete_call",          true , &["SDL"], "delete a statement whose value is discarded";
@@ -138,6 +152,17 @@ mutators! {
     "option.none_to_some",       true,  &["EVR"], "replace None with Some(Default::default())";
     "result.ok_to_err",          true,  &["EVR"], "replace Ok(value) with Err(Default::default())";
     "result.err_to_ok",          true,  &["EVR"], "replace Err(value) with Ok(Default::default())";
+    "option.is_some_to_is_none", true,  &["EVR"], "replace is_some with is_none";
+    "option.is_none_to_is_some", true,  &["EVR"], "replace is_none with is_some";
+    "result.is_ok_to_is_err",    true,  &["EVR"], "replace is_ok with is_err";
+    "result.is_err_to_is_ok",    true,  &["EVR"], "replace is_err with is_ok";
+
+    // ---- Propagation and fallback semantics. ---------------------------------------------------
+    "try.propagate_to_unwrap",   true,  &["EVR"], "replace ? propagation with unwrap";
+    "fallback.unwrap_or_to_default", true, &["EVR"], "replace unwrap_or with unwrap_or_default";
+    "fallback.unwrap_or_else_to_default", true, &["EVR"], "replace an unwrap_or_else fallback with a default";
+    "fallback.map_or_to_default", true, &["EVR"], "replace a map_or fallback with a default";
+    "fallback.map_or_else_to_default", true, &["EVR"], "replace a map_or_else fallback with a default";
 
     // ---- Iterator quantifiers and selectors. ---------------------------------------------------
     // Limited to a curated set of standard-library names. Without type resolution there is no way
@@ -151,6 +176,10 @@ mutators! {
     "iter.last_to_first",        true,  &["EVR"], "replace last with first";
     "iter.remove_sort",          true,  &["SDL"], "remove a sort from a chain";
     "iter.remove_dedup",         true,  &["SDL"], "remove a deduplication from a chain";
+    "iter.remove_rev",           true,  &["EVR"], "remove rev from an iterator pipeline";
+    "iter.remove_filter",        true,  &["EVR"], "remove filter from an iterator pipeline";
+    "iter.take_to_skip",         true,  &["EVR"], "replace take with skip";
+    "iter.skip_to_take",         true,  &["EVR"], "replace skip with take";
 
     // ---- String semantics. ---------------------------------------------------------------------
     "string.starts_with_to_ends_with", true, &["EVR"], "replace starts_with with ends_with";
@@ -164,9 +193,24 @@ mutators! {
     // Only `vec![]`, never an array: an array's length is part of its type, so removing an element
     // changes the type rather than the behaviour.
     "collection.omit_element",   true,  &["SDL"], "omit an element from a vec! literal";
+    "collection.reverse_vec",    true,  &["EVR"], "reverse the elements of a vec! literal";
+    "collection.reverse_array",  true,  &["EVR"], "reverse the elements of an array literal";
 
     // ---- Assignment values. --------------------------------------------------------------------
     "assign_value.default",      true,  &["EVR"], "replace an assigned value with its type's default";
+
+    // ---- Calls and parameters. ------------------------------------------------------------------
+    "call.replace_with_default", true,  &["SDL"], "replace a call and its side effects with a default value";
+    "call_result.default",       true,  &["EVR"], "preserve a call's side effects but replace its result with a default";
+    "parameter.default_shadow",  true,  &["EVR"], "shadow a function parameter with its type's default";
+
+    // ---- Parsed regular-expression semantics. --------------------------------------------------
+    "regex.remove_start_anchor", true,  &["EVR"], "remove a regular expression's leading anchor";
+    "regex.remove_end_anchor",   true,  &["EVR"], "remove a regular expression's trailing anchor";
+    "regex.star_to_plus",        true,  &["EVR"], "replace a regular-expression * quantifier with +";
+    "regex.plus_to_star",        true,  &["EVR"], "replace a regular-expression + quantifier with *";
+    "regex.optional_to_required", true, &["EVR"], "remove a regular-expression ? quantifier";
+    "regex.negate_character_class", true, &["EVR"], "toggle negation of a regular-expression character class";
 }
 
 /// Every mutator preset known to the tool.
@@ -199,22 +243,33 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "logical",
         description: "logical operators and branch conditions",
-        members: &["logical", "cond", "match_guard"],
+        members: &["logical", "bool_expr", "cond", "match_guard"],
     },
     Preset {
         name: "control",
         description: "the choices control flow makes: conditions, guards, arms and loop exits",
-        members: &["cond", "match_guard", "match_arm", "loop"],
+        members: &["cond", "match_guard", "match_arm", "loop", "return_value"],
     },
     Preset {
         name: "removal",
         description: "statement and side-effect deletion",
-        members: &["stmt", "unary", "match_arm", "struct_field", "collection"],
+        members: &["stmt", "unary", "match_arm", "struct_field", "collection.omit_element", "call"],
     },
     Preset {
         name: "semantics",
-        description: "standard-library meaning: Option, Result, iterators, strings and collections",
-        members: &["option", "result", "iter", "string", "collection", "assign_value"],
+        description: "Rust and library meaning: propagation, fallbacks, calls, iterators, regexes and collections",
+        members: &[
+            "option",
+            "result",
+            "try",
+            "fallback",
+            "iter",
+            "string",
+            "collection",
+            "assign_value",
+            "call_result",
+            "regex",
+        ],
     },
     Preset {
         name: "literals",
@@ -224,7 +279,16 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "numeric",
         description: "literal replacement and focused numeric expression perturbation",
-        members: &["literal", "expr"],
+        members: &[
+            "literal.int_to_zero",
+            "literal.int_to_one",
+            "literal.int_increment",
+            "literal.int_decrement",
+            "literal.float_to_zero",
+            "literal.float_to_one",
+            "literal.float_negate",
+            "expr",
+        ],
     },
     Preset {
         name: "extreme",

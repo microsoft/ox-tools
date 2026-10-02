@@ -398,6 +398,17 @@ fn once_whole_workspace_expands_to_workspace_flag() {
         .stdout(predicate::str::contains("cargo clippy --workspace"));
 }
 
+#[test]
+#[cfg_attr(miri, ignore = "uses temporary directories and spawns cargo-each")]
+fn once_implicit_default_members_expand_explicitly() {
+    let (_tmp, manifest) = default_members_fixture();
+    each(&manifest)
+        .args(["--once", "--dry-run", "--", "echo", "{packages}"])
+        .assert()
+        .success()
+        .stdout("echo --package alpha@0.1.0\n");
+}
+
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
 fn per_package_runs_once_per_selected_member() {

@@ -64,9 +64,18 @@ pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Str
 /// exact-case match and falling back to an ASCII-case-insensitive one. Returns
 /// the entry's real on-disk name.
 fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
+    select_entry_case_insensitive(
+        std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned()),
+        name,
+    )
+}
+
+fn select_entry_case_insensitive(entries: impl IntoIterator<Item = String>, name: &str) -> Option<String> {
     let mut case_insensitive: Option<String> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let entry_name = entry.file_name().to_string_lossy().into_owned();
+    for entry_name in entries {
         if entry_name == name {
             return Some(entry_name);
         }
@@ -109,6 +118,37 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "Justfile");
         assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "Justfile");
+    }
+
+    #[test]
+    fn exact_match_wins_over_an_earlier_case_insensitive_match() {
+        let entries = ["justfile".to_owned(), "Justfile".to_owned()];
+
+        assert_eq!(select_entry_case_insensitive(entries, "Justfile"), Some("Justfile".to_owned()));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn empty_path_segments_are_ignored() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("justfile"), "").unwrap();
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "//Justfile"), "justfile");
+    }
+
+    #[test]
+    fn first_case_insensitive_match_is_stable() {
+        let entries = ["JUSTFILE".to_owned(), "justfile".to_owned()];
+
+        assert_eq!(select_entry_case_insensitive(entries, "Justfile"), Some("JUSTFILE".to_owned()));
+    }
+
+    #[cfg_attr(miri, ignore = "reads a directory; miri isolation forbids it")]
+    #[test]
+    fn unreadable_directory_is_treated_as_no_match() {
+        assert_eq!(
+            find_entry_case_insensitive(Path::new("a-directory-that-does-not-exist"), "Justfile"),
+            None
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

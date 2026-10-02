@@ -584,6 +584,82 @@ fn help_goes_to_stdout_and_exits_zero() {
 }
 
 #[test]
+fn list_help_shows_modes_instead_of_unrelated_run_options() {
+    let mut host = Sink::default();
+    let code = run(&mut host, ["cargo-gamma", "gamma", "list", "--help"]);
+    let help = host.out();
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    for mode in ["mutants", "files", "mutators", "presets"] {
+        assert!(help.contains(mode), "{help}");
+    }
+    for irrelevant in ["--jobs", "--min-score", "--test-timeout-multiplier", "--artifact-dir"] {
+        assert!(!help.contains(irrelevant), "{irrelevant} leaked into list help:\n{help}");
+    }
+}
+
+#[test]
+fn list_mode_help_contains_only_that_modes_options() {
+    let mut host = Sink::default();
+    let code = run(&mut host, ["cargo-gamma", "gamma", "list", "mutators", "--help"]);
+    let help = host.out();
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    for relevant in ["--dir", "--mutators", "--config", "--json"] {
+        assert!(help.contains(relevant), "{relevant} missing from list mutators help:\n{help}");
+    }
+    for irrelevant in ["--file", "--package", "--shard-count", "--json-report", "--jobs"] {
+        assert!(!help.contains(irrelevant), "{irrelevant} leaked into list mutators help:\n{help}");
+    }
+}
+
+#[test]
+fn suppress_help_contains_no_run_or_selection_options() {
+    let mut host = Sink::default();
+    let code = run(&mut host, ["cargo-gamma", "gamma", "suppress", "--help"]);
+    let help = host.out();
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    for relevant in ["--dir", "--cache-dir", "--apply", "--eligible", "--allow-dirty"] {
+        assert!(help.contains(relevant), "{relevant} missing from suppress help:\n{help}");
+    }
+    for irrelevant in ["--file", "--package", "--jobs", "--dry-run", "--test-timeout-multiplier"] {
+        assert!(!help.contains(irrelevant), "{irrelevant} leaked into suppress help:\n{help}");
+    }
+}
+
+#[test]
+fn hints_help_contains_no_run_options() {
+    let mut host = Sink::default();
+    let code = run(&mut host, ["cargo-gamma", "gamma", "hints", "--help"]);
+    let help = host.out();
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    for relevant in ["--dir", "--cache-dir", "--dry-run", "--replace"] {
+        assert!(help.contains(relevant), "{relevant} missing from hints help:\n{help}");
+    }
+
+    for irrelevant in ["--progress", "--jobs", "--file", "--package", "--test-timeout-multiplier"] {
+        assert!(!help.contains(irrelevant), "{irrelevant} leaked into hints help:\n{help}");
+    }
+}
+
+#[test]
+fn run_help_offers_the_dashboard_without_leaking_it_to_hints() {
+    let mut host = Sink::default();
+    let code = run(&mut host, ["cargo-gamma", "gamma", "run", "--help"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.out().contains("--dashboard"), "{}", host.out());
+
+    let mut host = Sink::default();
+    let code = run(&mut host, ["cargo-gamma", "gamma", "hints", "--help"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(!host.out().contains("--dashboard"), "{}", host.out());
+}
+
+#[test]
 fn an_unknown_flag_goes_to_stderr_and_exits_one() {
     let mut host = Sink::default();
     let code = run(&mut host, ["cargo-gamma", "gamma", "--not-a-flag"]);
@@ -723,9 +799,12 @@ fn population(dir: &TempDir) -> Vec<(String, String)> {
 }
 
 #[test]
-fn a_survivor_report_selects_only_its_genuine_survivor_identities() {
+fn the_effective_artifact_directory_report_selects_only_its_genuine_survivor_identities() {
     let dir = workspace(SUBJECT);
-    let prior = dir.path().join("prior-report.json");
+    let artifact_dir = dir.path().join("artifacts");
+    let artifact_arg = artifact_dir.to_str().expect("the artifact directory is UTF-8");
+    fs::create_dir_all(&artifact_dir).expect("the artifact directory is creatable");
+    let prior = artifact_dir.join("gamma-report.json");
     let prior_arg = prior.to_str().expect("the report path is UTF-8");
     let (listed, listing) = invoke(&dir, &["list", "mutants", "--json-report", prior_arg]);
 
@@ -761,14 +840,13 @@ fn a_survivor_report_selects_only_its_genuine_survivor_identities() {
 
     fs::write(&prior, serde_json::to_vec(&report).expect("the report serializes")).expect("the prior report is writable");
 
-    let (code, host) = invoke(&dir, &["run", "--dry-run", "--only-survivors-from", prior_arg]);
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--artifact-dir", artifact_arg, "--only-survivors"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
 
-    let selected: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).expect("the dry-run report exists"),
-    )
-    .expect("the dry-run report is JSON");
+    let output = artifact_dir.join("gamma-report.json");
+    let selected: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output).expect("the dry-run report exists")).expect("the dry-run report is JSON");
     let selected_ids = selected["files"]
         .as_object()
         .expect("the selected report has files")

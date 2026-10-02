@@ -16,6 +16,9 @@
 
 mod support;
 
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
+
 use serde_json::Value;
 use support::{MockWorld, run_cli};
 
@@ -380,6 +383,34 @@ async fn test_deps_command_all_features() {
     );
 
     // --all-features should include once_cell (behind the "extra" feature)
+    assert_eq!(report_names(&json_path), ["adler2", "itoa", "miniz_oxide", "once_cell"]);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+async fn test_deps_command_all_features_ignores_unknown_selected_features() {
+    let world = MockWorld::new().await;
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let json_path = temp_dir.path().join("report.json");
+    let host = run_cli(
+        &world,
+        &[
+            "deps",
+            "--manifest-path",
+            FIXTURE_MANIFEST,
+            "--all-features",
+            "--features",
+            "definitely-not-a-feature",
+            "--json",
+            json_path.to_str().expect("valid path"),
+        ],
+    )
+    .await;
+    assert!(
+        host.error_str().is_empty(),
+        "--all-features must ignore selected feature names: {}",
+        host.error_str()
+    );
     assert_eq!(report_names(&json_path), ["adler2", "itoa", "miniz_oxide", "once_cell"]);
 }
 

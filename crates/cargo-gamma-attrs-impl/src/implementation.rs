@@ -3,7 +3,8 @@
 
 use core::mem;
 
-use proc_macro2::{Delimiter, Literal, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Group, Literal, TokenStream, TokenTree};
+use quote::ToTokens as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Block, Expr, ImplItemFn, ItemFn, Token, TraitItemFn};
@@ -23,6 +24,127 @@ pub fn inert(name: &str, attr: TokenStream, item: TokenStream) -> TokenStream {
 #[must_use]
 pub fn inert_timeout(name: &str, attr: &TokenStream, item: TokenStream) -> TokenStream {
     validated_item(name, validate_timeout_multiplier(attr), item)
+}
+
+/// Emits an ignored test marker carrying one test resource name.
+///
+/// The marker is discovered through the test harness's ordinary `--list` output. Encoding both
+/// names into an identifier lets the harness add the enclosing module path, so cargo-gamma learns
+/// the exact fully qualified test name without source-path heuristics or runtime registration.
+#[must_use]
+pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let resource = match syn::parse2::<syn::LitStr>(attr) {
+        Ok(resource) if valid_resource_name(&resource.value()) => resource.value(),
+        Ok(_resource) => {
+            return validated_item(
+                "resource",
+                Err("resource name must start with an ASCII letter and contain only ASCII letters, digits, `.`, `_`, or `-`".to_owned()),
+                item,
+            );
+        }
+        Err(_cause) => {
+            return validated_item(
+                "resource",
+                Err("expected one string literal, as in `#[gamma::resource(\"cargo-subprocess\")]`".to_owned()),
+                item,
+            );
+        }
+    };
+
+    let (suffix, module, marker_attributes) = if let Ok(function) = syn::parse2::<ItemFn>(item.clone()) {
+        if !function
+            .attrs
+            .iter()
+            .any(|attribute| attribute.path().segments.last().is_some_and(|segment| segment.ident == "test"))
+        {
+            return validated_item(
+                "resource",
+                Err("resource annotations on functions require a test attribute such as `#[test]` or `#[tokio::test]`".to_owned()),
+                item,
+            );
+        }
+        let marker_attributes = function
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
+            .fold(TokenStream::new(), |mut tokens, attribute| {
+                attribute.to_tokens(&mut tokens);
+                tokens
+            });
+        (
+            format!("test_{}", hex(function.sig.ident.to_string().trim_start_matches("r#").as_bytes())),
+            false,
+            marker_attributes,
+        )
+    } else if syn::parse2::<syn::ItemMod>(item.clone()).is_ok() {
+        ("binary".to_owned(), true, TokenStream::new())
+    } else {
+        return validated_item(
+            "resource",
+            Err("resource annotations may only be applied to test functions or test modules".to_owned()),
+            item,
+        );
+    };
+    let marker = format!(
+        "#[doc(hidden)] #[test] #[ignore = \"cargo-gamma scheduling metadata\"] fn __cargo_gamma_resource_{}_{suffix}() {{}}",
+        hex(resource.as_bytes())
+    );
+    let marker: TokenStream = marker
+        .parse()
+        .expect("hex-encoded resource and function names always form a valid Rust item");
+    if module {
+        return marker_inside_module(item.clone(), &marker).unwrap_or_else(|| {
+            validated_item(
+                "resource",
+                Err("resource annotations on modules require an inline module body".to_owned()),
+                item,
+            )
+        });
+    }
+
+    let mut output = item;
+    output.extend(marker_attributes);
+    output.extend(marker);
+    output
+}
+
+fn marker_inside_module(item: TokenStream, marker: &TokenStream) -> Option<TokenStream> {
+    let mut output = TokenStream::new();
+    let mut inserted = false;
+    for token in item {
+        if !inserted
+            && let TokenTree::Group(group) = &token
+            && group.delimiter() == Delimiter::Brace
+        {
+            let mut contents = group.stream();
+            contents.extend(marker.clone());
+            let mut replacement = Group::new(Delimiter::Brace, contents);
+            replacement.set_span(group.span());
+            output.extend([TokenTree::Group(replacement)]);
+            inserted = true;
+        } else {
+            output.extend([token]);
+        }
+    }
+    inserted.then_some(output)
+}
+
+fn valid_resource_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+
+    encoded
 }
 
 /// Validates the argument of `#[gamma::value(<expr>)]` and returns the item untouched.
@@ -792,6 +914,88 @@ mod tests {
         let out = inert("skip", stream("arith, reason = \"checked by proptest\""), stream("fn f() {}"));
 
         assert_eq!(out.to_string(), "fn f () { }");
+    }
+
+    #[test]
+    fn a_resource_attribute_emits_an_ignored_harness_marker() {
+        let out = resource(stream("\"cargo-subprocess\""), stream("#[test] fn resolves_metadata() {}")).to_string();
+
+        assert!(out.contains("# [test] fn resolves_metadata"));
+        assert!(out.contains("# [ignore = \"cargo-gamma scheduling metadata\"]"));
+        assert!(out.contains("__cargo_gamma_resource_636172676f2d73756270726f63657373_test_7265736f6c7665735f6d65746164617461"));
+    }
+
+    #[test]
+    fn a_resource_marker_inherits_conditional_compilation() {
+        let out = resource(
+            stream("\"network\""),
+            stream("#[cfg(unix)] #[cfg_attr(target_os = \"linux\", ignore)] #[test] fn downloads() {}"),
+        )
+        .to_string();
+
+        assert_eq!(out.matches("cfg (unix)").count(), 2, "{out}");
+        assert_eq!(out.matches("cfg_attr (target_os = \"linux\" , ignore)").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn a_resource_name_must_be_one_portable_literal() {
+        for invalid in ["", "\"\"", "\"two words\"", "\"2cpu\"", "\"cargo\", \"network\""] {
+            let out = resource(stream(invalid), stream("#[test] fn test() {}")).to_string();
+
+            assert!(out.contains("compile_error"), "`{invalid}` should be rejected: {out}");
+            assert!(out.contains("# [test] fn test"), "the annotated test must survive: {out}");
+        }
+    }
+
+    #[test]
+    fn a_resource_attribute_rejects_non_functions() {
+        let out = resource(stream("\"cargo\""), stream("struct Fixture;")).to_string();
+
+        assert!(out.contains("compile_error"));
+        assert!(out.contains("resource annotations may only be applied to test functions or test modules"));
+        assert!(out.ends_with("struct Fixture ;"));
+    }
+
+    #[test]
+    fn a_function_resource_requires_a_test_attribute() {
+        let out = resource(stream("\"cargo\""), stream("fn helper() {}")).to_string();
+
+        assert!(out.contains("compile_error"));
+        assert!(out.contains("resource annotations on functions require a test attribute"));
+        assert!(out.contains("fn helper"));
+    }
+
+    #[test]
+    fn a_function_resource_accepts_a_qualified_test_attribute() {
+        let out = resource(stream("\"cargo\""), stream("#[tokio::test] async fn asynchronous() {}")).to_string();
+
+        assert!(!out.contains("compile_error"));
+        assert!(out.contains("__cargo_gamma_resource_636172676f_test_6173796e6368726f6e6f7573"));
+    }
+
+    #[test]
+    fn a_resource_module_emits_a_binary_wide_marker() {
+        let out = resource(stream("\"cargo\""), stream("mod cargo_resource {}")).to_string();
+
+        assert!(out.contains("__cargo_gamma_resource_636172676f_binary"));
+        assert!(out.find("__cargo_gamma_resource_636172676f_binary").unwrap() < out.rfind('}').unwrap());
+    }
+
+    #[test]
+    fn sibling_resource_modules_keep_their_markers_in_separate_scopes() {
+        let mut out = resource(stream("\"cargo\""), stream("mod alpha {}"));
+        out.extend(resource(stream("\"cargo\""), stream("mod beta {}")));
+
+        syn::parse2::<syn::File>(out).expect("sibling modules with the same resource compose");
+    }
+
+    #[test]
+    fn a_resource_module_requires_an_inline_body() {
+        let out = resource(stream("\"cargo\""), stream("mod external;")).to_string();
+
+        assert!(out.contains("compile_error"));
+        assert!(out.contains("resource annotations on modules require an inline module body"));
+        assert!(out.contains("mod external"));
     }
 
     /// No arguments at all means every mutator, and is the shortest thing a user can write, so it
@@ -1623,6 +1827,23 @@ mod tests {
 
         assert!(!at_links_limit.exceeds_chain_limit(7));
         assert!(!at_ladders_limit.exceeds_chain_limit(7));
+    }
+
+    #[test]
+    fn completing_an_else_ladder_resets_its_counter_to_zero() {
+        let mut frame = Frame {
+            iter: TokenStream::new().into_iter(),
+            depth: 0,
+            links: 0,
+            ladders: 7,
+            awaiting_else: true,
+            previous: Previous::Other,
+        };
+
+        frame.end_possible_ladder();
+
+        assert_eq!(frame.ladders, 0);
+        assert!(!frame.awaiting_else);
     }
 
     #[test]

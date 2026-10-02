@@ -143,7 +143,8 @@ fn read_and_classify(path: &Path, config: &HeatherConfig) -> Result<Option<(File
         path: path.to_path_buf(),
         source: e,
     })?;
-    let kind = FileKind::detect(path, Some(&content)).ok_or_else(|| HeatherError::UnsupportedFileType { path: path.to_path_buf() })?;
+    let kind = FileKind::detect(path, Some(&content))
+        .expect("the path was accepted by path-only FileKind detection above, and content can only refine Rust into CargoScript");
     if kind == FileKind::CargoScript && !config.scripts {
         return Ok(None);
     }
@@ -257,6 +258,134 @@ mod tests {
         cfg.scripts = false;
         let fixed = run_fix(&[script], &cfg, tmp.path()).unwrap();
         assert_eq!(fixed, 0);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_check_continues_after_a_disabled_script() {
+        let tmp = TempDir::new().unwrap();
+        let script = tmp.path().join("a-script.rs");
+        let regular = tmp.path().join("z-regular.rs");
+        std::fs::write(&script, "#!/usr/bin/env cargo\n---\nfn main() {}\n").unwrap();
+        std::fs::write(&regular, "// Copyright\n").unwrap();
+        let mut cfg = config();
+        cfg.scripts = false;
+
+        assert_eq!(run_check(&[script, regular], &cfg, tmp.path()).unwrap(), 1);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_fix_continues_after_a_disabled_script() {
+        let tmp = TempDir::new().unwrap();
+        let script = tmp.path().join("a-script.rs");
+        let regular = tmp.path().join("z-regular.rs");
+        std::fs::write(&script, "#!/usr/bin/env cargo\n---\nfn main() {}\n").unwrap();
+        std::fs::write(&regular, "fn main() {}\n").unwrap();
+        let mut cfg = config();
+        cfg.scripts = false;
+
+        assert_eq!(run_fix(&[script, regular.clone()], &cfg, tmp.path()).unwrap(), 1);
+        assert!(std::fs::read_to_string(regular).unwrap().starts_with("// Copyright\n"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn disabling_scripts_does_not_skip_regular_rust_files() {
+        let tmp = TempDir::new().unwrap();
+        let regular = tmp.path().join("regular.rs");
+        std::fs::write(&regular, "fn main() {}\n").unwrap();
+        let mut cfg = config();
+        cfg.scripts = false;
+
+        let (kind, content) = read_and_classify(&regular, &cfg)
+            .expect("regular file should be readable")
+            .expect("regular Rust must not be skipped when scripts are disabled");
+
+        assert_eq!(kind, FileKind::Rust);
+        assert_eq!(content, "fn main() {}\n");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_check_propagates_classification_errors() {
+        let tmp = TempDir::new().unwrap();
+        let unreadable = tmp.path().join("directory.rs");
+        std::fs::create_dir(&unreadable).unwrap();
+
+        let error = run_check(&[unreadable], &config(), tmp.path()).expect_err("classification error must be returned");
+
+        assert!(error.to_string().contains("failed to read file"), "{error}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_fix_propagates_classification_errors() {
+        let tmp = TempDir::new().unwrap();
+        let unreadable = tmp.path().join("directory.rs");
+        std::fs::create_dir(&unreadable).unwrap();
+
+        let error = run_fix(&[unreadable], &config(), tmp.path()).expect_err("classification error must be returned");
+
+        assert!(error.to_string().contains("failed to read file"), "{error}");
+    }
+
+    #[cfg(windows)]
+    fn set_readonly(path: &Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[cfg_attr(miri, ignore = "uses a temporary directory and filesystem permissions")]
+    #[test]
+    fn run_fix_propagates_write_error_for_missing_header() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("readonly.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        set_readonly(&path, true);
+
+        let error = run_fix(std::slice::from_ref(&path), &config(), tmp.path()).expect_err("write error must be returned");
+
+        assert!(error.to_string().contains("failed to write file"), "{error}");
+        set_readonly(&path, false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[cfg_attr(miri, ignore = "uses a temporary directory and filesystem permissions")]
+    fn run_fix_propagates_write_error_for_mismatched_header() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("readonly.rs");
+        std::fs::write(&path, "// Copyright Acme\n\nfn main() {}\n").unwrap();
+        set_readonly(&path, true);
+
+        let error = run_fix(std::slice::from_ref(&path), &config(), tmp.path()).expect_err("write error must be returned");
+
+        assert!(error.to_string().contains("failed to write file"), "{error}");
+        set_readonly(&path, false);
+    }
+
+    #[cfg(windows)]
+    #[cfg_attr(miri, ignore = "uses a temporary directory and filesystem permissions")]
+    #[test]
+    fn run_propagates_fix_errors() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("readonly.rs");
+        std::fs::write(tmp.path().join(".cargo-heather.toml"), "header = \"Copyright\"\n").unwrap();
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        set_readonly(&path, true);
+        let args = HeatherArgs {
+            project_dir: Some(tmp.path().to_path_buf()),
+            config: None,
+            fix: true,
+        };
+
+        let error = run(&args).expect_err("fix failure must be returned by the command");
+
+        assert!(error.to_string().contains("failed to write file"), "{error}");
+        set_readonly(&path, false);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

@@ -73,20 +73,26 @@ mod tests {
 
 /// A crate whose only mutant cannot compile, so `suppress --eligible unviable` has something to write.
 ///
-/// A trait object is what makes the mutant unviable and keeps it so. It names a capability rather
-/// than a type, so there is no value to put inside the `Some`, and the family falls back on
-/// `Default::default()`, which cannot compile here. A reference to a concrete type would not do:
-/// those are served by leaking a box, and the mutant would build.
+/// A non-iterator method named `take` keeps the iterator-shaped replacement unviable.
 const UNVIABLE: &str = "
-pub fn lookup() -> Option<&'static dyn core::fmt::Debug> {
-    None
+#[derive(Debug)]
+pub struct Value;
+
+impl Value {
+    fn take(self, _count: usize) -> Self {
+        self
+    }
+}
+
+pub fn lookup() -> Value {
+    Value.take(1)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn it_builds() {
-        assert!(super::lookup().is_none());
+        assert_eq!(format!(\"{:?}\", super::lookup()), \"Value\");
     }
 }
 ";
@@ -823,14 +829,16 @@ fn a_red_baseline_is_reported_rather_than_measured() {
     step_aside_if_nested!();
     let source = format!(
         "{SUBJECT}\n\
-         pub fn lookup() -> Option<&'static dyn core::fmt::Debug> {{ None }}\n\
+         pub struct Value;\n\
+         impl Value {{ fn take(self, _count: usize) -> Self {{ self }} }}\n\
+         pub fn lookup() -> Value {{ Value.take(1) }}\n\
          #[test]\nfn always_fails() {{ panic!(\"nope\"); }}\n"
     );
     let dir = workspace(&source);
     let stale = dir.path().join("target/cargo-gamma/baseline-failures/stale/failure.json");
     fs::create_dir_all(stale.parent().expect("stale failure has a parent")).expect("stale directory");
     fs::write(&stale, "{}").expect("stale failure");
-    let (code, output) = session(&dir, &["--mutators", "relational,fn_value.some_default"]);
+    let (code, output) = session(&dir, &["--mutators", "relational,iter.take_to_skip"]);
 
     assert_ne!(code, EXIT_OK, "{output}");
     assert!(output.contains("baseline measurement failed due to 1 test failures"), "{output}");
@@ -906,18 +914,18 @@ fn nextest_launches_reproduce_cargos_and_nextests_runtime_environment() {
 #[test]
 fn a_file_whose_every_mutant_is_unviable_still_converges() {
     step_aside_if_nested!();
-    // `Some(Default::default())` cannot compile for a trait object, so the mutant has to be
-    // withdrawn. Withdrawing the only mutant in a file must not leave the previous round's
-    // instrumented copy in the tree, or the offending guard survives its own withdrawal and the
-    // build can never be made to succeed.
+    // The iterator-shaped replacement cannot compile for this non-iterator method, so the mutant
+    // has to be withdrawn. Withdrawing the only mutant in a file must not leave the previous
+    // round's instrumented copy in the tree, or the offending guard survives its own withdrawal
+    // and the build can never be made to succeed.
     let dir = workspace(UNVIABLE);
-    let (code, output) = session(&dir, &["--mutators", "fn_value.some_default", "--show-unviable"]);
+    let (code, output) = session(&dir, &["--mutators", "iter.take_to_skip", "--show-unviable"]);
 
     assert_eq!(code, EXIT_OK, "{output}");
 
     // The summary line no longer counts unviable mutants, so the listing `--show-unviable` opts
     // into is what proves the withdrawal happened rather than the build failing outright.
-    assert!(output.contains("[fn_value.some_default]"), "{output}");
+    assert!(output.contains("[iter.take_to_skip]"), "{output}");
     assert!(output.contains("none tested"), "{output}");
 }
 
@@ -1025,7 +1033,7 @@ fn a_foreign_config_is_reported_as_unread() {
 fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
     step_aside_if_nested!();
     let dir = workspace(UNVIABLE);
-    let (campaign_code, campaign_output) = session(&dir, &["--mutators", "fn_value.some_default"]);
+    let (campaign_code, campaign_output) = session(&dir, &["--mutators", "iter.take_to_skip"]);
     assert_eq!(campaign_code, EXIT_OK, "{campaign_output}");
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
     let mut host = Sink::default();
@@ -1035,6 +1043,7 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
             "cargo-gamma".to_owned(),
             "gamma".to_owned(),
             "suppress".to_owned(),
+            "--apply".to_owned(),
             "--eligible".to_owned(),
             "unviable".to_owned(),
             "--dir".to_owned(),
@@ -1048,7 +1057,7 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
 
     let source = fs::read_to_string(dir.path().join("src/lib.rs")).expect("could not read the source");
 
-    assert!(source.contains("// #[gamma::skip(fn_value.some_default"), "{source}");
+    assert!(source.contains("// #[gamma::skip(iter.take_to_skip"), "{source}");
     assert!(
         source.contains("written by cargo gamma suppress"),
         "the directive must say who wrote it"
@@ -1056,7 +1065,7 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
 
     // The written directive has to be one the tool itself honours; verification inside `suppress`
     // asserts that, and this asserts the verification was not vacuous.
-    let (code, output) = session(&dir, &["--mutators", "fn_value.some_default", "--dry-run"]);
+    let (code, output) = session(&dir, &["--mutators", "iter.take_to_skip", "--dry-run"]);
 
     assert_eq!(code, EXIT_OK, "{output}");
     assert!(output.contains("none tested"), "{output}");
@@ -1066,7 +1075,7 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
 fn suppressing_a_dry_run_prints_a_diff_and_changes_nothing() {
     step_aside_if_nested!();
     let dir = workspace(UNVIABLE);
-    let (campaign_code, campaign_output) = session(&dir, &["--mutators", "fn_value.some_default"]);
+    let (campaign_code, campaign_output) = session(&dir, &["--mutators", "iter.take_to_skip"]);
     assert_eq!(campaign_code, EXIT_OK, "{campaign_output}");
     let before = fs::read_to_string(dir.path().join("src/lib.rs")).expect("could not read the source");
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
@@ -1226,108 +1235,6 @@ fn a_merged_score_gate_can_fail_the_build() {
 
     assert_ne!(code, EXIT_OK, "{}", host.err());
     assert!(host.err().contains("merged mutation score"), "{}", host.err());
-}
-
-#[test]
-fn estimating_projects_the_rest_of_the_run_and_then_runs_it() {
-    step_aside_if_nested!();
-    let dir = workspace(SUBJECT);
-    let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
-    let mut host = Sink::default();
-    let code = run(
-        &mut host,
-        vec![
-            "cargo-gamma".to_owned(),
-            "gamma".to_owned(),
-            "run".to_owned(),
-            "--estimate".to_owned(),
-            "--mutators".to_owned(),
-            "relational".to_owned(),
-            // Phase lines belong to the progress display, so asserting on them needs it on.
-            "--progress".to_owned(),
-            "always".to_owned(),
-            "--dir".to_owned(),
-            path.to_string(),
-        ],
-    );
-
-    let output = format!("{}{}", host.out(), host.err());
-
-    assert_eq!(code, EXIT_OK, "{output}");
-
-    // The projection rests on the fixed cost, so it cannot be printed before that is paid.
-    assert!(output.contains("Baseline"), "{output}");
-    assert!(output.contains("Estimate"), "{output}");
-    assert!(output.contains("worst case"), "{output}");
-
-    // One line, not a block: the build and baseline it would otherwise repeat are on the screen
-    // immediately above it.
-    let estimate = output
-        .lines()
-        .find(|line| line.contains("Estimate"))
-        .expect("the estimate line is missing");
-
-    assert!(estimate.contains("worst case"), "the estimate must fit one line: {estimate}");
-
-    // And unlike the subcommand it replaced, it carries on and actually tests the mutants.
-    assert!(output.contains("Summary"), "{output}");
-    assert!(output.contains("2 mutants ("), "{output}");
-}
-
-#[test]
-fn no_estimate_is_printed_unless_it_was_asked_for() {
-    step_aside_if_nested!();
-    let dir = workspace(SUBJECT);
-    let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
-    let mut host = Sink::default();
-    let code = run(
-        &mut host,
-        vec![
-            "cargo-gamma".to_owned(),
-            "gamma".to_owned(),
-            "run".to_owned(),
-            "--mutators".to_owned(),
-            "relational".to_owned(),
-            "--dir".to_owned(),
-            path.to_string(),
-        ],
-    );
-
-    let output = format!("{}{}", host.out(), host.err());
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(!output.contains("Estimate"), "{output}");
-}
-
-#[test]
-fn the_estimate_survives_being_piped() {
-    // It is the one line the user explicitly asked for, so suppressing it along with the progress
-    // display when stdout is not a terminal would defeat the flag in exactly the setting — a CI
-    // log — where knowing the remaining cost matters most.
-    step_aside_if_nested!();
-    let dir = workspace(SUBJECT);
-    let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
-    let mut host = Sink::default();
-    let code = run(
-        &mut host,
-        vec![
-            "cargo-gamma".to_owned(),
-            "gamma".to_owned(),
-            "run".to_owned(),
-            "--estimate".to_owned(),
-            "--mutators".to_owned(),
-            "relational".to_owned(),
-            "--progress".to_owned(),
-            "never".to_owned(),
-            "--dir".to_owned(),
-            path.to_string(),
-        ],
-    );
-
-    let output = format!("{}{}", host.out(), host.err());
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(output.contains("Estimate"), "{output}");
 }
 
 /// Builds a crate whose only oracle for the boundary lives in a named integration target.

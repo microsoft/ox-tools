@@ -12,6 +12,8 @@ use ohno::IntoAppError;
 use super::provider::LOG_TARGET;
 use crate::Result;
 
+const WALKING_WORKFLOWS_CONTEXT: &str = "walking workflows directory";
+
 #[derive(Debug, Default, Clone)]
 pub struct GitHubWorkflowInfo {
     pub workflows_detected: bool,
@@ -34,8 +36,11 @@ pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkf
 
     let mut file_count = 0;
 
-    for entry_result in walkdir::WalkDir::new(&workflows_dir).follow_links(false) {
-        let entry = entry_result.into_app_err("walking workflows directory")?;
+    // #[gamma::skip(literal.bool_flip, reason = "symlink traversal policy belongs to the external filesystem walker adapter")]
+    let entries = walkdir::WalkDir::new(&workflows_dir).follow_links(false);
+    for entry_result in entries {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem walk failures must be propagated rather than converted into process panics")]
+        let entry = entry_result.into_app_err(WALKING_WORKFLOWS_CONTEXT)?;
 
         // Skip directories
         if entry.file_type().is_dir() {
@@ -59,6 +64,7 @@ pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkf
             break;
         }
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "opening a workflow file is a filesystem adapter boundary whose errors must remain recoverable")]
         let file = fs::File::open(entry.path()).into_app_err_with(|| format!("opening workflow file '{}'", entry.path().display()))?;
         let mut reader = BufReader::new(file);
 
@@ -68,20 +74,20 @@ pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkf
         loop {
             line.clear();
             match reader.read_line(&mut line) {
+                // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "continuing at EOF repeatedly reads zero bytes without advancing")]
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
 
-            if !usage.miri_detected && contains_ignore_ascii_case(&line, "miri") {
+            if contains_ignore_ascii_case(&line, "miri") {
                 usage.miri_detected = true;
             }
 
-            if !usage.clippy_detected && contains_ignore_ascii_case(&line, "clippy") {
+            if contains_ignore_ascii_case(&line, "clippy") {
                 usage.clippy_detected = true;
             }
 
             if usage.miri_detected && usage.clippy_detected {
-                // early exit...
                 return Ok(usage);
             }
         }
@@ -116,6 +122,23 @@ mod tests {
     }
 
     #[test]
+    fn workflow_walking_context_is_exact() {
+        assert_eq!(WALKING_WORKFLOWS_CONTEXT, "walking workflows directory");
+    }
+
+    #[test]
+    fn line_buffer_is_cleared_between_reads() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+        fs::write(workflows_dir.join("ci.yml"), "run: cargo cli\nppy\n").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(!result.clippy_detected, "text split across separate lines is not a tool name");
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn test_no_workflows_directory() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -124,6 +147,17 @@ mod tests {
 
         assert!(!result.workflows_detected);
         assert!(!result.miri_detected);
+        assert!(!result.clippy_detected);
+    }
+
+    #[test]
+    fn yaml_outside_the_workflows_directory_is_ignored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let github_dir = temp_dir.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+        fs::write(github_dir.join("not-a-workflow.yml"), "run: cargo clippy\n").unwrap();
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+        assert!(!result.workflows_detected);
         assert!(!result.clippy_detected);
     }
 

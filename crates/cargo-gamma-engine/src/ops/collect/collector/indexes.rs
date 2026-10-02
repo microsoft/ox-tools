@@ -5,8 +5,9 @@
 
 use syn::visit::{self, Visit};
 use syn::{
-    BinOp, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, File, ImplItem, ImplItemConst, Item, ItemConst, ItemStatic,
-    ItemStruct, ItemUse, Member, Pat, Stmt, TraitItem, TraitItemConst, Type, UseTree,
+    BinOp, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, File, FnArg, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
+    ItemFn, ItemStatic, ItemStruct, ItemType, ItemUse, Member, Pat, ReturnType, Signature, Stmt, TraitItem, TraitItemConst, TraitItemFn,
+    Type, UseTree,
 };
 
 use crate::cfg::CfgSet;
@@ -15,11 +16,25 @@ use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attr
 use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
 
+fn merge_type(index: &mut HashMap<String, Option<Type>>, name: &str, ty: &Type) {
+    let _known = index
+        .entry(name.to_owned())
+        .and_modify(|known| {
+            if known.as_ref() != Some(ty) {
+                *known = None;
+            }
+        })
+        .or_insert_with(|| Some(ty.clone()));
+}
+
 /// The names a file uses in a way only a number can be used.
 #[derive(Default)]
 pub(super) struct NumericUses {
     /// Bare identifiers: locals, parameters, loop indices.
     pub(super) names: HashSet<String>,
+
+    /// Bare identifiers used where Rust requires an unsigned index or slice bound.
+    pub(super) unsigned_names: HashSet<String>,
 
     /// Field names, which stand in for the declarations the per-file pre-pass cannot reach.
     pub(super) fields: HashSet<String>,
@@ -50,6 +65,16 @@ pub(in crate::ops::collect) struct Indexes {
 
     /// Whether each constant and static declared anywhere in this file holds a number.
     pub(super) constants: HashMap<String, bool>,
+
+    /// Unambiguous source-written types for fields and constants.
+    pub(super) declared_types: HashMap<String, Option<Type>>,
+
+    /// Return types of locally visible functions.
+    pub(super) returns: HashMap<String, Option<Type>>,
+    pub(super) parameters: HashMap<String, Option<Vec<Type>>>,
+
+    /// Locally declared type aliases and their targets.
+    pub(super) aliases: HashMap<String, Option<Type>>,
 }
 
 /// Fills whichever indexes were asked for, ignoring scope.
@@ -97,20 +122,78 @@ impl Walk<'_> {
         }
     }
 
+    /// Notes every bare name whose value contributes to an index or slice bound.
+    pub(super) fn note_unsigned(&mut self, expression: &Expr) {
+        match expression {
+            Expr::Path(path) if path.qself.is_none() => {
+                if let Some(ident) = path.path.get_ident() {
+                    let name = ident.to_string();
+                    let _added = self.indexes.numeric_uses.names.insert(name.clone());
+                    let _added = self.indexes.numeric_uses.unsigned_names.insert(name);
+                }
+            }
+            Expr::Range(range) => {
+                if let Some(start) = &range.start {
+                    self.note_unsigned(start);
+                }
+                if let Some(end) = &range.end {
+                    self.note_unsigned(end);
+                }
+            }
+            Expr::Paren(paren) => self.note_unsigned(&paren.expr),
+            Expr::Group(group) => self.note_unsigned(&group.expr),
+            Expr::Reference(reference) => self.note_unsigned(&reference.expr),
+            _ => {}
+        }
+    }
+
     /// Records one constant's declaration, demoting a name two declarations disagree about.
     pub(super) fn declared(&mut self, name: &str, ty: &Type) {
-        if !self.numeric {
-            return;
+        merge_type(&mut self.indexes.declared_types, name, ty);
+
+        if self.numeric {
+            let numeric = is_numeric_binding(ty);
+
+            let _known = self
+                .indexes
+                .constants
+                .entry(name.to_owned())
+                .and_modify(|known| *known = *known && numeric)
+                .or_insert(numeric);
         }
+    }
 
-        let numeric = is_numeric_binding(ty);
+    pub(super) fn returned(&mut self, name: &str, output: &ReturnType) {
+        if let ReturnType::Type(_, ty) = output {
+            merge_type(&mut self.indexes.returns, name, ty);
+        }
+    }
 
+    pub(super) fn signature(&mut self, signature: &Signature) {
+        self.returned(&signature.ident.to_string(), &signature.output);
+        let parameters = signature
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                FnArg::Typed(typed) => Some((*typed.ty).clone()),
+                FnArg::Receiver(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let name = signature.ident.to_string();
         let _known = self
             .indexes
-            .constants
-            .entry(name.to_owned())
-            .and_modify(|known| *known = *known && numeric)
-            .or_insert(numeric);
+            .parameters
+            .entry(name)
+            .and_modify(|known| {
+                if known.as_ref() != Some(&parameters) {
+                    *known = None;
+                }
+            })
+            .or_insert(Some(parameters));
+    }
+
+    pub(super) fn alias(&mut self, name: &str, ty: &Type) {
+        merge_type(&mut self.indexes.aliases, name, ty);
     }
 
     /// Records every name one `use` tree brings into scope, and where each came from.
@@ -180,10 +263,6 @@ impl Walk<'_> {
     /// struct's, so each field is checked again here: a field the build does not compile must not
     /// inform the numeric guess for a same-named field elsewhere that the build does compile.
     pub(super) fn on_item_struct(&mut self, node: &ItemStruct) {
-        if !self.numeric {
-            return;
-        }
-
         for field in &node.fields {
             if self.cfg.skip_gate(&field.attrs) {
                 continue;
@@ -193,8 +272,13 @@ impl Walk<'_> {
                 continue;
             };
 
-            let numeric = is_numeric_binding(&field.ty);
+            merge_type(&mut self.indexes.declared_types, &name.to_string(), &field.ty);
 
+            if !self.numeric {
+                continue;
+            }
+
+            let numeric = is_numeric_binding(&field.ty);
             // Two structs disagreeing about a name means neither answer can be trusted for
             // a bare `x.count`, so the name is demoted to unknown rather than won by
             // whichever was seen last.
@@ -251,7 +335,7 @@ impl Walk<'_> {
     /// The local update `visit_expr_index` makes, without its recursive continuation.
     pub(super) fn on_expr_index(&mut self, node: &ExprIndex) {
         if self.numeric {
-            self.note(&node.index);
+            self.note_unsigned(&node.index);
         }
     }
 
@@ -346,6 +430,26 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         visit::visit_item_use(self, node);
     }
 
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.signature(&node.sig);
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        self.signature(&node.sig);
+        visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast TraitItemFn) {
+        self.signature(&node.sig);
+        visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast ItemType) {
+        self.alias(&node.ident.to_string(), &node.ty);
+        visit::visit_item_type(self, node);
+    }
+
     fn visit_item_const(&mut self, node: &'ast ItemConst) {
         self.declared(&node.ident.to_string(), &node.ty);
 
@@ -432,17 +536,32 @@ impl<'cfg> Walk<'cfg> {
                 imports: HashMap::default(),
                 numeric_uses: NumericUses::default(),
                 constants: HashMap::default(),
+                declared_types: HashMap::default(),
+                returns: HashMap::default(),
+                parameters: HashMap::default(),
+                aliases: HashMap::default(),
             },
-            numeric: selection.contains("expr.increment") || selection.contains("expr.decrement"),
+            numeric: selection.contains("expr.increment")
+                || selection.contains("expr.decrement")
+                || selection.contains("literal.int_decrement"),
 
-            // Two families read this one, not one: `fn_value` to know whether a return type has a
-            // `Default` to reach for, and `result.ok_to_err` to know whether the `Err` it would
-            // write could be built at all. Missing the second cost five mutants when this gate was
-            // first written, which is what a gate on an index has to be checked against.
+            // Several families need source-visible standard-library identities: value synthesis
+            // and result mutation use them for `Default`, while integer decrement uses them to
+            // recognize fixed unsigned constructor arguments.
             imports: selection.any_in_family("fn_value")
                 || selection.contains("result.ok_to_err")
+                || selection.contains("result.err_to_ok")
+                || selection.contains("option.none_to_some")
+                || selection.contains("assign_value.default")
+                || selection.any_in_family("call")
+                || selection.any_in_family("call_result")
+                || selection.any_in_family("parameter")
+                || selection.any_in_family("return_value")
+                || selection.any_in_family("bool_expr")
+                || selection.any_in_family("arith")
                 || selection.contains("expr.increment")
-                || selection.contains("expr.decrement"),
+                || selection.contains("expr.decrement")
+                || selection.contains("literal.int_decrement"),
             cfg,
         }
     }
@@ -455,7 +574,7 @@ impl<'cfg> Walk<'cfg> {
 
 #[cfg(test)]
 mod tests {
-    use syn::parse_quote;
+    use syn::{ExprGroup, parse_quote, token};
 
     use super::*;
 
@@ -466,6 +585,10 @@ mod tests {
                 imports: HashMap::default(),
                 numeric_uses: NumericUses::default(),
                 constants: HashMap::default(),
+                declared_types: HashMap::default(),
+                returns: HashMap::default(),
+                parameters: HashMap::default(),
+                aliases: HashMap::default(),
             },
             numeric,
             imports,
@@ -496,6 +619,25 @@ mod tests {
         assert_eq!(walk.indexes.numeric_uses.names.len(), 1);
         assert!(walk.indexes.numeric_uses.names.contains("offset"));
         assert!(walk.indexes.numeric_uses.fields.is_empty());
+    }
+
+    #[test]
+    fn unsigned_notes_descend_through_ranges_and_transparent_wrappers() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
+        let expression = syn::parse_str::<Expr>("&(start..(end))").expect("the wrapped range parses");
+
+        walk.note_unsigned(&expression);
+
+        assert!(walk.indexes.numeric_uses.unsigned_names.contains("start"));
+        assert!(walk.indexes.numeric_uses.unsigned_names.contains("end"));
+
+        walk.note_unsigned(&Expr::Group(ExprGroup {
+            attrs: Vec::new(),
+            group_token: token::Group::default(),
+            expr: Box::new(parse_quote!(grouped)),
+        }));
+        assert!(walk.indexes.numeric_uses.unsigned_names.contains("grouped"));
     }
 
     #[test]
@@ -572,6 +714,17 @@ mod tests {
 
         assert_eq!(walk.indexes.constants.get("LIMIT"), Some(&false));
         assert_eq!(walk.indexes.fields.get("count"), Some(&false));
+    }
+
+    #[test]
+    fn conflicting_function_signatures_are_demoted_to_unknown() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(false, true, &cfg);
+
+        walk.signature(&parse_quote!(fn convert(value: usize) -> usize));
+        walk.signature(&parse_quote!(fn convert(value: String) -> usize));
+
+        assert_eq!(walk.indexes.parameters.get("convert"), Some(&None));
     }
 
     #[test]

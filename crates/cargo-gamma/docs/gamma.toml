@@ -164,6 +164,13 @@
 #
 # test-workspace = true
 
+# Compile and run only library unit-test harnesses when deciding verdicts. Default: false.
+#
+# Package widening still preserves this target-kind constraint; integration, binary, example, and
+# benchmark harnesses are never added to the oracle.
+#
+# test-lib = false
+
 # Experimentally measure case-level reachability before testing mutants.
 # Default: false.
 #
@@ -192,6 +199,13 @@
 # slower under a threaded harness; it is red, and a red baseline stops the run.
 #
 # nextest = false
+
+# Shared resources declared with `#[gamma::resource("name")]`. Each value is the maximum number of
+# matching test processes allowed to run at once. A declared resource omitted here defaults to 1.
+# Command-line `--resource-concurrency NAME=N` values override entries with the same name.
+#
+# [resources]
+# cargo-subprocess = 2
 
 # ---------------------------------------------------------------------------------------------
 # Baseline
@@ -265,6 +279,12 @@
 # every build red and gets switched off within a week.
 #
 # min-score = 70.0
+
+# Fail if more than this many flaky outcomes remain. Default: no gate.
+#
+# This gate is independent of the mutation score and requires confirmation to remain enabled.
+#
+# max-flaky = 0
 
 # ---------------------------------------------------------------------------------------------
 # Sharding

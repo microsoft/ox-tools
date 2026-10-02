@@ -4,6 +4,44 @@ The next cargo-gamma release is breaking. Upgrade every developer and CI
 installation that shares configuration, hints, or artifacts before promoting
 new hints.
 
+## List commands
+
+The value previously passed to the flat `list [WHAT]` command is now a
+subcommand. Bare `cargo gamma list` remains shorthand for `cargo gamma list
+mutants`, but options must follow the selected subcommand:
+
+| Previous invocation | New invocation |
+| --- | --- |
+| `cargo gamma list [OPTIONS]` | `cargo gamma list mutants [OPTIONS]` |
+| `cargo gamma list [OPTIONS] mutants` | `cargo gamma list mutants [OPTIONS]` |
+| `cargo gamma list [OPTIONS] files` | `cargo gamma list files [OPTIONS]` |
+| `cargo gamma list [OPTIONS] mutators` | `cargo gamma list mutators [OPTIONS]` |
+| `cargo gamma list [OPTIONS] presets` | `cargo gamma list presets [OPTIONS]` |
+
+Each subcommand now accepts only its relevant options. In particular,
+population and file selection options belong to `mutants` or `files`, while
+registry selection options belong to `mutators` or `presets`.
+
+## Survivor selection
+
+`--only-survivors` is now a flag that reads the current artifact directory. Scripts that supplied
+a report path as its value must place that report at `<ARTIFACT_DIR>/gamma-report.json` and pass
+`--artifact-dir <ARTIFACT_DIR> --only-survivors`.
+
+## Suppression commands
+
+`cargo gamma suppress` and `cargo gamma unsuppress` now preview their edits by
+default. Add `--apply` to write the displayed changes. Existing scripts that
+relied on the old write-by-default behavior must add that flag.
+
+## Estimate option
+
+`cargo gamma run --estimate` has been removed. It combined an up-front
+projection with live execution even though the projection could not account
+for compiler withdrawal, learned hints, test-resource contention, or changing
+selection costs. Use ordinary count-based progress or `--dashboard` while a
+campaign runs.
+
 ## Test selection and uncovered verdicts
 
 The reachability census is now opt-in. A default run still uses checked exact

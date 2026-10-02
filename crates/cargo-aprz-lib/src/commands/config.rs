@@ -327,6 +327,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_accepts_sub_one_thresholds() {
+        let config = Config {
+            medium_risk_threshold: 0.0,
+            low_risk_threshold: 0.5,
+            ..Config::default()
+        };
+        config.validate().expect("ordered thresholds below one are valid");
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn test_save_default_and_load() {
         let tmp = tempfile::tempdir().unwrap();
@@ -343,6 +354,18 @@ mod tests {
         let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
         let config = Config::load(&workspace_root, None).unwrap();
         config.validate().unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_load_implicit_config_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        fs::write(workspace_root.join("aprz.toml"), "bug_labels = [\"regression\"]\n").unwrap();
+
+        let config = Config::load(&workspace_root, None).unwrap();
+
+        assert_eq!(config.bug_labels, ["regression"]);
     }
 
     #[test]
@@ -522,5 +545,25 @@ version = "^2.0"
             format!("{err}").contains("reading cargo-aprz configuration file"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_explicit_load_reports_a_read_error() {
+        let dir = tempfile::tempdir().expect("creating a temp dir");
+        let path = Utf8Path::from_path(dir.path()).expect("temp dir paths are UTF-8");
+
+        let error = Config::load(path, Some(&path.to_path_buf())).expect_err("reading a directory as a file must fail");
+        assert!(error.to_string().contains("reading cargo-aprz configuration file"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_save_default_reports_a_write_error() {
+        let dir = tempfile::tempdir().expect("creating a temp dir");
+        let path = Utf8Path::from_path(dir.path()).expect("temp dir paths are UTF-8");
+
+        let error = Config::save_default(path).expect_err("writing over a directory must fail");
+        assert!(error.to_string().contains("writing default configuration"));
     }
 }

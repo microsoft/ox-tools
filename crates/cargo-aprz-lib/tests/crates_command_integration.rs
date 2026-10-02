@@ -12,6 +12,9 @@
 
 mod support;
 
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
+
 use support::{MockWorld, run_cli};
 
 /// Config with no gates at all, so nothing can flag a crate.

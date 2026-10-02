@@ -3,7 +3,7 @@
 
 use std::io::Write;
 
-use rust_xlsxwriter::{Color, DocProperties, Format, FormatAlign, Workbook};
+use rust_xlsxwriter::{Color, DocProperties, Format, FormatAlign, Workbook, XlsxError};
 use strum::IntoEnumIterator;
 
 use super::{ReportableCrate, common};
@@ -11,6 +11,24 @@ use crate::Result;
 use crate::expr::{Appraisal, Risk};
 use crate::metrics::{MetricCategory, MetricValue};
 use crate::reports::common::ReportContext;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenerationSite {
+    Header,
+    FreezePanes,
+    Appraisal,
+    ReasonsLabel,
+    Reasons,
+    CategoryHeader,
+    CategoryFill,
+    MetricName,
+    MetricValue,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AT_SITE: core::cell::Cell<Option<GenerationSite>> = const { core::cell::Cell::new(None) };
+}
 
 pub fn generate<W: Write>(crates: &[ReportableCrate], writer: &mut W) -> Result<()> {
     let ctx = ReportContext::new(crates);
@@ -25,7 +43,10 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
     let properties = DocProperties::new().set_author("cargo-aprz");
     workbook.set_properties(&properties);
 
-    let worksheet = workbook.add_worksheet().set_name("Crate Metrics")?;
+    let worksheet = workbook
+        .add_worksheet()
+        .set_name("Crate Metrics")
+        .expect("the fixed worksheet name is valid and shorter than Excel's 31-character limit");
 
     // Create formats
     let bold_format = Format::new().set_bold();
@@ -51,11 +72,14 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
     for (col_idx, crate_info) in crates.iter().enumerate() {
         let header = format!("{} v{}", crate_info.name, crate_info.version);
         #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
-        worksheet.write_string_with_format(0, (col_idx + 1) as u16, &header, &bold_format)?;
+        propagate_xlsx_at(
+            GenerationSite::Header,
+            worksheet.write_string_with_format(0, (col_idx + 1) as u16, &header, &bold_format),
+        )?;
     }
 
     // Freeze the first column (metric names) and first row (headers)
-    worksheet.set_freeze_panes(1, 1)?;
+    propagate_xlsx_at(GenerationSite::FreezePanes, worksheet.set_freeze_panes(1, 1))?;
 
     // Write metrics as rows, grouped by category
     let mut row = 1;
@@ -64,7 +88,9 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
     let has_appraisals = crates.iter().any(|c| c.appraisal.is_some());
     if has_appraisals {
         // Result row with colored cells
-        worksheet.write_string_with_format(row, 0, "Appraisals", &bold_format)?;
+        worksheet
+            .write_string_with_format(row, 0, "Appraisals", &bold_format)
+            .expect("the fixed appraisal label and bounded initial row and column are valid");
         for (col_idx, crate_info) in crates.iter().enumerate() {
             if let Some(eval) = &crate_info.appraisal {
                 let (value, _) = appraisal_cell_values(eval);
@@ -74,14 +100,23 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
                     Risk::High => &high_risk_format,
                 };
                 #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
-                worksheet.write_string_with_format(row, (col_idx + 1) as u16, value, format)?;
+                propagate_xlsx_at(
+                    GenerationSite::Appraisal,
+                    worksheet.write_string_with_format(row, (col_idx + 1) as u16, value, format),
+                )?;
             }
         }
         row += 1;
 
         // Reasons row
-        worksheet.write_string_with_format(row, 0, "Reasons", &bold_format)?;
-        write_eval_row(worksheet, row, crates, |eval| appraisal_cell_values(eval).1)?;
+        propagate_xlsx_at(
+            GenerationSite::ReasonsLabel,
+            worksheet.write_string_with_format(row, 0, "Reasons", &bold_format),
+        )?;
+        propagate_report_at(
+            GenerationSite::Reasons,
+            write_eval_row(worksheet, row, crates, |eval| appraisal_cell_values(eval).1),
+        )?;
         row += 1;
 
         // Add blank row after evaluation
@@ -92,19 +127,22 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
     for category in MetricCategory::iter() {
         if let Some(category_metric_names) = ctx.metrics_by_category.get(&category) {
             // Write category header (uppercase and bold with background color)
-            worksheet.write_string_with_format(row, 0, category.as_uppercase_str(), &category_format)?;
+            propagate_xlsx_at(
+                GenerationSite::CategoryHeader,
+                worksheet.write_string_with_format(row, 0, category.as_uppercase_str(), &category_format),
+            )?;
 
             // Fill the rest of the category row with the same background color
             #[expect(clippy::cast_possible_truncation, reason = "Column count is limited by Excel's u16 column limit")]
             for c in 1..=crates.len() as u16 {
-                worksheet.write_blank(row, c, &category_format)?;
+                propagate_xlsx_at(GenerationSite::CategoryFill, worksheet.write_blank(row, c, &category_format))?;
             }
 
             row += 1;
 
             // Write each metric in this category
             for &metric_name in category_metric_names {
-                worksheet.write_string(row, 0, metric_name)?;
+                propagate_xlsx_at(GenerationSite::MetricName, worksheet.write_string(row, 0, metric_name))?;
 
                 // Write values for each crate
                 for (col_idx, metric_map) in ctx.crate_metric_maps.iter().enumerate() {
@@ -112,7 +150,8 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
                         && let Some(ref value) = metric.value
                     {
                         #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
-                        write_metric_value(worksheet, row, (col_idx + 1) as u16, metric_name, value, &left_align_format)?;
+                        let result = write_metric_value(worksheet, row, (col_idx + 1) as u16, metric_name, value, &left_align_format);
+                        propagate_report_at(GenerationSite::MetricValue, result)?;
                     }
                 }
                 row += 1;
@@ -127,10 +166,52 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
     worksheet.autofit();
 
     // Write workbook to output
-    let data = workbook.save_to_buffer()?;
-    writer.write_all(&data)?;
+    let data = workbook
+        .save_to_buffer()
+        .expect("saving a validated workbook to its in-memory buffer cannot incur an I/O failure");
+    propagate_io(writer.write_all(&data))?;
 
     Ok(())
+}
+
+fn propagate_xlsx<T>(result: core::result::Result<T, XlsxError>) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn propagate_xlsx_at<T>(site: GenerationSite, result: core::result::Result<T, XlsxError>) -> Result<T> {
+    #[cfg(test)]
+    if FAIL_AT_SITE.with(|fail_at| fail_at.get() == Some(site)) {
+        return Err(XlsxError::RowColumnLimitError.into());
+    }
+    #[cfg(not(test))]
+    let _ = site;
+
+    propagate_xlsx(result)
+}
+
+fn propagate_report<T>(result: Result<T>) -> Result<T> {
+    result
+}
+
+fn propagate_report_at<T>(site: GenerationSite, result: Result<T>) -> Result<T> {
+    #[cfg(test)]
+    if FAIL_AT_SITE.with(|fail_at| fail_at.get() == Some(site)) {
+        return Err(ohno::app_err!("injected report-generation failure"));
+    }
+    #[cfg(not(test))]
+    let _ = site;
+
+    propagate_report(result)
+}
+
+fn propagate_io<T>(result: std::io::Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[expect(unused_results, reason = "rust_xlsxwriter methods return &mut Worksheet for chaining")]
@@ -380,6 +461,19 @@ mod tests {
         None
     }
 
+    fn sheet_cell_xml(workbook: &[u8], cell: &str) -> Option<String> {
+        let sheet = xlsx_entry(workbook, "xl/worksheets/sheet1.xml");
+        let needle = format!("r=\"{cell}\"");
+        sheet
+            .split("<c ")
+            .skip(1)
+            .find(|cell_xml| cell_xml.split_once('>').is_some_and(|(tag, _)| tag.contains(&needle)))
+            .map(|cell_xml| {
+                let end = cell_xml.find("</c>").map_or(cell_xml.len(), |index| index + "</c>".len());
+                format!("<c {}", &cell_xml[..end])
+            })
+    }
+
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
     fn test_generate_empty_crates() {
@@ -578,6 +672,141 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn workbook_preserves_sheet_name_freeze_panes_and_category_fill_extent() {
+        let crates = vec![
+            create_test_crate("alpha", "1.0.0", None),
+            create_test_crate("beta", "1.0.0", None),
+            create_test_crate("gamma", "1.0.0", None),
+        ];
+        let mut output = Vec::new();
+        generate(&crates, &mut output).unwrap();
+
+        let workbook = xlsx_entry(&output, "xl/workbook.xml");
+        assert!(workbook.contains(r#"name="Crate Metrics""#), "{workbook}");
+
+        let sheet = xlsx_entry(&output, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains(r#"<pane xSplit="1" ySplit="1""#), "{sheet}");
+        assert!(sheet.contains("<cols>"), "autofit must emit column widths: {sheet}");
+        for cell in ["B2", "C2", "D2"] {
+            assert!(
+                sheet_cell_xml(&output, cell).is_some_and(|xml| xml.contains(" s=")),
+                "category fill must include {cell}: {sheet}"
+            );
+        }
+        assert!(
+            sheet_cell_xml(&output, "E2").is_none(),
+            "category fill must stop after the last crate"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn workbook_uses_the_exact_report_palette() {
+        let crates = vec![
+            create_test_crate("low", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            create_test_crate("medium", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 2, 1, 50.0))),
+            create_test_crate("high", "1.0.0", Some(Appraisal::new(Risk::High, vec![], 1, 0, 0.0))),
+        ];
+        let mut output = Vec::new();
+        generate(&crates, &mut output).unwrap();
+
+        let styles = xlsx_entry(&output, "xl/styles.xml");
+        for rgb in ["FFFED7AA", "FFC8E6C9", "FF2E7D32", "FFFFF9C4", "FFF57F17", "FFFFCDD2", "FFC62828"] {
+            assert!(styles.contains(&format!(r#"rgb="{rgb}""#)), "missing {rgb} from {styles}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn one_appraised_crate_is_enough_to_emit_appraisal_rows() {
+        let crates = vec![
+            create_test_crate("plain", "1.0.0", None),
+            create_test_crate("scored", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+        ];
+        let mut output = Vec::new();
+        generate(&crates, &mut output).unwrap();
+
+        assert_eq!(sheet_cell_text(&output, "A2").as_deref(), Some("Appraisals"));
+        assert_eq!(
+            sheet_cell_text(&output, "C2").as_deref(),
+            Some("LOW RISK (score = 100, awarded points = 1, available points = 1)")
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn workbook_records_its_author() {
+        let mut output = Vec::new();
+        generate(&[], &mut output).unwrap();
+        let properties = xlsx_entry(&output, "docProps/core.xml");
+        assert!(properties.contains("<dc:creator>cargo-aprz</dc:creator>"), "{properties}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn floating_point_metrics_are_written_on_their_metric_row() {
+        let metrics = vec![Metric::with_value(&STABILITY_DEF, MetricValue::Float(12.5))];
+        let crates = vec![ReportableCrate::new(
+            "floaty".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = Vec::new();
+        generate(&crates, &mut output).unwrap();
+        assert_eq!(sheet_cell_text(&output, "A3").as_deref(), Some("stability.score"));
+        assert_eq!(sheet_cell_text(&output, "B3").as_deref(), Some("12.5"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn metric_value_kinds_are_written_to_the_requested_cells() {
+        let created_at = chrono::DateTime::parse_from_rfc3339("2024-02-03T10:30:00Z").unwrap().to_utc();
+        let values = [
+            ("A1", "uint", MetricValue::UInt(7), "7"),
+            ("B2", "float", MetricValue::Float(12.5), "12.5"),
+            ("C3", "boolean", MetricValue::Boolean(true), "1"),
+            (
+                "D4",
+                "url",
+                MetricValue::String("https://example.invalid".into()),
+                "https://example.invalid",
+            ),
+            ("E5", "crate.categories", MetricValue::String("web, cli".into()), "#web, #cli"),
+            ("F6", "date", MetricValue::DateTime(created_at), "2024-02-03"),
+            (
+                "G7",
+                "list",
+                MetricValue::List(vec![MetricValue::String("one".into()), MetricValue::UInt(2)]),
+                "one, 2",
+            ),
+        ];
+        let mut workbook = Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        let format = Format::new();
+
+        for (index, (_, metric_name, value, _)) in values.iter().enumerate() {
+            #[expect(clippy::cast_possible_truncation, reason = "The fixture has seven entries")]
+            write_metric_value(worksheet, index as u32, index as u16, metric_name, value, &format).unwrap();
+        }
+
+        let output = workbook.save_to_buffer().unwrap();
+        let sheet = xlsx_entry(&output, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains(r#"<hyperlink ref="D4""#),
+            "the URL cell must be an active hyperlink: {sheet}"
+        );
+        for (cell, _, _, expected) in values {
+            assert_eq!(
+                sheet_cell_text(&output, cell).as_deref(),
+                Some(expected),
+                "unexpected value in {cell}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
     fn workbook_writes_keyword_metric_values_with_hash_prefixes() {
         let metrics = vec![
             Metric::with_value(&NAME_DEF, MetricValue::String("serde".into())),
@@ -594,5 +823,125 @@ mod tests {
         generate(&crates, &mut output).unwrap();
 
         assert_eq!(sheet_cell_text(&output, "B4").as_deref(), Some("#serialization, #parsing"));
+    }
+
+    #[test]
+    fn appraisal_reasons_use_semicolon_space_separators() {
+        let appraisal = Appraisal::new(
+            Risk::High,
+            vec![
+                ExpressionOutcome::new("first".into(), "First failed.".into(), ExpressionDisposition::False),
+                ExpressionOutcome::new("second".into(), "Second failed.".into(), ExpressionDisposition::False),
+            ],
+            2,
+            0,
+            0.0,
+        );
+
+        assert_eq!(
+            appraisal_cell_values(&appraisal).1,
+            "❌ first: First failed.; ❌ second: Second failed."
+        );
+    }
+
+    #[test]
+    fn worksheet_helpers_propagate_out_of_range_errors() {
+        let mut workbook = Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        let format = Format::new();
+        let created_at = chrono::DateTime::parse_from_rfc3339("2024-02-03T10:30:00Z").unwrap().to_utc();
+        let values = [
+            MetricValue::UInt(1),
+            MetricValue::Float(1.5),
+            MetricValue::Boolean(true),
+            MetricValue::String("value".into()),
+            MetricValue::DateTime(created_at),
+            MetricValue::List(vec![MetricValue::UInt(1)]),
+        ];
+
+        for value in &values {
+            assert!(
+                write_metric_value(worksheet, u32::MAX, 0, "text", value, &format).is_err(),
+                "{value:?} must propagate an invalid-row error"
+            );
+        }
+        for (metric_name, value) in [
+            ("url", MetricValue::String("https://example.invalid".into())),
+            ("crate.categories", MetricValue::String("web, cli".into())),
+        ] {
+            assert!(
+                write_metric_value(worksheet, u32::MAX, 0, metric_name, &value, &format).is_err(),
+                "{metric_name} must propagate an invalid-row error"
+            );
+        }
+
+        let crates = vec![create_test_crate(
+            "scored",
+            "1.0.0",
+            Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
+        )];
+        assert!(write_eval_row(worksheet, u32::MAX, &crates, |_| "value".to_owned()).is_err());
+        assert!(propagate_xlsx::<()>(Err(XlsxError::RowColumnLimitError)).is_err());
+        assert!(propagate_report::<()>(Err(ohno::app_err!("synthetic report failure"))).is_err());
+        assert!(propagate_io::<()>(Err(std::io::Error::other("synthetic I/O failure"))).is_err());
+    }
+
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("synthetic write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn workbook_output_propagates_writer_errors() {
+        assert!(generate(&[], &mut FailingWriter).is_err());
+    }
+
+    #[test]
+    fn generation_propagates_each_injected_worksheet_failure() {
+        let metrics = vec![
+            Metric::with_value(&NAME_DEF, MetricValue::String("scored".into())),
+            Metric::with_value(&STABILITY_DEF, MetricValue::UInt(80)),
+        ];
+        let crates = vec![ReportableCrate::new(
+            "scored".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            Some(Appraisal::new(
+                Risk::Low,
+                vec![ExpressionOutcome::new(
+                    "quality".into(),
+                    "Quality is acceptable.".into(),
+                    ExpressionDisposition::True,
+                )],
+                1,
+                1,
+                100.0,
+            )),
+        )];
+
+        for site in [
+            GenerationSite::Header,
+            GenerationSite::FreezePanes,
+            GenerationSite::Appraisal,
+            GenerationSite::ReasonsLabel,
+            GenerationSite::Reasons,
+            GenerationSite::CategoryHeader,
+            GenerationSite::CategoryFill,
+            GenerationSite::MetricName,
+            GenerationSite::MetricValue,
+        ] {
+            FAIL_AT_SITE.with(|fail_at| fail_at.set(Some(site)));
+            let result = generate(&crates, &mut Vec::new());
+            FAIL_AT_SITE.with(|fail_at| fail_at.set(None));
+            assert!(result.is_err(), "failure at {site:?} must be returned");
+        }
     }
 }

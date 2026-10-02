@@ -126,6 +126,7 @@ struct Arguments {
 /// `arith.add_to_sub` or `@default` or `!bitwise` is a perfectly good token sequence but not a
 /// well-formed meta path. Reading tokens keeps the directive grammar identical to the one
 /// `--mutators` accepts, which is the whole point of having a single vocabulary.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn parse_arguments(tokens: &TokenStream) -> Arguments {
     let mut arguments = Arguments::default();
     let mut selectors: Vec<String> = Vec::new();
@@ -278,6 +279,7 @@ fn is_string_literal(tokens: &[TokenTree]) -> bool {
 ///
 /// Anything that is not a string literal passes through unchanged — the *whole* input, not the
 /// remains of the prefix strip, which is what the selector rendering path relies on.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn unquote(text: &str) -> String {
     let body = text.strip_prefix('r').unwrap_or(text);
     let hashes = body.len() - body.trim_start_matches('#').len();
@@ -297,6 +299,15 @@ mod tests {
 
     use super::super::directives;
     use super::*;
+
+    #[test]
+    fn an_empty_argument_between_commas_does_not_create_a_selector() {
+        let tokens: TokenStream = "arith,,reason = \"covered\"".parse().expect("tokens");
+        let parsed = parse_arguments(&tokens);
+
+        assert_eq!(parsed.selectors, "arith");
+        assert_eq!(parsed.reason.as_deref(), Some("covered"));
+    }
 
     fn file(source: &str) -> SourceFile {
         SourceFile::parse("test.rs", source.to_owned()).unwrap()

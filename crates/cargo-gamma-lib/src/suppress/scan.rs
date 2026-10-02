@@ -64,7 +64,7 @@ fn attribute_directives(file: &SourceFile, scopes: &Scopes, cfg: &CfgSet) -> Res
                     // expression rather than selecting mutators, and it adds a mutant rather than
                     // withdrawing one. It is read where mutants are made, and validated there too, so it
                     // passes through here rather than being mistaken for a misspelled suppression.
-                    if name == STATED_VALUE {
+                    if name == STATED_VALUE || name == "resource" {
                         continue;
                     }
 
@@ -74,7 +74,7 @@ fn attribute_directives(file: &SourceFile, scopes: &Scopes, cfg: &CfgSet) -> Res
                         (Channel::Attribute, Some(intent))
                     } else {
                         return Err(Error::new(format!(
-                            "{}:{line}: unknown directive `{namespace}::{name}`, expected `skip`, `expect_survived`, `expect_killed`, `test_timeout_multiplier`, or `timeout_multiplier`",
+                            "{}:{line}: unknown directive `{namespace}::{name}`, expected `skip`, `expect_survived`, `expect_killed`, `resource`, `test_timeout_multiplier`, or `timeout_multiplier`",
                             file.path()
                         ))
                         .usage());
@@ -106,6 +106,7 @@ fn unwrap_cfg_attr(attribute: &Attribute, cfg: &CfgSet) -> Vec<(syn::Path, Token
 }
 
 /// Unwraps one attribute meta item, recursively following every nested `cfg_attr`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn unwrap_meta(meta: &Meta, cfg: &CfgSet) -> Vec<(syn::Path, TokenStream)> {
     if !meta.path().is_ident("cfg_attr") {
         let arguments = match meta {
@@ -278,6 +279,20 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_in_the_gamma_namespace_is_recognized_as_a_directive() {
+        let file = SourceFile::parse(
+            "src/lib.rs",
+            "fn f(a: i32, b: i32) -> i32 {\n    // #[gamma::skip(arith)]\n    a + b\n}\n".to_owned(),
+        )
+        .expect("source parses");
+
+        let found = directives(&file).expect("directive parses");
+
+        assert_eq!(found.len(), 1);
+        assert!(matches!(found[0].channel, Channel::Comment));
+    }
+
+    #[test]
     fn an_unrelated_cfg_attr_entry_does_not_hide_a_later_gamma_directive() {
         let file = SourceFile::parse(
             "src/lib.rs",
@@ -289,5 +304,18 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert!(found[0].intent.is_some());
+    }
+
+    #[test]
+    fn a_resource_attribute_is_not_mistaken_for_a_suppression_directive() {
+        let file = SourceFile::parse(
+            "src/lib.rs",
+            "#[gamma::resource(\"network\")]\n#[test]\nfn downloads() {}\n".to_owned(),
+        )
+        .expect("source parses");
+
+        let found = directives(&file).expect("resource attributes share the namespace without being directives");
+
+        assert!(found.is_empty());
     }
 }

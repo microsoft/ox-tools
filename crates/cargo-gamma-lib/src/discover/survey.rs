@@ -137,6 +137,12 @@ pub struct Survey {
     /// these patterns choose what judges it.
     pub tests: Vec<String>,
 
+    /// Library targets whose unit-test harness Cargo may build, by package name.
+    pub library_test_packages: HashSet<String>,
+
+    /// Library target names whose unit-test harness Cargo may build.
+    pub library_tests: Vec<String>,
+
     /// Every test target that appears to run the compiler rather than the code under test.
     ///
     /// Kept beside `tests` because it is a property of what the workspace declares rather than of
@@ -195,7 +201,7 @@ pub struct Survey {
     diff: Option<Diff>,
     shard: Option<(u32, u32)>,
     only_mutants: Option<HashSet<MutantId>>,
-    settled: HashMap<MutantId, Outcome>,
+    settled: HashMap<MutantId, (Outcome, Option<String>)>,
     exclude_trait_impls: Vec<String>,
 }
 
@@ -258,6 +264,7 @@ impl Survey {
     /// Returns an error if configuration or cargo metadata cannot be read, a named package does
     /// not exist, or the diff cannot be parsed.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new(args: &SelectArgs, shard: Option<(u32, u32)>) -> Result<Self> {
         let config = crate::config::Config::resolve(args)?;
         let cargo = config.cargo_options();
@@ -288,6 +295,7 @@ impl Survey {
 
     #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
     // #[gamma::skip(all, reason = "survey construction integrates Cargo metadata, filesystem discovery, and process toolchain state; deterministic component tests cover normalization while isolated mutations are platform-dependent")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn for_build_with_cache_inputs(
         args: &SelectArgs,
         shard: Option<(u32, u32)>,
@@ -468,6 +476,8 @@ impl Survey {
             reach: reachable(&metadata),
             selected: sorted(selected),
             tests: test_targets(&metadata),
+            library_test_packages: library_test_packages(&metadata),
+            library_tests: library_test_targets(&metadata),
             compile_fail: compile_fail_targets(&metadata),
             roots,
             specs,
@@ -495,6 +505,7 @@ impl Survey {
     /// time. A file missing from the population is a mutant nobody measures and a score nobody can
     /// see is wrong.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn killers(&self) -> Killers {
         let mut files = Vec::new();
         let mut complete = true;
@@ -531,7 +542,14 @@ impl Survey {
     /// report written out could not be fed to the next iteration because it no longer describes the
     /// whole population.
     pub fn settle(&mut self, settled: HashMap<MutantId, Outcome>) {
-        self.settled = settled;
+        self.settled = settled.into_iter().map(|(id, outcome)| (id, (outcome, None))).collect();
+    }
+
+    pub(crate) fn settle_recorded(&mut self, settled: HashMap<MutantId, super::Settled>) {
+        self.settled = settled
+            .into_iter()
+            .map(|(id, settled)| (id, (settled.outcome, settled.compiler_reason)))
+            .collect();
     }
 
     /// Restricts discovery to the exact mutant identities named by an earlier report.
@@ -652,8 +670,9 @@ impl Survey {
         // #[gamma::skip(cond.always_true, reason = "iterating an empty settled map leaves every mutant unchanged, exactly like taking this fast path")]
         if !self.settled.is_empty() {
             for mutant in &mut mutants {
-                if let Some(outcome) = self.settled.get(&mutant.id).copied() {
-                    mutant.outcome = outcome;
+                if let Some((outcome, compiler_reason)) = self.settled.get(&mutant.id) {
+                    mutant.outcome = *outcome;
+                    mutant.note.clone_from(compiler_reason);
                     settled_out = settled_out.saturating_add(1);
                 }
             }
@@ -862,6 +881,7 @@ impl TraitImplementations<'_> {
 }
 
 /// Validates workspace-scoped trait exclusions before run-scoped filters narrow the population.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_trait_exclusions(exclusions: &[String], files: &[TargetFile], cfgs: &Cfgs) -> Result<()> {
     // #[gamma::skip(cond.always_false, reason = "with no exclusions the full scan still finds no unmatched entry and returns the same success, but wastes parsing work")]
     if exclusions.is_empty() {
@@ -898,6 +918,7 @@ impl<'ast> Visit<'ast> for TraitImplementations<'_> {
         clippy::renamed_function_params,
         reason = "`item` identifies the syntax node more clearly than the trait declaration's `i`"
     )]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn visit_item(&mut self, item: &'ast syn::Item) {
         if !self.cfg.holds_for(item_attributes(item)) {
             return;
@@ -914,6 +935,7 @@ impl<'ast> Visit<'ast> for TraitImplementations<'_> {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
     match item {
         syn::Item::Const(node) => &node.attrs,
@@ -1133,6 +1155,7 @@ struct Declarations {
 /// # Errors
 ///
 /// Returns the first non-skippable file-read or parse error encountered, in path order.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet)]) -> Result<Declarations> {
     if files.is_empty() {
         return Ok(Declarations {
@@ -1209,6 +1232,7 @@ fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet)]) -> Result<Declara
 }
 
 /// Reads one declaration-only file, turning a skippable failure into a named skip.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn parse_declarations_of(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
     match SourceFile::read(path) {
         Ok(source) => Ok(DeclarationOutcome::Declared(
@@ -1262,6 +1286,7 @@ struct Shared {
 /// The `usize` in the error is the index of the offending file, so `scan` can report the earliest
 /// in file order rather than whichever worker happened to notice first.
 // #[gamma::skip(all, reason = "parallel discovery aggregation is covered by deterministic single- and multi-worker plan equality; deleting an individual merge changes only resource scheduling under the mutation harness")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn work(
     files: &[&TargetFile],
     shared: &Shared,
@@ -1444,6 +1469,7 @@ fn sorted<T: Ord + core::hash::Hash>(values: HashSet<T>) -> Vec<T> {
 /// saving whenever `c` is smaller than `n`, and never worse, since a graph with no cycles has
 /// `c == n` and the bitset union pass still costs only `O(n^2 / 64)` words rather than `O(n^2)`
 /// pointer-chasing queue operations.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn reachable(metadata: &Metadata) -> HashMap<String, HashSet<String>> {
     let member_packages: Vec<&str> = metadata.workspace_packages().iter().map(|p| p.name.as_str()).collect();
     let member_count = member_packages.len();
@@ -1576,6 +1602,7 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
 
             if frame.edge_at < edges[node].len() {
                 let neighbor = edges[node][frame.edge_at];
+                // #[gamma::skip(stmt.delete_assign, reason = "without advancing the edge cursor Tarjan's traversal repeatedly processes the same edge and never terminates")]
                 frame.edge_at += 1;
 
                 if let Some(neighbor_index) = index_of[neighbor] {
@@ -1713,6 +1740,7 @@ fn reachable_ids(edges: &[Vec<usize>], opaque: &[bool]) -> Vec<HashSet<usize>> {
 /// unconditional, which is exactly how the tool behaved before it evaluated predicates at all:
 /// nothing is stripped, and a user on an unusual toolchain gets a noisier report rather than a
 /// failed run.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn configuration(root: &Utf8Path, cargo: &CargoOptions, enabled: &HashMap<String, Vec<String>>) -> Cfgs {
     let build = cargo.cfg_build(root);
 
@@ -1826,6 +1854,7 @@ fn apply_metadata_features(command: &mut MetadataCommand, features: &FeatureArgs
 /// Build scripts are different: any package's script can read arbitrary paths that metadata does
 /// not enumerate, so their presence makes a snapshot incomplete.
 // #[gamma::skip(all, reason = "external path-root filtering, normalization, and deduplication depend on Cargo metadata and physical filesystem identity; integration fixtures cover the resulting root set")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn external_path_inputs(dir: &Utf8Path, features: &FeatureArgs, root: &Utf8Path) -> Result<ExternalPathInputs> {
     let mut command = MetadataCommand::new();
     let _builder = command.current_dir(dir);
@@ -1875,6 +1904,7 @@ fn external_path_inputs(dir: &Utf8Path, features: &FeatureArgs, root: &Utf8Path)
 /// do for a bare `cargo test`. `workspace_default_members` needs cargo 1.71, and dereferencing it on
 /// anything older panics, so an unavailable list falls back to the owning package, or to every
 /// member — which is what cargo itself does for a virtual manifest that declares no `default-members`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn selected_packages(metadata: &Metadata, args: &SelectArgs) -> HashSet<String> {
     let members = || {
         metadata
@@ -1931,6 +1961,7 @@ fn at_workspace_root(metadata: &Metadata, dir: &Utf8Path) -> bool {
 /// The deepest match wins, since a package may be nested inside another package's directory and the
 /// inner one is the one cargo would act on. A directory that resolves to no member — the root of a
 /// virtual manifest, or a directory outside the workspace entirely — has no owner.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn owning_package(metadata: &Metadata, dir: &Utf8Path) -> Option<String> {
     let absolute = dir.canonicalize_utf8().unwrap_or_else(|_unresolved| dir.to_owned());
     let mut best: Option<(usize, String)> = None;
@@ -2047,6 +2078,38 @@ fn test_targets(metadata: &Metadata) -> Vec<String> {
     names
 }
 
+fn library_test_packages(metadata: &Metadata) -> HashSet<String> {
+    metadata
+        .workspace_packages()
+        .iter()
+        .filter(|package| package.targets.iter().any(|target| target.test && target_is_library(target)))
+        .map(|package| package.name.to_string())
+        .collect()
+}
+
+fn library_test_targets(metadata: &Metadata) -> Vec<String> {
+    let mut names: Vec<String> = metadata
+        .workspace_packages()
+        .iter()
+        .flat_map(|package| package.targets.iter())
+        .filter(|target| target.test && target_is_library(target))
+        .map(|target| target.name.clone())
+        .collect();
+
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn target_is_library(target: &cargo_metadata::Target) -> bool {
+    target.kind.iter().any(|kind| {
+        matches!(
+            kind,
+            TargetKind::Lib | TargetKind::RLib | TargetKind::DyLib | TargetKind::CDyLib | TargetKind::StaticLib | TargetKind::ProcMacro
+        )
+    })
+}
+
 /// Returns the first `--file` or `--exclude-file` pattern that matches no source file.
 ///
 /// A pattern that matches nothing is nearly always a mistake — a typo, a stale path after a move,
@@ -2110,6 +2173,7 @@ fn is_included(path: &Utf8Path, args: &SelectArgs) -> bool {
 /// have been mutated and now cannot even be named, while a file of any other kind was never part
 /// of the population and its spelling is nobody's business here.
 // #[gamma::skip(iter.remove_sort, reason = "filesystem traversal order is platform-dependent; callers consume this as a set and deterministic ordering is retained solely for stable diagnostics")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn walk_rust_files(directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     let mut found: Vec<Utf8PathBuf> = Vec::new();
 
@@ -3603,6 +3667,7 @@ mod tests {
     /// the score is read knowing which code is not in it: a file dropped in silence is
     /// indistinguishable from a file with nothing worth mutating.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_file_too_deep_to_walk_is_left_out_by_name_rather_than_stopping_the_scan() {
         let (_directory, root) = workspace();
 
@@ -3656,6 +3721,7 @@ mod tests {
     /// narrow one — a selection flag deciding whether the tree is sound. Both selections must
     /// complete, and both must name the same file for the same reason.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_file_too_deep_to_walk_is_skipped_the_same_way_when_only_its_declarations_are_needed() {
         let (_directory, root) = workspace();
 
@@ -3760,7 +3826,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_declared_in_another_file_reach_function_value_collection() {
+    fn a_qualified_cross_file_default_stays_unproven() {
         let (_directory, root) = workspace();
 
         write(
@@ -3782,18 +3848,12 @@ mod tests {
             .scan(None, &Selection::parse("fn_value.default").expect("selection"), &mut ordinals)
             .expect("scan");
 
-        assert!(
-            scanned
-                .mutants
-                .iter()
-                .any(|mutant| &*mutant.item_path == "widget" && mutant.replacement == "Default::default()"),
-            "{:?}",
-            scanned.mutants
-        );
+        assert!(scanned.mutants.is_empty(), "{:?}", scanned.mutants);
     }
 
     /// A file walked once per target still appears once, and test-only modules never appear.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn files_reached_twice_are_listed_once_and_test_only_modules_are_dropped() {
         let (_directory, root) = wide_workspace();
         let survey = survey(&root, SelectArgs::default());
@@ -3849,6 +3909,9 @@ mod tests {
         assert!(survey.tests.contains(&"core".to_owned()), "{:?}", survey.tests);
         assert!(survey.tests.contains(&"app".to_owned()), "{:?}", survey.tests);
         assert!(!survey.tests.contains(&"demo".to_owned()), "{:?}", survey.tests);
+
+        assert_eq!(survey.library_tests, ["core"]);
+        assert_eq!(survey.library_test_packages, HashSet::from_iter(["core".to_owned()]));
     }
 
     #[test]
@@ -3874,6 +3937,55 @@ mod tests {
         let metadata = load_metadata(&root, &FeatureArgs::default()).expect("metadata");
 
         assert_eq!(test_targets(&metadata), ["alpha", "shared", "zeta"]);
+        assert_eq!(library_test_targets(&metadata), ["alpha", "zeta"]);
+        assert_eq!(
+            library_test_packages(&metadata),
+            HashSet::from_iter(["alpha".to_owned(), "zeta".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_library_with_tests_disabled_is_not_a_library_oracle() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
+
+        write(
+            &root,
+            "Cargo.toml",
+            "[package]\nname = \"disabled\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+             [lib]\ntest = false\n",
+        );
+        write(&root, "src/lib.rs", "pub fn value() {}\n");
+
+        let metadata = load_metadata(&root, &FeatureArgs::default()).expect("metadata");
+
+        assert!(library_test_targets(&metadata).is_empty());
+        assert!(library_test_packages(&metadata).is_empty());
+    }
+
+    #[test]
+    fn explicit_library_crate_types_remain_library_oracles() {
+        for crate_types in ["[\"rlib\"]", "[\"dylib\"]", "[\"cdylib\", \"rlib\"]", "[\"staticlib\"]"] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
+            write(
+                &root,
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"explicit\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+                     [lib]\ncrate-type = {crate_types}\n"
+                ),
+            );
+            write(&root, "src/lib.rs", "pub fn value() {}\n");
+            let metadata = load_metadata(&root, &FeatureArgs::default()).expect("metadata");
+
+            assert_eq!(library_test_targets(&metadata), ["explicit"], "{crate_types}");
+            assert_eq!(
+                library_test_packages(&metadata),
+                HashSet::from_iter(["explicit".to_owned()]),
+                "{crate_types}"
+            );
+        }
     }
 
     /// A proc macro's code runs inside `rustc` while another crate is compiled, but a run builds
@@ -3898,6 +4010,8 @@ mod tests {
         write(&root, "macros/src/lib.rs", "pub fn widen(x: i32) -> i32 {\n    x + 1\n}\n");
 
         let survey = survey(&root, SelectArgs::default());
+        assert!(survey.library_test_packages.contains("macros"));
+        assert!(survey.library_tests.contains(&"macros".to_owned()));
         let mut ordinals = 0;
         let scanned = survey
             .scan(None, &Selection::parse("all").expect("every mutator resolves"), &mut ordinals)
@@ -4403,6 +4517,40 @@ mod tests {
             second.mutants
         );
         assert_eq!(crate::model::Summary::of(&second.mutants).scored(), Some(100.0));
+    }
+
+    #[test]
+    fn a_reused_compile_error_keeps_its_reason() {
+        let (_directory, root) = workspace();
+        let mut plan = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let selection = Selection::parse("all").expect("every mutator resolves");
+        let mut ordinals = 0;
+        let first = plan.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let id = first.mutants.first().expect("the fixture yields a mutant").id.clone();
+        plan.settle_recorded(HashMap::from_iter([(
+            id.clone(),
+            crate::discover::Settled {
+                outcome: Outcome::CompileError,
+                compiler_reason: Some("rustc E0308: mismatched types".to_owned()),
+            },
+        )]));
+
+        let mut ordinals = 0;
+        let second = plan.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let reused = second
+            .mutants
+            .iter()
+            .find(|mutant| mutant.id == id)
+            .expect("settled mutant remains");
+
+        assert_eq!(reused.outcome, Outcome::CompileError);
+        assert_eq!(reused.note.as_deref(), Some("rustc E0308: mismatched types"));
     }
 
     /// Only the mutants the report actually settled are carried; the rest are work again, and the

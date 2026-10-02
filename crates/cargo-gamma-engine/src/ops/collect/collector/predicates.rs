@@ -320,6 +320,14 @@ pub(super) fn returns_numeric(method: &str) -> bool {
     )
 }
 
+/// Returns whether a method's name fixes its return type as floating point.
+///
+/// This is separate from [`returns_numeric`] because a proven float must be perturbed by `1.0`;
+/// using the integer literal `1` makes the generated replacement itself fail to compile.
+pub(super) fn returns_float(method: &str) -> bool {
+    matches!(method, "as_secs_f32" | "as_secs_f64" | "elapsed_secs")
+}
+
 /// Returns whether a callee's arguments describe how much room to set aside rather than what the
 /// program should do.
 ///
@@ -411,6 +419,9 @@ fn is_standard_default_callee(path: &Path, defaults: &DefaultPaths, defaulted_ty
         return false;
     };
 
+    // A one-segment path also fails both recognition branches below, so weakening this length
+    // check cannot change the answer.
+    // #[gamma::skip(literal.int_decrement, reason = "a one-segment default path is rejected by both subsequent recognition branches")]
     if method.ident != "default" || path.segments.len() < 2 {
         return false;
     }
@@ -961,13 +972,18 @@ mod tests {
 
         assert_eq!(declared_name(&parse_quote!(value)), Some("value".to_owned()));
         assert_eq!(declared_name(&parse_quote!((value))), None);
-        let typed: Stmt = parse_quote!(let value: usize;);
-        let Stmt::Local(typed) = typed else {
-            panic!("the fixture is a local statement");
-        };
+        let typed = local_statement(parse_quote!(let value: usize;));
         assert_eq!(declared_name(&typed.pat), Some("value".to_owned()));
         assert_eq!(declared_name(&parse_quote!(value @ Some(_))), None);
         assert_eq!(declared_name(&parse_quote!(_)), None);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn local_statement(statement: Stmt) -> syn::Local {
+        match statement {
+            Stmt::Local(local) => local,
+            _ => panic!("the fixture is parsed from a let statement"),
+        }
     }
 
     #[test]

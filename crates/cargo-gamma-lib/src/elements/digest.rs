@@ -8,8 +8,7 @@ use std::borrow::Cow;
 use serde::Deserialize;
 
 use super::report::{
-    FLAKY_PREFIX, FRAMEWORK_NAME, NOT_BUILT_PREFIX, OUT_OF_MEMORY_PREFIX, Report, SUPPORTED_SCHEMA_MAJOR, TIMEOUT_PREFIX,
-    supported_schema_version,
+    FRAMEWORK_NAME, NOT_BUILT_PREFIX, OUT_OF_MEMORY_PREFIX, Report, SUPPORTED_SCHEMA_MAJOR, TIMEOUT_PREFIX, supported_schema_version,
 };
 use crate::model::{MUTANT_ID_VERSION, MutantId, Outcome};
 use crate::{HashMap, HashSet};
@@ -158,7 +157,7 @@ pub(super) fn settled_verdict(status: &str, reason: Option<&str>) -> Option<Outc
         "Survived" if reason_is(OUT_OF_MEMORY_PREFIX) => None,
         "Survived" if reason_is(TIMEOUT_PREFIX) => Some(Outcome::Timeout),
         "Timeout" if reason.is_none() || reason_is(OUT_OF_MEMORY_PREFIX) => None,
-        "Ignored" if reason.is_none() || reason_is(NOT_BUILT_PREFIX) || reason_is(FLAKY_PREFIX) => None,
+        "Ignored" if reason.is_none() || reason_is(NOT_BUILT_PREFIX) || super::report::is_flaky_status(status, reason) => None,
         "Killed" => Some(Outcome::Killed),
         "Timeout" => Some(Outcome::Timeout),
         "CompileError" => Some(Outcome::CompileError),

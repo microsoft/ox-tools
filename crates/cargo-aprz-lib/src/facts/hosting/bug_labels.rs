@@ -38,12 +38,18 @@ impl BugLabelMatcher {
                 .into_app_err_with(|| format!("compiling bug label pattern '{pattern}'"))?;
         }
 
-        let patterns = RegexSetBuilder::new(patterns)
-            .case_insensitive(true)
-            .build()
-            .into_app_err("compiling bug label patterns")?;
+        let mut builder = RegexSetBuilder::new(patterns);
+        Self::from_builder(builder.case_insensitive(true))
+    }
 
-        Ok(Self { patterns })
+    fn from_builder(builder: &RegexSetBuilder) -> Result<Self> {
+        Ok(Self {
+            patterns: Self::build_pattern_set(builder)?,
+        })
+    }
+
+    fn build_pattern_set(builder: &RegexSetBuilder) -> Result<RegexSet> {
+        builder.build().into_app_err("compiling bug label patterns")
     }
 
     /// Returns true if the label matches any of the configured patterns.
@@ -128,5 +134,13 @@ mod tests {
         let err = BugLabelMatcher::new(&["bug(".to_string()]).unwrap_err();
 
         assert!(format!("{err}").contains("bug("), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn aggregate_regex_set_errors_are_propagated_with_context() {
+        let mut builder = RegexSetBuilder::new(["bug"]);
+        let error = BugLabelMatcher::from_builder(builder.size_limit(0)).expect_err("a zero-size automaton cannot be compiled");
+
+        assert!(error.to_string().contains("compiling bug label patterns"), "{error}");
     }
 }

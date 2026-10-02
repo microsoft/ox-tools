@@ -73,8 +73,7 @@ pub fn by_repo(specs: impl IntoIterator<Item = CrateSpec>) -> HashMap<RepoSpec, 
 
 impl Display for CrateSpec {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}@{}", self.name(), self.version())?;
-        Ok(())
+        write!(f, "{}@{}", self.name(), self.version())
     }
 }
 

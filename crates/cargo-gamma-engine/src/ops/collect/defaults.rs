@@ -352,6 +352,13 @@ pub struct Defaults {
     /// Those of them that derive or implement the standard `Default` trait.
     defaulted: HashSet<String>,
 
+    /// Unqualified names defined more than once across the indexed source.
+    ///
+    /// Positive evidence is unsafe for these names: one definition implementing `Default` does not
+    /// prove that another type with the same final segment does. Negative evidence remains safe
+    /// when no definition with that name implements `Default`.
+    ambiguous: HashSet<String>,
+
     /// For each `type Alias<T, E = SomeError> = Result<T, E>`, the name of that default error type.
     ///
     /// A crate-wide `Result` alias is close to universal in real Rust, and it hides the error type
@@ -368,6 +375,9 @@ pub struct Defaults {
     /// The selected configuration, used to ignore declarations that introduce no binding in this
     /// build.
     cfg: CfgSet,
+
+    /// Whether the indexed declarations are complete enough to supply negative evidence.
+    negative: bool,
 }
 
 /// Folds one alias into the map, demoting a key two files disagree about.
@@ -410,6 +420,7 @@ impl Defaults {
         let mut index = Self {
             paths: DefaultPaths::of_in(file, cfg),
             cfg: cfg.clone(),
+            negative: true,
             ..Self::default()
         };
 
@@ -417,14 +428,25 @@ impl Defaults {
         index
     }
 
+    /// Builds only the file-local path-resolution evidence, without negative type evidence.
+    ///
+    /// A standalone file cannot prove that a type lacks an implementation written in another
+    /// file, so convenience collection stays optimistic until a workspace-wide index is available.
+    pub(super) fn optimistic_of_in(file: &File, cfg: &CfgSet) -> Self {
+        let mut index = Self::of_in(file, cfg);
+        index.negative = false;
+        index
+    }
+
     /// Returns whether the workspace defines this type and gives it no `Default`.
     ///
-    /// Names are compared unqualified, so two crates in one workspace can both define a `Config`.
-    /// Presence wins that collision: if either of them has a `Default`, neither is screened. The
-    /// alternative would withhold a mutant that compiles, and this index exists to be conservative.
+    /// Bare names are compared across the workspace, so two crates can both define a `Config`.
+    /// Qualified paths stay unknown because this syntax-only index cannot prove which declaration
+    /// they name. The union supplies negative evidence only when none of the bare-name definitions
+    /// implements `Default`.
     #[must_use]
     pub fn lacks_default(&self, ty: &Type) -> bool {
-        let Some(name) = name_of(ty) else {
+        let Some(name) = unqualified_name_of(ty) else {
             return false;
         };
 
@@ -437,12 +459,15 @@ impl Defaults {
     /// whatever order they finished. Every field resolves a collision without reference to that
     /// order, because the order is not reproducible and the result decides which mutants exist.
     ///
-    /// `defined` and `defaulted` are unions, which is what makes presence win: a name one crate
-    /// defines without a `Default` and another defines with one ends up in both sets, and is not
-    /// screened. `result_error` cannot union, because its values are single names rather than
-    /// membership, so a key two files disagree about is demoted to "unknown" instead — see
-    /// [`merge_alias`].
+    /// `defined` and `defaulted` are unions. A name defined in both inputs becomes ambiguous, so
+    /// positive evidence from one definition is not applied to the other. The `defaulted` union
+    /// still proves negative evidence only when no definition with that name implements `Default`.
+    /// `result_error` cannot union, because its values are single names rather than membership, so
+    /// a key two files disagree about is demoted to "unknown" instead — see [`merge_alias`].
     pub fn absorb(&mut self, other: Self) {
+        self.negative |= other.negative;
+        self.ambiguous.extend(self.defined.intersection(&other.defined).cloned());
+        self.ambiguous.extend(other.ambiguous);
         self.defined.extend(other.defined);
         self.defaulted.extend(other.defaulted);
 
@@ -457,7 +482,21 @@ impl Defaults {
     /// is a name rather than a syntax node.
     #[must_use]
     pub fn lacks_error_default(&self, name: &str) -> bool {
-        self.defined.contains(name) && !self.defaulted.contains(name)
+        self.negative && self.defined.contains(name) && !self.defaulted.contains(name)
+    }
+
+    /// Returns whether the workspace declares a type with this unqualified name.
+    #[must_use]
+    pub fn defines(&self, name: &str) -> bool {
+        self.defined.contains(name)
+    }
+
+    /// Returns positive workspace evidence that the named type implements `Default`.
+    #[must_use]
+    pub fn has_default(&self, ty: &Type) -> bool {
+        unqualified_name_of(ty).is_some_and(|name| {
+            !self.ambiguous.contains(&name) && (self.defaulted.contains(&name) || (!self.negative && self.defined.contains(&name)))
+        })
     }
 
     /// Returns the error type a `Result` alias fixed, given the alias's name.
@@ -470,7 +509,9 @@ impl Defaults {
     }
 
     fn note_derive(&mut self, name: &str, attributes: &[syn::Attribute]) {
-        let _inserted = self.defined.insert(name.to_owned());
+        if !self.defined.insert(name.to_owned()) {
+            let _inserted = self.ambiguous.insert(name.to_owned());
+        }
 
         if derives_default(attributes, &self.paths) {
             let _inserted = self.defaulted.insert(name.to_owned());
@@ -595,6 +636,17 @@ fn name_of(ty: &Type) -> Option<String> {
     }
 }
 
+/// The name of a bare, non-generic type path, which can safely refer to the workspace-wide name
+/// index.
+fn unqualified_name_of(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(path) if path.qself.is_none() => path.path.get_ident().map(ToString::to_string),
+        Type::Paren(paren) => unqualified_name_of(&paren.elem),
+        Type::Group(group) => unqualified_name_of(&group.elem),
+        _ => None,
+    }
+}
+
 /// The name of a type's `index`th generic argument.
 fn payload_name(ty: &Type, index: usize) -> Option<String> {
     let Type::Path(path) = ty else {
@@ -664,6 +716,25 @@ mod tests {
         let ty: Type = parse_quote!(Error);
 
         assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
+    fn colliding_type_names_supply_neither_positive_nor_negative_default_evidence() {
+        let defaults = index(&["pub struct Config;", "#[derive(Default)] pub struct Config;"]);
+        let ty: Type = parse_quote!(Config);
+
+        assert!(!defaults.has_default(&ty));
+        assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
+    fn repeated_non_default_type_names_still_supply_negative_evidence() {
+        let defaults = index(&["pub struct Error;", "pub enum Error { One }"]);
+        let ty: Type = parse_quote!(Error);
+
+        assert!(!defaults.has_default(&ty));
+        assert!(defaults.lacks_default(&ty));
+        assert!(defaults.lacks_error_default("Error"));
     }
 
     #[test]
@@ -813,11 +884,37 @@ mod tests {
     }
 
     #[test]
-    fn a_qualified_path_is_keyed_by_its_last_segment() {
-        let defaults = index(&["pub struct Error;"]);
-        let ty: Type = parse_quote!(crate::error::Error);
+    fn a_qualified_path_does_not_reuse_negative_evidence_for_its_last_segment() {
+        let defaults = index(&["pub struct Config;"]);
+        let ty: Type = parse_quote!(dependency::Config);
 
-        assert!(defaults.lacks_default(&ty));
+        assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
+    fn a_qualified_path_does_not_reuse_positive_evidence_for_its_last_segment() {
+        let defaults = index(&["#[derive(Default)] pub struct Config;"]);
+        let ty: Type = parse_quote!(dependency::Config);
+
+        assert!(!defaults.has_default(&ty));
+    }
+
+    #[test]
+    fn a_generic_path_does_not_reuse_evidence_for_its_type_name() {
+        let defaults = index(&["#[derive(Default)] pub struct Config<T>(T);"]);
+        let ty: Type = parse_quote!(Config<NoDefault>);
+
+        assert!(!defaults.has_default(&ty));
+        assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
+    fn an_absolute_path_does_not_reuse_evidence_for_its_type_name() {
+        let defaults = index(&["#[derive(Default)] pub struct Config;"]);
+        let ty: Type = parse_quote!(::Config);
+
+        assert!(!defaults.has_default(&ty));
+        assert!(!defaults.lacks_default(&ty));
     }
 
     #[test]

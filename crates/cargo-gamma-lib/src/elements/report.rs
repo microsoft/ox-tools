@@ -359,6 +359,10 @@ pub(super) const NOT_BUILT_PREFIX: &str = "not built: ";
 /// them apart once the report has left the machine that produced it.
 pub(super) const FLAKY_PREFIX: &str = "flaky: ";
 
+pub(crate) fn is_flaky_status(status: &str, reason: Option<&str>) -> bool {
+    status == "Ignored" && reason.is_some_and(|reason| reason.starts_with(FLAKY_PREFIX))
+}
+
 /// Maps a verdict onto the schema's closed status enum.
 ///
 /// The schema treats `Timeout` as detected, so Gamma exports both resource-exhaustion outcomes as
@@ -405,7 +409,7 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
             .as_ref()
             .map(|test| format!("failed `{test}`"))
             .or_else(|| mutant.note.clone()),
-        Outcome::CompileError => Some("the mutant does not compile".to_owned()),
+        Outcome::CompileError => Some(mutant.note.clone().unwrap_or_else(|| "the mutant does not compile".to_owned())),
         // `NotBuilt` and a suppression both export as `Ignored`, so without this the reader cannot
         // tell a mutant the run gave up on from one that was deliberately skipped.
         Outcome::NotBuilt => Some(format!(
@@ -465,6 +469,7 @@ pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Resul
 
 /// Builds a report from a synchronized campaign tree, falling back to discovery-retained source
 /// only when no such tree was built.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
     let mut files: BTreeMap<String, FileResult> = BTreeMap::new();
 
@@ -542,6 +547,7 @@ pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds
 
 /// Whether a schema version has the form and major version this crate supports.
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn supported_schema_version(version: &str) -> bool {
     let mut parts = version.split('.');
     let Some(major) = parts.next() else {
@@ -682,6 +688,7 @@ fn validate_file(value: &Value, path: &str) -> SchemaResult<()> {
     validate_mutants(required(file, "mutants", path)?, &format!("{path}.mutants"))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_mutants(value: &Value, path: &str) -> SchemaResult<()> {
     let mutants = array(value, path)?;
     let mut unique = HashSet::default();
@@ -751,6 +758,7 @@ fn validate_strings(value: &Value, path: impl Display + Copy) -> SchemaResult<()
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_location(value: &Value, path: impl Display + Copy, open_end: bool) -> SchemaResult<()> {
     let location = object(value, path)?;
     validate_position(required(location, "start", path)?, format_args!("{path}.start"))?;
@@ -778,6 +786,7 @@ fn validate_position(value: &Value, path: impl Display + Copy) -> SchemaResult<(
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_test_files(value: &Value, path: &str) -> SchemaResult<()> {
     for (name, file) in object(value, path)? {
         let file_path = format!("{path}[{name:?}]");
@@ -816,6 +825,7 @@ fn validate_performance(value: &Value, path: &str) -> SchemaResult<()> {
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_framework(value: &Value, path: &str) -> SchemaResult<()> {
     let framework = object(value, path)?;
 
@@ -891,6 +901,7 @@ fn is_uri(value: &str) -> bool {
     true
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_system(value: &Value, path: &str) -> SchemaResult<()> {
     let system = object(value, path)?;
     boolean(required(system, "ci", path)?, format_args!("{path}.ci"))?;

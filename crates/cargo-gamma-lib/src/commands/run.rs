@@ -10,6 +10,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use super::cli::RunArgs;
 use super::console_events::ConsoleEvents;
+use super::dashboard::Dashboard;
 use super::dispatch::{DEFAULT_TEST_TIMEOUT_MULTIPLIER, EXIT_CANNOT_PROCEED, EXIT_GATE_FAILED, EXIT_OK};
 use super::host::Host;
 use super::verdict_log::VerdictLog;
@@ -211,6 +212,7 @@ struct ReportContents<'a> {
     dropped: &'a [String],
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn emit_reports_from<H: Host>(
     host: &mut H,
     args: &RunArgs,
@@ -250,6 +252,7 @@ fn emit_reports_from<H: Host>(
 }
 
 /// Writes the SARIF log and, when requested, the diff annotations and job summary.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&str>, styler: Styler) -> crate::Result<()> {
     let path = Documents::resolve(args, &plan.root).sarif;
     let (log, truncation) = crate::ci::sarif(&plan.mutants, &plan.root, args.sarif_level)?;
@@ -340,19 +343,26 @@ fn broken_expectations(mutants: &[Mutant]) -> Vec<(&Mutant, &'static str)> {
 
 /// Fails a run whose gate never got a population to judge.
 ///
-/// A gate that cannot fail is worse than no gate. Every route to an empty score — an exclude
+/// A gate that cannot fail is worse than no gate. Every route to an empty population — an exclude
 /// pattern that matched everything, a shard that held nothing but suppressions, a diff that named
 /// no code, an incremental run that had already settled the lot — would otherwise end in a
 /// summary that said nothing was tested and an exit code that said everything was fine. A job that
-/// asked for `--min-score 100` would then pass on the strength of having tested nothing at all,
-/// indefinitely, which is the exact failure the flag exists to prevent.
+/// asked for `--min-score 100` or `--max-flaky 0` would then pass on the strength of having tested
+/// nothing at all, indefinitely, which is the exact failure these flags exist to prevent.
 ///
 /// A run that asked for no gate is left alone: an empty population is a perfectly ordinary answer
 /// to a narrow selection, and turning it into a failure would break every run that never made a
 /// claim about its score.
-fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, expectations: bool) -> i32 {
-    let gate = if args.min_score.is_some() {
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, flaky_outcomes: bool, expectations: bool) -> i32 {
+    let score_unevaluated = args.min_score.is_some();
+    let flaky_unevaluated = args.max_flaky.is_some() && !flaky_outcomes;
+    let gate = if score_unevaluated && flaky_unevaluated {
+        "the `--min-score` and `--max-flaky` gates"
+    } else if score_unevaluated {
         "the `--min-score` gate"
+    } else if flaky_unevaluated {
+        "the `--max-flaky` gate"
     } else if expectations {
         "the expectations this run carried"
     } else {
@@ -361,7 +371,7 @@ fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, expectations:
 
     let _ = writeln!(
         host.error(),
-        "{} no mutant counted toward the score, so {gate} was never evaluated; \
+        "{} no mutant counted toward {gate}, so it was never evaluated; \
          check that the selection — `--in-diff`, `--exclude-file`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test",
         styler.error("error:")
     );
@@ -377,6 +387,7 @@ fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, expectations:
 /// shown at the coarsest precision that still distinguishes them, so the common case stays at one
 /// decimal and only a genuine near miss grows extra digits. The caller guarantees `score < minimum`,
 /// so the two are distinct reals and the search always terminates at a precision that separates them.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
     for precision in 1..=12 {
         let shown_score = format!("{score:.precision$}");
@@ -391,6 +402,7 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
 }
 
 // #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
     let Executed { plan, stuck } = measured(host, args, progress_when, styler)?;
 
@@ -406,7 +418,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     let Some(plan) = plan else {
         // Nothing was generated at all, so no mutant carries an expectation either: whether a gate
         // exists is entirely what the command line asked for.
-        return Ok(ungraded(host, args, styler, false));
+        return Ok(ungraded(host, args, styler, false, false));
     };
 
     let summary = crate::model::Summary::of(&plan.mutants);
@@ -439,12 +451,38 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     }
 
     if pending_fails_gate(args, summary.pending) {
+        let gate = if args.min_score.is_some() && args.max_flaky.is_some() {
+            "`--min-score` and `--max-flaky` gates"
+        } else if args.min_score.is_some() {
+            "`--min-score` gate"
+        } else {
+            "`--max-flaky` gate"
+        };
         let _ = writeln!(
             host.error(),
-            "{} {} {} still pending, so the `--min-score` gate cannot evaluate the complete population",
+            "{} {} {} still pending, so the {gate} cannot evaluate the complete population",
             styler.error("error:"),
             summary.pending,
             if summary.pending == 1 { "mutant is" } else { "mutants are" }
+        );
+
+        return Ok(EXIT_GATE_FAILED);
+    }
+
+    if let Some(maximum) = flaky_excess(args, summary.flaky) {
+        let mut stream = host.error();
+
+        for mutant in plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Flaky) {
+            let reason = mutant.note.as_deref().unwrap_or("a test failed with and without the mutant active");
+            let _ = writeln!(stream, "{} {} [{}]: {reason}", styler.error("error:"), mutant.describe(), mutant.id);
+        }
+
+        let _ = writeln!(
+            stream,
+            "{} {} unresolved flaky {} exceed the configured maximum of {maximum}",
+            styler.error("error:"),
+            summary.flaky,
+            if summary.flaky == 1 { "outcome" } else { "outcomes" }
         );
 
         return Ok(EXIT_GATE_FAILED);
@@ -458,6 +496,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
             host,
             args,
             styler,
+            summary.flaky > 0,
             plan.mutants.iter().any(|mutant| mutant.expectation.is_some()),
         ));
     };
@@ -479,9 +518,14 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     Ok(EXIT_OK)
 }
 
+fn flaky_excess(args: &RunArgs, flaky: u32) -> Option<usize> {
+    args.max_flaky
+        .filter(|maximum| usize::try_from(flaky).unwrap_or(usize::MAX) > *maximum)
+}
+
 // #[gamma::skip(all, reason = "the gate truth table is asserted directly; instrumentation of this private predicate is not distinguishable from the calling gate branch")]
 fn pending_fails_gate(args: &RunArgs, pending: u32) -> bool {
-    args.min_score.is_some() && pending > 0
+    (args.min_score.is_some() || args.max_flaky.is_some()) && pending > 0
 }
 
 /// Collects the arguments every test binary should receive.
@@ -529,6 +573,7 @@ fn adopted_from_cache(plan: &Plan, cached: &crate::HashMap<crate::model::MutantI
 ///
 /// See [`crate::suppress::idle`] for exactly which directives reach here.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn report_idle<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> crate::Result<()> {
     if plan.idle.is_empty() {
         return Ok(());
@@ -551,6 +596,7 @@ fn report_idle<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> crate::Res
 }
 
 // #[gamma::skip(all, reason = "diagnostic emission is asserted through an injected Host, while write-failure paths are intentionally best-effort and cannot add a distinct correctness verdict")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate::Result<()> {
     if adopted == 0 {
         return Ok(());
@@ -586,6 +632,7 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
         rustflags: rustflags.as_deref(),
         toolchain: toolchain.as_deref(),
         test_packages: &args.measure.test_packages,
+        test_lib: args.measure.test_lib,
         include_tests: &args.measure.include_tests,
         exclude_tests: &args.measure.exclude_tests,
         test_workspace: args.measure.test_workspace,
@@ -607,6 +654,7 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
         no_relaunch: args.measure.no_relaunch,
         copy_ignored: args.measure.copy_ignored,
         jobs: args.measure.jobs,
+        resource_concurrency: &args.measure.resource_concurrency,
         build_timeout: args.limits.build_timeout,
         build_timeout_multiplier: args.limits.build_timeout_multiplier,
         rollback_rounds: args.limits.rollback_rounds,
@@ -640,7 +688,7 @@ impl RecordPreparation {
 }
 
 fn incremental_enabled(args: &RunArgs) -> bool {
-    !args.dry_run && args.incremental.unwrap_or(exec::IncrementalMode::Build).is_enabled()
+    !args.dry_run && args.mutants.is_empty() && args.incremental.unwrap_or(exec::IncrementalMode::Build).is_enabled()
 }
 
 #[cfg(test)]
@@ -695,6 +743,29 @@ fn postprocessing_advice(root: &Utf8Path, stored: &crate::discover::RunRecord, r
     (crate::discover::Hints::record_promotion_is_useful(root, stored), suppressible)
 }
 
+fn requested_mutants(values: &[String]) -> crate::Result<crate::HashSet<crate::model::MutantId>> {
+    let mut requested = crate::HashSet::default();
+
+    for value in values {
+        if value.len() != crate::model::MUTANT_ID_HEX_LEN
+            || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(error!(
+                "`--mutant {value}` is not a current mutant ID; expected {} lowercase hexadecimal characters",
+                crate::model::MUTANT_ID_HEX_LEN
+            )
+            .usage());
+        }
+
+        let id = crate::model::MutantId::new(value);
+        if !requested.insert(id) {
+            return Err(error!("mutant ID `{value}` was requested more than once").usage());
+        }
+    }
+
+    Ok(requested)
+}
+
 /// Settles everything the measured run needs from the command line.
 pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
     exec::Config {
@@ -720,12 +791,14 @@ pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
         cache_dir: args.measure.cache_dir.clone(),
         copy_ignored: args.measure.copy_ignored,
         test_packages: args.measure.test_packages.clone(),
+        test_lib: args.measure.test_lib,
         include_tests: args.measure.include_tests.clone(),
         exclude_tests: args.measure.exclude_tests.clone(),
         test_workspace: args.measure.test_workspace,
         optimize_test_execution: args.measure.optimize_test_execution,
         whole_test_binaries: args.measure.whole_test_binaries,
         nextest: args.measure.nextest,
+        resources: args.measure.resource_concurrency.clone(),
         incremental: args.incremental.unwrap_or(exec::IncrementalMode::Build),
         timeout_floor: args
             .measure
@@ -754,6 +827,7 @@ pub(super) struct Executed {
 ///
 /// Incremental mode governs whether compiler unviability is reused from `last-gamma-run.json`.
 // #[gamma::skip(all, reason = "cache adoption combines filesystem locks, process-global compiler context, and persisted records; deterministic record-settlement tests cover the data contract while isolated branch mutants are not safely observable")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn adopt(
     args: &RunArgs,
     survey: &mut crate::discover::Survey,
@@ -808,12 +882,12 @@ fn adopt(
     // asked for more must not have the rest credited to the free tier.
     let free: crate::HashMap<crate::model::MutantId, Outcome> = recorded
         .iter()
-        .filter(|(_id, outcome)| **outcome == Outcome::CompileError)
-        .map(|(id, outcome)| (id.clone(), *outcome))
+        .filter(|(_id, settled)| settled.outcome == Outcome::CompileError)
+        .map(|(id, settled)| (id.clone(), settled.outcome))
         .collect();
 
     if !recorded.is_empty() {
-        survey.settle(recorded);
+        survey.settle_recorded(recorded);
     }
 
     (free, declined, moved)
@@ -824,6 +898,7 @@ fn adopt(
     reason = "the command orchestrator keeps its ordered reporting and resource-cleanup paths together"
 )]
 // #[gamma::skip(all, reason = "the command orchestrator coordinates subprocesses, cache locks, terminal state, and cleanup; its externally observable branches are covered by integration tests, while isolated mutations are platform/resource dependent")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
     let started = Instant::now();
     let selection = args.select.selection()?;
@@ -843,8 +918,44 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let contexts = postprocessing_contexts(args, observed_context);
     let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, incremental_enabled(args))?;
 
-    if let Some(path) = args.only_survivors_from.as_ref() {
-        let report = crate::merge::read_limited(path, u64::MAX)?.report;
+    if !args.mutants.is_empty() {
+        let requested = requested_mutants(&args.mutants)?;
+        survey.retain_only(requested.clone());
+
+        let mut ordinals = 0;
+        let scanned = survey.scan(None, &selection, &mut ordinals)?;
+        let found: crate::HashSet<crate::model::MutantId> = scanned
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.outcome == Outcome::Pending)
+            .map(|mutant| mutant.id.clone())
+            .collect();
+        let mut missing: Vec<&str> = requested
+            .iter()
+            .filter(|id| !found.contains(*id))
+            .map(crate::model::MutantId::as_str)
+            .collect();
+        missing.sort_unstable();
+
+        if !missing.is_empty() {
+            return Err(error!(
+                "the requested mutant {} could not be selected from the current source and filters: {}. \
+                 Re-run `cargo gamma list mutants --json` to obtain current IDs.",
+                if missing.len() == 1 { "ID" } else { "IDs" },
+                missing.join(", ")
+            )
+            .usage());
+        }
+
+        writeln!(
+            host.error(),
+            "{} {} for a fresh verdict",
+            styler.verb("Selected"),
+            quantity(requested.len(), "explicit mutant")
+        )?;
+    } else if args.only_survivors {
+        let path = Documents::resolve(args, &survey.root).json;
+        let report = crate::merge::read_limited(&path, u64::MAX)?.report;
         let survivors = crate::elements::surviving_mutants(&report)
             .map_err(|cause| error!("cannot select survivors from `{path}`: {cause}").usage())?;
 
@@ -897,11 +1008,12 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
     clear_baseline_failures(&artifact_dir)?;
 
+    let dashboard = Dashboard::new(visible && args.dashboard, host.terminal_width(), styler);
     let mut events = ConsoleEvents {
         host,
         progress,
+        dashboard,
         styler,
-        estimate: args.estimate,
         show_build: args.measure.show_build,
         verdict_log: VerdictLog::default(),
     };
@@ -948,11 +1060,13 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let log_failure = log_result.err();
 
     let mut progress = events.progress;
+    let mut dashboard = events.dashboard;
 
     // The live display named every survivor and timeout as it happened, so the summary must not
     // name them again.
     let announced = progress.is_enabled();
 
+    dashboard.finish(host);
     progress.finish(host);
 
     // Written from the whole population so an adopted cache is preserved. Failing here is not failing the run:
@@ -1076,6 +1190,7 @@ fn clear_baseline_failures(artifact_dir: &Utf8Path) -> crate::Result<()> {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn emit_failure_artifacts<H: Host>(
     events: &mut ConsoleEvents<'_, H>,
     args: &RunArgs,
@@ -1172,6 +1287,7 @@ fn platform_path(path: &Utf8Path) -> String {
 }
 
 // #[gamma::skip(all, reason = "auxiliary diagnostic writes are deliberately best-effort, so an injected write failure and an omitted write have the same command result")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn warn_auxiliary<H: Host>(host: &mut H, failure: Option<&Error>, styler: Styler) {
     if let Some(failure) = failure {
         let _ = writeln!(host.error(), "{} {failure}", styler.warning());
@@ -1207,6 +1323,7 @@ fn stuck_panel(stuck: &[String]) -> Option<String> {
 /// the part of the suite nobody could run — belongs on the same page as the score they are missing
 /// from.
 // #[gamma::skip(all, reason = "the assembled summary is asserted as an artifact; mutations in this private composition layer duplicate the component formatter contracts")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn summary_panel(args: &RunArgs, plan: &Plan, session: &exec::Session, stuck: &[String], dropped: &[String], wall: Duration) -> String {
     // The job summary wants a fragment under the heading it already owns; the artifact wants a whole
     // document. Same analysis, two shapes.
@@ -1222,6 +1339,7 @@ fn summary_panel(args: &RunArgs, plan: &Plan, session: &exec::Session, stuck: &[
 
 /// Renders the dropped test packages for the job summary.
 // #[gamma::skip(all, reason = "the exact artifact fragment is covered by deterministic formatting tests; mutating this private formatter duplicates the report contract")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn dropped_panel(dropped: &[String]) -> Option<String> {
     if dropped.is_empty() {
         return None;
@@ -1239,6 +1357,7 @@ fn dropped_panel(dropped: &[String]) -> Option<String> {
 /// failure. What it is not is comparable with a run over the whole workspace, and nothing else on
 /// screen says so.
 // #[gamma::skip(all, reason = "the warning text is covered through an injected Host; mutations here duplicate the artifact panel's dropped-package contract")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn report_dropped<H: Host>(host: &mut H, dropped: &[String], styler: Styler) -> crate::Result<()> {
     if dropped.is_empty() {
         return Ok(());
@@ -1437,13 +1556,75 @@ mod tests {
             &mut self.diagnostics
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn is_terminal(&self) -> bool {
             false
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn terminal_width(&self) -> Option<u16> {
             None
         }
+    }
+
+    #[test]
+    fn exact_mutant_ids_are_validated_and_deduplicated() {
+        let selected = requested_mutants(&["deadbeefcafe".to_owned(), "0123456789ab".to_owned()]).expect("valid IDs");
+
+        assert_eq!(selected.len(), 2);
+        let _ = requested_mutants(&["DEADBEEFCAFE".to_owned()]).expect_err("uppercase is not canonical");
+        let _ = requested_mutants(&["short".to_owned()]).expect_err("short IDs are invalid");
+        let _ = requested_mutants(&["deadbeefcafe".to_owned(), "deadbeefcafe".to_owned()]).expect_err("duplicate IDs are ambiguous");
+    }
+
+    #[test]
+    fn exact_mutant_selection_disables_cached_verdict_adoption() {
+        let mut args = RunArgs::default();
+
+        assert!(incremental_enabled(&args));
+        args.mutants.push("deadbeefcafe".to_owned());
+        assert!(!incremental_enabled(&args));
+    }
+
+    #[test]
+    fn flaky_gate_is_independent_of_the_score_gate() {
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+
+        assert_eq!(flaky_excess(&args, 1), Some(0));
+        assert_eq!(flaky_excess(&args, 0), None);
+
+        args.max_flaky = Some(2);
+        assert_eq!(flaky_excess(&args, 2), None);
+        assert_eq!(flaky_excess(&args, 3), Some(2));
+    }
+
+    #[test]
+    fn a_flaky_only_gate_requires_a_complete_population() {
+        let args = RunArgs {
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+
+        assert!(pending_fails_gate(&args, 1));
+        assert!(!pending_fails_gate(&args, 0));
+    }
+
+    #[test]
+    fn a_flaky_only_gate_is_evaluated_by_an_in_budget_flaky_outcome() {
+        let args = RunArgs {
+            max_flaky: Some(1),
+            ..RunArgs::default()
+        };
+        let mut host = Sink::default();
+
+        let code = ungraded(&mut host, &args, Styler::new(false), true, false);
+
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        assert!(host.err().is_empty(), "{}", host.err());
     }
 
     #[test]
@@ -2372,8 +2553,8 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), Some(80)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
             styler: Styler::new(false),
-            estimate: false,
             show_build: false,
             verdict_log: VerdictLog::default(),
         };
@@ -2934,6 +3115,7 @@ mod tests {
     /// package would look like a run that simply found nothing, hiding the fact that everything in
     /// it was deliberately excluded.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_run_with_every_mutant_suppressed_never_builds_and_still_summarizes() {
         let dir = workdir("run-all-suppressed-");
         let root = subject_root(&dir);
@@ -3044,31 +3226,35 @@ mod tests {
     /// A gate that cannot fail is worse than no gate. A selection that leaves nothing to test used
     /// to exit zero, so `--min-score 100` passed on the strength of having tested nothing.
     #[test]
-    fn a_gated_run_with_nothing_to_test_fails_rather_than_passing_silently() {
+    fn every_gate_fails_when_nothing_was_available_to_test() {
         let dir = workdir("run-empty-gated-");
         let root = subject_root(&dir);
         fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
 
         // Every file is excluded, so discovery finds nothing at all: the shape an over-eager
         // `--exclude-file`, an empty shard and a diff that named no code all arrive in.
-        let args = RunArgs {
-            select: crate::commands::SelectArgs {
-                dir: root,
-                exclude_files: vec!["**/*.rs".to_owned()],
-                ..crate::commands::SelectArgs::default()
-            },
-            dry_run: true,
-            min_score: Some(100.0),
-            ..Default::default()
-        };
-        let mut host = Sink::default();
+        for (min_score, max_flaky, gate) in [(Some(100.0), None, "--min-score"), (None, Some(0), "--max-flaky")] {
+            let args = RunArgs {
+                select: crate::commands::SelectArgs {
+                    dir: root.clone(),
+                    exclude_files: vec!["**/*.rs".to_owned()],
+                    ..crate::commands::SelectArgs::default()
+                },
+                dry_run: true,
+                min_score,
+                max_flaky,
+                ..Default::default()
+            };
+            let mut host = Sink::default();
 
-        let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
+            let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
-        assert_eq!(code, EXIT_GATE_FAILED);
-        assert!(host.err().contains("never evaluated"), "{}", host.err());
-        assert!(host.err().contains("--exclude-file"), "{}", host.err());
-        assert!(host.err().contains("--shard-count"), "{}", host.err());
+            assert_eq!(code, EXIT_GATE_FAILED);
+            assert!(host.err().contains("never evaluated"), "{}", host.err());
+            assert!(host.err().contains(gate), "{}", host.err());
+            assert!(host.err().contains("--exclude-file"), "{}", host.err());
+            assert!(host.err().contains("--shard-count"), "{}", host.err());
+        }
     }
 
     /// The same run without a gate made no claim about its score, so an empty population is an

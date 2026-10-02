@@ -17,6 +17,7 @@ const MAX_SYMLINKS: usize = 40;
 /// `canonicalize` cannot answer this for a dangling link: it fails at the link rather than
 /// reporting where a later create or rename would land. Following components one at a time keeps
 /// that destination visible while still leaving a genuinely absent tail in place.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let mut pending = absolute(path)?;
     let mut followed_links = 0;
@@ -107,6 +108,7 @@ pub(crate) fn require_within(path: &Utf8Path, root: &Utf8Path, purpose: &str) ->
 }
 
 /// Refuses output names that would publish over the same physical destination.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn reject_collisions(outputs: &[(&str, &Utf8Path)]) -> Result<()> {
     let mut destinations: Vec<(&str, Utf8PathBuf)> = Vec::with_capacity(outputs.len());
 
@@ -165,6 +167,7 @@ fn lexical(path: &Utf8Path) -> Result<Utf8PathBuf> {
 }
 
 /// Appends components while preserving their filesystem meaning below an absolute root.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn append<'path>(destination: &mut Utf8PathBuf, components: impl IntoIterator<Item = Utf8Component<'path>>) {
     for component in components {
         match component {
@@ -264,6 +267,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn windows_links_are_resolved_and_containment_uses_their_targets() {
         let (_directory, root) = root();
         let outside = root.join("outside");
@@ -294,6 +298,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn excessive_windows_link_indirection_is_refused() {
         let (_directory, root) = root();
         for index in 0..=40 {

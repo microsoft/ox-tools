@@ -237,6 +237,7 @@ impl Registry {
 
     /// Claims a process-group slot and its cgroup kill handle as one registration.
     #[cfg(target_os = "linux")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn claim_with_cgroup<K: Fn(i32), C: Fn(i32)>(
         &self,
         group: i32,
@@ -266,6 +267,7 @@ impl Registry {
 
     /// Stops watching a cgroup descriptor and waits for a sweep that already took it.
     #[cfg(target_os = "linux")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn release_cgroup(&self, slot: usize, descriptor: i32) {
         if let Some(entry) = self.cgroups.get(slot)
             && let Some(encoded) = descriptor.checked_add(1)
@@ -511,6 +513,7 @@ impl Spawning {
     /// nothing was registered for the cgroup either.
     #[cfg(target_os = "linux")]
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn watch_cgroup(&self, group: i32, cgroup: Option<&mut Cgroup>) -> Option<usize> {
         let Some(cgroup) = cgroup else {
             return self.watch(group);
@@ -530,6 +533,7 @@ impl Spawning {
 /// nothing reading a diagnostic wants to be shown them.
 impl fmt::Debug for Spawning {
     #[expect(clippy::renamed_function_params, reason = "`f` is less clear than `formatter`")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Spawning")
@@ -565,6 +569,7 @@ pub(crate) struct TestRegistry(&'static Registry);
 
 #[cfg(all(test, target_os = "linux", not(miri)))]
 impl fmt::Debug for TestRegistry {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TestRegistry")
     }
@@ -578,6 +583,7 @@ impl TestRegistry {
         Self(registry)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn watch_cgroup<K: Fn(i32), C: Fn(i32)>(
         self,
         group: i32,
@@ -606,6 +612,7 @@ impl TestRegistry {
         self.0.release(slot, group);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn release_cgroup(self, slot: usize, descriptor: i32) {
         self.0.release_cgroup(slot, descriptor);
     }
@@ -630,6 +637,7 @@ pub fn forget(slot: usize, group: i32) {
 /// about to be closed. It is not public: the release has to be tied to the cgroup's lifetime
 /// rather than offered to a caller who could skip it, call it twice, or call it too early.
 #[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn release_watched_cgroup(slot: usize, descriptor: i32) {
     registry().release_cgroup(slot, descriptor);
 }
@@ -643,6 +651,7 @@ fn kill_group(group: i32) {
 }
 
 /// Kills every process in a cgroup through an already-open `cgroup.kill` descriptor.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn kill_cgroup(descriptor: i32) {
     // SAFETY: descriptors admitted here come from a live `Cgroup`, whose own `Drop` waits for every
     // active sweep before the owning `File` closes the descriptor, so it cannot have been closed or
@@ -724,6 +733,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn process_case() {
         let Ok(case) = std::env::var("CARGO_GAMMA_INTERRUPT_CASE") else {
             return;
@@ -798,6 +808,7 @@ mod tests {
     fn dying_resets_the_disposition_to_the_default_before_re_raising() {
         static DELIVERED: AtomicBool = AtomicBool::new(false);
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         extern "C" fn record(_signal: i32) {
             DELIVERED.store(true, Ordering::SeqCst);
         }
@@ -852,6 +863,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn killing_a_group_reaches_every_member_with_sigkill() {
         let mut child = Command::new("sh");
         let _grouped = child

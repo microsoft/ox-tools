@@ -277,6 +277,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fixed_artifacts_keep_their_emission_order() {
+        let paths: Vec<_> = all()
+            .into_iter()
+            .take(6)
+            .map(|artifact| match artifact {
+                Artifact::OwnedFile(spec) => spec.path,
+                Artifact::Region(_) => panic!("ADO artifacts must be owned files"),
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ".pipelines/anvil/steps/setup.yml",
+                ".pipelines/anvil/steps/impact.yml",
+                ".pipelines/anvil/steps/advisory-comments.yml",
+                ".pipelines/anvil/steps/job.yml",
+                ".pipelines/anvil/hooks/before-checks.yml",
+                ".pipelines/anvil/hooks/after-checks.yml",
+            ]
+        );
+    }
+
+    #[test]
     fn check_hooks_default_to_empty_steps_and_surround_check_work() {
         for artifact in [before_checks(), after_checks()] {
             let Artifact::OwnedFile(spec) = artifact else {

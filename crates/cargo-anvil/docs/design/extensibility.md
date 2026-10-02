@@ -418,7 +418,7 @@ impl Cli {
     pub fn parse_from_cargo_args(catalog: &Catalog, args: I) -> Result<Cli, clap::Error>;
 }
 
-pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError>;
+pub fn run(catalog: &Catalog, cli: &Cli) -> Result<i32, AppError>;
 pub fn run_update(catalog: &Catalog, cli: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError>;
 
 /// One-call entry point: tracing init + parse + run + ExitCode mapping.
@@ -428,9 +428,11 @@ pub fn run_app(catalog: Catalog) -> ExitCode;
 ```
 
 `run_app` is what makes the downstream `main` a single line. It owns exactly what
-`cargo-anvil`'s `main.rs` owns today (subscriber setup, `parse_from_cargo_args`, the
-`Ok/Err → ExitCode` mapping, and the `--dry-run` exit-1 behavior), so all of that logic lives in
-one tested place rather than being copy-pasted into every fork.
+`cargo-anvil`'s `main.rs` owns today (subscriber setup, `parse_from_cargo_args`, and the
+`Ok/Err → ExitCode` mapping), so all of that logic lives in one tested place rather than being
+copy-pasted into every fork. The internal `run` returns zero for an applied or clean run and carries
+the plan's nonzero dry-run status in `Ok`; `run_app` maps that successful status, separately from
+`AppError`, onto the process exit code.
 
 `cargo-anvil`'s own `main.rs` collapses to
 `fn main() -> ExitCode { cargo_anvil::run_app(Catalog::anvil()) }`, proving the seam by

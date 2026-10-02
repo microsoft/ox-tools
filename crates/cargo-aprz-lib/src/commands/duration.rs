@@ -93,6 +93,7 @@ pub(super) fn parse(text: &str) -> Result<Duration, ParseError> {
     loop {
         rest = rest.trim_start();
         if rest.is_empty() {
+            // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "continuing at end of input leaves the parser loop running forever")]
             break;
         }
 
@@ -118,6 +119,7 @@ pub(super) fn parse(text: &str) -> Result<Duration, ParseError> {
             .and_then(|scaled| total.checked_add(scaled))
             .ok_or(ParseError::Overflow)?;
         saw_pair = true;
+        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the parser must advance to the remaining input before its next iteration")]
         rest = remainder;
     }
 
@@ -286,6 +288,12 @@ mod tests {
     }
 
     #[test]
+    fn digit_only_and_oversized_amounts_return_errors_instead_of_panicking() {
+        assert_eq!(parse("7"), Err(ParseError::MissingUnit));
+        assert_eq!(parse("340282366920938463463374607431768211456s"), Err(ParseError::Overflow));
+    }
+
+    #[test]
     fn totals_beyond_a_duration_are_rejected() {
         assert_eq!(parse("99999999999999999999999999999999 years"), Err(ParseError::Overflow));
         assert_eq!(parse("18446744073709551616s"), Err(ParseError::Overflow));
@@ -304,6 +312,15 @@ mod tests {
             assert!(!error.to_string().is_empty(), "{error:?} has no message");
         }
         assert!(ParseError::UnknownUnit("blink".to_owned()).to_string().contains("blink"));
+        assert_eq!(
+            ParseError::Empty.to_string(),
+            "expected a duration such as \"1 week\", \"12h\" or \"250ms\", found nothing"
+        );
+        assert_eq!(
+            ParseError::MissingUnit.to_string(),
+            "expected a unit after the number, such as \"s\", \"h\" or \"days\""
+        );
+        assert_eq!(ParseError::Overflow.to_string(), "duration is too large to represent");
     }
 
     #[test]
@@ -316,6 +333,14 @@ mod tests {
         assert_eq!(format(Duration::from_nanos(1_001_001)), "1ms 1us 1ns");
         assert_eq!(format(Duration::from_secs(SECS_PER_YEAR + SECS_PER_MONTH)), "1year 1month");
         assert_eq!(format(Duration::from_secs(2 * SECS_PER_YEAR)), "2years");
+    }
+
+    #[test]
+    fn plural_units_keep_their_suffix() {
+        assert_eq!(format(Duration::from_secs(SECS_PER_DAY)), "1day");
+        assert_eq!(format(Duration::from_secs(2 * SECS_PER_DAY)), "2days");
+        assert_eq!(format(Duration::from_secs(1)), "1s");
+        assert_eq!(format(Duration::from_secs(2)), "2s");
     }
 
     #[test]

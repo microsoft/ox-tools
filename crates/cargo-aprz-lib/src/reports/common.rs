@@ -116,7 +116,7 @@ pub const fn format_risk_status(risk: Risk) -> &'static str {
 /// Return policy-failure and inconclusive counts when weighted scoring was skipped.
 fn required_check_counts(appraisal: &Appraisal) -> (usize, usize) {
     if !appraisal.is_required_check_failure() {
-        return (0, 0);
+        return Default::default();
     }
 
     appraisal
@@ -224,7 +224,7 @@ impl fmt::Display for IconName<'_> {
 ///
 /// Returns a `HashMap` mapping each category to a vector of metric names.
 pub fn group_metrics_by_category<'a>(metrics: &'a [Metric]) -> HashMap<MetricCategory, Vec<&'a str>> {
-    let mut metrics_by_category: HashMap<MetricCategory, Vec<&'a str>> = crate::hash_map_with_capacity(metrics.len().min(16));
+    let mut metrics_by_category: HashMap<MetricCategory, Vec<&'a str>> = HashMap::default();
 
     for metric in metrics {
         metrics_by_category.entry(metric.category()).or_default().push(metric.name());
@@ -261,8 +261,8 @@ impl<'a> ReportContext<'a> {
 pub fn group_all_metrics_by_category<'a>(
     crate_metrics: impl IntoIterator<Item = &'a [Metric]>,
 ) -> HashMap<MetricCategory, Vec<&'static str>> {
-    let mut seen: HashSet<&'static str> = crate::hash_set_with_capacity(128);
-    let mut metrics_by_category: HashMap<MetricCategory, Vec<&'static str>> = crate::hash_map_with_capacity(16);
+    let mut seen: HashSet<&'static str> = HashSet::default();
+    let mut metrics_by_category: HashMap<MetricCategory, Vec<&'static str>> = HashMap::default();
 
     for metrics in crate_metrics {
         for metric in metrics {
@@ -477,6 +477,7 @@ mod tests {
     #[test]
     fn test_format_appraisal_details_explains_total_weighted_evaluation_failure() {
         let appraisal = Appraisal::weighted_evaluation_failure(vec![
+            ExpressionOutcome::new("Passing".into(), "Passed.".into(), ExpressionDisposition::True),
             ExpressionOutcome::new(
                 "Weighted 1".into(),
                 "Weighted policy 1".into(),
@@ -486,6 +487,11 @@ mod tests {
                 "Weighted 2".into(),
                 "Weighted policy 2".into(),
                 ExpressionDisposition::Failed("unavailable".into()),
+            ),
+            ExpressionOutcome::new(
+                "Failing".into(),
+                "Failed without an evaluation error.".into(),
+                ExpressionDisposition::False,
             ),
         ]);
 
@@ -636,6 +642,20 @@ mod tests {
                 "the writer failed on write {budget}, so formatting must fail too"
             );
         }
+    }
+
+    #[test]
+    fn failed_outcome_description_write_failure_is_returned() {
+        use core::fmt::Write as _;
+
+        let outcome = ExpressionOutcome::new(
+            "Denied".into(),
+            "The policy was not satisfied.".into(),
+            ExpressionDisposition::False,
+        );
+        let mut writer = FailAfter { budget: 2, writes: 0 };
+
+        assert!(write!(writer, "{}", outcome_icon_name(&outcome)).is_err());
     }
 
     #[test]

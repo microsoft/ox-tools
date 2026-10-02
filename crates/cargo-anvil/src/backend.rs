@@ -180,6 +180,8 @@ pub fn resolve(flag_backends: &[String], no_backends: bool, repo_root: &Path) ->
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -207,6 +209,11 @@ mod tests {
     }
 
     #[test]
+    fn scheme_url_without_user_info_starts_the_host_at_zero() {
+        assert_eq!(extract_host("https://github.com/repo"), Some("github.com"));
+    }
+
+    #[test]
     fn extract_host_ssh_url() {
         assert_eq!(extract_host("ssh://git@github.com:22/foo/bar.git"), Some("github.com"));
         assert_eq!(
@@ -227,12 +234,17 @@ mod tests {
         assert_eq!(extract_host("   "), None);
         assert_eq!(extract_host("not-a-url"), None);
         assert_eq!(extract_host("://nohost"), None);
+        assert_eq!(extract_host("https:///missing-host"), None);
+        assert_eq!(extract_host("https://user@/missing-host"), None);
+        assert_eq!(extract_host("https://github.com"), Some("github.com"));
     }
 
     #[test]
     fn detect_github() {
         assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
+        assert_eq!(detect_from_url("https://enterprise.github.com/foo/bar.git"), vec![Backend::GitHub]);
+        assert!(detect_from_url("https://github.com.example/foo/bar.git").is_empty());
     }
 
     #[test]
@@ -256,7 +268,7 @@ mod tests {
 
     #[test]
     fn resolve_explicit_backends_skip_autodetect() {
-        let result = resolve(&["github".to_owned(), "ado".to_owned()], false, Path::new("/nonexistent")).unwrap();
+        let result = resolve(&["ado".to_owned(), "github".to_owned()], false, Path::new("/nonexistent")).unwrap();
         assert_eq!(result, vec![Backend::GitHub, Backend::Ado]);
     }
 
@@ -271,5 +283,49 @@ mod tests {
         let result = resolve(&["gitlab".to_owned()], false, Path::new("/nonexistent"));
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown backend 'gitlab'"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns git to inspect the configured origin")]
+    fn resolve_without_flags_propagates_origin_lookup_failure() {
+        let result = resolve(&[], false, Path::new("a-directory-that-does-not-exist"));
+        result.unwrap_err();
+    }
+
+    #[cfg_attr(miri, ignore = "spawns git; miri cannot run child processes")]
+    #[test]
+    fn origin_lookup_reports_command_and_utf8_failures() {
+        let tmp = TempDir::new().unwrap();
+        let err = read_origin_url(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("`git config --get remote.origin.url` exited"), "{err}");
+
+        let status = Command::new("git").arg("init").current_dir(tmp.path()).status().unwrap();
+        assert!(status.success());
+        let mut config = std::fs::read(tmp.path().join(".git/config")).unwrap();
+        config.extend_from_slice(b"\n[remote \"origin\"]\n\turl = \xff\n");
+        std::fs::write(tmp.path().join(".git/config"), config).unwrap();
+
+        let err = read_origin_url(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("git config output was not valid UTF-8"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "spawns git; miri cannot run child processes")]
+    #[test]
+    fn origin_lookup_rejects_an_empty_configured_url() {
+        let tmp = TempDir::new().unwrap();
+        let status = Command::new("git").arg("init").current_dir(tmp.path()).status().unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .args(["config", "remote.origin.url", "   "])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let err = read_origin_url(tmp.path()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("no `origin` remote configured in {}", tmp.path().display())
+        );
     }
 }

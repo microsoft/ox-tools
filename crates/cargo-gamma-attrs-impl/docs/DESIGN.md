@@ -39,7 +39,12 @@ metadata.
   appear twice — a second multiplier, in any spelling and in either order, is
   refused rather than silently overriding the first, and the tool's directive
   parser refuses the same text.
-- It returns the original item unchanged after validation.
+- Mutation-control attributes return the original item unchanged after
+  validation.
+- A resource attribute accepts one portable string name on a test function or
+  inline test module and emits an ignored marker test. The marker identifier encodes
+  the resource and, for a function, the test name; the harness supplies the
+  enclosing module path in its listing.
 
 ## Stability
 

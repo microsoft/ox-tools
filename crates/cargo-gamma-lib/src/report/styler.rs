@@ -207,7 +207,6 @@ mod tests {
             "Rewriting",
             "Building",
             "Baseline",
-            "Estimate",
             "Testing",
             "Timing",
             "Hangs",

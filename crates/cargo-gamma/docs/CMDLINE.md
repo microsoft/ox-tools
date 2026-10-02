@@ -73,9 +73,9 @@ lives in is usually enough to find it:
 | **Running tests** | How the suite is executed per mutant: parallelism, timeouts, which test targets may decide a verdict, and which runner. |
 | **Memory** | The ceiling each test binary runs under, and how it is derived. A mutant can turn bounded allocation into unbounded allocation, which a timeout catches only slowly. |
 | **Scratch tree** | Where the instrumented copy of the workspace lives, and what is copied into it. |
-| **Run control** | What the run does as a whole: gate on a score, reuse safe knowledge from a previous run, stop early, or only estimate. |
+| **Run control** | What the run does as a whole: gate on a score, reuse safe knowledge from a previous run, or stop early. |
 | **Reporting** | What is written where, and how much detail the console prints. |
-| **Global options** | Color and progress, accepted by every subcommand. |
+| **Global options** | Color, accepted by every subcommand. Progress display settings are run control. |
 
 Two categories are specific to one subcommand: **Suppressing** (`suppress`, `unsuppress`) and
 **Merging** (`merge`).
@@ -184,7 +184,6 @@ default take that value when neither the command line nor the configuration file
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--color` | `<WHEN>` | When to use color in output. Defaults to `auto`. |
-| `--progress` | `<WHEN>` | When to show the progress display. Defaults to `auto`. |
 
 ### `gamma run`
 
@@ -208,7 +207,8 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
-| `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
+| `--only-survivors` |  | Run only mutants that genuinely survived in the previous cargo-gamma report. |
+| `--mutant` | `<ID>` | Run exactly this current mutant ID; repeat to select more than one. |
 
 **Cargo features**
 
@@ -225,16 +225,33 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
 | `--no-config` |  | Ignore the configuration file entirely. |
 
+**Run control**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--progress` | `<WHEN>` | When to show the progress display. Defaults to `auto`. |
+| `--dashboard` |  | Show a live testing dashboard instead of the progress bar. |
+| `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |
+| `--max-flaky` | `<COUNT>` | Fail if more than this many mutants have an unresolved flaky outcome. |
+| `--incremental` | `<INCREMENTAL>` | How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler unviability and checked execution hints. |
+| `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
+| `--no-baseline` |  | Skip the baseline run. |
+| `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
+| `--dry-run` |  | Find and report mutants without building or running anything. |
+| `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
+
 **Running tests**
 
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--show-build` |  | Let cargo's own build output through, instead of only its progress bar. |
 | `-j`, `--jobs` | `<N>` | How many mutants to test at once. Defaults to one more than the available parallelism. |
+| `--resource-concurrency` | `<NAME=N>` | Override the maximum concurrency of a test resource declared with `#[gamma::resource]`. |
 | `--test-timeout-multiplier` | `<FACTOR>` | Multiple of each test binary's baseline duration that a mutant is allowed. |
 | `--minimum-test-timeout` | `<SECONDS>` | Lower bound on a test binary's timeout, however fast the baseline was. |
 | `--cargo-test-arg` | `<ARG>` | Pass an argument through to every test binary. |
 | `--test-package` | `<NAME>` | Run the tests of these packages when deciding a verdict. |
+| `--test-lib` |  | Use only library unit-test harnesses as the verdict oracle. |
 | `--include-test` | `<GLOB>` | Only let these test targets decide a verdict. |
 | `--exclude-test` | `<GLOB>` | Do not let these test targets decide a verdict. |
 | `--nextest` |  | Run test binaries through `cargo nextest` for per-test process isolation. |
@@ -287,32 +304,21 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--annotations` | `<WHEN>` | Annotate the diff and write a job summary when running inside a CI system. Defaults to `auto`. |
 | `--diag-names` | `<POLICY>` | What to do with package and binary names in the diagnostics bundle. Defaults to `hashed`. |
 
-**Run control**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |
-| `--incremental` | `<INCREMENTAL>` | How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler unviability and checked execution hints. |
-| `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
-| `--no-baseline` |  | Skip the baseline run. |
-| `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
-| `--dry-run` |  | Find and report mutants without building or running anything. |
-| `--estimate` |  | Project what the rest of the run will cost, once the build and baseline have been measured. |
-| `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
-
 ### `gamma list`
 
 List what would be done, without doing it
 
 ```text
-cargo gamma list [OPTIONS] [WHAT]
+cargo gamma list <COMMAND>
 ```
 
-**Arguments**
+### `gamma list mutants`
 
-| Option | Value | What it does |
-| --- | --- | --- |
-| `<WHAT>` | `<WHAT>` | What to list. Defaults to `mutants`. |
+List the mutants that would be generated
+
+```text
+cargo gamma list mutants [OPTIONS]
+```
 
 **Selecting what to mutate**
 
@@ -351,26 +357,12 @@ cargo gamma list [OPTIONS] [WHAT]
 | `--json` |  | Emit machine-readable JSON instead of text. |
 | `--json-report` | `<PATH>` | Write the population as a report document, for `merge` to withdraw retired mutants against. |
 
-### `gamma explain`
+### `gamma list files`
 
-Explain a mutator, a mutant, or a suppression
-
-```text
-cargo gamma explain <SUBJECT>
-```
-
-**Arguments**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `<SUBJECT>` | `<SUBJECT>` | A mutator name, family, preset, or mutant id. |
-
-### `gamma suppress`
-
-Write suppressions into the source for mutants that cannot usefully be tested
+List the source files that would be analyzed
 
 ```text
-cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
+cargo gamma list files [OPTIONS]
 ```
 
 **Selecting what to mutate**
@@ -387,7 +379,6 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
-| `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Cargo features**
 
@@ -404,88 +395,133 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
 | `--no-config` |  | Ignore the configuration file entirely. |
 
-**Running tests**
+**Reporting**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--show-build` |  | Let cargo's own build output through, instead of only its progress bar. |
-| `-j`, `--jobs` | `<N>` | How many mutants to test at once. Defaults to one more than the available parallelism. |
-| `--test-timeout-multiplier` | `<FACTOR>` | Multiple of each test binary's baseline duration that a mutant is allowed. |
-| `--minimum-test-timeout` | `<SECONDS>` | Lower bound on a test binary's timeout, however fast the baseline was. |
-| `--cargo-test-arg` | `<ARG>` | Pass an argument through to every test binary. |
-| `--test-package` | `<NAME>` | Run the tests of these packages when deciding a verdict. |
-| `--include-test` | `<GLOB>` | Only let these test targets decide a verdict. |
-| `--exclude-test` | `<GLOB>` | Do not let these test targets decide a verdict. |
-| `--nextest` |  | Run test binaries through `cargo nextest` for per-test process isolation. |
-| `--test-workspace` |  | Let every workspace package's tests decide a verdict. |
-| `--optimize-test-execution` |  | Measure which individual tests reach each mutation site before testing mutants. |
-| `--whole-test-binaries` |  | Run every selected test in each reachable test binary. |
+| `--json` |  | Emit machine-readable JSON instead of text. |
 
-**Memory**
+### `gamma list mutators`
+
+List the mutator registry
+
+```text
+cargo gamma list mutators [OPTIONS]
+```
+
+**Selecting mutators**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--memory` | `<MODE>` | How much memory control to place around each test binary. `enforce` by default. |
-| `--memory-multiplier` | `<FACTOR>` | Multiple of a test binary's baseline peak memory a mutant of it may reach. |
-| `--memory-headroom` | `<SIZE>` | Absolute headroom added to a test binary's baseline peak memory. |
-| `--memory-limit` | `<SIZE>` | An explicit memory ceiling for every test binary, instead of one derived from the baseline. |
-| `--baseline-memory-limit` | `<SIZE>` | A memory ceiling for the baseline runs themselves. |
-| `--no-relaunch` |  | Do not re-run inside a systemd scope to obtain the cgroup memory control needs. |
+| `-d`, `--dir` | `<PATH>` | Path used to find `gamma.toml`. Defaults to `.`. |
+| `--mutators` | `<SELECTORS>` | Mutators to mark as enabled, as a comma-separated selector list. |
 
-**Building**
+**Configuration**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--profile` | `<NAME>` | Which Cargo profile to build with. |
-| `-C`, `--cargo-arg` | `<ARG>` | Pass an argument through to every cargo invocation. |
-| `--build-timeout` | `<SECONDS>` | Seconds the build may take before the run is abandoned. |
-| `--build-timeout-multiplier` | `<FACTOR>` | Multiple of the first successful build's duration that a later build round is allowed. |
-| `--rollback-rounds` | `<ROUNDS>` | How many times the tree may be rebuilt while withdrawing mutants that do not compile. Defaults to `256`. |
-
-**Cache**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `--cache-dir` | `<PATH>` | Put cargo-gamma's reusable workspace and Cargo artifacts in this directory. |
-| `--copy-ignored` |  | Copy files version control ignores into the cached workspace as well. |
-
-**Arguments**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `<TEST_ARGS>` | `<TEST_ARGS>` | Arguments passed to every test binary, after `--`. |
+| `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
+| `--no-config` |  | Ignore the configuration file entirely. |
 
 **Reporting**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--artifact-dir` | `<PATH>` | Write all user-facing artifacts to this directory. |
-| `--show-killed` |  | List the mutants the suite killed, not just the ones that survived. |
-| `--show-unviable` |  | List every mutant that could not be compiled, not just how many there were. |
-| `--sarif-level` | `<LEVEL>` | How loudly a survivor is reported to a SARIF consumer. Defaults to `note`. |
-| `--annotations` | `<WHEN>` | Annotate the diff and write a job summary when running inside a CI system. Defaults to `auto`. |
-| `--diag-names` | `<POLICY>` | What to do with package and binary names in the diagnostics bundle. Defaults to `hashed`. |
+| `--json` |  | Emit machine-readable JSON instead of text. |
 
-**Run control**
+### `gamma list presets`
+
+List the named mutator presets
+
+```text
+cargo gamma list presets [OPTIONS]
+```
+
+**Selecting mutators**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |
-| `--incremental` | `<INCREMENTAL>` | How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler unviability and checked execution hints. |
-| `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
-| `--no-baseline` |  | Skip the baseline run. |
-| `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
-| `--dry-run` |  | Find and report mutants without building or running anything. |
-| `--estimate` |  | Project what the rest of the run will cost, once the build and baseline have been measured. |
-| `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
+| `-d`, `--dir` | `<PATH>` | Path used to find `gamma.toml`. Defaults to `.`. |
+| `--mutators` | `<SELECTORS>` | Mutators to mark as enabled, as a comma-separated selector list. |
+
+**Configuration**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
+| `--no-config` |  | Ignore the configuration file entirely. |
+
+**Reporting**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--json` |  | Emit machine-readable JSON instead of text. |
+
+### `gamma explain`
+
+Explain a mutator, a mutant, or a suppression
+
+```text
+cargo gamma explain [OPTIONS] <SUBJECT>
+```
+
+**Arguments**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `<SUBJECT>` | `<SUBJECT>` | A mutator name, family, preset, or mutant id. |
+
+**Selecting current mutants**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `-d`, `--dir` | `<PATH>` | Path to the workspace used to resolve a current mutant ID. Defaults to `.`. |
+| `-p`, `--package` | `<NAME>` | Restrict current discovery to these packages. |
+| `--workspace` |  | Resolve current mutants across every workspace package. |
+
+**Reporting**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--report` | `<PATH>` | Read historical verdict context from this cargo-gamma JSON report. |
+
+**Cargo features**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--features` | `<FEATURES>` | Cargo features to activate, comma-separated or repeated. |
+| `--all-features` |  | Activate every feature of every selected package. |
+| `--no-default-features` |  | Do not activate the `default` feature. |
+
+**Configuration**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
+| `--no-config` |  | Ignore the configuration file entirely. |
+
+### `gamma suppress`
+
+Write suppressions into the source for mutants that cannot usefully be tested
+
+```text
+cargo gamma suppress [OPTIONS]
+```
 
 **Suppressing**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--dry-run-suppress` |  | Print the diff without changing anything. |
+| `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose completed campaign should be used. Defaults to `.`. |
+| `--apply` |  | Write the generated directives instead of printing what would be written. |
 | `--eligible` | `<LIST>` | Which verdicts may be suppressed. Defaults to `timeout,outofmem`. |
 | `--allow-dirty` |  | Edit source files that have uncommitted changes. |
+
+**Cache**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--cache-dir` | `<PATH>` | Read the completed campaign from this cache directory instead of cargo-gamma's default. |
 
 ### `gamma unsuppress`
 
@@ -564,6 +600,7 @@ cargo gamma merge [OPTIONS] <REPORTS>...
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--min-score` | `<PERCENT>` | Fail if the merged assertion-killed score is below this percentage. |
+| `--max-flaky` | `<COUNT>` | Fail if more than this many merged mutants have an unresolved flaky outcome. |
 
 ### `gamma hints`
 

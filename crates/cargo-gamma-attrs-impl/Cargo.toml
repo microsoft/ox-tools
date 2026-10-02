@@ -40,6 +40,7 @@ agreement = []
 
 [dependencies]
 proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
+quote = { workspace = true }
 # `#[gamma::value(<expr>)]` promises its argument is one valid Rust expression, and only a real
 # expression parser can keep that promise. Checking it with tokens alone would accept things the
 # compiler later rejects at the expansion site, which is the diagnostic this crate exists to avoid.
