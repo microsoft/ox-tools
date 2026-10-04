@@ -9,6 +9,7 @@ See also:
 - [README.md](./README.md) for the overall principles.
 - [checks.md](./checks.md) for the catalog the recipes implement.
 - [updates.md](./updates.md) for how these files are tracked / regenerated.
+- [release-validation.md](./release-validation.md) for standalone release-candidate selection and packaged compilation.
 
 ## 1. File layout
 
@@ -36,6 +37,8 @@ repo/
 │   │                       (project a cargo-delta report into the per-tier
 │   │                       `--package name@version` include list). Same recipe
 │   │                       locally and in CI.
+│   ├── release.just        version-based candidate selection and reusable
+│   │                       `anvil_release_selection` package-file arguments.
 │   ├── checks/             one file per check: checks/<check>.just holds the
 │   │                       `anvil-<check>` recipe plus its paired `*-setup` and
 │   │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,

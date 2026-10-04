@@ -9,6 +9,7 @@ user-visible shape of the tool. Detail lives in companion documents:
 
 - [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
 - [local.md](./local.md) — the `justfiles/anvil/` layout, recipe surface, and customization.
+- [release-validation.md](./release-validation.md) — standalone release selection and packaged dependency validation.
 - [updates.md](./updates.md) — ownership, TOML adoption, marker recovery, and retirement.
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.

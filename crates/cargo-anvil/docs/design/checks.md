@@ -12,6 +12,11 @@ See also:
 
 ## 1. Groups and tiers
 
+Release-dependency validation is a standalone check, deliberately not a member
+of any group or tier yet. Invoke `just anvil-release-dependency-validation`
+explicitly; it selects version-based release candidates independently of
+impact scoping. See [release-validation.md](./release-validation.md).
+
 The check catalog is hardcoded in the binary. Each check belongs to one or more *groups*, and
 each group belongs to exactly one *tier*. Groups are the unit of cloud workflows parallelization (one cloud workflows
 job per group) and the unit of local invocation through `just` (one `just` recipe per group).
