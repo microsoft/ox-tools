@@ -486,6 +486,87 @@ _install-tool-core name version installer source_prereq="":
 # Provision stable before entering the Cargo tool installer.
 _install-tool name version installer source_prereq="": anvil-toolchain-stable-install (_install-tool-core name version installer source_prereq)
 
+# The release guard has no public release yet. Never pretend a development minimum
+# can be installed from a registry. An explicit source checkout is opt-in.
+[script("pwsh", "-NoProfile")]
+_anvil-development-tool name version action:
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    if ($name -ne 'cargo-release-guard') { throw "Unsupported development tool '$name'" }
+    $minimum = [version]'{{version}}'
+    $action = '{{action}}'
+    if ($action -notin @('install', 'check')) { throw "Unknown development-tool action '$action'" }
+    if ($action -eq 'install' -and $env:ANVIL_TOOL_SOURCE_ROOT) {
+        $source = Join-Path $env:ANVIL_TOOL_SOURCE_ROOT "crates/$name"
+        if (-not (Test-Path -LiteralPath (Join-Path $source 'Cargo.toml') -PathType Leaf)) {
+            throw "anvil: ANVIL_TOOL_SOURCE_ROOT does not contain crates/$name/Cargo.toml"
+        }
+        $source = (Resolve-Path -LiteralPath $source).Path
+        # cargo install --path discovers config from the source, not the caller.
+        # Forward consumer-only config layers explicitly, outermost first, so an
+        # approved source replacement cannot silently disappear during bootstrap.
+        $comparison = if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+        $sourceAncestors = [System.Collections.Generic.HashSet[string]]::new($comparison)
+        $directory = [System.IO.DirectoryInfo]::new($source)
+        while ($null -ne $directory) {
+            [void]$sourceAncestors.Add($directory.FullName)
+            $directory = $directory.Parent
+        }
+        $configs = [System.Collections.Generic.List[string]]::new()
+        $directory = [System.IO.DirectoryInfo]::new((Get-Location).Path)
+        while ($null -ne $directory) {
+            if (-not $sourceAncestors.Contains($directory.FullName)) {
+                foreach ($filename in @('config', 'config.toml')) {
+                    $config = Join-Path $directory.FullName ".cargo/$filename"
+                    if (Test-Path -LiteralPath $config -PathType Leaf) {
+                        $configs.Insert(0, $config)
+                        break
+                    }
+                }
+            }
+            $directory = $directory.Parent
+        }
+        $configArgs = @()
+        foreach ($config in $configs) { $configArgs += @('--config', $config) }
+        Write-Host "anvil: building unpublished $name from explicit source '$source'"
+        # Build tools under their source checkout's native toolchain,
+        # not a consuming workspace's potentially older MSRV.
+        Push-Location -LiteralPath $source
+        try {
+            & cargo install --locked --force --path $source @configArgs
+            $installExit = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        if ($installExit -ne 0) { exit $installExit }
+    }
+    $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
+    try {
+        $env:RUSTUP_AUTO_INSTALL = '0'
+        $installed = @(& cargo {{_anvil_stable_toolchain_args}} install --list)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
+    }
+    $pattern = '^' + [regex]::Escape($name) + ' v([0-9]+\.[0-9]+\.[0-9]+)(?: \([^)]*\))?:$'
+    foreach ($line in $installed) {
+        if ($line -match $pattern -and [version]$Matches[1] -ge $minimum) {
+            if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+                throw "anvil: $name is installed but not on PATH; add Cargo's bin directory"
+            }
+            exit 0
+        }
+    }
+    throw "anvil: $name >= $minimum is not available. This tool is not published yet. Set ANVIL_TOOL_SOURCE_ROOT to an ox-tools source checkout and run just anvil-tool-$name-install, or preinstall that source with cargo install --locked --path <checkout>/crates/$name. CI must provision this source explicitly until public registry distribution is available."
+
+# Install the unpublished release guard from explicitly supplied local source.
+[group("anvil-setup")]
+anvil-tool-cargo-release-guard-install installer="install": anvil-toolchain-stable-install (_anvil-development-tool "cargo-release-guard" cargo_release_guard_version "install")
+
+# Validate the release guard without requesting an unavailable registry release.
+[group("anvil-setup")]
+anvil-tool-cargo-release-guard-validate-prereqs: (_anvil-development-tool "cargo-release-guard" cargo_release_guard_version "check")
+
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
 [script("pwsh", "-NoProfile")]

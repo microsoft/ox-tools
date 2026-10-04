@@ -27,7 +27,7 @@ repo/
 │   │                       reached transitively.
 │   ├── helpers.just        the shared helper recipe _anvil-base-ref (resolve the
 │   │                       PR base ref), reused across the impact recipe, the
-│   │                       cloud impact steps, and anvil-mutants-diff.
+│   │                       cloud impact steps, anvil-mutants-diff, and release-guard.
 │   ├── impact.just         the single `anvil-impact` building block: snapshots the
 │   │                       base ref and working tree (two independent cache keys),
 │   │                       runs `cargo delta impact`, and writes the
@@ -43,7 +43,7 @@ repo/
 │   ├── groups/             one file per group: groups/<group>.just holds the
 │   │                       `anvil-<group>` recipe plus its `*-setup` /
 │   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
+│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants, anvil-pr-release,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
 │   │                       convenience umbrella over the pr-slow groups.
 │   ├── container.just      containerized execution (`anvil-container`). See containers.md.
@@ -133,7 +133,7 @@ any tier × group combination (e.g. the coverage-instrumented test check is name
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
 The `pr-slow` work is split into independent cloud-workflow-visible groups
-(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
+(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`, `pr-release`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
 use; it invokes those groups sequentially. `pr-mutants` (mutants) is
 diff-scoped against the PR base; `scheduled-exhaustive` runs the
@@ -144,13 +144,14 @@ anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
-               anvil-external-types anvil-aprz
+               anvil-external-types
 
-anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants anvil-pr-release
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-pr-msrv: anvil-msrv-test
 anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
+anvil-pr-release: anvil-release-guard
 
 anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
@@ -158,6 +159,57 @@ anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
                                   anvil-miri-strict-provenance anvil-miri-race-coverage
 anvil-scheduled-exhaustive: anvil-mutants-full anvil-cargo-hack anvil-bench
 ```
+
+### Development-tool bootstrap
+
+`cargo-release-guard` has no public release yet. Its `0.1.0` development minimum
+is not a registry pin. Until distribution
+is available, explicitly supply an ox-tools source checkout:
+
+```powershell
+$env:ANVIL_TOOL_SOURCE_ROOT = 'C:\src\ox-tools'
+just anvil-pr-release-setup
+```
+
+Setup uses `cargo install --locked --force --path <source>/crates/<tool>` for
+this tool, even when the group requests `binstall`; source selection is
+never inferred from the consuming workspace. Explicit source builds are rebuilt
+so a cached binary cannot hide source changes under the same development version.
+Installation runs from the tool's source directory so rustup uses that checkout's
+selected build compiler, not the consuming project's potentially older MSRV.
+The selected compiler is distinct from the tool manifest's required MSRV.
+An explicit `RUSTUP_TOOLCHAIN` remains authoritative and must support the tool.
+Because `cargo install --path` discovers configuration from the source package,
+bootstrap forwards consumer-only `.cargo/config` or `.cargo/config.toml` layers
+as absolute `--config` arguments, outermost first. Layers already shared with the
+source ancestry are not duplicated. Cargo home configuration, environment, and
+credential providers remain intact; approved consumer source replacement is
+never silently bypassed. Resolution/authentication failures stop installation.
+Check execution returns to the consuming workspace and retains its compiler and
+configuration.
+Without that variable, a preinstalled matching tool is accepted; otherwise setup
+fails with a clear unpublished-tool diagnostic and no public-registry fallback.
+Prerequisite validation stays read-only. CI must deliberately preinstall the
+tool or provide the source checkout through its runner/setup environment.
+The GitHub root workflow explicitly opts `microsoft/ox-tools` into building the
+checked-out source with `tool_source_root: "."`; other repositories can set
+`ANVIL_TOOL_SOURCE_ROOT` as a repository variable for a provisioned checkout or
+pass the reusable workflow's `tool_source_root` input themselves.
+After publication, replace this development installer with an ordinary verified
+catalog pin before enabling unattended registry installation.
+
+`anvil-pr-release` requires the same fetched base used by local/CI base-dependent
+checks (`BASE_REF`, CI target branch, then `origin/main` or `origin/master`).
+The tool resolves the immutable comparison commit. It does not consume the
+impact cache, even when `ANVIL_IMPACT=off` or a dirty tree makes ordinary tests
+run across the workspace. Release artifacts are preserved under
+`target/anvil/release`; repeated runs use fresh output directories.
+It builds candidates separately from test execution and runs Cargo's built-in
+test runner, doctests, and example compilation in all/default/no-default feature
+modes. It does not use the consuming repository's nextest configuration, whose
+binary overrides may not apply to the isolated workspace. Nextest remains
+installed and validated as test support for the guard's own tests of its
+optional nextest runner, not as the publication suite's orchestrator.
 
 ### tiers.just
 
@@ -196,10 +248,11 @@ anvil-full: anvil-pr anvil-scheduled
    `installer` selects `cargo install` vs `cargo binstall`.
 6. **Per-check / per-group / per-tier / global setup** — composition layer; see §3.3.
 
-All atomic install recipes are idempotent: they early-skip when the tool is already
+Published-tool install recipes are idempotent: they early-skip when the tool is already
 present at or above the pinned version (`_install-tool` uses `cargo install --list`
 plus a `[version]` comparison in pwsh). So calling any composition layer on every cloud workflows
-run costs nothing on a cache hit.
+run costs nothing on a cache hit. Explicit development-source installation is
+the exception: it rebuilds the supplied source as described above.
 
 The full tool-version policy these recipes implement is detailed in §3 below.
 

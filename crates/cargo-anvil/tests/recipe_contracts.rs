@@ -38,6 +38,7 @@ const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-t
 const README: &str = include_str!("../templates/justfiles/anvil/checks/readme-check.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
+const RELEASE_GUARD: &str = include_str!("../templates/justfiles/anvil/checks/release-guard.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
 const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
@@ -191,6 +192,9 @@ if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
 }
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
+}
+if ($args -contains 'release-guard') {
+    exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 }
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
@@ -584,6 +588,7 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     // that exercise those contracts pass the relevant values explicitly.
     command.env_remove("ANVIL_IMPACT");
     command.env_remove("ANVIL_MIRI_JOBS");
+    command.env_remove("ANVIL_TOOL_SOURCE_ROOT");
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
     for key in std::env::vars_os().map(|(key, _)| key) {
@@ -655,6 +660,123 @@ fn scoped_check_propagates_missing_consumed_impact_cache() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(!log.exists(), "the scoped command must not run after impact scope resolution fails");
+}
+
+#[test]
+fn release_guard_forwards_the_base_without_dirty_tree_or_impact_candidate_expansion() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("release-guard.just", RELEASE_GUARD), ("helpers.just", HELPERS)],
+        &[
+            "anvil-tool-rustc-validate-prereqs",
+            "anvil-tool-cargo-release-guard-install installer",
+            "anvil-tool-cargo-release-guard-validate-prereqs",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+        ],
+    );
+    write(&tmp.path().join("dirty.rs"), "uncommitted content\n");
+    write(
+        &tmp.path().join("fake-bin/git.ps1"),
+        "throw 'release recipe must not infer candidates itself'\n",
+    );
+    let log = tmp.path().join("cargo.log");
+    for mode in ["off", "consume"] {
+        let output = run_just(
+            tmp.path(),
+            &["anvil-release-guard"],
+            &[
+                ("BASE_REF", OsStr::new("authoritative-base")),
+                ("ANVIL_IMPACT", OsStr::new(mode)),
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+            ],
+        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.matches("release-guard check --base authoritative-base").count(), 2);
+    assert!(calls.contains("--output-dir target"));
+    assert_eq!(calls.matches("--test-runner cargo").count(), 2);
+    assert!(!calls.contains("--test-runner nextest"));
+    let directories = calls
+        .lines()
+        .map(|line| line.split_once("--output-dir ").unwrap().1.split_once(" --test-runner").unwrap().0)
+        .collect::<HashSet<_>>();
+    assert_eq!(directories.len(), 2, "repeated runs must preserve independent artifact directories");
+    assert!(calls.contains("--feature-mode all --feature-mode default --feature-mode no-default"));
+    assert!(!calls.contains("--package"));
+    assert!(!calls.contains("--workspace"));
+    let failed = run_just(
+        tmp.path(),
+        &["anvil-release-guard"],
+        &[
+            ("BASE_REF", OsStr::new("authoritative-base")),
+            ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+        ],
+    );
+    assert_failed(&failed, "publication-workspace failure");
+}
+
+#[test]
+fn release_tool_requires_explicit_source_and_never_installs_from_a_registry() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("versions.just", VERSIONS), ("tools.just", TOOLS)],
+        &["anvil-toolchain-stable-install"],
+    );
+    let source = TempDir::new().unwrap();
+    let log = tmp.path().join("cargo.log");
+    let directories = tmp.path().join("cargo-directories.log");
+    let approved_config = tmp.path().join(".cargo/config.toml");
+    write(&approved_config, "[source.crates-io]\nreplace-with = 'approved'\n");
+    for _ in 0..2 {
+        let tool = "cargo-release-guard";
+        let recipe = format!("anvil-tool-{tool}-install");
+        let missing = run_just(tmp.path(), &[&recipe], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+        assert_failed(&missing, "unpublished tool without explicit bootstrap");
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("not published yet"));
+        write(&source.path().join(format!("crates/{tool}/Cargo.toml")), "[package]\n");
+        write(&tmp.path().join(format!("fake-bin/{tool}.ps1")), "exit 0\n");
+        let installed = format!("{tool} v0.1.0 (explicit-source):");
+        let output = run_just(
+            tmp.path(),
+            &[&recipe, "binstall"],
+            &[
+                ("ANVIL_TOOL_SOURCE_ROOT", source.path().as_os_str()),
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+                ("FAKE_CARGO_CWD_LOG", directories.as_os_str()),
+                ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new(&installed)),
+            ],
+        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let calls = fs::read_to_string(log).unwrap();
+    assert_eq!(calls.matches("install --locked --force --path").count(), 2);
+    assert!(!calls.contains("binstall"));
+    assert!(!calls.contains("--version"));
+    assert!(
+        calls
+            .lines()
+            .filter(|line| line.contains("--path"))
+            .all(|line| line.starts_with("install "))
+    );
+    assert_eq!(
+        calls
+            .replace('\\', "/")
+            .matches(&format!("--config {}", approved_config.display()).replace('\\', "/"))
+            .count(),
+        2,
+        "{calls}"
+    );
+    let directories = fs::read_to_string(directories).unwrap();
+    assert!(
+        directories.contains(&source.path().join("crates").join("cargo-release-guard").display().to_string()),
+        "{directories}"
+    );
 }
 
 fn assert_miri_cargo_calls(cargo_calls: &str) {

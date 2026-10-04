@@ -148,7 +148,7 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"];
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants", "pr-release"];
     const SCHEDULED_GROUPS: &[&str] = &[
         "scheduled-test",
         "scheduled-advisories",
@@ -268,6 +268,46 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(needs, all_jobs, "required-checks must depend on every validation job");
+        for job in needs {
+            assert!(
+                required.contains(&format!("needs.{job}.result")),
+                "required-checks must inspect {job}, not merely wait for it"
+            );
+        }
+        assert!(required.contains("name: Required Anvil checks"));
+        assert!(required.contains("if [[ \"$conclusion\" != \"success\" ]]"));
+    }
+
+    #[test]
+    fn release_job_fetches_base_history_without_consuming_source_impact() {
+        let release = PR_IMPL_WORKFLOW
+            .split_once("\n  pr-release:\n")
+            .expect("release job is registered")
+            .1
+            .split_once("\n  required-checks:\n")
+            .expect("release job precedes the aggregate")
+            .0;
+        for needle in [
+            "os: [linux, windows, linux-arm, windows-arm]",
+            "fetch-depth: 0",
+            "group: pr-release",
+            "BASE_REF: ${{ inputs.base_ref }}",
+            "impact_mode: off",
+            "ANVIL_TOOL_SOURCE_ROOT: ${{ inputs.tool_source_root }}",
+        ] {
+            assert!(release.contains(needle), "release job missing {needle}");
+        }
+        assert!(!release.contains("download-artifact"));
+        assert!(!release.contains("needs:"));
+        assert_eq!(
+            PR_IMPL_WORKFLOW
+                .matches("ANVIL_TOOL_SOURCE_ROOT: ${{ inputs.tool_source_root }}")
+                .count(),
+            1,
+            "only the release group needs the unpublished tool"
+        );
+        assert!(PR_IMPL_WORKFLOW.contains("tool_source_root:"));
+        assert!(PR_ROOT_WORKFLOW.contains("vars.ANVIL_TOOL_SOURCE_ROOT || (github.repository == 'microsoft/ox-tools' && '.')"));
     }
 
     #[test]
@@ -486,6 +526,7 @@ export -f just
             "pr-msrv:",
             "pr-runtime-analysis:",
             "pr-mutants:",
+            "pr-release:",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(needle), "PR impl workflow missing job '{needle}'");
         }
@@ -515,8 +556,8 @@ export -f just
         assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
-            4,
-            "both impact jobs plus SemVer and mutation checks must use the event-specific base"
+            5,
+            "both impact jobs plus SemVer, mutation and release checks must use the event-specific base"
         );
         for group in PR_GROUPS {
             assert!(
@@ -557,8 +598,8 @@ export -f just
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
-            2,
-            "disk cleanup should be enabled for the PR test and MSRV groups"
+            3,
+            "disk cleanup should be enabled for the PR test, MSRV and release groups"
         );
     }
 

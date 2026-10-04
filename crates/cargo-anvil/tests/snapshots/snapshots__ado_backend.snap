@@ -679,7 +679,7 @@ stages:
           steps:
             - template: steps/pr-fast.yml
 
-  # The PR-tier slow checks are split into four independent stages
+  # The PR-tier impact-scoped slow checks are split into independent stages
   # (pr_test, pr_msrv, pr_runtime_analysis, pr_mutants) so they run in
   # parallel rather than sequentially in one job. Each stage owns its own
   # dependsOn link to
@@ -812,6 +812,26 @@ stages:
               path: target/anvil/impact
           steps:
             - template: steps/pr-mutants.yml
+
+  # Release intent is independent of cargo-delta and its dirty-tree fallback.
+  - stage: pr_release
+    displayName: anvil pr-release (publication workspace)
+    dependsOn: []
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          stage: pr_release
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-release.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          stage: pr_release
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-release.yml
 
 === .pipelines/anvil/scheduled.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1086,7 +1106,7 @@ steps:
 #   - name      (string)   Job name; ADO derives the display name from it.
 #   - stage     (string)   ADO stage this job belongs to, e.g. `pr_mutants`.
 #                          Exists so an owned wrapper can discriminate between
-#                          stages; the default wrapper ignores it. Per-OS job
+#                          stages; release jobs use it to fetch base history. Per-OS job
 #                          names repeat (`linux` / `windows` in every pr-* and
 #                          scheduled-* stage, `compute_linux` /
 #                          `compute_windows` in impact), so `name` alone does
@@ -1097,7 +1117,7 @@ steps:
 #                          template writes after `stage:`, one of:
 #                            impact
 #                            pr_fast   pr_test   pr_msrv
-#                            pr_runtime_analysis   pr_mutants
+#                            pr_runtime_analysis   pr_mutants   pr_release
 #                            scheduled_test   scheduled_advisories
 #                            scheduled_runtime_analysis   scheduled_exhaustive
 #                          Unrelated to `group` in steps/setup.yml, which
@@ -1145,6 +1165,19 @@ jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
+      - ${{ if eq(parameters.stage, 'pr_release') }}:
+          - checkout: self
+            fetchDepth: 0
+            lfs: true
+            persistCredentials: true
+          - pwsh: |
+              $ErrorActionPreference = 'Stop'
+              if ($env:SYSTEM_PULLREQUEST_TARGETBRANCH) {
+                  $branch = $env:SYSTEM_PULLREQUEST_TARGETBRANCH -replace '^refs/heads/', ''
+                  git fetch --no-tags origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              }
+            displayName: Fetch authoritative release base
       - ${{ each artifact in parameters.inputArtifacts }}:
           # DownloadPipelineArtifact@2 is the current major of the built-in
           # download task; v2 takes the `artifact` + `path` inputs used here
@@ -1179,11 +1212,11 @@ jobs:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1218,10 +1251,9 @@ steps:
       # Resolved by the preceding pr-fast step; empty only outside PR builds.
       PR_TITLE: $(PR_TITLE)
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "consume"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1239,11 +1271,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1254,10 +1286,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "consume"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1275,11 +1306,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1290,11 +1321,45 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "consume"
+      # Disable cargo incremental compilation in CI: the incremental dir is
+      # not part of the anvil-setup cache (see setup.yml), so generating it is
+      # pure cost with no cross-run benefit. Mirrors the GitHub impl workflows'
+      # workflow-level CARGO_INCREMENTAL=0.
+      CARGO_INCREMENTAL: "0"
+
+=== .pipelines/anvil/steps/pr-release.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+# The token pr-release is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+#
+# The impact set reaches this group as the downloaded target/anvil/impact/
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
+# target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
+# read that cache via their `anvil-impact` dependency -- the same code path as
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
+steps:
+  - template: setup.yml
+    parameters:
+      group: pr-release
+
+  - pwsh: just anvil-pr-release
+    displayName: anvil-pr-release
+    env:
+
+      # The impact mode is fixed by group class at emit time -- never probed from a
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
+      # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
+      ANVIL_IMPACT: "off"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
       # pure cost with no cross-run benefit. Mirrors the GitHub impl workflows'
@@ -1311,11 +1376,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1326,10 +1391,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "consume"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1347,11 +1411,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1362,10 +1426,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "consume"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1383,11 +1446,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1398,10 +1461,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "off"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1419,11 +1481,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1434,10 +1496,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "off"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1455,11 +1516,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1470,10 +1531,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "off"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -1491,11 +1551,11 @@ steps:
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -1506,10 +1566,9 @@ steps:
     env:
 
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "off"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
@@ -4041,6 +4100,34 @@ anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-insta
 [group("anvil-setup")]
 anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs
 
+=== justfiles/anvil/checks/release-guard.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# Publication intent is independent of source impact, including dirty-tree
+# full-workspace fallbacks. Candidate selection and preparation belong to the tool.
+[script("pwsh", "-NoProfile")]
+anvil-release-guard: anvil-release-guard-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    $base = (& "{{ just_executable() }}" _anvil-base-ref)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $outputDir = Join-Path 'target/anvil/release' ([Guid]::NewGuid().ToString('N'))
+    Write-Host "anvil-release-guard: preserving this run's artifacts in $outputDir"
+    & cargo {{_anvil_stable_toolchain_args}} release-guard check --base $base --manifest-path Cargo.toml --output-dir $outputDir --test-runner cargo --feature-mode all --feature-mode default --feature-mode no-default
+    exit $LASTEXITCODE
+
+# Install the guard and nextest test support. Cargo orchestrates the publication
+# suite; the guard's own tests also exercise its optional nextest runner.
+[group("anvil-setup")]
+anvil-release-guard-setup installer="install": (anvil-tool-cargo-release-guard-install installer) (anvil-tool-cargo-nextest-install installer)
+
+# Validate prerequisites without installing tools.
+[group("anvil-setup")]
+anvil-release-guard-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-release-guard-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
 === justfiles/anvil/checks/semver-check.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -5769,6 +5856,25 @@ anvil-pr-mutants-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-diff-validate-prereqs
 
+=== justfiles/anvil/groups/pr-release.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# Rehearse explicitly inferred publication candidates, never impact-selected packages.
+[group("anvil")]
+anvil-pr-release: anvil-pr-release-validate-prereqs anvil-release-guard
+
+# Install prerequisites for the release group.
+[group("anvil-setup")]
+anvil-pr-release-setup installer="install": (anvil-release-guard-setup installer)
+
+# Validate prerequisites for the release group.
+[group("anvil-setup")]
+anvil-pr-release-validate-prereqs: anvil-release-guard-validate-prereqs
+
 === justfiles/anvil/groups/pr-runtime-analysis.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -5821,6 +5927,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 #   pr-msrv: all-target tests under the declared MSRV
 #   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
 #   pr-mutants: mutation testing
+#   pr-release: publication-workspace rehearsal
 #
 # Cloud workflows run these groups as independent parallel jobs.
 # The umbrella runs them sequentially only when invoked locally:
@@ -5832,7 +5939,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 
 # Run the slow pull request checks.
 [group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants anvil-pr-release
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
@@ -5840,7 +5947,8 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
-    (anvil-pr-mutants-setup installer)
+    (anvil-pr-mutants-setup installer) \
+    (anvil-pr-release-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
@@ -5848,7 +5956,8 @@ anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \
     anvil-pr-runtime-analysis-validate-prereqs \
-    anvil-pr-mutants-validate-prereqs
+    anvil-pr-mutants-validate-prereqs \
+    anvil-pr-release-validate-prereqs
 
 === justfiles/anvil/groups/pr-test.just ===
 # Copyright (c) Microsoft Corporation.
@@ -6932,6 +7041,7 @@ import 'checks/mutants-diff.just'
 import 'checks/mutants-full.just'
 import 'checks/pr-title.just'
 import 'checks/readme-check.just'
+import 'checks/release-guard.just'
 import 'checks/semver-check.just'
 import 'checks/spellcheck.just'
 import 'checks/udeps.just'
@@ -6942,6 +7052,7 @@ import 'checks/udeps.just'
 import? 'container.just'
 import 'groups/pr-fast.just'
 import 'groups/pr-msrv.just'
+import 'groups/pr-release.just'
 import 'groups/pr-slow.just'
 import 'groups/pr-test.just'
 import 'groups/pr-runtime-analysis.just'
@@ -6969,6 +7080,7 @@ alias anvil := anvil-pr
 # PR tier: every check that should run on every pull request, split
 # into two groups so the fast checks aren't blocked behind the slow
 # ones in cloud workflows.
+# The slow umbrella includes the independent publication-workspace release group.
 
 # Run all pull request checks.
 [group("anvil")]
@@ -7574,6 +7686,87 @@ _install-tool-core name version installer source_prereq="":
 
 # Provision stable before entering the Cargo tool installer.
 _install-tool name version installer source_prereq="": anvil-toolchain-stable-install (_install-tool-core name version installer source_prereq)
+
+# The release guard has no public release yet. Never pretend a development minimum
+# can be installed from a registry. An explicit source checkout is opt-in.
+[script("pwsh", "-NoProfile")]
+_anvil-development-tool name version action:
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    if ($name -ne 'cargo-release-guard') { throw "Unsupported development tool '$name'" }
+    $minimum = [version]'{{version}}'
+    $action = '{{action}}'
+    if ($action -notin @('install', 'check')) { throw "Unknown development-tool action '$action'" }
+    if ($action -eq 'install' -and $env:ANVIL_TOOL_SOURCE_ROOT) {
+        $source = Join-Path $env:ANVIL_TOOL_SOURCE_ROOT "crates/$name"
+        if (-not (Test-Path -LiteralPath (Join-Path $source 'Cargo.toml') -PathType Leaf)) {
+            throw "anvil: ANVIL_TOOL_SOURCE_ROOT does not contain crates/$name/Cargo.toml"
+        }
+        $source = (Resolve-Path -LiteralPath $source).Path
+        # cargo install --path discovers config from the source, not the caller.
+        # Forward consumer-only config layers explicitly, outermost first, so an
+        # approved source replacement cannot silently disappear during bootstrap.
+        $comparison = if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+        $sourceAncestors = [System.Collections.Generic.HashSet[string]]::new($comparison)
+        $directory = [System.IO.DirectoryInfo]::new($source)
+        while ($null -ne $directory) {
+            [void]$sourceAncestors.Add($directory.FullName)
+            $directory = $directory.Parent
+        }
+        $configs = [System.Collections.Generic.List[string]]::new()
+        $directory = [System.IO.DirectoryInfo]::new((Get-Location).Path)
+        while ($null -ne $directory) {
+            if (-not $sourceAncestors.Contains($directory.FullName)) {
+                foreach ($filename in @('config', 'config.toml')) {
+                    $config = Join-Path $directory.FullName ".cargo/$filename"
+                    if (Test-Path -LiteralPath $config -PathType Leaf) {
+                        $configs.Insert(0, $config)
+                        break
+                    }
+                }
+            }
+            $directory = $directory.Parent
+        }
+        $configArgs = @()
+        foreach ($config in $configs) { $configArgs += @('--config', $config) }
+        Write-Host "anvil: building unpublished $name from explicit source '$source'"
+        # Build tools under their source checkout's native toolchain,
+        # not a consuming workspace's potentially older MSRV.
+        Push-Location -LiteralPath $source
+        try {
+            & cargo install --locked --force --path $source @configArgs
+            $installExit = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        if ($installExit -ne 0) { exit $installExit }
+    }
+    $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
+    try {
+        $env:RUSTUP_AUTO_INSTALL = '0'
+        $installed = @(& cargo {{_anvil_stable_toolchain_args}} install --list)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
+    }
+    $pattern = '^' + [regex]::Escape($name) + ' v([0-9]+\.[0-9]+\.[0-9]+)(?: \([^)]*\))?:$'
+    foreach ($line in $installed) {
+        if ($line -match $pattern -and [version]$Matches[1] -ge $minimum) {
+            if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+                throw "anvil: $name is installed but not on PATH; add Cargo's bin directory"
+            }
+            exit 0
+        }
+    }
+    throw "anvil: $name >= $minimum is not available. This tool is not published yet. Set ANVIL_TOOL_SOURCE_ROOT to an ox-tools source checkout and run just anvil-tool-$name-install, or preinstall that source with cargo install --locked --path <checkout>/crates/$name. CI must provision this source explicitly until public registry distribution is available."
+
+# Install the unpublished release guard from explicitly supplied local source.
+[group("anvil-setup")]
+anvil-tool-cargo-release-guard-install installer="install": anvil-toolchain-stable-install (_anvil-development-tool "cargo-release-guard" cargo_release_guard_version "install")
+
+# Validate the release guard without requesting an unavailable registry release.
+[group("anvil-setup")]
+anvil-tool-cargo-release-guard-validate-prereqs: (_anvil-development-tool "cargo-release-guard" cargo_release_guard_version "check")
 
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
@@ -8287,6 +8480,9 @@ cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
+# Development minimum, NOT a published release. Setup requires an explicit local
+# source checkout or preinstalled tool; see _anvil-development-tool.
+cargo_release_guard_version := "0.1.0"
 cargo_coverage_gate_version := "0.4.0"
 cargo_delta_version := "0.3.1"
 cargo_deny_version := "0.20.2"

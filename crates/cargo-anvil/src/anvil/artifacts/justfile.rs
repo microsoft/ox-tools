@@ -123,6 +123,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "mutants-full",
         "pr-title",
         "readme-check",
+        "release-guard",
         "semver-check",
         "spellcheck",
         "udeps",
@@ -136,6 +137,7 @@ const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
     [
         "pr-fast",
         "pr-msrv",
+        "pr-release",
         "pr-slow",
         "pr-test",
         "pr-runtime-analysis",
@@ -293,6 +295,7 @@ mod tests {
             // cargo-delta does not map to a package, so scoping them would
             // silently skip a changed template/dictionary.
             ("readme-check", Unscoped),
+            ("release-guard", Unscoped),
             ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
@@ -307,6 +310,34 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
         assert!(TOOLS_JUST.contains("anvil-toolchain-stable-install"));
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
+    }
+
+    #[test]
+    fn release_check_has_complete_independent_setup() {
+        let body = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/release-guard.just").then_some(*body))
+            .unwrap();
+        for suffix in ["setup", "validate-prereqs"] {
+            assert!(defines_recipe(body, &format!("anvil-release-guard-{suffix}")));
+        }
+        for suffix in ["install", "validate-prereqs"] {
+            assert!(defines_recipe(TOOLS_JUST, &format!("anvil-tool-cargo-release-guard-{suffix}")));
+        }
+        assert!(VERSIONS_JUST.contains("cargo_release_guard_version :="));
+        assert!(body.contains("(anvil-tool-cargo-nextest-install installer)"));
+        assert!(body.contains("anvil-tool-cargo-nextest-validate-prereqs"));
+        assert!(!body.contains("_anvil-impact-include"));
+        assert!(!body.contains("anvil-impact"));
+        let groups = all_group_bodies();
+        assert!(groups.contains("anvil-pr-release: anvil-pr-release-validate-prereqs anvil-release-guard"));
+        let test = GROUP_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/pr-test.just").then_some(*body))
+            .unwrap();
+        assert!(test.contains("anvil-llvm-cov"));
+        assert!(!test.contains("anvil-pr-fast"));
+        assert!(!test.contains("anvil-pr-release"));
     }
 
     /// All `checks/*.just` bodies concatenated, for content assertions.
@@ -599,7 +630,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (24, 8),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
@@ -633,6 +664,7 @@ mod tests {
             "anvil-pr-slow:",
             "anvil-pr-test:",
             "anvil-pr-msrv:",
+            "anvil-pr-release:",
             "anvil-pr-runtime-analysis:",
             "anvil-pr-mutants:",
             "anvil-scheduled-test:",
@@ -645,7 +677,7 @@ mod tests {
             assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
         assert!(groups.contains(
-            "anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants"
+            "anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants anvil-pr-release"
         ));
         // PR group recipes list their own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
@@ -653,6 +685,7 @@ mod tests {
             "anvil-pr-fast: anvil-pr-fast-validate-prereqs",
             "anvil-pr-test: anvil-pr-test-validate-prereqs",
             "anvil-pr-msrv: anvil-pr-msrv-validate-prereqs",
+            "anvil-pr-release: anvil-pr-release-validate-prereqs",
             "anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs",
             "anvil-pr-mutants: anvil-pr-mutants-validate-prereqs",
         ] {

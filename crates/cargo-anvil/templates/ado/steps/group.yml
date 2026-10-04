@@ -7,11 +7,11 @@
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
 # The impact set reaches this group as the downloaded target/anvil/impact/
-# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# cache. An impact-scoped PR group job downloads the `anvil-impact-<os>` artifact into
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
-# a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the group step).
+# a local run. Scheduled and release group jobs download nothing. Release intent
+# is selected by the tool from base history, never from source-impact packages.
 steps:
   - template: setup.yml
     parameters:
@@ -22,10 +22,9 @@ __PR_TITLE_STEP__
     env:
 __PR_TITLE_ENV__
       # The impact mode is fixed by group class at emit time -- never probed from a
-      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # marker file. Impact-scoped PR jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
-      # cargo-delta, or base ref); scheduled group jobs force off so every
-      # tier runs full-workspace.
+      # cargo-delta, or base ref); scheduled and release group jobs force off.
       ANVIL_IMPACT: "__IMPACT_MODE__"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is

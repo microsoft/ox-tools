@@ -47,12 +47,13 @@ flowchart LR
     pr_evt([PR build-validation<br/>branch policy]):::trigger
     pr_root[".pipelines/<br/>anvil-pr.yml<br/>(root, ~15 lines)"]:::root
     pr_stages[".pipelines/anvil/pr.yml<br/>(stages template)"]:::impl
-    impact_s["stage: impact_linux + stage: impact_windows<br/>(2 stages;<br/>outputs consumed by every group below)"]:::stage
+    impact_s["stage: impact<br/>(2 jobs;<br/>outputs consumed by impact-scoped groups)"]:::stage
     pr_fast_s["stage: pr_fast<br/>linux + windows jobs"]:::stage
     pr_test_s["stage: pr_test<br/>linux + windows jobs"]:::stage
     pr_msrv_s["stage: pr_msrv<br/>linux + windows jobs"]:::stage
     pr_runtime_analysis_s["stage: pr_runtime_analysis<br/>linux + windows jobs"]:::stage
     pr_mutants_s["stage: pr_mutants<br/>linux + windows jobs"]:::stage
+    pr_release_s["stage: pr_release<br/>linux + windows jobs<br/>independent base history"]:::stage
     impact_step[".pipelines/anvil/<br/>steps/impact.yml"]:::step
     impact_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     fast_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
@@ -60,11 +61,13 @@ flowchart LR
     msrv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     runtime_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     mutants_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    release_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     fast_step[".pipelines/anvil/<br/>steps/pr-fast.yml"]:::step
     test_step[".pipelines/anvil/<br/>steps/pr-test.yml"]:::step
     msrv_step[".pipelines/anvil/<br/>steps/pr-msrv.yml"]:::step
     runtime_step[".pipelines/anvil/<br/>steps/pr-runtime-analysis.yml"]:::step
     mutants_step[".pipelines/anvil/<br/>steps/pr-mutants.yml"]:::step
+    release_step[".pipelines/anvil/<br/>steps/pr-release.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     fast_just["just anvil-pr-fast"]:::recipe
     fast_setup_just["just anvil-setup"]:::recipe
@@ -78,6 +81,8 @@ flowchart LR
     runtime_setup_just["just anvil-setup"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
     mutants_setup_just["just anvil-setup"]:::recipe
+    release_just["just anvil-pr-release"]:::recipe
+    release_setup_just["just anvil-pr-release-setup"]:::recipe
 
     pr_evt --> pr_root
     pr_root -. extends/template .-> pr_stages
@@ -87,6 +92,7 @@ flowchart LR
     pr_stages --> pr_msrv_s
     pr_stages --> pr_runtime_analysis_s
     pr_stages --> pr_mutants_s
+    pr_stages --> pr_release_s
 
     impact_s ==> impact_step
     pr_fast_s ==> fast_step
@@ -95,6 +101,7 @@ flowchart LR
     pr_test_s ==> publish_coverage
     pr_runtime_analysis_s ==> runtime_step
     pr_mutants_s ==> mutants_step
+    pr_release_s ==> release_step
 
     impact_step ==> impact_setup
     impact_step ==> impact_just
@@ -108,6 +115,8 @@ flowchart LR
     runtime_step ==> runtime_just
     mutants_step ==> mutants_setup
     mutants_step ==> mutants_just
+    release_step ==> release_setup
+    release_step ==> release_just
 
     impact_setup ==> impact_setup_just
     fast_setup ==> fast_setup_just
@@ -115,6 +124,7 @@ flowchart LR
     msrv_setup ==> msrv_setup_just
     runtime_setup ==> runtime_setup_just
     mutants_setup ==> mutants_setup_just
+    release_setup ==> release_setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
@@ -125,8 +135,8 @@ flowchart LR
     classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
 ```
 
-(Every job in `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, and
-`pr_mutants` is rendered through the per-job wrapper at `steps/job.yml`; that
+(Every job in `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`,
+`pr_mutants`, and `pr_release` is rendered through the per-job wrapper at `steps/job.yml`; that
 uniform indirection is elided from the diagram. See §4.1 for the wrapper's role
 as a 1ESPT extensibility point.)
 
@@ -227,6 +237,7 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── pr-msrv.yml            owned
         ├── pr-runtime-analysis.yml            owned
         ├── pr-mutants.yml            owned
+        ├── pr-release.yml            owned
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
         ├── scheduled-runtime-analysis.yml  owned
@@ -369,7 +380,7 @@ The catalog and recipes are identical across backends — the asymmetry is purel
 wiring layer's default OS matrix. See
 [checks.md §1](./checks.md#1-groups-and-tiers) for the per-group OS scope tables.
 
-The `pr.yml` stages template is where the wiring lives. Every per-group job downloads the
+The `pr.yml` stages template is where the wiring lives. Every impact-scoped per-group job downloads the
 per-OS impact artifact into `target/anvil/impact/` before running its step template;
 which tiers a group's checks consume from that cache is the catalog's concern, not the
 wiring layer's. This means moving a check between groups (e.g. `clippy` from `pr-fast` to
@@ -384,6 +395,31 @@ after reporting that it skipped the test. Otherwise it runs affected-package
 `cargo test --tests` in all-features and default-features configurations.
 Ordinary stable checks honor a caller-provided `RUSTUP_TOOLCHAIN`. The dedicated
 MSRV setup ensures the declared root MSRV is available through rustup.
+
+The independent `pr_release` stage has `dependsOn: []`, two Linux/Windows jobs,
+and no impact-artifact download. Both invoke the same `anvil-pr-release` group
+as local runs and GitHub. Its generated group step fixes `ANVIL_IMPACT=off`;
+publication candidates still come only from the release tool's base comparison,
+never a dirty-tree full-workspace fallback. The default wrapper checks out
+release jobs with `fetchDepth: 0`, fetches `System.PullRequest.TargetBranch`
+into its normal `origin/<branch>` ref using checkout credentials, and fails on
+fetch errors. `_anvil-base-ref` then gives the local and CI tool invocation the
+same base interpretation. Customized wrappers must retain equivalent history
+and target-ref provisioning when adopting the new stage.
+
+ADO retains its existing root pipeline/build-policy gate; there is no new
+aggregate name to configure. `pr_release` is a required ordinary stage, without
+failure tolerance, so its failure fails that same pipeline. Unsupported
+toolchains/platforms and source-resolution failures remain explicit failures.
+The publication-workspace reports are preserved under `target/anvil/release`.
+
+The release guard is not yet published. Explicitly preinstall a source build or supply
+`ANVIL_TOOL_SOURCE_ROOT` through a pipeline variable/runner environment after
+provisioning the source checkout in `before-checks.yml`. Missing tools fail;
+it is never silently skipped or fetched from a fallback public feed. Verify
+public distribution and update the catalog installer before relying on registry
+installation.
+See [local bootstrap](./local.md#development-tool-bootstrap).
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
@@ -400,7 +436,7 @@ The contract is intentionally small and stable:
 | Parameter   | Type       | Required | Meaning                                                                                                                                                                                |
 |-------------|------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
-| `stage`     | `string`   | no       | ADO stage this job belongs to — exactly what the stages template writes after `stage:`, and what `System.StageName` reports at runtime: `impact`, `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_mutants`, `scheduled_test`, `scheduled_advisories`, `scheduled_runtime_analysis`, `scheduled_exhaustive`. Per-OS job names repeat across stages, so `name` alone cannot identify one, and `templateContext:` is consumed at template-expansion time so a runtime condition on `System.StageName` is unavailable there. The default wrapper ignores it; it exists so an owned wrapper can apply per-stage settings. Unrelated to `group` in `steps/setup.yml`, which selects a check group's tool catalog. |
+| `stage`     | `string`   | no       | ADO stage this job belongs to — exactly what the stages template writes after `stage:`, and what `System.StageName` reports at runtime: `impact`, `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_mutants`, `pr_release`, `scheduled_test`, `scheduled_advisories`, `scheduled_runtime_analysis`, `scheduled_exhaustive`. Per-OS job names repeat across stages, so `name` alone cannot identify one, and `templateContext:` is consumed at template-expansion time so a runtime condition on `System.StageName` is unavailable there. The default wrapper uses it to fetch release base history; owned wrappers can also apply per-stage settings. Unrelated to `group` in `steps/setup.yml`, which selects a check group's tool catalog. |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
 | `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
@@ -651,7 +687,7 @@ threading pre-formatted strings the local run never produces. The chain:
    `inputArtifacts:` parameter (a `DownloadPipelineArtifact@2` task by default, overridable
    by a 1ESPT `job.yml`).
 3. **The group step template** runs `just anvil-<group>` with an impact mode fixed **by
-   group class at emit time** (never probed from a file). PR groups — which always download the
+   group class at emit time** (never probed from a file). Impact-scoped PR groups — which always download the
    artifact — set `ANVIL_IMPACT=consume` in the step environment. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
@@ -755,8 +791,8 @@ the scope.
 
 These templates are consumed primarily by anvil's own stages template. Users who want to
 plug individual groups into an unrelated pipeline can `template:` them directly; the
-group's run step fixes the impact mode at emit time (`ANVIL_IMPACT=consume` for PR groups,
-`ANVIL_IMPACT=off` for scheduled). With no downloaded cache present the checks fall back to
+group's run step fixes the impact mode at emit time (`ANVIL_IMPACT=consume` for impact-scoped PR groups,
+`ANVIL_IMPACT=off` for scheduled and release). With no downloaded cache present the checks fall back to
 their `--workspace` defaults, so a direct consumer only needs to arrange the artifact
 download to get scoping.
 

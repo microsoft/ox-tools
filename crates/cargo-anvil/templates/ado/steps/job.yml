@@ -23,7 +23,7 @@
 #   - name      (string)   Job name; ADO derives the display name from it.
 #   - stage     (string)   ADO stage this job belongs to, e.g. `pr_mutants`.
 #                          Exists so an owned wrapper can discriminate between
-#                          stages; the default wrapper ignores it. Per-OS job
+#                          stages; release jobs use it to fetch base history. Per-OS job
 #                          names repeat (`linux` / `windows` in every pr-* and
 #                          scheduled-* stage, `compute_linux` /
 #                          `compute_windows` in impact), so `name` alone does
@@ -34,7 +34,7 @@
 #                          template writes after `stage:`, one of:
 #                            impact
 #                            pr_fast   pr_test   pr_msrv
-#                            pr_runtime_analysis   pr_mutants
+#                            pr_runtime_analysis   pr_mutants   pr_release
 #                            scheduled_test   scheduled_advisories
 #                            scheduled_runtime_analysis   scheduled_exhaustive
 #                          Unrelated to `group` in steps/setup.yml, which
@@ -82,6 +82,19 @@ jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
+      - ${{ if eq(parameters.stage, 'pr_release') }}:
+          - checkout: self
+            fetchDepth: 0
+            lfs: true
+            persistCredentials: true
+          - pwsh: |
+              $ErrorActionPreference = 'Stop'
+              if ($env:SYSTEM_PULLREQUEST_TARGETBRANCH) {
+                  $branch = $env:SYSTEM_PULLREQUEST_TARGETBRANCH -replace '^refs/heads/', ''
+                  git fetch --no-tags origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              }
+            displayName: Fetch authoritative release base
       - ${{ each artifact in parameters.inputArtifacts }}:
           # DownloadPipelineArtifact@2 is the current major of the built-in
           # download task; v2 takes the `artifact` + `path` inputs used here

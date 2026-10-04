@@ -110,6 +110,9 @@ cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
+# Development minimum, NOT a published release. Setup requires an explicit local
+# source checkout or preinstalled tool; see _anvil-development-tool.
+cargo_release_guard_version := "0.1.0"
 cargo_coverage_gate_version := "0.4.0"
 cargo_delta_version := "0.3.1"
 cargo_deny_version := "0.20.2"

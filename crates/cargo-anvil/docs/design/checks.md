@@ -48,6 +48,7 @@ flowchart LR
     pr_slow --> pr_msrv[anvil-pr-msrv]:::group
     pr_slow --> pr_runtime_analysis[anvil-pr-runtime-analysis]:::group
     pr_slow --> pr_mutants[anvil-pr-mutants]:::group
+    pr_slow --> pr_release[anvil-pr-release]:::group
 
     sched --> s_test[anvil-scheduled-test]:::group
     sched --> s_adv[anvil-scheduled-advisories]:::group
@@ -82,6 +83,7 @@ flowchart LR
     pr_runtime_analysis --> bolero[bolero]:::check
 
     pr_mutants --> mutants_diff[mutants-diff]:::check
+    pr_release --> release_guard[release-guard]:::check
 
     s_test --> s_llvm_cov[llvm-cov]:::check
     s_test --> s_doc_test[doc-test]:::check
@@ -119,11 +121,12 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
+| `pr-release`      | Same default as `pr-fast`             | Publication-workspace builds and tests against the PR base. Independent of source impact; an empty candidate set explicitly reports no release. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
 The `pr-slow` groups are independent: failures in `pr-test` don't block
-`pr-msrv`, `pr-runtime-analysis`, or `pr-mutants`, and overall PR wall-clock is
+`pr-msrv`, `pr-runtime-analysis`, `pr-mutants`, or `pr-release`, and overall PR wall-clock is
 their maximum rather than their sum. Locally, `just anvil-pr-slow` is an umbrella
 recipe that invokes those groups sequentially.
 
@@ -195,7 +198,7 @@ while paired prerequisite validation remains read-only.
 ### `pr-slow` umbrella
 
 The PR-tier slow checks are split into independent cloud-workflow-visible groups —
-`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
+`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`, `pr-release` — that each run as their own job (GitHub) or
 stage (ADO) in parallel. An umbrella `anvil-pr-slow` recipe is also provided in
 `groups.just` for local use; it invokes those groups sequentially so
 adopters can type one command to run "everything slow" without needing the cloud workflow
@@ -208,6 +211,43 @@ matrix overhead.
 | `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config LCOV reports scoped to the same affected packages, so instrumented but unselected dependencies do not contaminate downstream coverage totals. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. On Windows, an `llvm-cov export` that exceeds the process command-line limit (OS error 206) is retried from cargo-llvm-cov's diagnostic through an LLVM response file. Other report failures remain failures. Per-config reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
 | `doc-test`   | Two cargo-test runs over affected packages with at least one Cargo metadata target marked `doctest = true`: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). The capability flag includes explicit library crate types and proc macros while excluding bin-only packages, which make Cargo error when they are the complete selection. An empty doctest-capable subset is a successful no-op. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
+
+#### `pr-release` (publication workspace)
+
+`anvil-release-guard` resolves `_anvil-base-ref` and invokes
+`cargo release-guard check --base <ref> --manifest-path Cargo.toml --output-dir
+<fresh-output> --test-runner cargo --feature-mode all --feature-mode default
+--feature-mode no-default`. The tool owns immutable comparison-commit resolution,
+candidate inference, registry checks, workspace construction, and execution.
+Selection uses publication/version changes, never cargo-delta, `Affected`, or a
+dirty-tree fallback. An empty proposal succeeds with an explicit no-release
+result; ordinary workspace tests still run independently.
+
+The publication suite uses Cargo's built-in test runner. Nextest configuration
+can reference binaries omitted from the isolated workspace, so the group does
+not use nextest to orchestrate that suite or modify the repository's nextest
+configuration. Setup and prerequisite validation still include nextest as test
+support: the guard's own tests exercise its optional nextest runner when the
+guard itself is a release candidate.
+
+The isolated workspace retains selected candidates and private test/support
+members. Noncandidate publishable dependencies resolve through the consumer's
+authoritative Cargo registry configuration, not unpublished local source.
+Candidate builds precede workspace tests, doctests, and example compilation in
+each of the three feature modes. Output is preserved under unique
+`target/anvil/release/<run-id>` directories. This is a source-level rehearsal,
+not a package-content, upload-permission, own-API SemVer, or MSRV proof.
+Unavailable base history, registry/authentication failures, and test failures
+fail the group rather than enlarging the proposal or skipping checks. See the
+[release-guard contract](../../../cargo-release-guard/docs/design/README.md).
+
+The tool is **not published yet**. Its development minimum in `versions.just`
+does not claim registry availability. Setup accepts a preinstalled source build
+or explicit `ANVIL_TOOL_SOURCE_ROOT` bootstrap, and otherwise fails with
+distribution guidance. GitHub's generated root explicitly opts this repository
+into using its checked-out source. Other consumers must provision source until
+public distribution and a verified catalog pin are available. See
+[local setup](./local.md#development-tool-bootstrap).
 
 #### `pr-msrv` (minimum-version tests)
 
@@ -425,7 +465,7 @@ Bucket assignments per check:
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck`, `release-guard` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
@@ -446,6 +486,9 @@ repo-level files cargo-delta does not map to any package — the workspace-level
 template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary — so a
 change to one of those would be silently scoped out. These ignore impact scoping and
 always run.
+
+`release-guard` is unscoped because publication intent is a separate input
+domain, not full-workspace candidate selection.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with
