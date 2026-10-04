@@ -606,7 +606,7 @@
 
 use std::io::{Write, stderr, stdout};
 
-use cargo_aprz_lib::{Host, run};
+use cargo_aprz_lib::{Host, run_release_probe};
 #[cfg(not(miri))]
 use mimalloc::MiMalloc;
 
@@ -642,5 +642,5 @@ impl Host for RealHost {
 #[mutants::skip] // Entry point: thin wrapper, tested via integration tests on `run()`.
 // #[gamma::skip(fn_value.unit, tag = "uncovered", reason = "the binary entry point is deliberately excluded from coverage; command behavior is tested through cargo_aprz_lib::run")]
 async fn main() {
-    run(&mut RealHost, std::env::args()).await;
+    run_release_probe(&mut RealHost, std::env::args()).await;
 }

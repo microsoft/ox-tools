@@ -74,4 +74,4 @@ macro_rules! expose_internals {
 
 expose_internals!(commands, expr, facts, metrics, reports);
 
-pub use crate::commands::{Host, run};
+pub use crate::commands::{Host, run, run as run_release_probe};
