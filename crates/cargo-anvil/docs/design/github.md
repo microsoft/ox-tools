@@ -56,12 +56,13 @@ flowchart LR
     pr_evt([pull_request<br/>merge_group]):::trigger
     pr_root[".github/workflows/<br/>anvil-pr.yml<br/>(policy root)"]:::root
     pr_impl[".github/workflows/<br/>anvil-pr-impl.yml<br/>(reusable workflow_call)"]:::impl
-    impact["impact-linux + impact-windows<br/>(2 jobs;<br/>outputs consumed by every group below)"]:::job
+    impact["impact-linux + impact-windows<br/>(2 jobs;<br/>outputs consumed by impact-scoped groups)"]:::job
     pr_fast_job["pr-fast<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_test_job["pr-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_msrv_job["pr-msrv<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    pr_release_job["pr-release<br/>matrix: linux, windows,<br/>linux-arm, windows-arm<br/>independent base history"]:::job
     required_checks["required-checks<br/>(single branch-protection context)"]:::job
     impact_act[".github/actions/<br/>anvil-impact"]:::action
     setup_act[".github/actions/<br/>anvil-setup"]:::action
@@ -73,6 +74,7 @@ flowchart LR
     msrv_just["just anvil-pr-msrv"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
+    release_just["just anvil-pr-release"]:::recipe
     setup_just["just anvil-&lt;group&gt;-setup"]:::recipe
 
     pr_evt --> pr_root
@@ -83,12 +85,14 @@ flowchart LR
     pr_impl --> pr_msrv_job
     pr_impl --> pr_runtime_analysis_job
     pr_impl --> pr_mutants_job
+    pr_impl --> pr_release_job
     impact --> required_checks
     pr_fast_job --> required_checks
     pr_test_job --> required_checks
     pr_msrv_job --> required_checks
     pr_runtime_analysis_job --> required_checks
     pr_mutants_job --> required_checks
+    pr_release_job --> required_checks
 
     impact ==> impact_act
     pr_fast_job ==> run_group_act
@@ -97,6 +101,7 @@ flowchart LR
     pr_test_job ==> codecov_act
     pr_runtime_analysis_job ==> run_group_act
     pr_mutants_job ==> run_group_act
+    pr_release_job ==> run_group_act
 
     impact_act ==> setup_act
     impact_act ==> impact_just
@@ -106,6 +111,7 @@ flowchart LR
     run_group_act ==> msrv_just
     run_group_act ==> runtime_just
     run_group_act ==> mutants_just
+    run_group_act ==> release_just
     setup_act ==> setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
@@ -510,11 +516,14 @@ The reusable workflow declares a small input set so the root workflow can pass o
 | `windows_runner`     | string | `windows-latest`     | Runner label for x86_64 Windows jobs.                  |
 | `linux_arm_runner`   | string | `ubuntu-24.04-arm`   | Runner label for aarch64 Linux jobs.                   |
 | `windows_arm_runner` | string | `windows-11-arm`     | Runner label for aarch64 Windows jobs.                 |
+| `base_ref`           | string | required             | Event-specific target commit for base-dependent checks. |
+| `publish_commit_statuses` | boolean | `false`         | Best-effort supplemental statuses on same-repository pull requests. |
+| `tool_source_root`   | string | empty                | Explicit provisioned ox-tools checkout for the unpublished release guard. |
 
-The input surface is intentionally narrow: only per-leg *runner labels* are exposed,
-because swapping in self-hosted runners is the one common need that doesn't require
-otherwise touching the workflow. The OS matrix shape (which legs run) is fixed in the
-workflow source — see the discussion under the PR snippet above.
+The matrix override surface is intentionally narrow: only per-leg *runner labels*
+are exposed. The other inputs carry event policy and explicit tool provisioning,
+not matrix shape. Which legs run is fixed in the workflow source — see the
+discussion under the PR snippet above.
 
 The reusable workflows also declare an optional `workflow_call` secret
 `CODECOV_TOKEN`. See §10 (Coverage upload) for how it's used.
@@ -531,7 +540,7 @@ keeps setup, output capture, failed-recipe extraction, status publication, and
 failure propagation in one file in every adopting repository.
 
 The action's impact input surface is a single `impact_mode` toggle (`consume`
-for PR groups, `off` — the default — for scheduled groups). The impact *set* is
+for impact-scoped PR groups, `off` — the default — for scheduled and release groups). The impact *set* is
 never threaded as `--package` inputs: it is shared as a downloaded artifact
 (§6.1). The reusable workflow downloads `anvil-impact-<os>` into
 `target/anvil/impact/` before invoking the action, and the group's scoped checks
@@ -553,8 +562,8 @@ inputs:
   impact_mode:
     description: |
       Impact-scoping mode exported as ANVIL_IMPACT before the group runs.
-      "consume" (PR groups) trusts the impact cache the caller downloaded
-      into target/anvil/impact/; "off" (scheduled groups, the default) runs
+      "consume" (impact-scoped PR groups) trusts the impact cache the caller downloaded
+      into target/anvil/impact/; "off" (scheduled/release groups, the default) runs
       every tier full-workspace. Fixed by tier at the call site.
     required: false
     default: "off"
@@ -610,7 +619,7 @@ Input set on the shared group action:
 | Input              | Default   | Notes                                                                                                                                  |
 |--------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------|
 | `group`            | required  | Group recipe suffix, such as `pr-fast` or `scheduled-test`.                                                                           |
-| `impact_mode`      | `"off"`   | Exported as `ANVIL_IMPACT`. `consume` (PR groups) trusts the downloaded `target/anvil/impact` cache; `off` (scheduled groups) runs every tier full-workspace. |
+| `impact_mode`      | `"off"`   | Exported as `ANVIL_IMPACT`. `consume` (impact-scoped PR groups) trusts the downloaded `target/anvil/impact` cache; `off` disables source-impact scoping for scheduled and release groups. Release candidates are selected independently by the release tool. |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
 | `publish_commit_statuses` | `"false"` | Best-effort management of supplemental failure commit statuses for same-repository pull requests. Requires `statuses: write`; clean runs only supersede prior failures. |
 
@@ -623,7 +632,7 @@ step succeeds, so validation necessarily precedes use of the value in the log
 path and recipe name.
 
 The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
-`BASE_REF` on the `pr-mutants` group step. They are environment variables rather
+`BASE_REF` on the `pr-mutants` and `pr-release` group steps. They are environment variables rather
 than action inputs because only the recipes consume them.
 
 The recipes themselves consume the downloaded impact cache (via
@@ -746,9 +755,37 @@ event- and repository-guarded. Using one caller removes the skipped duplicate
 and their Just processes receive the caller's write-capable token. Actual
 status and comment publication remains guarded to pull-request events.
 
+### Release guard
+
+The separate `pr-release` job uses the same Linux/Windows × x86_64/aarch64
+matrix as the other PR groups and invokes `just anvil-pr-release`. Its checkout
+uses `fetch-depth: 0` and passes `inputs.base_ref` as `BASE_REF`, matching the
+event-specific input already used by SemVer and mutation checks. It has no
+impact-job dependency or artifact download and explicitly selects
+`impact_mode: off`: release candidates are inferred by the release tool from
+version/publication changes, not from a full-workspace impact fallback.
+An unsupported platform/toolchain or unavailable base fails visibly rather
+than skipping the job. The same local recipe builds production candidates and
+runs the publication-workspace suite, preserving reports under
+`target/anvil/release`.
+
+The release guard is not published yet. The reusable workflow accepts an explicit
+`tool_source_root` input (empty by default), which the release job maps to
+`ANVIL_TOOL_SOURCE_ROOT` for setup and execution. The generated root workflow
+passes the repository variable `ANVIL_TOOL_SOURCE_ROOT` when configured; for
+`microsoft/ox-tools` it explicitly defaults to `.` so the required job builds the
+tool from its checked-out source, including changes in the current PR.
+Other repositories must provision that source checkout or preinstall a source
+build; an unset input does not imply registry availability. After publication,
+verify distribution and update the catalog installer before relying on registry
+installation. See
+[local bootstrap](./local.md#development-tool-bootstrap).
+There is no unavailable registry-version install disguised as a released pin,
+no credential-store bypass, and no silent missing-tool skip.
+
 The reusable PR workflow ends with `required-checks`, an `always()` job that
 depends on both impact jobs and every check-group matrix. It succeeds only when
-all seven logical dependencies report `success`; failure, cancellation, or
+all eight logical dependencies, including `pr-release`, report `success`; failure, cancellation, or
 skipping in any dependency fails the aggregate. GitHub renders its stable
 branch-protection context as `PR Job / Required Anvil checks` for both
 pull-request and merge-group runs.
@@ -803,7 +840,7 @@ GitHub-hosted runner, it removes pre-installed toolchains that anvil's Rust chec
 not use: Android, Haskell/GHC, Swift and browser drivers on Linux; Android and
 Haskell/GHC on Windows. This reclaims approximately 18 GB on Linux and 17 GB on
 Windows. It is a no-op on macOS and self-hosted runners. The generated reusable
-workflows explicitly enable this input only for `pr-test`, `pr-msrv`, and `scheduled-test`,
+workflows explicitly enable this input only for `pr-test`, `pr-msrv`, `pr-release`, and `scheduled-test`,
 mirroring the testing-job integration in [microsoft/oxidizer#583](https://github.com/microsoft/oxidizer/pull/583).
 Other groups retain the action's disabled default.
 
@@ -848,7 +885,7 @@ threading pre-formatted strings that local runs never see. The chain in
    selecting by matrix OS — e.g.
    `name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}`.
 3. **The group composite action** (`group-action.yml`) runs `just anvil-<group>` with an
-   impact mode fixed **by group class at emit time** (never probed from a file). PR groups —
+   impact mode fixed **by group class at emit time** (never probed from a file). Impact-scoped PR groups —
    which always download the artifact — export `ANVIL_IMPACT=consume`. In consume mode
    `anvil-impact` is a pure no-op — it trusts the downloaded cache verbatim and
    **neither snapshots nor recomputes**, so it needs neither cargo-delta nor a fetched

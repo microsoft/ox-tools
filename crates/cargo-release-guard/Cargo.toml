@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-release-guard"
+description = "Rehearse Rust release candidates against registry dependencies in an isolated workspace"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "release", "dependencies", "ci", "oxidizer"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-release-guard"
+
+[dependencies]
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+mimalloc = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+semver = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+sha2 = { workspace = true }
+tar = { workspace = true }
+toml_edit = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+tempfile = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

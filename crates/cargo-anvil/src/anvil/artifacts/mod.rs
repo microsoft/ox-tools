@@ -16,7 +16,7 @@
 //! This is the single source of truth for the base catalog: both
 //! `anvil_artifacts` and downstream forks build on these functions, so the
 //! template content and its identity live together with no separate
-//! key/content split. See [`extensibility.md §4.1`](../../../docs/design/extensibility.md).
+//! key/content split.
 
 pub mod ado;
 pub mod container;
@@ -32,6 +32,8 @@ use crate::catalog::{Artifact, ComposedHost};
 ///
 /// PR groups download the `target/anvil/impact` artifact and trust it verbatim
 /// (`consume`); scheduled groups force `off` so every tier runs full-workspace.
+/// The release group also uses `off`, but its tool selects publication candidates
+/// from the base revision, never from workspace impact.
 /// This is the single source of truth for the tier-to-mode policy, shared by
 /// both the GitHub and ADO backends (the per-backend `GROUPS` lists remain
 /// render inventories, but the *policy* answer lives here once). The match is
@@ -44,7 +46,7 @@ use crate::catalog::{Artifact, ComposedHost};
 pub(crate) fn impact_mode(group: &str) -> &'static str {
     match group {
         "pr-fast" | "pr-test" | "pr-msrv" | "pr-runtime-analysis" | "pr-mutants" => "consume",
-        "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
+        "pr-release" | "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
         other => {
             panic!("impact_mode: unclassified group '{other}'; add it to the pr/scheduled arms in artifacts::impact_mode")
         }
@@ -206,6 +208,7 @@ mod tests {
         assert_eq!(impact_mode("pr-fast"), "consume");
         assert_eq!(impact_mode("pr-msrv"), "consume");
         assert_eq!(impact_mode("pr-mutants"), "consume");
+        assert_eq!(impact_mode("pr-release"), "off");
         assert_eq!(impact_mode("scheduled-test"), "off");
         assert_eq!(impact_mode("scheduled-exhaustive"), "off");
     }

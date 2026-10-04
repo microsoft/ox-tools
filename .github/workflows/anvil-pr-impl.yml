@@ -34,6 +34,10 @@ on:
           same-repository pull requests. Requires statuses: write.
         type: boolean
         default: false
+      tool_source_root:
+        description: Explicit ox-tools source checkout for the unpublished release guard.
+        type: string
+        default: ""
     secrets:
       CODECOV_TOKEN:
         description: |
@@ -318,6 +322,32 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
 
+  pr-release:
+    name: "Check Group: Release Guard (${{ matrix.os }})"
+    # Publication candidates come from base history, not the impact artifact.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          fetch-depth: 0
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: pr-release
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
+          free-disk-space: true
+          impact_mode: off
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          ANVIL_TOOL_SOURCE_ROOT: ${{ inputs.tool_source_root }}
+
   required-checks:
     # This display name is the repository-ruleset context. Keep it stable
     # across pull-request and merge-group callers.
@@ -331,6 +361,7 @@ jobs:
       - pr-msrv
       - pr-runtime-analysis
       - pr-mutants
+      - pr-release
     runs-on: ${{ inputs.linux_runner }}
     steps:
       - name: Verify every Anvil job family succeeded
@@ -343,6 +374,7 @@ jobs:
           PR_MSRV: ${{ needs.pr-msrv.result }}
           PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}
           PR_MUTANTS: ${{ needs.pr-mutants.result }}
+          PR_RELEASE: ${{ needs.pr-release.result }}
         run: |
           status=0
           for result in \
@@ -352,7 +384,8 @@ jobs:
             "pr-test=$PR_TEST" \
             "pr-msrv=$PR_MSRV" \
             "pr-runtime-analysis=$PR_RUNTIME_ANALYSIS" \
-            "pr-mutants=$PR_MUTANTS"
+            "pr-mutants=$PR_MUTANTS" \
+            "pr-release=$PR_RELEASE"
           do
             name="${result%%=*}"
             conclusion="${result#*=}"

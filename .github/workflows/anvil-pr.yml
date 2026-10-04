@@ -38,4 +38,7 @@ jobs:
     with:
       base_ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
       publish_commit_statuses: ${{ github.event_name == 'pull_request' }}
+      # This repository explicitly bootstraps its unpublished tool from the
+      # checked-out source. Other consumers must supply a provisioned checkout.
+      tool_source_root: ${{ vars.ANVIL_TOOL_SOURCE_ROOT || (github.repository == 'microsoft/ox-tools' && '.') || '' }}
     secrets: inherit

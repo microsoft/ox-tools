@@ -33,6 +33,7 @@ These are the crates built out of this repo:
 - [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/README.md) - A cargo subcommand that ensures dependencies are declared with default-features = false
 - [`cargo-gamma`](./crates/cargo-gamma/README.md) - Fast mutation testing for Rust
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
+- [`cargo-release-guard`](./crates/cargo-release-guard/README.md) - Rehearses selected releases in an isolated publication workspace without omitted local dependencies
 - [`cargo-unique-target-names`](./crates/cargo-unique-target-names/README.md) - A cargo subcommand that detects workspace targets which uplift to the same build artifact
 - [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that finds unused and misplaced dependencies
 
@@ -116,7 +117,7 @@ The recipe generates documentation and opens it in your default browser.
 
 We use the workflows generated and maintained by `cargo-anvil`:
 
-- `Anvil`. Runs impact-scoped validation on pull requests and merge-queue
+- `Anvil`. Runs impact-scoped validation and an independent release guard on pull requests and merge-queue
   commits. Its aggregate `PR Job / Required Anvil checks` context blocks a
   merge when impact analysis or any check-group matrix does not succeed.
 
@@ -144,7 +145,7 @@ just anvil-pr-fast
 
 The fast tier includes formatting, generated README, spelling, metadata,
 dependency-policy, and static-analysis checks. It deliberately omits tests and
-coverage, runtime analysis, and mutation testing. Generic developer operations
+coverage, runtime analysis, mutation testing, and the release guard. Generic developer operations
 are also provided by Anvil:
 
 ```shell
@@ -198,6 +199,14 @@ These focused operations are not substitutes for either verification tier.
   of the type which can be problematic over time. This check is there to prevent unintentional exposure. If the exposure
   is intentional,
   it's a simple matter of adding an exclusion for it to the crate's `Cargo.toml` file.
+
+- **Release Guard**. The separate `anvil-pr-release` group
+  [rehearses publication candidates](./crates/cargo-release-guard/docs/design/README.md)
+  against registry-resolved noncandidates, retaining private test/support packages.
+  It does not publish or infer candidates from source impact. Until the tool is
+  distributed, provision it beforehand or explicitly bootstrap it with
+  `ANVIL_TOOL_SOURCE_ROOT`; see the
+  [bootstrap contract](./crates/cargo-anvil/docs/design/local.md#development-tool-bootstrap).
 
 - **Default Features**. We use [
   `cargo-ensure-no-default-features`](https://crates.io/crates/cargo-ensure-no-default-features) to make

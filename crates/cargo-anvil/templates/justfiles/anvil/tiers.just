@@ -9,6 +9,7 @@
 # PR tier: every check that should run on every pull request, split
 # into two groups so the fast checks aren't blocked behind the slow
 # ones in cloud workflows.
+# The slow umbrella includes the independent publication-workspace release group.
 
 # Run all pull request checks.
 [group("anvil")]

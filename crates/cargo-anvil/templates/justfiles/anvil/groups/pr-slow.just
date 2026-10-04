@@ -14,6 +14,7 @@
 #   pr-msrv: all-target tests under the declared MSRV
 #   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
 #   pr-mutants: mutation testing
+#   pr-release: publication-workspace rehearsal
 #
 # Cloud workflows run these groups as independent parallel jobs.
 # The umbrella runs them sequentially only when invoked locally:
@@ -25,7 +26,7 @@
 
 # Run the slow pull request checks.
 [group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants anvil-pr-release
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
@@ -33,7 +34,8 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
-    (anvil-pr-mutants-setup installer)
+    (anvil-pr-mutants-setup installer) \
+    (anvil-pr-release-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
@@ -41,4 +43,5 @@ anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \
     anvil-pr-runtime-analysis-validate-prereqs \
-    anvil-pr-mutants-validate-prereqs
+    anvil-pr-mutants-validate-prereqs \
+    anvil-pr-release-validate-prereqs

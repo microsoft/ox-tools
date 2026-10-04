@@ -75,8 +75,14 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 9. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
    modified it, and updates only the unmodified bits.
 10. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
-   crates.io. The binary contains no Microsoft-internal dependencies; everything it can install
-   on the user's behalf comes from crates.io.
+   crates.io. The binary contains no Microsoft-internal dependencies. Released tools
+   come from public distribution; the unpublished release guard requires explicitly
+   provisioned source or a preinstalled source build.
+
+The PR tier includes an independent publication-workspace rehearsal. Release
+candidates are inferred from publication intent, not source impact; see
+[checks](./checks.md#pr-release-publication-workspace) and
+[bootstrap](./local.md#development-tool-bootstrap).
 
 ## 3. Non-Goals
 

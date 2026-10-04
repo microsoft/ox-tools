@@ -65,6 +65,7 @@ const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
     "pr-msrv",
+    "pr-release",
     "pr-runtime-analysis",
     "pr-mutants",
     "scheduled-test",
@@ -237,6 +238,7 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-fast", ".pipelines/anvil/steps/pr-fast.yml"),
     ("pr-test", ".pipelines/anvil/steps/pr-test.yml"),
     ("pr-msrv", ".pipelines/anvil/steps/pr-msrv.yml"),
+    ("pr-release", ".pipelines/anvil/steps/pr-release.yml"),
     ("pr-runtime-analysis", ".pipelines/anvil/steps/pr-runtime-analysis.yml"),
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
@@ -551,6 +553,35 @@ mod tests {
             !body.contains("[ -f target/anvil/impact/impact.state ]"),
             "scheduled group must not gate its mode on a runtime marker-file probe"
         );
+    }
+
+    #[test]
+    fn release_stage_runs_both_platforms_with_authoritative_history_and_no_impact() {
+        let release = PR_STAGES
+            .split_once("  - stage: pr_release\n")
+            .expect("release stage is registered")
+            .1;
+        assert!(release.contains("dependsOn: []"));
+        assert!(release.contains("name: linux"));
+        assert!(release.contains("name: windows"));
+        assert_eq!(release.matches("template: steps/pr-release.yml").count(), 2);
+        assert!(!release.contains("inputArtifacts:"));
+        assert!(!release.contains("continueOnError"));
+        let checkout = JOB_WRAPPER
+            .split_once("if eq(parameters.stage, 'pr_release')")
+            .expect("release wrapper provisions history")
+            .1
+            .split_once("${{ each artifact in parameters.inputArtifacts }}")
+            .unwrap()
+            .0;
+        assert!(checkout.contains("fetchDepth: 0"));
+        assert!(checkout.contains("SYSTEM_PULLREQUEST_TARGETBRANCH"));
+        assert!(checkout.contains("refs/remotes/origin/${branch}"));
+        assert!(checkout.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+        let body = render_group_step("pr-release");
+        assert!(body.contains("just anvil-pr-release"));
+        assert!(body.contains("group: pr-release"));
+        assert!(body.contains("ANVIL_IMPACT: \"off\""));
     }
 
     #[test]

@@ -113,7 +113,7 @@ stages:
           steps:
             - template: steps/pr-fast.yml
 
-  # The PR-tier slow checks are split into four independent stages
+  # The PR-tier impact-scoped slow checks are split into independent stages
   # (pr_test, pr_msrv, pr_runtime_analysis, pr_mutants) so they run in
   # parallel rather than sequentially in one job. Each stage owns its own
   # dependsOn link to
@@ -246,3 +246,23 @@ stages:
               path: target/anvil/impact
           steps:
             - template: steps/pr-mutants.yml
+
+  # Release intent is independent of cargo-delta and its dirty-tree fallback.
+  - stage: pr_release
+    displayName: anvil pr-release (publication workspace)
+    dependsOn: []
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          stage: pr_release
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-release.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          stage: pr_release
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-release.yml

@@ -716,6 +716,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-release-guard"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "cargo_metadata",
+ "clap",
+ "mimalloc",
+ "ohno",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "toml_edit 0.25.13+spec-1.1.0",
+]
+
+[[package]]
 name = "cargo-unique-target-names"
 version = "0.1.0"
 dependencies = [
