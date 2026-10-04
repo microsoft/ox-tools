@@ -63,6 +63,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::versions(),
         justfile::helpers(),
         justfile::impact(),
+        justfile::release(),
         justfile::tiers(),
         instructions::cargo_anvil(),
         instructions::adoption_skill(),

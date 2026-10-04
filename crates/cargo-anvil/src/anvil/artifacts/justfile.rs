@@ -59,6 +59,9 @@ const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impac
 /// Repo-root-relative path of the impact recipe file.
 const IMPACT_JUST_PATH: &str = "justfiles/anvil/impact.just";
 
+const RELEASE_JUST: &str = include_str!("../../../templates/justfiles/anvil/release.just");
+const RELEASE_JUST_PATH: &str = "justfiles/anvil/release.just";
+
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -123,6 +126,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "mutants-full",
         "pr-title",
         "readme-check",
+        "release-dependency-validation",
         "semver-check",
         "spellcheck",
         "udeps",
@@ -197,6 +201,12 @@ pub fn impact() -> Artifact {
     Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
 }
 
+/// `justfiles/anvil/release.just` -- reusable release-candidate selection.
+#[must_use]
+pub fn release() -> Artifact {
+    Artifact::owned_file(RELEASE_JUST_PATH, RELEASE_JUST)
+}
+
 /// Generic local-development recipe files.
 #[must_use]
 pub fn dev_files() -> Vec<Artifact> {
@@ -232,8 +242,8 @@ mod tests {
 
     use super::*;
 
-    /// A check's impact-scoping policy: either unscoped (always runs the full
-    /// workspace) or scoped to one cargo-delta impact category.
+    /// A check's impact-scoping policy: either independent of impact selection
+    /// or scoped to one cargo-delta impact category.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ImpactPolicy {
         Unscoped,
@@ -293,6 +303,7 @@ mod tests {
             // cargo-delta does not map to a package, so scoping them would
             // silently skip a changed template/dictionary.
             ("readme-check", Unscoped),
+            ("release-dependency-validation", Unscoped),
             ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
@@ -599,7 +610,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (24, 8),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
@@ -887,6 +898,13 @@ mod tests {
                     || line.contains("= & cargo ")
                     || line.contains("(& cargo ");
                 if invokes_cargo {
+                    if *path == "justfiles/anvil/checks/release-dependency-validation.just" {
+                        assert!(
+                            line.starts_with("cargo each {{ anvil_release_selection }} --once -- cargo {{ anvil_release_toolchain_arg }}"),
+                            "release validation must delegate explicit candidate and toolchain expansion to cargo-each"
+                        );
+                        continue;
+                    }
                     let toolchain = line
                         .split_once("cargo ")
                         .map(|(_, arguments)| arguments.trim_start())
@@ -908,6 +926,7 @@ mod tests {
         for needle in [
             "import 'helpers.just'",
             "import 'impact.just'",
+            "import 'release.just'",
             "import 'checks/fmt.just'",
             "import 'checks/miri.just'",
             // Optional: a fork can drop the container backend with
