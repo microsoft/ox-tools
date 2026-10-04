@@ -5,7 +5,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -46,6 +46,9 @@ fn finish_evaluation(
     write_text: impl FnOnce(&EvaluatedReport, bool) -> Result<(), AppError>,
     write_summary_file: impl FnOnce(&EvaluatedReport, &Path) -> io::Result<()>,
 ) -> Result<ExitCode, AppError> {
+    // Text output is authoritative and stops summary emission on failure. Summary rendering
+    // likewise preserves its original error, while successful buffered output is explicitly
+    // flushed so delayed writer failures are never reported as success.
     write_text(report, args.quiet)?;
 
     if let Some(path) = summary_target(args) {
@@ -93,7 +96,7 @@ fn write_summary(report: &EvaluatedReport, out: impl io::Write) -> io::Result<()
 fn write_summary_with(out: impl io::Write, render: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> io::Result<()> {
     let mut writer = BufWriter::new(out);
     render(&mut writer)?;
-    io::Write::flush(&mut writer)
+    writer.flush()
 }
 
 /// Resolve where the Markdown summary should be written, if anywhere.
@@ -123,6 +126,10 @@ fn summary_target_with(args: &CoverageGateArgs, mut var_os: impl FnMut(&str) -> 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use cargo_coverage_gate::evaluate_many;
     use tempfile::tempdir;
 
     use super::*;
@@ -154,9 +161,35 @@ mod tests {
         )
         .expect("write member manifest");
         fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
-        let report = cargo_coverage_gate::evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("zero-threshold report");
+        let report = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("zero-threshold report");
 
         (tmp, report)
+    }
+
+    /// Injects rendering failures while allowing flushes to succeed independently.
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected summary failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FlushObserver(Rc<Cell<bool>>);
+
+    impl io::Write for FlushObserver {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.set(true);
+            Ok(())
+        }
     }
 
     #[test]
@@ -206,18 +239,6 @@ mod tests {
         assert!(error.to_string().contains("failed to write summary file"));
     }
 
-    struct FailingWriter;
-
-    impl io::Write for FailingWriter {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("injected summary failure"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
     fn summary_rendering_errors_are_returned() {
@@ -229,9 +250,14 @@ mod tests {
 
     #[test]
     fn summary_returns_render_errors_before_flushing() {
-        let error = write_summary_with(io::sink(), |_| Err(io::Error::other("injected render failure")))
-            .expect_err("render failure must propagate");
+        let flushed = Rc::new(Cell::new(false));
+        let error = write_summary_with(FlushObserver(Rc::clone(&flushed)), |writer| {
+            writer.write_all(b"partial summary")?;
+            Err(io::Error::other("injected render failure"))
+        })
+        .expect_err("render failure must propagate");
         assert_eq!(error.to_string(), "injected render failure");
+        assert!(!flushed.get(), "render failure must skip the explicit flush");
     }
 
     #[test]

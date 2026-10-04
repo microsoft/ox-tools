@@ -21,6 +21,10 @@ loads configuration, and coordinates the remaining stages. Each later stage
 operates on typed data produced by the previous stage rather than reading source
 systems directly.
 
+The published executable is a thin process adapter over the library command
+dispatcher. It writes normal and diagnostic output to the corresponding process
+streams and terminates with status 1 when command execution reports an error.
+
 ## Fact collection
 
 Fact providers retrieve independent views of each crate from crates.io, source
@@ -31,7 +35,9 @@ from a legitimate zero value.
 
 Collection is asynchronous where providers can run independently. Source-code
 analysis is grouped by repository so crates from the same repository share the
-clone and repository-level work.
+clone and repository-level work. Source analysis does not follow filesystem
+links and reads only regular Rust source files whose metadata is within the
+configured per-file size limit.
 
 ### Service addresses
 
@@ -127,6 +133,11 @@ typed data or a negative-cache result. Each provider has its own configurable
 time-to-live. Expired, corrupt, or explicitly ignored entries are treated as
 cache misses. Repository clones and the RustSec database are kept in their
 provider partitions alongside synchronization metadata.
+
+The crates.io download tables encode dates as day counts from the Unix epoch.
+Counts outside Chrono's representable range cannot be emitted by the table
+writer and are treated as malformed cache rows. Such rows are ignored rather
+than being reinterpreted as epoch-dated download activity.
 
 The process takes an advisory lock on the cache root before collection so two
 instances do not concurrently mutate shared cache state.

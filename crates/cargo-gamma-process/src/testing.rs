@@ -224,6 +224,7 @@ fn finish_within<T>(what: &str, budget: Duration, received: Result<std::thread::
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

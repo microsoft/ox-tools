@@ -12,6 +12,7 @@ use syn::{
 
 use crate::cfg::CfgSet;
 use crate::ops::collect::collector::predicates::{expr_attrs, is_int_literal, is_numeric_binding, is_numeric_receiver, stmt_attrs};
+use crate::ops::collect::collector::types::Alias;
 use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
 use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
@@ -74,18 +75,22 @@ pub(in crate::ops::collect) struct Indexes {
     pub(super) parameters: HashMap<String, Option<Vec<Type>>>,
 
     /// Locally declared type aliases and their targets.
-    pub(super) aliases: HashMap<String, Option<Type>>,
+    pub(super) aliases: HashMap<String, Option<Alias>>,
 }
 
 /// Fills whichever indexes were asked for, ignoring scope.
+///
+/// Signature maps are deliberately file-wide and keyed by bare names because their consumers
+/// classify unqualified calls. Collisions merge to unknown rather than depending on visit order;
+/// receiver methods and associated functions therefore cannot supply bare-function evidence.
 pub(super) struct Walk<'cfg> {
     indexes: Indexes,
 
     /// Whether the numeric evidence — fields, constants, uses — is wanted.
     numeric: bool,
 
-    /// Whether the import paths are wanted.
-    imports: bool,
+    /// Whether source-visible type evidence is wanted.
+    type_evidence: bool,
 
     /// The configuration predicates that hold for the build this file will be part of.
     ///
@@ -149,7 +154,9 @@ impl Walk<'_> {
 
     /// Records one constant's declaration, demoting a name two declarations disagree about.
     pub(super) fn declared(&mut self, name: &str, ty: &Type) {
-        merge_type(&mut self.indexes.declared_types, name, ty);
+        if self.type_evidence {
+            merge_type(&mut self.indexes.declared_types, name, ty);
+        }
 
         if self.numeric {
             let numeric = is_numeric_binding(ty);
@@ -164,19 +171,33 @@ impl Walk<'_> {
     }
 
     pub(super) fn returned(&mut self, name: &str, output: &ReturnType) {
-        if let ReturnType::Type(_, ty) = output {
-            merge_type(&mut self.indexes.returns, name, ty);
+        if !self.type_evidence {
+            return;
         }
+
+        let unit;
+        let ty = match output {
+            ReturnType::Default => {
+                unit = syn::parse_quote!(());
+                &unit
+            }
+            ReturnType::Type(_, ty) => ty,
+        };
+        merge_type(&mut self.indexes.returns, name, ty);
     }
 
     pub(super) fn signature(&mut self, signature: &Signature) {
+        if !self.type_evidence {
+            return;
+        }
+
         self.returned(&signature.ident.to_string(), &signature.output);
         let parameters = signature
             .inputs
             .iter()
             .filter_map(|input| match input {
-                FnArg::Typed(typed) => Some((*typed.ty).clone()),
-                FnArg::Receiver(_) => None,
+                FnArg::Typed(typed) if !self.cfg.skip_gate(&typed.attrs) => Some((*typed.ty).clone()),
+                FnArg::Receiver(_) | FnArg::Typed(_) => None,
             })
             .collect::<Vec<_>>();
         let name = signature.ident.to_string();
@@ -192,8 +213,23 @@ impl Walk<'_> {
             .or_insert(Some(parameters));
     }
 
-    pub(super) fn alias(&mut self, name: &str, ty: &Type) {
-        merge_type(&mut self.indexes.aliases, name, ty);
+    pub(super) fn alias(&mut self, name: &str, generics: &syn::Generics, ty: &Type) {
+        if self.type_evidence {
+            let alias = Alias {
+                parameters: generics.type_params().map(|parameter| parameter.ident.to_string()).collect(),
+                target: ty.clone(),
+            };
+            let _known = self
+                .indexes
+                .aliases
+                .entry(name.to_owned())
+                .and_modify(|known| {
+                    if known.as_ref() != Some(&alias) {
+                        *known = None;
+                    }
+                })
+                .or_insert(Some(alias));
+        }
     }
 
     /// Records every name one `use` tree brings into scope, and where each came from.
@@ -272,7 +308,10 @@ impl Walk<'_> {
                 continue;
             };
 
-            merge_type(&mut self.indexes.declared_types, &name.to_string(), &field.ty);
+            let name = name.to_string();
+            if self.type_evidence {
+                merge_type(&mut self.indexes.declared_types, &name, &field.ty);
+            }
 
             if !self.numeric {
                 continue;
@@ -285,7 +324,7 @@ impl Walk<'_> {
             let _known = self
                 .indexes
                 .fields
-                .entry(name.to_string())
+                .entry(name)
                 .and_modify(|known| *known = *known && numeric)
                 .or_insert(numeric);
         }
@@ -293,7 +332,7 @@ impl Walk<'_> {
 
     /// The local update `visit_item_use` makes, without its recursive continuation.
     pub(super) fn on_item_use(&mut self, node: &ItemUse) {
-        if self.imports {
+        if self.type_evidence {
             self.descend(&mut Vec::new(), &node.tree);
         }
     }
@@ -436,17 +475,15 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        self.signature(&node.sig);
         visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast TraitItemFn) {
-        self.signature(&node.sig);
         visit::visit_trait_item_fn(self, node);
     }
 
     fn visit_item_type(&mut self, node: &'ast ItemType) {
-        self.alias(&node.ident.to_string(), &node.ty);
+        self.alias(&node.ident.to_string(), &node.generics, &node.ty);
         visit::visit_item_type(self, node);
     }
 
@@ -515,7 +552,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
 pub(super) fn indexes_in(file: &File, selection: &Selection, cfg: &CfgSet) -> Indexes {
     let mut walk = Walk::new(selection, cfg);
 
-    if !walk.numeric && !walk.imports {
+    if !walk.numeric && !walk.type_evidence {
         return walk.indexes;
     }
 
@@ -548,7 +585,7 @@ impl<'cfg> Walk<'cfg> {
             // Several families need source-visible standard-library identities: value synthesis
             // and result mutation use them for `Default`, while integer decrement uses them to
             // recognize fixed unsigned constructor arguments.
-            imports: selection.any_in_family("fn_value")
+            type_evidence: selection.any_in_family("fn_value")
                 || selection.contains("result.ok_to_err")
                 || selection.contains("result.err_to_ok")
                 || selection.contains("option.none_to_some")
@@ -559,6 +596,8 @@ impl<'cfg> Walk<'cfg> {
                 || selection.any_in_family("return_value")
                 || selection.any_in_family("bool_expr")
                 || selection.any_in_family("arith")
+                || selection.contains("iter.last_to_first")
+                || selection.contains("iter.remove_filter")
                 || selection.contains("expr.increment")
                 || selection.contains("expr.decrement")
                 || selection.contains("literal.int_decrement"),
@@ -573,12 +612,13 @@ impl<'cfg> Walk<'cfg> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use syn::{ExprGroup, parse_quote, token};
+    use syn::{ExprGroup, parse_quote, parse_str, token};
 
     use super::*;
 
-    fn walk(numeric: bool, imports: bool, cfg: &CfgSet) -> Walk<'_> {
+    fn walk(numeric: bool, type_evidence: bool, cfg: &CfgSet) -> Walk<'_> {
         Walk {
             indexes: Indexes {
                 fields: HashMap::default(),
@@ -591,7 +631,7 @@ mod tests {
                 aliases: HashMap::default(),
             },
             numeric,
-            imports,
+            type_evidence,
             cfg,
         }
     }
@@ -600,7 +640,7 @@ mod tests {
     fn note_tracks_named_fields_behind_references() {
         let cfg = CfgSet::unconditional();
         let mut walk = walk(true, false, &cfg);
-        let expression = syn::parse_str::<Expr>("&record.count").expect("the field expression parses");
+        let expression = parse_str::<Expr>("&record.count").expect("the field expression parses");
 
         walk.note(&expression);
 
@@ -612,9 +652,9 @@ mod tests {
         let cfg = CfgSet::unconditional();
         let mut walk = walk(true, false, &cfg);
 
-        walk.note(&syn::parse_str::<Expr>("offset").expect("the bare path parses"));
-        walk.note(&syn::parse_str::<Expr>("<T as Trait>::VALUE").expect("the qualified path parses"));
-        walk.note(&syn::parse_str::<Expr>("tuple.0").expect("the tuple field parses"));
+        walk.note(&parse_str::<Expr>("offset").expect("the bare path parses"));
+        walk.note(&parse_str::<Expr>("<T as Trait>::VALUE").expect("the qualified path parses"));
+        walk.note(&parse_str::<Expr>("tuple.0").expect("the tuple field parses"));
 
         assert_eq!(walk.indexes.numeric_uses.names.len(), 1);
         assert!(walk.indexes.numeric_uses.names.contains("offset"));
@@ -625,7 +665,7 @@ mod tests {
     fn unsigned_notes_descend_through_ranges_and_transparent_wrappers() {
         let cfg = CfgSet::unconditional();
         let mut walk = walk(true, false, &cfg);
-        let expression = syn::parse_str::<Expr>("&(start..(end))").expect("the wrapped range parses");
+        let expression = parse_str::<Expr>("&(start..(end))").expect("the wrapped range parses");
 
         walk.note_unsigned(&expression);
 
@@ -663,7 +703,7 @@ mod tests {
         let mut walk = walk(true, false, &cfg);
 
         for expression in ["left - right", "left + 1", "1 + right", "left[at]", "index.saturating_add(1)"] {
-            let expression = syn::parse_str::<Expr>(expression).expect("the numeric expression parses");
+            let expression = parse_str::<Expr>(expression).expect("the numeric expression parses");
             visit::visit_expr(&mut walk, &expression);
         }
         for expression in [
@@ -672,7 +712,7 @@ mod tests {
             "text.max(other)",
             "for item in values { use_item(item); }",
         ] {
-            let expression = syn::parse_str::<Expr>(expression).expect("the non-evidence expression parses");
+            let expression = parse_str::<Expr>(expression).expect("the non-evidence expression parses");
             visit::visit_expr(&mut walk, &expression);
         }
 
@@ -688,7 +728,7 @@ mod tests {
     fn declared_ignores_constants_when_numeric_index_is_disabled() {
         let cfg = CfgSet::unconditional();
         let mut walk = walk(false, false, &cfg);
-        let ty = syn::parse_str::<Type>("usize").expect("the numeric type parses");
+        let ty = parse_str::<Type>("usize").expect("the numeric type parses");
 
         walk.declared("COUNT", &ty);
 
@@ -728,10 +768,34 @@ mod tests {
     }
 
     #[test]
+    fn signatures_record_implicit_unit_and_only_free_functions() {
+        let file =
+            syn::parse_file("fn free() {} struct Service; impl Service { fn free() -> usize { 1 } } trait Contract { fn free() -> bool; }")
+                .expect("the signature fixture parses");
+        let selection = Selection::parse("call").expect("the family resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::unconditional());
+
+        assert_eq!(indexes.returns.get("free"), Some(&Some(parse_quote!(()))));
+        assert_eq!(indexes.parameters.get("free"), Some(&Some(Vec::new())));
+    }
+
+    #[test]
+    fn signature_parameters_follow_the_active_configuration() {
+        let cfg = CfgSet::parse("unix\n");
+        let mut walk = walk(false, true, &cfg);
+
+        walk.signature(&parse_quote!(
+            fn configured(#[cfg(windows)] removed: String, kept: usize) -> usize
+        ));
+
+        assert_eq!(walk.indexes.parameters.get("configured"), Some(&Some(vec![parse_quote!(usize)])));
+    }
+
+    #[test]
     fn descend_handles_groups_renames_and_globs() {
         let cfg = CfgSet::unconditional();
         let mut walk = walk(false, true, &cfg);
-        let item = syn::parse_str::<ItemUse>("use crate::{Thing as Alias, inner::Item, *};").expect("the use item parses");
+        let item = parse_str::<ItemUse>("use crate::{Thing as Alias, inner::Item, *};").expect("the use item parses");
 
         walk.descend(&mut Vec::new(), &item.tree);
 
@@ -754,7 +818,7 @@ mod tests {
             "use second::Thing;",
             "use crate::module::{self, Item};",
         ] {
-            let item = syn::parse_str::<ItemUse>(item).expect("the use item parses");
+            let item = parse_str::<ItemUse>(item).expect("the use item parses");
             walk.descend(&mut Vec::new(), &item.tree);
         }
 
@@ -829,15 +893,15 @@ mod tests {
 
         let numeric = Walk::new(&Selection::parse("expr.decrement").expect("selector resolves"), &cfg);
         assert!(numeric.numeric);
-        assert!(numeric.imports);
+        assert!(numeric.type_evidence);
 
         let result = Walk::new(&Selection::parse("result.ok_to_err").expect("selector resolves"), &cfg);
         assert!(!result.numeric);
-        assert!(result.imports);
+        assert!(result.type_evidence);
 
         let unrelated = Walk::new(&Selection::parse("literal.bool_flip").expect("selector resolves"), &cfg);
         assert!(!unrelated.numeric);
-        assert!(!unrelated.imports);
+        assert!(!unrelated.type_evidence);
 
         let file = syn::parse_file("const LIMIT: usize = left - right; use crate::Thing;").expect("the file parses");
         let indexes = indexes_in(&file, &Selection::parse("literal.bool_flip").expect("selector resolves"), &cfg);

@@ -33,8 +33,8 @@ pub const fn capacity() -> usize {
 }
 
 #[cfg(windows)]
-fn release_child(child: u32) -> bool {
-    #[cfg(test)]
+fn resume_child(child: u32) -> bool {
+    #[cfg(any(test, feature = "fault-injection"))]
     if faults::fired(faults::Fault::JobResume) {
         return false;
     }
@@ -43,10 +43,10 @@ fn release_child(child: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn assign_and_release(job: &Job, child: &Child) -> Result<(), PlatformError> {
-    #[cfg(test)]
+fn assign_and_resume(job: &Job, child: &Child) -> Result<(), PlatformError> {
+    #[cfg(any(test, feature = "fault-injection"))]
     let assigned = !faults::fired(faults::Fault::JobAssign) && job.assign(child);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "fault-injection")))]
     let assigned = job.assign(child);
     if !assigned {
         return Err(PlatformError::new_static(
@@ -58,7 +58,7 @@ fn assign_and_release(job: &Job, child: &Child) -> Result<(), PlatformError> {
     // The child has been waiting since it was created. It is now inside the new job, where
     // termination can reach every descendant it creates.
     // #[gamma::skip(cond.always_false, reason = "pretending the suspended child was resumed leaves it waiting forever")]
-    if release_child(child.id()) {
+    if resume_child(child.id()) {
         Ok(())
     } else {
         Err(PlatformError::new_static(
@@ -681,13 +681,13 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // rather than run with its descendants unreachable. Nesting has been permitted since
         // Windows 8, so this is a genuine host failure rather than the ordinary case of a run
         // started inside somebody else's job.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fault-injection"))]
         let job = if faults::fired(faults::Fault::JobCreate) {
             None
         } else {
             Job::create(request.limit)
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "fault-injection")))]
         let job = Job::create(request.limit);
         let Some(job) = job else {
             return Err(PlatformError::new_static(
@@ -935,7 +935,7 @@ impl ProcessTree {
         #[cfg(windows)]
         {
             if let Some(job) = guard.job.as_ref()
-                && let Err(refusal) = assign_and_release(job, &child)
+                && let Err(refusal) = assign_and_resume(job, &child)
             {
                 return Err(abandoning(refusal, &mut child, &guard));
             }
@@ -986,13 +986,13 @@ impl ProcessTree {
     /// reported as [`io::ErrorKind::Other`].
     pub fn wait_with_output(mut self) -> io::Result<Output> {
         let stdout = output_reader(self.take_stdout(), STDOUT_READER_THREAD)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fault-injection"))]
         let stderr = if faults::fired(faults::Fault::StderrReader) {
             Err(io::Error::other("stderr reader creation failed as requested by a test"))
         } else {
             output_reader(self.take_stderr(), STDERR_READER_THREAD)
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "fault-injection")))]
         let stderr = output_reader(self.take_stderr(), STDERR_READER_THREAD);
         let stderr = match stderr {
             Ok(stderr) => stderr,
@@ -1236,13 +1236,13 @@ impl ProcessTree {
 
         #[cfg(not(unix))]
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             let status = if faults::fired(faults::Fault::TryWait) {
                 Err(io::Error::other("child status failed as requested by a test"))
             } else {
                 child.try_wait()
             };
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "fault-injection")))]
             let status = child.try_wait();
             let status = match status {
                 Ok(status) => status,
@@ -1344,7 +1344,7 @@ impl ProcessTree {
     /// primitive is reachable only from [`Self::observe`] and [`Self::terminate`], which signal
     /// before reaping that leader, so `killpg` cannot name a replacement group.
     fn sweep(&self) -> io::Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::Sweep) {
             return Err(io::Error::other("subtree sweep failed as requested by a test"));
         }
@@ -1471,7 +1471,7 @@ fn join_output_reader(reader: Option<OutputReader>, stream: &str) -> io::Result<
 
 fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
     loop {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::OutputWait) {
             return Err(io::Error::other("output wait failed as requested by a test"));
         }
@@ -1513,7 +1513,7 @@ fn group_id(child_id: u32) -> Result<i32, PlatformError> {
 /// Preserves a containment refusal while reporting failure to clean up its child.
 fn abandoning(refusal: PlatformError, child: &mut Child, guard: &SpawnGuard) -> PlatformError {
     let cleanup = abandon(child, guard);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     let cleanup = if faults::fired(faults::Fault::AbandonCleanup) {
         Err(io::Error::other("abandonment cleanup failed as requested by a test"))
     } else {
@@ -1574,13 +1574,13 @@ fn abandon(child: &mut Child, guard: &SpawnGuard) -> io::Result<()> {
 
 /// Kills a child unless the failed kill proves to have raced with its exit.
 fn kill_if_running(child: &mut Child) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     let killed = if faults::fired(faults::Fault::Kill) {
         Err(io::Error::other("child kill failed as requested by a test"))
     } else {
         child.kill()
     };
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "fault-injection")))]
     let killed = child.kill();
 
     match killed {
@@ -1658,6 +1658,7 @@ impl Drop for ProcessTree {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::cell::RefCell;
     #[cfg(unix)]
@@ -1668,6 +1669,7 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::io::{BufRead as _, Write as _};
+    use std::sync::PoisonError;
     use std::time::Instant;
 
     use camino::Utf8Path;
@@ -1720,7 +1722,7 @@ mod tests {
             .expect("the watchdog observes the first captured chunk");
         discard_output_reader(Some(&reader));
         {
-            let bytes = reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let bytes = reader.bytes.lock().unwrap_or_else(PoisonError::into_inner);
             assert!(bytes.is_empty(), "detachment retained bytes already captured");
             assert_eq!(bytes.capacity(), 0, "detachment retained the capture allocation");
         }
@@ -1748,7 +1750,7 @@ mod tests {
 
         assert_eq!(error.to_string(), "cleanup failed");
         assert!(!retaining.load(Ordering::Acquire));
-        assert!(bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+        assert!(bytes.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
         reader.thread.join().expect("reader thread").expect("reader result");
     }
 
@@ -1888,7 +1890,6 @@ mod tests {
     /// Reached only when somebody asked for these by name, so the answer is a failure rather than a
     /// skip: they asked for coverage of containment and did not get it, and the reason is the same
     /// one the tool itself would give a user who asked to be protected here.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn demand_containment() {
         #[cfg(not(windows))]
         assert!(containment().is_ok(), "{NEEDS_CONTAINMENT}: {:?}", containment().err());
@@ -2044,7 +2045,6 @@ mod tests {
         ));
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[expect(
         clippy::unnecessary_wraps,
         reason = "the unreachable closure must match cleanup_after_observation's fallible callback"
@@ -2055,7 +2055,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_pending_observation_neither_cleans_nor_reaps() {
         let cleaned = RefCell::new(false);
         let reaped = RefCell::new(false);
@@ -2141,7 +2140,6 @@ mod tests {
 
     /// Asking for accounting on a host that cannot provide it fails rather than running anyway.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn asking_for_accounting_a_host_cannot_provide_fails_the_spawn() {
         let command = no_op_command();
 
@@ -2179,7 +2177,6 @@ mod tests {
     /// A separate question from sealing, even where the two are answered by the same facility: a
     /// host could grow a boundary it cannot meter, and a test about the reading would then fail for
     /// a reason that has nothing to do with the reading.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn demand_measurement() {
         #[cfg(not(windows))]
         assert!(crate::support().is_ok(), "{NEEDS_CONTAINMENT}: {:?}", crate::support().err());
@@ -2195,7 +2192,6 @@ mod tests {
 
     /// A metered child's peak is reported through the subtree, on a host that can measure one.
     #[test]
-    #[cfg_attr(all(coverage_nightly, not(windows)), coverage(off))]
     #[cfg_attr(
         not(windows),
         ignore = "needs a host that can seal a subtree: run with --ignored (on Linux, under `systemd-run --user --scope -p Delegate=yes`)"
@@ -2302,7 +2298,6 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delayed_marker_child(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf, Child) {
         let work = testing::workdir(prefix);
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
@@ -2609,7 +2604,6 @@ mod tests {
     /// request here asks for neither measurement nor a ceiling, so a containment tied to accounting
     /// would leave this grandchild running.
     #[test]
-    #[cfg_attr(all(coverage_nightly, not(windows)), coverage(off))]
     #[cfg_attr(
         not(windows),
         ignore = "needs a host that can seal a subtree: run with --ignored (on Linux, under `systemd-run --user --scope -p Delegate=yes`)"
@@ -2666,7 +2660,6 @@ mod tests {
     /// so the request now decides one thing only: whether the boundary's readings are reported. A
     /// leaf created for containment alone must not start answering a question nobody asked.
     #[test]
-    #[cfg_attr(all(coverage_nightly, not(windows)), coverage(off))]
     #[cfg_attr(
         not(windows),
         ignore = "needs a host that can seal a subtree: run with --ignored (on Linux, under `systemd-run --user --scope -p Delegate=yes`)"
@@ -2702,7 +2695,6 @@ mod tests {
     /// A run announces best-effort containment once, before it executes anything the repository
     /// controls, and that announcement is worth nothing if the per-launch answer can differ from it.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_host_answer_about_sealing_matches_what_a_launch_gets() {
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
         let _ = command.arg(testing::directive("exit:0"));
@@ -2762,7 +2754,6 @@ mod tests {
     /// Without this, a helper whose `spawn` quietly did nothing would make that test pass by
     /// producing no grandchild to reach — the exact shape of a test that cannot fail.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_unkilled_grandchild_outlives_its_parent_and_finishes() {
         let work = testing::workdir("gamma-grandchild-control");
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
@@ -2941,7 +2932,6 @@ mod tests {
     /// Inert unless the outer test asked for it, since it deliberately kills the process it runs in.
     #[cfg(unix)]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spawns_a_child_then_interrupts_itself() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -2976,7 +2966,6 @@ mod tests {
     /// it is running on.
     #[cfg(unix)]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn interrupts_itself_between_the_spawn_and_the_registration() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -3045,7 +3034,6 @@ mod tests {
     /// Inert unless the outer test asked for it, since it deliberately kills the process it runs in.
     #[cfg(unix)]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn spawns_a_child_then_quits_itself() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -3079,7 +3067,6 @@ mod tests {
     /// signal. Closing that window is what finally performs the death, and the sweep with it.
     #[cfg(unix)]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn interrupts_itself_twice_with_a_window_open() {
         if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
@@ -3392,14 +3379,57 @@ mod tests {
         ProcessTree::adopt(spawned).expect("adoption")
     }
 
+    fn captured_gated_subtree() -> (ProcessTree, tempfile::TempDir, camino::Utf8PathBuf, camino::Utf8PathBuf) {
+        let work = testing::workdir("gamma-process-output-cleanup");
+        let root = Utf8Path::from_path(work.path()).expect("the test-work path is UTF-8");
+        let ready = root.join("ready");
+        let gate = root.join("gate");
+        let completed = root.join("completed");
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command
+            .args([
+                testing::directive(format!("touch:{ready}")),
+                testing::directive(format!("wait:{gate}")),
+                testing::directive(format!("touch:{completed}")),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "the live child did not reach its gate");
+            thread::yield_now();
+        }
+
+        (subtree, work, gate, completed)
+    }
+
+    fn assert_gated_child_was_cleaned(gate: &Utf8Path, completed: &Utf8Path) {
+        fs::write(gate, b"release").expect("the gate should be writable");
+        let deadline = Instant::now() + Duration::from_millis(250);
+
+        while Instant::now() < deadline && !completed.exists() {
+            thread::yield_now();
+        }
+
+        assert!(
+            !completed.exists(),
+            "the supposedly cleaned child remained live and crossed its gate"
+        );
+    }
+
     #[test]
     fn stderr_reader_start_failure_cleans_up_and_preserves_its_reason() {
-        let subtree = captured_no_op_subtree();
+        let (subtree, _work, gate, completed) = captured_gated_subtree();
         let _armed = faults::arm(faults::Fault::StderrReader);
 
         let reason = subtree.wait_with_output().expect_err("the stderr reader fault is reported");
 
         assert!(reason.to_string().contains("stderr reader creation failed"), "{reason}");
+        assert_gated_child_was_cleaned(&gate, &completed);
     }
 
     #[test]
@@ -3415,12 +3445,13 @@ mod tests {
 
     #[test]
     fn output_wait_failure_cleans_up_and_preserves_its_reason() {
-        let subtree = captured_no_op_subtree();
+        let (subtree, _work, gate, completed) = captured_gated_subtree();
         let _armed = faults::arm(faults::Fault::OutputWait);
 
         let reason = subtree.wait_with_output().expect_err("the output wait fault is reported");
 
         assert!(reason.to_string().contains("output wait failed"), "{reason}");
+        assert_gated_child_was_cleaned(&gate, &completed);
     }
 
     #[test]
@@ -3446,22 +3477,15 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn an_observed_exit_reports_a_sweep_failure() {
+    fn an_injected_sweep_failure_is_reported_without_waiting_for_a_child_exit() {
         let mut subtree = captured_no_op_subtree();
-        let _sweep = faults::arm(faults::Fault::Sweep);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let sweep = faults::arm(faults::Fault::Sweep);
 
-        let reason = loop {
-            match subtree.observe() {
-                Err(reason) => break reason,
-                Ok(None) if Instant::now() < deadline => thread::yield_now(),
-                Ok(None) => panic!("the child did not exit before the test deadline"),
-                Ok(Some(status)) => panic!("the sweep fault did not fire for completed child {status}"),
-            }
-        };
+        let reason = subtree.sweep().expect_err("the sweep fault is reported");
 
         assert!(reason.to_string().contains("subtree sweep failed"), "{reason}");
+        drop(sweep);
+        subtree.terminate().expect("the fixture is cleaned up");
     }
 
     #[cfg(not(unix))]

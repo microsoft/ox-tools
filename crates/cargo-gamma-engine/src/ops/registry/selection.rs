@@ -143,6 +143,7 @@ impl Selection {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -189,6 +190,37 @@ mod tests {
         for name in all.sorted() {
             assert!(combined.contains(name), "{name} is not reachable through a shipped preset");
         }
+    }
+
+    #[test]
+    fn changed_presets_have_exact_membership() {
+        assert_eq!(
+            Selection::parse("@numeric").unwrap().sorted(),
+            [
+                "expr.decrement",
+                "expr.increment",
+                "literal.float_negate",
+                "literal.float_to_one",
+                "literal.float_to_zero",
+                "literal.int_decrement",
+                "literal.int_increment",
+                "literal.int_to_one",
+                "literal.int_to_zero",
+            ]
+        );
+        assert_eq!(
+            Selection::parse("@removal").unwrap().sorted(),
+            [
+                "call.replace_with_default",
+                "collection.omit_element",
+                "match_arm.never_matches",
+                "stmt.delete_assign",
+                "stmt.delete_call",
+                "struct_field.omit",
+                "unary.remove_neg",
+                "unary.remove_not",
+            ]
+        );
     }
 
     #[test]

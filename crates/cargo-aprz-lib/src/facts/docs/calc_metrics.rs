@@ -343,7 +343,6 @@ trait ItemLike {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::process::Command;
@@ -610,6 +609,8 @@ mod tests {
 
     #[test]
     fn every_supported_format_version_is_parsed() {
+        // This range mirrors every production format-dispatch arm. Update both together whenever
+        // rustdoc JSON support changes.
         for version in 50..=57_u64 {
             let mut json = make_rustdoc_json("my_crate", Some("Crate docs"), &[]);
             json["format_version"] = json!(version);
@@ -642,7 +643,10 @@ mod tests {
         for version in 50..=57 {
             let bytes = serde_json::to_vec(&json!({ "format_version": version })).unwrap();
             let err = calculate_docs_metrics(bytes.as_slice(), &crate_spec("my_crate")).unwrap_err();
-            assert!(err.to_string().contains("parsing rustdoc JSON"), "version {version}: {err}");
+            assert!(
+                err.to_string().contains(&format!("parsing rustdoc JSON v{version} structure")),
+                "version {version}: {err}"
+            );
         }
     }
 
@@ -835,6 +839,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn link_classification_is_traced() {
         // The per-link trace messages are only formatted when a logger is installed, so
         // install one that evaluates and discards every record.
@@ -904,12 +909,20 @@ mod tests {
     }
 
     #[test]
-    fn code_blocks_and_malformed_inline_references_are_handled_exactly() {
+    fn fenced_code_is_removed_before_broken_links_are_counted() {
         assert_eq!(
             count_broken_links::<u32>("```\n[`Hidden`]\n```\nVisible [`Shown`].", &links(&[])),
             1
         );
+    }
+
+    #[test]
+    fn unterminated_inline_reference_counts_as_one_broken_link() {
         assert_eq!(count_broken_links::<u32>("See [`Alias`][unterminated.", &links(&[])), 1);
+    }
+
+    #[test]
+    fn suffix_after_inline_code_counts_as_one_broken_link() {
         assert_eq!(count_broken_links::<u32>("See [`Alias`]suffix.", &links(&[])), 1);
     }
 

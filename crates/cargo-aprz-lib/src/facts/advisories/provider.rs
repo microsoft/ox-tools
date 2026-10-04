@@ -44,14 +44,10 @@ struct GitFetcher;
 impl DbFetcher for GitFetcher {
     fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
         // #[gamma::skip(call.replace_with_default, call_result.default, tag = "external", reason = "the lock flag only changes rustsec's process-global git-cache locking, which cannot be distinguished deterministically without concurrent external repository access")]
-        Repository::fetch(database_url, repo_path, fetch_locked(), DATABASE_FETCH_TIMEOUT)
+        Repository::fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
             .map(|_| ())
             .map_err(Into::into)
     }
-}
-
-const fn fetch_locked() -> bool {
-    true
 }
 
 impl Provider {
@@ -190,6 +186,7 @@ where
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::env::var_os;
     use std::fs;
     use std::process::Command;
     use std::sync::Mutex;
@@ -495,6 +492,8 @@ mod tests {
     #[test]
     fn a_withdrawn_advisory_does_not_stop_the_remaining_scan() {
         let tmp = tempfile::tempdir().unwrap();
+        // RustSec iterates these identifiers in order. The low withdrawn ID deliberately precedes
+        // the high active ID so this fixture proves that scanning continues after a withdrawal.
         write_advisory(tmp.path(), "ordered-crate", "RUSTSEC-2020-0001", Some("2021-01-01"));
         write_advisory(tmp.path(), "ordered-crate", "RUSTSEC-2020-9999", None);
         let database = Database::open(tmp.path()).unwrap();
@@ -529,7 +528,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "spawned by database_operations_log_their_exact_success_verbs"]
     async fn helper_capture_database_operation_logs() {
-        if std::env::var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
+        if var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
             return;
         }
 
@@ -556,7 +555,7 @@ mod tests {
     #[test]
     #[ignore = "spawned by scan_summary_log_reports_checked_and_matched_counts"]
     fn helper_capture_scan_summary_log() {
-        if std::env::var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
+        if var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
             return;
         }
 
@@ -597,10 +596,17 @@ mod tests {
         assert_eq!(data.per_version.unmaintained_warning_count, 0);
         assert_eq!(data.total.unmaintained_warning_count, 0);
     }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod miri_tests {
+    use core::time::Duration;
+
+    use super::DATABASE_FETCH_TIMEOUT;
 
     #[test]
-    fn advisory_database_fetch_timeout_is_one_minute() {
+    fn advisory_database_fetch_policy_is_explicit() {
         assert_eq!(DATABASE_FETCH_TIMEOUT, Duration::from_mins(1));
-        assert!(fetch_locked(), "production fetches must honor the rustsec repository lock");
     }
 }

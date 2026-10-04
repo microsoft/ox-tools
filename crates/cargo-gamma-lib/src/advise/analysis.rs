@@ -346,7 +346,7 @@ fn timeouts(summary: Summary, mutants: &[Mutant]) -> Option<Finding> {
         ),
         detail: vec![format!("{} of CPU time spent waiting for them", human(spent))],
         remedy: "a mutant that hangs is a mutant the suite detected, so this is signal, not \
-                 failure — it is just expensive signal. `cargo gamma suppress --apply` writes suppressions \
+                 failure — it is just expensive signal. `cargo gamma suppress --eligible timeout --apply` writes suppressions \
                  for them so the next run does not pay again."
             .to_owned(),
         cost: "a suppressed timeout leaves the score unchanged today, but stops being retested, so \
@@ -404,7 +404,8 @@ fn out_of_memory(summary: Summary, mutants: &[Mutant]) -> Option<Finding> {
                  measure` reports each binary's peak without stopping anything, and \
                  `--memory-multiplier` or `--memory-headroom` widen the ceiling if the baseline it \
                  came from was unrepresentative. A site that is genuinely allowed to allocate this \
-                 much is eligible for `cargo gamma suppress --apply` by default."
+                 much is eligible for suppression by default; run `cargo gamma suppress --eligible \
+                 outofmem --apply` to write the suppression."
             .to_owned(),
         cost: "a widened ceiling stops bounding the runaway allocation it was there to catch, and a \
                suppressed site stops being retested, so a later edit that makes it allocate without \
@@ -433,7 +434,7 @@ fn unviable(summary: Summary) -> Option<Finding> {
             "each withdrawal round is a full rebuild of the instrumented tree".to_owned(),
             "they are excluded from the score, so the cost bought nothing".to_owned(),
         ],
-        remedy: "`cargo gamma suppress --eligible unviable` records them in the source so later runs \
+        remedy: "`cargo gamma suppress --eligible unviable --apply` records them in the source so later runs \
                  skip them without discovering their unviability again. If they cluster in one \
                  operator, narrow `--mutators` instead."
             .to_owned(),
@@ -736,6 +737,11 @@ mod tests {
 
         assert!(finding.headline.contains('2'), "{}", finding.headline);
         assert!(finding.detail[0].contains("60"), "{:?}", finding.detail);
+        assert!(
+            finding.remedy.contains("cargo gamma suppress --eligible timeout --apply"),
+            "{}",
+            finding.remedy
+        );
         assert!(finding.remedy.contains("does not pay again"), "{}", finding.remedy);
     }
 
@@ -780,8 +786,8 @@ mod tests {
         let verify = finding.remedy.find("--memory measure").expect("the remedy must offer measurement");
         let suppress = finding
             .remedy
-            .find("cargo gamma suppress")
-            .expect("the remedy must offer suppression");
+            .find("cargo gamma suppress --eligible outofmem --apply")
+            .expect("the remedy must offer the applying suppression command");
 
         assert!(
             verify < suppress,
@@ -906,7 +912,7 @@ mod tests {
                 "they are excluded from the score, so the cost bought nothing",
             ]
         );
-        assert!(finding.remedy.contains("cargo gamma suppress --eligible unviable"));
+        assert!(finding.remedy.contains("cargo gamma suppress --eligible unviable --apply"));
         assert_eq!(finding.cost, "none — an unviable mutant never contributed to the score");
     }
 

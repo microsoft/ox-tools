@@ -39,12 +39,8 @@ impl BugLabelMatcher {
         }
 
         let mut builder = RegexSetBuilder::new(patterns);
-        Self::from_builder(builder.case_insensitive(true))
-    }
-
-    fn from_builder(builder: &RegexSetBuilder) -> Result<Self> {
         Ok(Self {
-            patterns: Self::build_pattern_set(builder)?,
+            patterns: Self::build_pattern_set(builder.case_insensitive(true))?,
         })
     }
 
@@ -70,6 +66,7 @@ impl Default for BugLabelMatcher {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -139,7 +136,7 @@ mod tests {
     #[test]
     fn aggregate_regex_set_errors_are_propagated_with_context() {
         let mut builder = RegexSetBuilder::new(["bug"]);
-        let error = BugLabelMatcher::from_builder(builder.size_limit(0)).expect_err("a zero-size automaton cannot be compiled");
+        let error = BugLabelMatcher::build_pattern_set(builder.size_limit(0)).expect_err("a zero-size automaton cannot be compiled");
 
         assert!(error.to_string().contains("compiling bug label patterns"), "{error}");
     }

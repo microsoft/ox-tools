@@ -8,15 +8,18 @@
 
 // Miri cannot run these tests because they spawn subprocesses and use temp directories.
 #![cfg(not(miri))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::fs;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fs};
 
 use tempfile::TempDir;
 
@@ -860,10 +863,10 @@ fn unknown_package_selection_fails_loudly() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("did not match any workspace member"));
 }
 
-/// The tool's own workspace is the acceptance test: it must not accuse a
-/// dependency this repository legitimately uses.
+/// The tool's own workspace may report only cargo-gamma's injected runtime
+/// dependencies during mutation instrumentation; ordinary runs must be clean.
 #[test]
-fn the_tools_own_catalog_is_clean() {
+fn the_tools_own_catalog_has_no_unexpected_findings() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -882,12 +885,16 @@ fn the_tools_own_catalog_is_clean() {
         return;
     }
 
-    if std::env::var_os("CARGO_GAMMA").is_some() {
-        assert!(
-            stderr.contains("Found 2 unused workspace dependencies")
-                && stderr.contains("- gamma_rt")
-                && stderr.contains("- cargo-gamma-rt"),
-            "the instrumented catalog should differ only by cargo-gamma's two injected runtime dependencies: {stderr}"
+    if env::var_os("CARGO_GAMMA").is_some() {
+        let dependencies = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("  - "))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            dependencies,
+            BTreeSet::from(["cargo-gamma-rt".to_owned(), "gamma_rt".to_owned()]),
+            "the instrumented catalog should differ only by cargo-gamma's injected runtime dependencies: {stderr}"
         );
     } else {
         panic!("this repository's catalog should be clean: {stderr}");

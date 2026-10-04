@@ -14,6 +14,8 @@ use crate::report::Styler;
 
 pub(super) const TESTING_PROGRESS_LOG: &str = "gamma-progress.log";
 pub(super) const TEST_SELECTION_LOG: &str = "gamma-selection.jsonl";
+const MAX_SELECTION_LOG_BYTES: usize = 64 * 1024 * 1024;
+const SELECTION_TRUNCATION_MARKER: &[u8] = b"{\"truncated\":true,\"reason\":\"selection journal reached its 64 MiB retention limit\"}\n";
 
 #[derive(Debug, Default)]
 pub(super) enum VerdictLog {
@@ -24,6 +26,9 @@ pub(super) enum VerdictLog {
         path: Utf8PathBuf,
         selection_file: File,
         selection_path: Utf8PathBuf,
+        selection_buffer: Vec<u8>,
+        selection_bytes: usize,
+        selection_truncated: bool,
     },
     Failed {
         path: Utf8PathBuf,
@@ -45,6 +50,9 @@ impl VerdictLog {
             path,
             selection_file,
             selection_path,
+            selection_buffer: Vec::new(),
+            selection_bytes: 0,
+            selection_truncated: false,
         };
 
         Ok(())
@@ -75,12 +83,45 @@ impl VerdictLog {
     /// Writes and flushes one structured selection attempt.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn record_selection(&mut self, attempt: &SelectionAttempt) {
+        self.record_selection_with_limit(attempt, MAX_SELECTION_LOG_BYTES);
+    }
+
+    fn record_selection_with_limit(&mut self, attempt: &SelectionAttempt, limit: usize) {
         let failed = match self {
-            Self::Writing { selection_file, .. } => serde_json::to_writer(&mut *selection_file, attempt)
-                .map_err(std::io::Error::other)
-                .and_then(|()| writeln!(selection_file))
-                .and_then(|()| selection_file.flush())
-                .err(),
+            Self::Writing {
+                selection_file,
+                selection_buffer,
+                selection_bytes,
+                selection_truncated,
+                ..
+            } => {
+                if *selection_truncated {
+                    None
+                } else {
+                    selection_buffer.clear();
+                    serde_json::to_writer(&mut *selection_buffer, attempt)
+                        .map_err(std::io::Error::other)
+                        .and_then(|()| {
+                            selection_buffer.push(b'\n');
+                            if selection_bytes
+                                .saturating_add(selection_buffer.len())
+                                .saturating_add(SELECTION_TRUNCATION_MARKER.len())
+                                > limit
+                            {
+                                selection_file.write_all(SELECTION_TRUNCATION_MARKER)?;
+                                selection_file.flush()?;
+                                *selection_bytes = selection_bytes.saturating_add(SELECTION_TRUNCATION_MARKER.len());
+                                *selection_truncated = true;
+                            } else {
+                                selection_file.write_all(selection_buffer)?;
+                                selection_file.flush()?;
+                                *selection_bytes = selection_bytes.saturating_add(selection_buffer.len());
+                            }
+                            Ok(())
+                        })
+                        .err()
+                }
+            }
             Self::Disabled | Self::Failed { .. } => None,
         };
 
@@ -110,7 +151,7 @@ mod tests {
 
     use camino::Utf8Path;
 
-    use super::{TEST_SELECTION_LOG, VerdictLog};
+    use super::{SELECTION_TRUNCATION_MARKER, TEST_SELECTION_LOG, VerdictLog};
     use crate::exec::{SelectionAttempt, SelectionResult, SelectionTier};
 
     fn attempt() -> SelectionAttempt {
@@ -164,11 +205,33 @@ mod tests {
             path: progress_path,
             selection_file,
             selection_path: selection_path.clone(),
+            selection_buffer: Vec::new(),
+            selection_bytes: 0,
+            selection_truncated: false,
         };
 
         log.record_selection(&attempt());
 
         let error = log.finish().expect_err("a read-only selection log should fail when flushed");
         assert!(error.to_string().contains(selection_path.as_str()));
+    }
+
+    #[test]
+    fn selection_retention_reserves_one_truncation_marker_at_the_limit() {
+        let directory = tempfile::tempdir().expect("temporary directory creation should succeed");
+        let scratch = Utf8Path::from_path(directory.path()).expect("temporary paths should be UTF-8");
+        let mut log = VerdictLog::default();
+        log.start(scratch).expect("campaign log creation should succeed");
+
+        let mut record = serde_json::to_vec(&attempt()).expect("selection attempt should serialize");
+        record.push(b'\n');
+        let limit = record.len() + SELECTION_TRUNCATION_MARKER.len();
+
+        log.record_selection_with_limit(&attempt(), limit);
+        log.record_selection_with_limit(&attempt(), limit);
+        log.record_selection_with_limit(&attempt(), limit);
+
+        let bytes = fs::read(scratch.join(TEST_SELECTION_LOG)).expect("selection log should be readable");
+        assert_eq!(bytes, [record.as_slice(), SELECTION_TRUNCATION_MARKER].concat());
     }
 }

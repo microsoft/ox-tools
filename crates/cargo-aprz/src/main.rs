@@ -621,7 +621,6 @@ static GLOBAL: MiMalloc = MiMalloc;
 pub struct RealHost;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Process-boundary glue (stdout/stderr handles, `std::process::exit`); nothing to assert on.
 impl Host for RealHost {
     fn output(&mut self) -> impl Write {
         stdout()
@@ -631,7 +630,6 @@ impl Host for RealHost {
         stderr()
     }
 
-    // #[gamma::skip(expr.decrement, expr.increment, fn_value.unit, parameter.default_shadow, stmt.delete_call, tag = "uncovered", reason = "process-exit glue is deliberately excluded from coverage and cannot be exercised in-process")]
     fn exit(&mut self, code: i32) {
         std::process::exit(code);
     }
@@ -639,8 +637,6 @@ impl Host for RealHost {
 
 #[tokio::main]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Entry point: thin wrapper, tested via integration tests on `run()`.
-// #[gamma::skip(fn_value.unit, tag = "uncovered", reason = "the binary entry point is deliberately excluded from coverage; command behavior is tested through cargo_aprz_lib::run")]
 async fn main() {
     run(&mut RealHost, std::env::args()).await;
 }

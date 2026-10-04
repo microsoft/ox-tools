@@ -159,6 +159,7 @@ pub(super) const fn binary_replacements(op: &BinOp) -> &'static [(&'static str, 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use syn::parse_quote;
 

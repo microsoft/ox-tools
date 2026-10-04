@@ -10,6 +10,7 @@
 //! they are slower than the rest of the suite, but they are the only coverage that proves the
 //! encoding in `schema.rs` actually compiles and that a verdict means what it claims.
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::{fs, thread};
@@ -73,9 +74,9 @@ mod tests {
 
 /// A crate whose only mutant cannot compile, so `suppress --eligible unviable` has something to write.
 ///
-/// A non-iterator method named `take` keeps the iterator-shaped replacement unviable.
+/// `iter.take_to_skip` replaces `.take(1)` with `.skip(1)`. `Value` intentionally defines `take`
+/// but not `skip`, keeping that replacement unviable.
 const UNVIABLE: &str = "
-#[derive(Debug)]
 pub struct Value;
 
 impl Value {
@@ -92,7 +93,7 @@ pub fn lookup() -> Value {
 mod tests {
     #[test]
     fn it_builds() {
-        assert_eq!(format!(\"{:?}\", super::lookup()), \"Value\");
+        assert!(matches!(super::lookup(), super::Value));
     }
 }
 ";
@@ -215,6 +216,91 @@ fn workspace(source: &str) -> TempDir {
 
     fs::create_dir_all(root.join("src")).expect("could not create src");
     fs::write(root.join("src/lib.rs"), source).expect("could not write the library");
+
+    dir
+}
+
+/// Builds two test binaries that declare the same resource through both supported attribute scopes.
+fn resource_workspace() -> TempDir {
+    let dir = workspace(
+        "
+pub fn accepts(value: u32) -> bool {
+    value >= 1
+}
+",
+    );
+    let root = dir.path();
+    let attrs = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("cargo-gamma-lib has a workspace parent")
+        .join("cargo-gamma-attrs")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dev-dependencies]\ngamma = {{ package = \"cargo-gamma-attrs\", path = \"{attrs}\" }}\n"
+        ),
+    )
+    .expect("could not write the resource fixture manifest");
+    fs::create_dir_all(root.join("tests")).expect("could not create resource fixture tests");
+
+    let support = r#"
+fn hold_resource(scope: &str, peer: &str) {
+    use std::fs::{self, OpenOptions};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let active = std::env::var("GAMMA_ACTIVE").unwrap_or_else(|_| "baseline".to_owned());
+    let ready = format!(".resource-ready-{scope}-{active}");
+    let peer_ready = format!(".resource-ready-{peer}-{active}");
+    fs::write(&ready, "").expect("could not publish resource readiness");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !std::path::Path::new(&peer_ready).exists() && Instant::now() < deadline {
+        thread::yield_now();
+    }
+
+    let ownership = OpenOptions::new().write(true).create_new(true).open(".resource-owner");
+    if ownership.is_err() {
+        fs::write(".resource-overlap", format!("{scope}:{active}")).expect("could not record overlap");
+        panic!("resource capacity one admitted overlapping test processes");
+    }
+    thread::sleep(Duration::from_millis(100));
+    fs::remove_file(".resource-owner").expect("could not release resource ownership");
+}
+"#;
+    fs::write(
+        root.join("tests/function.rs"),
+        format!(
+            r#"{support}
+#[gamma::resource("exclusive")]
+#[test]
+fn function_scoped_resource() {{
+    hold_resource("function", "module");
+    assert!(subject::accepts(1));
+}}
+"#
+        ),
+    )
+    .expect("could not write the function-scoped resource test");
+    fs::write(
+        root.join("tests/module.rs"),
+        format!(
+            r#"{support}
+#[gamma::resource("exclusive")]
+mod resource_tests {{
+    #[test]
+    fn module_scoped_resource() {{
+        super::hold_resource("module", "function");
+        assert!(subject::accepts(1));
+    }}
+}}
+"#
+        ),
+    )
+    .expect("could not write the module-scoped resource test");
 
     dir
 }
@@ -568,14 +654,11 @@ fn session_on(host: Sink, dir: &TempDir, args: &[&str]) -> (i32, String, String)
 
 fn session_on_with(mut host: Sink, dir: &TempDir, args: &[&str], whole_test_binaries: bool) -> (i32, String, String) {
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
-    let mut command = vec![
-        "cargo-gamma".to_owned(),
-        "gamma".to_owned(),
-        "run".to_owned(),
-        "--jobs".to_owned(),
-        "1".to_owned(),
-    ];
+    let mut command = vec!["cargo-gamma".to_owned(), "gamma".to_owned(), "run".to_owned()];
 
+    if !args.contains(&"--jobs") {
+        command.extend(["--jobs".to_owned(), "1".to_owned()]);
+    }
     command.extend(args.iter().map(|arg| (*arg).to_owned()));
     if whole_test_binaries && !args.contains(&"--whole-test-binaries") {
         command.push("--whole-test-binaries".to_owned());
@@ -861,7 +944,7 @@ fn a_red_baseline_is_reported_rather_than_measured() {
 
     assert!(!stale.exists(), "the new build retained an old failure record");
     assert!(failure.contains("nope"), "{failure}");
-    assert!(diagnostics.contains("\"schemaVersion\": \"3\""), "{diagnostics}");
+    assert!(diagnostics.contains("\"schemaVersion\": \"5\""), "{diagnostics}");
     for document in [&parsed, &failure_diagnostics] {
         assert!(
             document["population"]["mutants"].as_u64().is_some_and(|count| count > 1),
@@ -997,6 +1080,28 @@ fn the_config_file_is_honoured_by_a_real_run() {
 }
 
 #[test]
+fn resource_attributes_serialize_function_and_module_scopes_end_to_end() {
+    step_aside_if_nested!();
+    let dir = resource_workspace();
+    let (code, output) = session(
+        &dir,
+        &[
+            "--mutators",
+            "relational",
+            "--jobs",
+            "4",
+            "--resource-concurrency",
+            "exclusive=1",
+            "--minimum-test-timeout",
+            "5",
+        ],
+    );
+
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(!dir.path().join(".resource-overlap").exists(), "{output}");
+}
+
+#[test]
 fn a_misspelled_config_key_stops_the_run() {
     step_aside_if_nested!();
     let dir = workspace(SUBJECT);
@@ -1072,7 +1177,7 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
 }
 
 #[test]
-fn suppressing_a_dry_run_prints_a_diff_and_changes_nothing() {
+fn suppression_previews_a_diff_by_default_and_changes_nothing() {
     step_aside_if_nested!();
     let dir = workspace(UNVIABLE);
     let (campaign_code, campaign_output) = session(&dir, &["--mutators", "iter.take_to_skip"]);
@@ -1086,7 +1191,6 @@ fn suppressing_a_dry_run_prints_a_diff_and_changes_nothing() {
             "cargo-gamma".to_owned(),
             "gamma".to_owned(),
             "suppress".to_owned(),
-            "--dry-run-suppress".to_owned(),
             "--eligible".to_owned(),
             "unviable".to_owned(),
             "--dir".to_owned(),
@@ -1100,7 +1204,7 @@ fn suppressing_a_dry_run_prints_a_diff_and_changes_nothing() {
 
     let after = fs::read_to_string(dir.path().join("src/lib.rs")).expect("could not read the source");
 
-    assert_eq!(before, after, "a dry run must not touch the source");
+    assert_eq!(before, after, "a preview must not touch the source");
 }
 
 #[test]
@@ -1862,6 +1966,10 @@ fn turning_the_feature_on_brings_the_same_code_back_into_the_run() {
 
     assert_eq!(code, EXIT_OK, "{output}");
     assert!(!output.contains("not built"), "{output}");
+    assert!(
+        output.contains("src/extra.rs"),
+        "the enabled module produced no reported mutant: {output}"
+    );
 }
 
 /// A crate whose two functions are reached by one test each, plus a third that reaches neither.

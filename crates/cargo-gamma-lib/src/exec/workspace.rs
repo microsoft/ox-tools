@@ -238,7 +238,6 @@ impl Workspace {
     }
 
     /// Copies and instruments the tree while retaining locks taken before cache adoption.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn prepare_with_locks(
         source: &Utf8Path,
         target_directory: &Utf8Path,
@@ -389,7 +388,6 @@ impl Workspace {
     /// for the last component alone, so it cannot see a link among the *intermediate* ones; the copy
     /// recreates links verbatim, including absolute targets, so such a prefix is reachable. The
     /// physical path is therefore checked as well.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn overwrite(root: &Utf8Path, path: &Utf8Path, contents: &str) -> Result<bool> {
         let metadata = fs::symlink_metadata(path.as_std_path())
             .map_err(|cause| error!("could not write `{path}`, which the copy did not create").caused_by(cause))?;
@@ -485,7 +483,6 @@ impl Workspace {
         self.resources.capacities()
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn cargo(&self) -> Command {
         let mut command = Command::new(cargo_binary());
 
@@ -563,7 +560,6 @@ impl Workspace {
         self.base.join(".cargo-gamma-report-source")
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn snapshot_report_sources(&self, plan: &crate::discover::Plan) -> Result<()> {
         let root = self.report_source_root();
         match fs::symlink_metadata(root.as_std_path()) {
@@ -635,7 +631,6 @@ impl Workspace {
 
     /// Reconstructs the environment Cargo would give the test executables from the metadata and
     /// successful build stream that produced them.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn arm_test_environment(&mut self, binaries: &[TestBinary], artifacts: &str) -> Result<()> {
         self.prepend_test_search_paths(binaries);
         let metadata = self.capture_cargo_metadata()?;
@@ -652,7 +647,6 @@ impl Workspace {
     }
 
     /// Adds the profile and dependency directories Cargo prepends when it runs a test binary.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepend_test_search_paths(&mut self, binaries: &[TestBinary]) {
         debug_assert!(
             self.launch.get().is_none(),
@@ -738,7 +732,6 @@ impl Workspace {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn write_scratch(&self, name: &str, contents: &str) -> Result<Utf8PathBuf> {
         let path = self.target.join(name);
 
@@ -830,7 +823,6 @@ impl Workspace {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn rustc_capture_directory(root: &Utf8Path, target: &Utf8Path) -> Option<Utf8PathBuf> {
     wrapper_path()?;
     let cfg::RustcWrapperChain::Interpose(_) = cfg::rustc_wrapper_chain(root) else {
@@ -840,7 +832,6 @@ fn rustc_capture_directory(root: &Utf8Path, target: &Utf8Path) -> Option<Utf8Pat
     Some(target.join(".cargo-gamma-rustc"))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bool {
     let candidate = std::path::Path::new(candidate);
 
@@ -865,7 +856,6 @@ fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bo
         .is_some_and(|(candidate, wrapper)| candidate == wrapper)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn executable_names_equal(left: &str, right: &str) -> bool {
     if cfg!(windows) {
         left.eq_ignore_ascii_case(right)
@@ -1008,7 +998,6 @@ pub(crate) fn campaign_base_from_state(root: &Utf8Path, cache: Option<&Utf8Path>
 }
 
 /// Resolves the workspace root and persisted campaign base for a state-consuming command.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn campaign_state_from(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
     let selected = physical(selected);
 
@@ -1068,7 +1057,6 @@ fn validate_campaign_state_owner(root: &Utf8Path, base: &Utf8Path) -> Result<()>
 /// locator under that lock. The second resolution therefore observes either the completed
 /// campaign's locator or the same state as the first resolution, never the stale locator that led
 /// this command to the lock.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
     let (root, _base) = campaign_state_from(selected, cache)?;
     let lock = claim_workspace(&root)?;
@@ -1083,7 +1071,6 @@ pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>
     Ok((root, base, lock))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn cache_owner_root(base: &Utf8Path) -> Option<Utf8PathBuf> {
     let base_metadata = fs::symlink_metadata(base.as_std_path()).ok()?;
     if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
@@ -1145,7 +1132,6 @@ fn metadata_workspace(selected: &Utf8Path) -> Option<(Utf8PathBuf, Utf8PathBuf)>
 ///
 /// Returns whether the locator was published. Postprocessing advice depends on this: a campaign
 /// record that exists but cannot be found by the advised command is not actionable.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn remember_campaign_base(root: &Utf8Path, base: &Utf8Path) -> bool {
     let root = physical(root);
     if !cache_owner_root(base).is_some_and(|owner| same_existing_path(&owner, &root)) {
@@ -1162,7 +1148,6 @@ pub(crate) fn remember_campaign_base(root: &Utf8Path, base: &Utf8Path) -> bool {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_campaign_base(root: &Utf8Path, target: &Utf8Path) -> Utf8PathBuf {
     #[cfg(any(test, feature = "internals"))]
     if crate::testing::cache_home(root).is_some() {
@@ -1177,7 +1162,6 @@ fn default_campaign_base(root: &Utf8Path, target: &Utf8Path) -> Utf8PathBuf {
 }
 
 /// The directory every default per-workspace cache is a child of.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_cache_home(root: &Utf8Path) -> Utf8PathBuf {
     #[cfg(any(test, feature = "internals"))]
     if let Some(home) = crate::testing::cache_home(root) {
@@ -1266,7 +1250,6 @@ fn digest_workspace_path(root: &Utf8Path) -> String {
 ///
 /// Only the workspace's own cache is cleaned. A cache redirected elsewhere with `--cache-dir` is
 /// not reachable from the workspace root alone and is the caller's to remove.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn clean_cache(root: &Utf8Path, target: &Utf8Path) -> Result<bool> {
     let scratch = gamma_base(root, None);
     let campaign = campaign_base(root, target, None);
@@ -1336,7 +1319,6 @@ fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
 ///
 /// Purely textual, so it never touches the filesystem and never fails: the paths it is given are
 /// scratch directories that do not exist yet, which is exactly when canonicalising cannot answer.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     let rooted = if path.is_absolute() {
@@ -1379,7 +1361,6 @@ pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
 /// enough to answer the only question asked of it: where the path physically lands. A path that
 /// cannot be resolved at all is returned as written, because being unable to answer must not fail
 /// a run that would otherwise have been fine.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn physical(path: &Utf8Path) -> Utf8PathBuf {
     let mut existing = path.to_owned();
     let mut tail: Vec<String> = Vec::new();
@@ -1422,7 +1403,6 @@ fn physical(path: &Utf8Path) -> Utf8PathBuf {
 /// Both are decided on the physical paths, because that is what the copy walks, and refused up
 /// front rather than allowed to proceed: the alternative is a tree that contains a copy of itself,
 /// growing until the disk does, and every mutant measured in it measured in the wrong file.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ensure_copy_terminates(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
     let (real_source, real_base) = (physical(source), physical(base));
 
@@ -1501,14 +1481,13 @@ fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
         "`--cache-dir` would relocate the cached workspace to `{scratch}`, where build scripts cannot see VCS metadata available from `{source}`: {}. \
          Use a cache directory beneath the same repository, or leave `--cache-dir` unset and set \
          `CARGO_TARGET_DIR` (or Cargo's `build.target-dir`) to move only compiler artifacts while \
-         preserving the synchronized workspace's Git context.",
+         preserving the synchronized workspace's version-control context.",
         hidden.iter().map(|marker| marker.as_str()).collect::<Vec<_>>().join(", ")
     )
     .usage())
 }
 
 /// Makes source-control metadata visible from an isolated default scratch tree.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn expose_vcs_metadata(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
     let markers = visible_vcs_metadata(source);
 
@@ -1600,7 +1579,6 @@ pub fn scratch_tree(root: &Utf8Path, scratch: Option<&Utf8Path>) -> Utf8PathBuf 
 /// The caller has already taken the stable workspace lock. This second lock protects the inverse
 /// collision: different workspaces naming the same redirected cache. Ownership is established only
 /// for an empty directory; existing unmarked contents are never adopted as cargo-gamma state.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
     if base.exists() {
         reject_linked_cache(base)?;
@@ -1700,7 +1678,6 @@ fn reject_linked_cache(base: &Utf8Path) -> Result<()> {
 /// can write to their own cache can still change it under a run they started themselves, and no
 /// check here would be about a trust boundary.
 #[cfg(unix)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
     /// The bits that let a group member or anyone else write to a directory.
     const SHARED_WRITE: u32 = 0o022;
@@ -1762,7 +1739,6 @@ fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
 /// does not depend on identity.
 #[cfg(not(unix))]
 #[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature this stands in for")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn reject_foreign_writers(_base: &Utf8Path) -> Result<()> {
     Ok(())
 }
@@ -1795,7 +1771,6 @@ impl CacheKind {
 /// The marker is opened once and both inspected and read through that one handle, so the file whose
 /// type is checked is the file whose contents decide the answer. Reopening it by name between the
 /// two would leave an interval in which the checked file could be replaced by another.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> Result<()> {
     let owner = base.join(CACHE_OWNER);
     let source = physical(source);
@@ -1877,7 +1852,6 @@ fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> 
 }
 
 #[cfg(unix)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
     // O_NOFOLLOW rejects a final-component symlink at open time. O_NONBLOCK prevents a planted
     // special file such as a FIFO from blocking before handle metadata can reject it.
@@ -1888,7 +1862,6 @@ fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
     let metadata = fs::symlink_metadata(owner.as_std_path())?;
 
@@ -2011,7 +1984,6 @@ fn claim_workspace_at(root: &Utf8Path, base: &Utf8Path) -> Result<File> {
 /// expression at a time, so removing the namespace or identity join from the derivation leaves
 /// this structural check intact and turns the mutant into a refusal rather than a write to the
 /// platform cache home.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_default_cache_base(root: &Utf8Path, base: &Utf8Path) -> Result<()> {
     let root = absolute(root);
     let expected_identity = workspace_identity(&root);
@@ -2038,7 +2010,6 @@ fn validate_default_cache_base(root: &Utf8Path, base: &Utf8Path) -> Result<()> {
 }
 
 /// Refuses a malformed target-resident campaign base before it can be claimed or cleaned.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_default_campaign_base(root: &Utf8Path, target: &Utf8Path, base: &Utf8Path) -> Result<()> {
     let root = absolute(root);
 
@@ -2149,7 +2120,6 @@ fn try_lock(file: &File) -> core::result::Result<(), TryLockError> {
 ///
 /// Every manifest is visited, not just the ones belonging to mutated packages: a package nobody
 /// mutates is still built, and a path dependency it cannot resolve fails the build just as surely.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> Result<()> {
     // Read before any manifest in the tree is edited: `root` is the copy of the whole workspace
     // `source` names, so its own `Cargo.toml` carries whatever `[workspace.dependencies]`
@@ -2209,7 +2179,6 @@ fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> R
 /// Missing any of this is not a warning: with `-D warnings` ambient the instrumented tree compiles
 /// under deny-by-default, guard-induced warnings become errors, and the mutants that produced them
 /// are withdrawn as unviable — a score computed over a silently smaller denominator.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn cap_ambient_rustflags(command: &mut Command) {
     // The encoded spelling separates flags with a unit separator rather than a space, which is the
     // whole reason it exists: a flag may contain spaces.
@@ -2283,6 +2252,7 @@ fn vendor_runtime(at: &Utf8Path) -> Result<()> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
@@ -2722,13 +2692,19 @@ mod tests {
         );
     }
 
-    fn initialize_git_build_fixture(source: &Utf8Path) -> String {
+    fn initialize_git_build_fixture(source: &Utf8Path, target: &Utf8Path) -> String {
         fs::create_dir_all(source.join("src")).expect("source");
+        fs::create_dir_all(source.join(".cargo")).expect("Cargo configuration");
         fs::write(
             source.join("Cargo.toml"),
-            "[package]\nname = \"git-context\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
+            "[package]\nname = \"g\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
         )
         .expect("manifest");
+        fs::write(
+            source.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
+        )
+        .expect("target-directory configuration");
         fs::write(source.join("src/lib.rs"), "pub fn present() {}\n").expect("library");
         fs::write(
             source.join("build.rs"),
@@ -2773,46 +2749,55 @@ mod tests {
             .to_owned()
     }
 
-    fn assert_external_target_preserves_git_context(source: &Utf8Path, root: &Utf8Path, expected_head: &str) {
-        let scratch = root.join("scratch");
-        let target = root.join("external-target");
-        fs::create_dir_all(scratch.join("src")).expect("scratch");
-        fs::copy(source.join("Cargo.toml"), scratch.join("Cargo.toml")).expect("manifest copy");
-        fs::copy(source.join("build.rs"), scratch.join("build.rs")).expect("build script copy");
-        fs::copy(source.join("src/lib.rs"), scratch.join("src/lib.rs")).expect("library copy");
-        expose_vcs_metadata(source, &scratch).expect("Git context");
+    fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {
+        let survey = crate::discover::Survey::for_build(
+            &crate::commands::SelectArgs {
+                dir: source.to_owned(),
+                ..crate::commands::SelectArgs::default()
+            },
+            None,
+            &crate::exec::CargoOptions::default(),
+        )
+        .expect("Cargo metadata resolves the configured external target");
+        assert_eq!(survey.target, target);
 
-        let output = Workspace::adopt(scratch.clone(), target.clone())
-            .cargo()
-            .arg("build")
-            .arg("--quiet")
-            .output()
-            .expect("cargo runs");
+        let mut events = crate::testing::Recorder::default();
+        let work = Workspace::prepare(&survey.root, &survey.target, &Config::default(), &mut events)
+            .expect("the production preparation path supports an external Cargo target");
+
+        let output = work.cargo().arg("build").arg("--quiet").output().expect("cargo runs");
 
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(
-            fs::read_to_string(scratch.join("observed-head"))
+            fs::read_to_string(work.root.join("observed-head"))
                 .expect("the build script recorded the selected commit")
                 .trim(),
             expected_head
         );
-        assert!(target.join("debug").is_dir(), "Cargo artifacts must use the external target");
         assert!(
-            !scratch.join("target").exists(),
+            fs::read_dir(work.target.as_std_path())
+                .expect("campaign target directory")
+                .next()
+                .is_some(),
+            "Cargo artifacts must be created beneath the campaign cache rooted at the external target"
+        );
+        assert!(
+            !work.root.join("target").exists(),
             "the synchronized workspace must not gain a local target"
         );
     }
 
     #[test]
     fn an_external_target_preserves_git_context_for_a_checkout_and_linked_worktree() {
-        let directory = crate::testing::workdir("workspace-external-target-git-");
+        let directory = crate::testing::workdir("git-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
-        let repository = root.join("repository");
-        let expected_head = initialize_git_build_fixture(&repository);
+        let repository = root.join("r");
+        let target = root.join("t");
+        let expected_head = initialize_git_build_fixture(&repository, &target);
 
-        assert_external_target_preserves_git_context(&repository, &root.join("ordinary"), &expected_head);
+        assert_external_target_preserves_git_context(&repository, &target, &expected_head);
 
-        let worktree = root.join("linked-worktree");
+        let worktree = root.join("w");
         let output = Command::new("git")
             .arg("-C")
             .arg(&repository)
@@ -2822,7 +2807,7 @@ mod tests {
             .output()
             .expect("git worktree runs");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_external_target_preserves_git_context(&worktree, &root.join("linked"), &expected_head);
+        assert_external_target_preserves_git_context(&worktree, &target, &expected_head);
     }
 
     #[test]

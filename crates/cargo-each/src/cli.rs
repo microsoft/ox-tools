@@ -232,6 +232,8 @@ mod tests {
 
     #[test]
     fn rejects_zero_malformed_and_overflowing_durations() {
+        let parse_overflow = format!("{}s", u128::from(u64::MAX) + 1);
+        let multiplication_overflow = format!("{}m", u64::MAX);
         for (value, expected) in [
             ("0s", "duration must be greater than zero"),
             ("1", "expected a positive integer followed by `ms`, `s`, or `m`"),
@@ -239,11 +241,8 @@ mod tests {
             ("-1s", "expected a positive integer followed by `ms`, `s`, or `m`"),
             ("1.5s", "expected a positive integer followed by `ms`, `s`, or `m`"),
             ("ms", "expected a positive integer followed by `ms`, `s`, or `m`"),
-            (
-                "18446744073709551616s",
-                "duration is too large: number too large to fit in target type",
-            ),
-            ("18446744073709551615m", "duration is too large"),
+            (&parse_overflow, "duration is too large: number too large to fit in target type"),
+            (&multiplication_overflow, "duration is too large"),
         ] {
             assert_eq!(parse_duration(value).expect_err(value), expected, "{value}");
         }

@@ -688,6 +688,8 @@ impl RecordPreparation {
 }
 
 fn incremental_enabled(args: &RunArgs) -> bool {
+    // Exact-mutant reruns intentionally bypass cached outcomes. Their requested IDs must resolve
+    // to current pending, runnable mutants; stale, suppressed, unknown, or filtered IDs fail.
     !args.dry_run && args.mutants.is_empty() && args.incremental.unwrap_or(exec::IncrementalMode::Build).is_enabled()
 }
 
@@ -730,6 +732,26 @@ fn store_completed_record(
     Ok(postprocessing_advice(&plan.root, &stored, reachable))
 }
 
+fn store_incomplete_convergence(prepared: &RecordPreparation, plan: &Plan) -> crate::Result<()> {
+    let Some(record) =
+        crate::discover::RunRecord::from_completed_plan_snapshot(plan, &prepared.context, prepared.inputs.clone(), &prepared.killers)
+    else {
+        return Err(crate::error::error!(
+            "could not construct incomplete compiler learning from the captured source generation"
+        ));
+    };
+
+    let _stored = record.store_incomplete_convergence(&prepared.base)?;
+    Ok(())
+}
+
+fn store_failed_convergence(prepared: Option<&RecordPreparation>, failed: &exec::FailedMeasurement) -> crate::Result<()> {
+    if let (Some(prepared), Some(plan)) = (prepared, failed.plan.as_ref()) {
+        store_incomplete_convergence(prepared, plan)?;
+    }
+    Ok(())
+}
+
 fn postprocessing_advice(root: &Utf8Path, stored: &crate::discover::RunRecord, reachable: bool) -> (bool, bool) {
     if !reachable {
         return (false, false);
@@ -743,21 +765,11 @@ fn postprocessing_advice(root: &Utf8Path, stored: &crate::discover::RunRecord, r
     (crate::discover::Hints::record_promotion_is_useful(root, stored), suppressible)
 }
 
-fn requested_mutants(values: &[String]) -> crate::Result<crate::HashSet<crate::model::MutantId>> {
+fn requested_mutants(values: &[String]) -> crate::Result<crate::HashSet<super::CanonicalMutantId>> {
     let mut requested = crate::HashSet::default();
 
     for value in values {
-        if value.len() != crate::model::MUTANT_ID_HEX_LEN
-            || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(error!(
-                "`--mutant {value}` is not a current mutant ID; expected {} lowercase hexadecimal characters",
-                crate::model::MUTANT_ID_HEX_LEN
-            )
-            .usage());
-        }
-
-        let id = crate::model::MutantId::new(value);
+        let id = super::CanonicalMutantId::parse(value).map_err(|cause| error!("`--mutant {}`", cause).usage())?;
         if !requested.insert(id) {
             return Err(error!("mutant ID `{value}` was requested more than once").usage());
         }
@@ -846,7 +858,8 @@ fn adopt(
     // would answer a question nobody asked.
     let (recorded, declined, moved) = match context {
         Some(context) if !args.dry_run => {
-            let record = crate::discover::RunRecord::load(base);
+            let completed = crate::discover::RunRecord::load(base);
+            let incomplete = crate::discover::RunRecord::load_incomplete(base);
 
             // Asked before the record is consumed, because what it costs the run is decided here
             // and reported nowhere else. A record whose unviability is refused still holds a build
@@ -859,19 +872,30 @@ fn adopt(
             // command line's unresolved digest would answer "nothing moved" for precisely the
             // configuration terms — the target and the `.cargo/config.toml` body — that a reader
             // has no other way to find.
-            let moved = if record.holds_unviability() {
-                record.context().differences(&context.resolved_at(&survey.root))
-            } else {
-                Vec::new()
-            };
+            let resolved = context.resolved_at(&survey.root);
+            let mut settled = crate::HashMap::default();
+            let mut declined = 0usize;
+            let mut moved = Vec::new();
 
-            let (settled, declined) = record.settled_against(
-                &survey.root,
-                crate::discover::Trust::Free,
-                &crate::discover::Killers::default(),
-                context,
-                inputs,
-            );
+            for record in [&completed, &incomplete] {
+                if record.holds_unviability() {
+                    for term in record.context().differences(&resolved) {
+                        if !moved.contains(&term) {
+                            moved.push(term);
+                        }
+                    }
+                }
+
+                let (recorded, record_declined) = record.settled_against(
+                    &survey.root,
+                    crate::discover::Trust::Free,
+                    &crate::discover::Killers::default(),
+                    context,
+                    inputs,
+                );
+                settled.extend(recorded);
+                declined = declined.saturating_add(record_declined);
+            }
 
             (settled, declined, moved)
         }
@@ -906,7 +930,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let visible = progress_when.resolve(host.is_terminal());
     let mut progress = Progress::new(visible, styler, host.terminal_width());
 
-    progress.status(host, "Analyzing", "the workspace");
+    progress.begin(host, "Analyzing", "Analyzed", "the workspace");
 
     // Settled before discovery rather than just before the run, because discovery evaluates
     // `#[cfg(...)]` against the build these options describe. Resolving it once and handing the
@@ -916,11 +940,19 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let config = run_config(args, styler);
     let observed_context = incremental_enabled(args).then(|| cache_context(args)).flatten();
     let contexts = postprocessing_contexts(args, observed_context);
-    let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, incremental_enabled(args))?;
+    let requested = (!args.mutants.is_empty()).then(|| requested_mutants(&args.mutants)).transpose()?;
+    let mut survey =
+        match crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, incremental_enabled(args)) {
+            Ok(survey) => survey,
+            Err(failure) => {
+                progress.abandon(host);
+                return Err(failure);
+            }
+        };
+    progress.complete(host, "the workspace");
 
-    if !args.mutants.is_empty() {
-        let requested = requested_mutants(&args.mutants)?;
-        survey.retain_only(requested.clone());
+    if let Some(requested) = requested {
+        survey.retain_only(requested.iter().cloned().map(super::CanonicalMutantId::into_inner).collect());
 
         let mut ordinals = 0;
         let scanned = survey.scan(None, &selection, &mut ordinals)?;
@@ -932,8 +964,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
             .collect();
         let mut missing: Vec<&str> = requested
             .iter()
-            .filter(|id| !found.contains(*id))
-            .map(crate::model::MutantId::as_str)
+            .filter(|id| !found.contains(id.as_inner()))
+            .map(super::CanonicalMutantId::as_str)
             .collect();
         missing.sort_unstable();
 
@@ -947,9 +979,14 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
             .usage());
         }
 
+        let purpose = if args.dry_run {
+            "for a selection preview"
+        } else {
+            "for a fresh verdict"
+        };
         writeln!(
             host.error(),
-            "{} {} for a fresh verdict",
+            "{} {} {purpose}",
             styler.verb("Selected"),
             quantity(requested.len(), "explicit mutant")
         )?;
@@ -1032,6 +1069,10 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     // that sentence.
     if outcome.is_err() {
         events.abandon();
+
+        if let Err(failure) = store_failed_convergence(record.as_ref(), &failed) {
+            crate::notes::note(format!("incomplete compiler learning was not saved: {failure}"));
+        }
     }
 
     let log_result = events.finish_verdict_log();
@@ -1517,7 +1558,60 @@ fn advice_markdown(args: &RunArgs, plan: &Plan, session: &exec::Session, wall: D
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod miri_tests {
+    use super::*;
+
+    #[test]
+    fn exact_mutant_ids_are_validated_and_deduplicated() {
+        let selected = requested_mutants(&["deadbeefcafe".to_owned(), "0123456789ab".to_owned()]).expect("valid IDs");
+
+        assert_eq!(selected.len(), 2);
+        let _ = requested_mutants(&["DEADBEEFCAFE".to_owned()]).expect_err("uppercase is not canonical");
+        let _ = requested_mutants(&["short".to_owned()]).expect_err("short IDs are invalid");
+        let _ = requested_mutants(&["deadbeefcafe".to_owned(), "deadbeefcafe".to_owned()]).expect_err("duplicate IDs are ambiguous");
+    }
+
+    #[test]
+    fn exact_mutant_selection_disables_cached_verdict_adoption() {
+        let mut args = RunArgs::default();
+
+        assert!(incremental_enabled(&args));
+        args.mutants.push("deadbeefcafe".to_owned());
+        assert!(!incremental_enabled(&args));
+    }
+
+    #[test]
+    fn flaky_gate_is_independent_of_the_score_gate() {
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+
+        assert_eq!(flaky_excess(&args, 1), Some(0));
+        assert_eq!(flaky_excess(&args, 0), None);
+
+        args.max_flaky = Some(2);
+        assert_eq!(flaky_excess(&args, 2), None);
+        assert_eq!(flaky_excess(&args, 3), Some(2));
+    }
+
+    #[test]
+    fn a_flaky_only_gate_requires_a_complete_population() {
+        let args = RunArgs {
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+
+        assert!(pending_fails_gate(&args, 1));
+        assert!(!pending_fails_gate(&args, 0));
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::cli::MeasureArgs;
     use super::*;
@@ -1565,52 +1659,6 @@ mod tests {
         fn terminal_width(&self) -> Option<u16> {
             None
         }
-    }
-
-    #[test]
-    fn exact_mutant_ids_are_validated_and_deduplicated() {
-        let selected = requested_mutants(&["deadbeefcafe".to_owned(), "0123456789ab".to_owned()]).expect("valid IDs");
-
-        assert_eq!(selected.len(), 2);
-        let _ = requested_mutants(&["DEADBEEFCAFE".to_owned()]).expect_err("uppercase is not canonical");
-        let _ = requested_mutants(&["short".to_owned()]).expect_err("short IDs are invalid");
-        let _ = requested_mutants(&["deadbeefcafe".to_owned(), "deadbeefcafe".to_owned()]).expect_err("duplicate IDs are ambiguous");
-    }
-
-    #[test]
-    fn exact_mutant_selection_disables_cached_verdict_adoption() {
-        let mut args = RunArgs::default();
-
-        assert!(incremental_enabled(&args));
-        args.mutants.push("deadbeefcafe".to_owned());
-        assert!(!incremental_enabled(&args));
-    }
-
-    #[test]
-    fn flaky_gate_is_independent_of_the_score_gate() {
-        let mut args = RunArgs {
-            min_score: Some(100.0),
-            max_flaky: Some(0),
-            ..RunArgs::default()
-        };
-
-        assert_eq!(flaky_excess(&args, 1), Some(0));
-        assert_eq!(flaky_excess(&args, 0), None);
-
-        args.max_flaky = Some(2);
-        assert_eq!(flaky_excess(&args, 2), None);
-        assert_eq!(flaky_excess(&args, 3), Some(2));
-    }
-
-    #[test]
-    fn a_flaky_only_gate_requires_a_complete_population() {
-        let args = RunArgs {
-            max_flaky: Some(0),
-            ..RunArgs::default()
-        };
-
-        assert!(pending_fails_gate(&args, 1));
-        assert!(!pending_fails_gate(&args, 0));
     }
 
     #[test]
@@ -1687,6 +1735,35 @@ mod tests {
         assert!(promotable, "newly learned probes remain promotable");
         assert_eq!(stored.outcomes().len(), plan.mutants.len());
         assert_eq!(stored.probes().get(&plan.mutants[0].id), Some(&killer));
+    }
+
+    #[test]
+    fn post_convergence_failure_publishes_run_level_compiler_learning() {
+        let (mut plan, _directory) = private_plan();
+        plan.mutants[0].outcome = Outcome::CompileError;
+        plan.mutants[0].note = Some("E0308: mismatched types".to_owned());
+        let base = plan.root.join("target/campaign-state");
+        fs::create_dir_all(&base).expect("campaign base");
+        let prepared = RecordPreparation {
+            inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
+            base: base.clone(),
+            context: crate::discover::record_context(&crate::discover::RecordContext {
+                toolchain: Some("test"),
+                ..crate::discover::RecordContext::default()
+            })
+            .expect("record context"),
+            killers: crate::discover::Killers::default(),
+        };
+        let failed = exec::FailedMeasurement {
+            plan: Some(plan),
+            ..exec::FailedMeasurement::default()
+        };
+
+        store_failed_convergence(Some(&prepared), &failed).expect("failed campaign learning");
+
+        let stored = crate::discover::RunRecord::load_incomplete(&base);
+        assert_eq!(stored.outcomes().len(), 1);
+        assert_eq!(stored.ordering().len(), 1);
     }
 
     #[test]
@@ -1854,6 +1931,27 @@ mod tests {
         );
 
         assert!(host.err().contains("Analyzing the workspace"), "{}", host.err());
+    }
+
+    #[test]
+    fn analysis_progress_completes_after_discovery() {
+        let dir = workdir("run-analysis-complete-");
+        let root = subject_root(&dir);
+        fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
+        let args = RunArgs {
+            select: crate::commands::SelectArgs {
+                dir: root,
+                ..crate::commands::SelectArgs::default()
+            },
+            dry_run: true,
+            ..RunArgs::default()
+        };
+        let mut host = Sink::default();
+
+        measured(&mut host, &args, When::Always, Styler::new(false)).expect("workspace discovery");
+
+        assert!(host.err().contains("Analyzing the workspace"), "{}", host.err());
+        assert!(host.err().contains("Analyzed the workspace"), "{}", host.err());
     }
 
     #[test]
@@ -2509,7 +2607,7 @@ mod tests {
 
         assert!(!args.diag, "the prose dump was not asked for and must not be the trigger");
         assert!(!err.contains("── diag ─"), "{err}");
-        assert_eq!(parsed["schemaVersion"], "3");
+        assert_eq!(parsed["schemaVersion"], "5");
         assert!(parsed["run"]["wallMs"].is_number(), "{text}");
 
         // The phase profile is what makes the census's cost and its sweep dividend readable from one
@@ -2570,8 +2668,8 @@ mod tests {
 
         assert!(first_baseline.contains("assertion failed"), "{first_baseline}");
         assert!(second_baseline.contains("time budget exceeded"), "{second_baseline}");
-        assert!(first_diagnostics.contains("\"schemaVersion\": \"3\""), "{first_diagnostics}");
-        assert!(second_diagnostics.contains("\"schemaVersion\": \"3\""), "{second_diagnostics}");
+        assert!(first_diagnostics.contains("\"schemaVersion\": \"5\""), "{first_diagnostics}");
+        assert!(second_diagnostics.contains("\"schemaVersion\": \"5\""), "{second_diagnostics}");
         assert_eq!(
             failure.to_string(),
             format!(

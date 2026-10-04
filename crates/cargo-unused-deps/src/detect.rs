@@ -407,6 +407,9 @@ pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>, decla
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
+    use std::slice::from_ref;
+
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -479,7 +482,7 @@ shadowed = []
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
     fn inheritance_retains_every_exact_manifest_input() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir().expect("temporary directory");
         let first = directory.path().join("first.toml");
         let second = directory.path().join("second.toml");
         let first_text = "[dependencies]\nserde = { workspace = true }\n";
@@ -522,9 +525,9 @@ shadowed = []
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
     fn inheritance_returns_read_and_parse_errors_instead_of_panicking() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir().expect("temporary directory");
         let missing = directory.path().join("missing.toml");
-        let read_error = inherited(std::slice::from_ref(&missing)).err().expect("missing manifest must fail");
+        let read_error = inherited(from_ref(&missing)).err().expect("missing manifest must fail");
         assert!(
             read_error.to_string().contains(&format!("failed to read {}", missing.display())),
             "unexpected error: {read_error}"
@@ -532,9 +535,7 @@ shadowed = []
 
         let malformed = directory.path().join("malformed.toml");
         fs::write(&malformed, "[package").expect("malformed manifest");
-        let parse_error = inherited(std::slice::from_ref(&malformed))
-            .err()
-            .expect("malformed manifest must fail");
+        let parse_error = inherited(from_ref(&malformed)).err().expect("malformed manifest must fail");
         assert!(
             parse_error
                 .to_string()

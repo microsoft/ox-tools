@@ -301,7 +301,11 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = "$($env:FAKE_NON_MEMBER_PACKAGE_NAME) 0.1.0"
             manifest_path = [System.IO.Path]::Combine($root, 'external', 'Cargo.toml')
-            targets = @([pscustomobject]@{ name = $env:FAKE_NON_MEMBER_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_NON_MEMBER_PACKAGE_NAME
+                kind = @('lib')
+                doctest = -not [bool]$env:FAKE_NON_MEMBER_DOCTEST_FALSE
+            })
             metadata = [pscustomobject]@{}
         }
     }
@@ -437,6 +441,26 @@ fn write(path: &Path, contents: &str) {
 /// must plant the include file the recipe consumes.
 fn seed_include(root: &Path, tier: &str, spec: &str) {
     write(&root.join(format!("target/anvil/impact/include_{tier}.txt")), spec);
+}
+
+fn seed_doctest_packages(root: &Path, specs: &[&str]) {
+    write(&root.join("target/anvil/impact/doctest_packages.txt"), &specs.join("\n"));
+}
+
+fn assert_exact_doc_test_commands(commands: &str, package_args: &str) {
+    let actual = commands
+        .lines()
+        .filter(|line| line.contains("test --doc"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        format!("test --doc {package_args} --all-features --locked"),
+        format!("test --doc {package_args} --locked"),
+    ];
+    assert_eq!(
+        actual,
+        expected.iter().map(String::as_str).collect(),
+        "doctest commands must be exactly the locked all-features/default-features pair:\n{commands}"
+    );
 }
 
 fn tools_available() -> bool {
@@ -605,10 +629,18 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
 }
 
 fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
+    run_just_with_real_cargo_env(root, arguments, &[])
+}
+
+fn run_just_with_real_cargo_env(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
     let _powershell = powershell_process_lock();
     let mut command = Command::new("just");
     command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
     command.env_remove("ANVIL_IMPACT");
+    command.env_remove("ANVIL_IMPACT_INPUT_DIR");
+    for &(key, value) in environment {
+        command.env(key, value);
+    }
     command.output().expect("just is required to verify generated recipe behavior")
 }
 
@@ -1509,6 +1541,13 @@ fn impact_format_resolves_directory_aliases_and_fails_hard() {
         "unknown package should be diagnosed directly:\n{}",
         String::from_utf8_lossy(&unknown.stderr)
     );
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .all(|line| line == "metadata --locked --no-deps --format-version 1"),
+        "impact metadata discovery must always be locked"
+    );
 
     write(
         &tmp.path().join("impact.json"),
@@ -1550,10 +1589,6 @@ fn impact_format_resolves_directory_aliases_and_fails_hard() {
         String::from_utf8_lossy(&ambiguous_alias.stderr)
     );
 
-    write(
-        &tmp.path().join("impact.json"),
-        r#"{"Modified":[],"Affected":["workspace-leaf"],"Required":[]}"#,
-    );
     let cross_namespace_alias = run_just(
         tmp.path(),
         &["_anvil-impact-format", "affected", "impact.json"],
@@ -1915,6 +1950,13 @@ fn metadata_consuming_checks_fail_when_discovery_fails() {
         seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
         let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))]);
         assert_failed(&output, &format!("{recipe} cargo metadata failure"));
+        if recipe == "anvil-doc-test" {
+            assert_eq!(
+                output.status.code(),
+                Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()),
+                "doc-test capability discovery must preserve Cargo metadata's exact failure status"
+            );
+        }
 
         let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
@@ -2238,20 +2280,11 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
         "affected",
         "--package Foo@0.1.0 --package foo@0.1.0 --package macro-package@0.1.0",
     );
+    seed_doctest_packages(tmp.path(), &["Foo@0.1.0", "macro-package@0.1.0"]);
     let output = run_just(
         tmp.path(),
         &["anvil-doc-test"],
-        &[
-            ("ANVIL_IMPACT", OsStr::new("consume")),
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
-            ("FAKE_FIRST_RLIB", OsStr::new("1")),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("foo")),
-            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
-            ("FAKE_SECOND_DOCTEST_FALSE", OsStr::new("1")),
-            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
-            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
-        ],
+        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert!(
         output.status.success(),
@@ -2260,41 +2293,27 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    let doc_commands = commands.lines().filter(|line| line.contains("test --doc")).collect::<Vec<_>>();
-    assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
-    for command in doc_commands {
-        assert!(
-            command.contains("--package Foo@0.1.0"),
-            "an explicit doctest-capable case-distinct crate was dropped:\n{command}"
-        );
-        assert!(
-            command.contains("--package macro-package@0.1.0"),
-            "a proc-macro doctest package was dropped:\n{command}"
-        );
-        assert!(
-            !command.contains("--package foo@0.1.0"),
-            "a case-distinct bin-only package reached cargo test --doc:\n{command}"
-        );
-    }
+    assert_exact_doc_test_commands(&commands, "--package Foo@0.1.0 --package macro-package@0.1.0");
+    assert_eq!(
+        commands.lines().count(),
+        2,
+        "a consumed impact projection must launch only the two doctest Cargo children and no metadata process:\n{commands}"
+    );
 
     fs::remove_file(&log).unwrap();
     seed_include(tmp.path(), "affected", "--package foo@0.1.0");
+    seed_doctest_packages(tmp.path(), &[]);
     let bin_only = run_just(
         tmp.path(),
         &["anvil-doc-test"],
-        &[
-            ("ANVIL_IMPACT", OsStr::new("consume")),
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PACKAGE_NAME", OsStr::new("foo")),
-            ("FAKE_FIRST_DOCTEST_FALSE", OsStr::new("1")),
-        ],
+        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert!(bin_only.status.success(), "bin-only selection must skip cleanly");
     assert!(
         String::from_utf8_lossy(&bin_only.stdout).contains("no affected doctest-capable packages"),
         "bin-only skip must explain why no doctests ran"
     );
-    let bin_only_commands = fs::read_to_string(log).unwrap();
+    let bin_only_commands = fs::read_to_string(log).unwrap_or_default();
     assert!(
         !bin_only_commands.lines().any(|line| line.contains("test --doc")),
         "a bin-only impact set must not invoke cargo test --doc:\n{bin_only_commands}"
@@ -2316,7 +2335,7 @@ fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
         tmp.path(),
         &["anvil-doc-test"],
         &[
-            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("ANVIL_IMPACT", OsStr::new("off")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
             ("FAKE_FIRST_RLIB", OsStr::new("1")),
@@ -2325,6 +2344,7 @@ fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
             ("FAKE_SECOND_DOCTEST_FALSE", OsStr::new("1")),
             ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
             ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+            ("FAKE_NON_MEMBER_PACKAGE_NAME", OsStr::new("outside")),
         ],
     );
     assert!(
@@ -2334,18 +2354,54 @@ fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    let doc_commands = commands.lines().filter(|line| line.contains("test --doc")).collect::<Vec<_>>();
-    assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
-    for command in doc_commands {
-        assert!(
-            command.contains("--package Foo@0.1.0 --package macro-package@0.1.0"),
-            "workspace selection must emit all capable members in ordinal order:\n{command}"
-        );
-        assert!(
-            !command.contains("--package foo@0.1.0"),
-            "workspace selection must exclude case-distinct bin-only members:\n{command}"
-        );
+    assert_exact_doc_test_commands(&commands, "--package Foo@0.1.0 --package macro-package@0.1.0");
+    assert!(
+        !commands.lines().any(|line| line.contains("--package outside@0.1.0")),
+        "workspace selection must exclude doctest-capable non-members:\n{commands}"
+    );
+    let metadata_commands = commands.lines().filter(|line| line.starts_with("metadata ")).collect::<Vec<_>>();
+    assert_eq!(
+        metadata_commands,
+        ["metadata --locked --no-deps --format-version 1"],
+        "unscoped capability discovery must issue exactly one locked metadata query:\n{commands}"
+    );
+}
+
+#[test]
+fn doc_test_locked_capability_discovery_rejects_a_stale_lockfile() {
+    if !tools_available() {
+        return;
     }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-toolchain-stable-install", "anvil-impact"],
+    );
+    write(
+        &tmp.path().join("src/lib.rs"),
+        "/// A doctest.\n/// ```\n/// assert!(true);\n/// ```\npub fn documented() {}\n",
+    );
+    let lock = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(tmp.path())
+        .output()
+        .expect("cargo is required to prepare the stale-lock fixture");
+    assert!(lock.status.success(), "failed to create fixture lockfile");
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nrust-version = \"1.97\"\n",
+    );
+
+    let output = run_just_with_real_cargo_env(tmp.path(), &["anvil-doc-test"], &[("ANVIL_IMPACT", OsStr::new("off"))]);
+    assert_failed(&output, "locked doctest capability discovery with a stale lockfile");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("lock file") || combined.contains("Cargo.lock"),
+        "the failure must come from locked metadata discovery:\n{combined}"
+    );
 }
 
 #[test]

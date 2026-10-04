@@ -20,5 +20,6 @@ ends do not keep readers open indefinitely.
 
 Unix launch preparation holds the interrupt spawn window only across child
 creation and registration. Linux cgroups and Windows jobs are created before
-that window opens. Fault injection substitutes failures at these lifecycle
-boundaries without changing the production ownership transitions.
+that window opens. Fault injection substitutes failures at these lifecycle boundaries without
+changing the production ownership transitions. The same fault branches compile
+for unit tests and for dependency builds that enable `fault-injection`.

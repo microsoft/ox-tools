@@ -14,8 +14,6 @@ use super::provider::LOG_TARGET;
 use crate::Result;
 
 pub(super) const GIT_TIMEOUT: Duration = Duration::from_mins(5);
-const GIT_RESET_OPERATION: &str = "git reset";
-const SPAWNING_GIT_CONTEXT: &str = "spawning git command";
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Convert a path to a UTF-8 string, returning an error if the path contains invalid UTF-8.
@@ -49,6 +47,10 @@ pub async fn get_repo(repo_path: &Path, repo_url: &Url, timeout: Duration) -> Re
 }
 
 async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> Result<RepoStatus> {
+    get_repo_core_with_executable(repo_path, repo_url, timeout, Path::new("git")).await
+}
+
+async fn get_repo_core_with_executable(repo_path: &Path, repo_url: &Url, timeout: Duration, git_executable: &Path) -> Result<RepoStatus> {
     let path_str = path_str(repo_path)?;
 
     if !repo_path.exists() {
@@ -56,7 +58,7 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
             fs::create_dir_all(parent).into_app_err_with(|| format!("creating directory '{}'", parent.display()))?;
         }
 
-        return clone_repo(path_str, repo_url, timeout).await;
+        return clone_repo_with_executable(path_str, repo_url, timeout, git_executable).await;
     }
 
     // Verify it's a valid git repository before attempting update
@@ -64,7 +66,7 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
         log::warn!(target: LOG_TARGET, "Cached repository path '{path_str}' exists but .git directory missing, re-cloning");
         // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem adapter errors must be propagated rather than converted into process panics")]
         remove_cached_repo(repo_path, &format!("removing potentially corrupt cached repository '{path_str}'"))?;
-        return clone_repo(path_str, repo_url, timeout).await;
+        return clone_repo_with_executable(path_str, repo_url, timeout, git_executable).await;
     }
 
     log::info!(target: LOG_TARGET, "Syncing repository '{repo_url}'");
@@ -73,7 +75,8 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
     // --filter=blob:none downloads only commit/tree objects, not file contents
     // --prune removes refs that no longer exist on remote
     // --force allows updating refs even if they're not fast-forward
-    let output = run_git_with_timeout(
+    let output = run_git_executable_with_timeout(
+        git_executable,
         &["-C", path_str, "fetch", "origin", "--filter=blob:none", "--prune", "--force"],
         timeout,
     )
@@ -85,13 +88,13 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
         log::warn!(target: LOG_TARGET, "Git fetch failed ({}), removing and re-cloning", stderr.trim());
         // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem adapter errors must be propagated rather than converted into process panics")]
         remove_cached_repo(Path::new(path_str), &format!("removing stale cached repository '{path_str}'"))?;
-        return clone_repo(path_str, repo_url, timeout).await;
+        return clone_repo_with_executable(path_str, repo_url, timeout, git_executable).await;
     }
 
     // Reset to match remote HEAD (discard any local changes)
     // #[gamma::skip(try.propagate_to_unwrap, reason = "external git process failures must be propagated rather than converted into process panics")]
-    let output = run_git_with_timeout(&["-C", path_str, "reset", "--hard", "origin/HEAD"], timeout).await?;
-    check_git_output(&output, GIT_RESET_OPERATION)?;
+    let output = run_git_executable_with_timeout(git_executable, &["-C", path_str, "reset", "--hard", "origin/HEAD"], timeout).await?;
+    check_git_output(&output, "git reset")?;
     Ok(RepoStatus::Ok)
 }
 
@@ -105,10 +108,11 @@ fn is_repo_not_found(stderr: &str) -> bool {
     stderr_lower.contains("not found") || stderr_lower.contains("does not exist")
 }
 
-async fn clone_repo(repo_path: &str, repo_url: &Url, timeout: Duration) -> Result<RepoStatus> {
+async fn clone_repo_with_executable(repo_path: &str, repo_url: &Url, timeout: Duration, git_executable: &Path) -> Result<RepoStatus> {
     log::info!(target: LOG_TARGET, "Syncing repository '{repo_url}'");
     // --filter=blob:none creates a partial clone with full history but no blob contents
-    let output = run_git_with_timeout(
+    let output = run_git_executable_with_timeout(
+        git_executable,
         &[
             "clone",
             "--filter=blob:none",
@@ -245,21 +249,23 @@ fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> C
 }
 
 async fn run_git_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
+    run_git_executable_with_timeout(Path::new("git"), args, timeout).await
+}
+
+async fn run_git_executable_with_timeout(executable: &Path, args: &[&str], timeout: Duration) -> Result<std::process::Output> {
     // #[gamma::skip(try.propagate_to_unwrap, reason = "spawning an external git process is an adapter boundary whose errors must remain recoverable")]
-    let child = Command::new("git")
+    let child = Command::new(executable)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // Timeout cancellation drops the child handle; kill-on-drop prevents an orphaned Git
+        // process from continuing after the operation has been reported as timed out.
         // #[gamma::skip(call.replace_with_default, call_result.default, reason = "subprocess cleanup policy is only observable when an external git process outlives a timed-out invocation")]
-        .kill_on_drop(git_processes_are_killed_on_drop())
+        .kill_on_drop(true)
         .spawn()
-        .into_app_err(SPAWNING_GIT_CONTEXT)?;
+        .into_app_err("spawning git command")?;
 
     classify_git_run(tokio::time::timeout(timeout, child.wait_with_output()).await, args, timeout)
-}
-
-const fn git_processes_are_killed_on_drop() -> bool {
-    true
 }
 
 /// Turn the outcome of a timed git invocation into a [`Result`].
@@ -278,10 +284,19 @@ fn classify_git_run(
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::process::{ExitStatus, Output};
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+    #[cfg(windows)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt;
+    #[cfg(windows)]
+    use std::path::PathBuf;
+    use std::process::{Command, ExitStatus, Output};
 
     use super::*;
 
@@ -362,11 +377,8 @@ mod tests {
     }
 
     #[test]
-    fn git_execution_policy_constants_are_exact() {
-        assert_eq!(GIT_RESET_OPERATION, "git reset");
-        assert_eq!(SPAWNING_GIT_CONTEXT, "spawning git command");
+    fn commit_window_uses_exact_day_lengths() {
         assert_eq!(SECONDS_PER_DAY, 86_400);
-        assert!(git_processes_are_killed_on_drop());
     }
 
     #[test]
@@ -406,7 +418,7 @@ mod tests {
 
         // Initialize a repo and make commits
         let init = |args: &[&str]| {
-            let _ = std::process::Command::new("git")
+            let _ = Command::new("git")
                 .args(args)
                 .current_dir(&repo_path)
                 .stdout(std::process::Stdio::piped())
@@ -437,7 +449,7 @@ mod tests {
         let bare_path = tmp.path().join("bare.git");
 
         let run = |args: &[&str], dir: &Path| {
-            let _ = std::process::Command::new("git")
+            let _ = Command::new("git")
                 .args(args)
                 .current_dir(dir)
                 .stdout(std::process::Stdio::piped())
@@ -450,7 +462,7 @@ mod tests {
         run(&["init", "--bare"], &bare_path);
 
         let work_path = tmp.path().join("work");
-        let _ = std::process::Command::new("git")
+        let _ = Command::new("git")
             .args(["clone", bare_path.to_str().unwrap(), work_path.to_str().unwrap()])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -625,7 +637,7 @@ mod tests {
         fs::create_dir_all(&repo_path).expect("create repo dir");
 
         let run = |args: &[&str], date: Option<&str>| {
-            let mut cmd = std::process::Command::new("git");
+            let mut cmd = Command::new("git");
             let _ = cmd
                 .args(args)
                 .current_dir(&repo_path)
@@ -707,7 +719,7 @@ mod tests {
         // Point the clone's origin at a remote that cannot be fetched. The next
         // sync must notice the failed fetch and re-clone from `bare_url`.
         let missing = tmp.path().join("gone.git");
-        let output = std::process::Command::new("git")
+        let output = Command::new("git")
             .args(["-C", clone_path.to_str().unwrap(), "remote", "set-url", "origin"])
             .arg(&missing)
             .output()
@@ -732,7 +744,12 @@ mod tests {
             RepoStatus::Ok
         ));
 
-        let _ = get_repo_core(&clone_path, &bare_url, Duration::ZERO).await.unwrap_err();
+        let missing_git = tmp.path().join("missing-git");
+        let error = get_repo_core_with_executable(&clone_path, &bare_url, GIT_TIMEOUT, &missing_git)
+            .await
+            .expect_err("a nonexistent executable must fail at process creation");
+
+        assert!(format!("{error:#}").contains("spawning git command"), "{error:#}");
     }
 
     #[tokio::test]
@@ -745,7 +762,7 @@ mod tests {
             get_repo(&clone_path, &bare_url, GIT_TIMEOUT).await.unwrap(),
             RepoStatus::Ok
         ));
-        let output = std::process::Command::new("git")
+        let output = Command::new("git")
             .args([
                 "-C",
                 clone_path.to_str().unwrap(),
@@ -791,7 +808,7 @@ mod tests {
         // Cloning into a non-empty directory always fails, which leaves the directory
         // behind for `clone_repo` to clean up.
         let missing = Url::from_file_path(tmp.path().join("no-such-repo.git")).unwrap();
-        let result = clone_repo(target.to_str().unwrap(), &missing, GIT_TIMEOUT).await;
+        let result = clone_repo_with_executable(target.to_str().unwrap(), &missing, GIT_TIMEOUT, Path::new("git")).await;
 
         assert!(!target.exists(), "the partial clone directory must be removed");
         // Git words the failure differently across versions, so accept either verdict.
@@ -805,17 +822,16 @@ mod tests {
         let target = tmp.path().join("clone");
         let remote = Url::from_file_path(tmp.path().join("remote.git")).unwrap();
 
-        let result = clone_repo(target.to_str().unwrap(), &remote, Duration::ZERO).await;
+        let missing_git = tmp.path().join("missing-git");
+        let result = clone_repo_with_executable(target.to_str().unwrap(), &remote, GIT_TIMEOUT, &missing_git).await;
 
-        let _ = result.unwrap_err();
+        let error = result.expect_err("a nonexistent executable must fail at process creation");
+        assert!(format!("{error:#}").contains("spawning git command"), "{error:#}");
     }
 
     #[cfg(unix)]
     #[test]
     fn test_path_str_invalid_utf8() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
         let path = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe"));
         let error = path_str(path).unwrap_err();
         assert!(error.to_string().contains("invalid UTF-8 in repository path"), "{error}");
@@ -824,21 +840,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_path_str_invalid_utf8() {
-        use std::ffi::OsString;
-        use std::os::windows::ffi::OsStringExt;
-
-        let path = std::path::PathBuf::from(OsString::from_wide(&[0xD800]));
+        let path = PathBuf::from(OsString::from_wide(&[0xD800]));
         let error = path_str(&path).unwrap_err();
         assert!(error.to_string().contains("invalid UTF-8 in repository path"), "{error}");
     }
 
     #[cfg(windows)]
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "Tokio's Windows runtime requires unsupported I/O completion ports")]
     async fn public_git_queries_propagate_non_utf8_paths() {
-        use std::ffi::OsString;
-        use std::os::windows::ffi::OsStringExt;
-
-        let path = std::path::PathBuf::from(OsString::from_wide(&[0xD800]));
+        let path = PathBuf::from(OsString::from_wide(&[0xD800]));
         let _ = count_contributors(&path, GIT_TIMEOUT).await.unwrap_err();
         let Err(_) = get_commit_stats(&path, &[], GIT_TIMEOUT).await else {
             panic!("a non-UTF-8 path must be rejected");
@@ -848,9 +859,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn public_git_queries_propagate_non_utf8_paths() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
         let path = Path::new(OsStr::from_bytes(b"/invalid/\xff"));
         let Err(_) = count_contributors(path, GIT_TIMEOUT).await else {
             panic!("a non-UTF-8 path must be rejected");
@@ -861,6 +869,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "uses filesystem; Miri isolation forbids it")]
     async fn repository_parent_creation_errors_are_propagated() {
         let tmp = tempfile::tempdir().unwrap();
         let parent_file = tmp.path().join("not-a-directory");
@@ -875,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; Miri isolation forbids it")]
     fn cached_repository_removal_errors_are_propagated() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("not-a-directory");

@@ -176,7 +176,7 @@ impl Provider {
         }
 
         // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "reqwest body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
-        let text = classify_response_text(response.text().await)?;
+        let text = contextualize_response_text(response.text().await)?;
 
         log::debug!(target: LOG_TARGET, "Codecov SVG length: {} bytes", text.len());
 
@@ -207,7 +207,7 @@ impl Provider {
     }
 }
 
-fn classify_response_text<E>(result: core::result::Result<String, E>) -> Result<String>
+fn contextualize_response_text<E>(result: core::result::Result<String, E>) -> Result<String>
 where
     E: std::error::Error + Send + Sync + 'static,
 {
@@ -231,12 +231,14 @@ const fn codecov_service(host: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use semver::Version;
 
     use super::*;
     use crate::facts::Progress;
 
+    /// Test-only progress adapter used to build a tracker while discarding all output.
     #[derive(Debug)]
     struct NoOpProgress;
 
@@ -332,7 +334,8 @@ mod tests {
         let provider = Provider::new(cache, None);
         assert_eq!(provider.base_url, CODECOV_BASE_URL);
         let debug = format!("{:?}", provider.throttler);
-        assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
+        let expected = format!("permits: {MAX_CONCURRENT_REQUESTS}");
+        assert!(debug.contains(&expected), "unexpected throttler state: {debug}");
     }
 
     #[test]
@@ -382,13 +385,6 @@ mod tests {
         assert!(error.to_string().contains("sending HTTP request"), "{error}");
     }
 
-    #[test]
-    fn truncated_response_reports_the_body_read_context() {
-        let error = classify_response_text(core::result::Result::<String, _>::Err(std::io::Error::other("truncated body"))).unwrap_err();
-        assert!(error.to_string().contains("reading codecov response body"), "{error}");
-        assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("truncated body"));
-    }
-
     #[tokio::test]
     async fn coverage_requests_are_counted_by_distinct_repository() {
         let server = wiremock::MockServer::start().await;
@@ -402,8 +398,23 @@ mod tests {
         let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("one"), crate_spec("two")]);
 
         assert_eq!(provider.get_coverage_data(crates, &tracker).await.count(), 2);
-        let debug = format!("{tracker:?}");
-        assert!(debug.contains("issued: 1"), "{debug}");
-        assert!(debug.contains("completed: 1"), "{debug}");
+        assert_eq!(
+            tracker.topic_state(TrackedTopic::Coverage),
+            (1, 1, crate::facts::request_tracker::TopicStatus::Done)
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod miri_tests {
+    use super::contextualize_response_text;
+
+    #[test]
+    fn response_text_error_is_contextualized() {
+        let error =
+            contextualize_response_text(core::result::Result::<String, _>::Err(std::io::Error::other("truncated body"))).unwrap_err();
+        assert!(error.to_string().contains("reading codecov response body"), "{error}");
+        assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("truncated body"));
     }
 }

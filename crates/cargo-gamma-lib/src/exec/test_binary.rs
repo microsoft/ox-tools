@@ -801,7 +801,7 @@ fn reaches_mutant(binary: &TestBinary, mutant: &Mutant, plan: &Plan, scope: &Tes
 ///
 /// Exact per-mutant and learned file-local killers are applied later by the verdict path and
 /// therefore still take precedence over this cold-run order; so does
-/// [`Census`](super::census::Census)'s own
+/// [`Census`](crate::exec::census::Census)'s own
 /// current-cost order, which further reorders this tier's tail once a census is available.
 pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str) {
     binaries.sort_by(|left, right| {
@@ -824,7 +824,7 @@ pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str
 /// Package reachability is a coarser fact than a census: it says a binary is *permitted* to be
 /// consulted for a mutant's package, never that a specific test or a specific mutation site is
 /// covered. Nothing here may ever be read as evidence that a site or a test is uncovered — only
-/// [`Census`](super::census::Census), and only when its own census for that binary completed,
+/// [`Census`](crate::exec::census::Census), and only when its own census for that binary completed,
 /// settles that.
 #[derive(Debug, Default)]
 pub(super) struct Reachability<'binaries> {
@@ -1143,6 +1143,9 @@ mod tests {
             ("linked", &root.join("tests/linked.rs"), &linked_executable),
             ("independent", &root.join("tests/independent.rs"), &independent_executable),
         ]);
+        // Cargo emits this shape for a build-script execution. It deliberately looks like a test
+        // artifact, including `profile.test`, to prove the selector rejects the message by
+        // `reason` before consulting artifact-only fields.
         let stdout = format!(
             "{stdout}\n{}",
             serde_json::json!({

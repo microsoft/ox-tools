@@ -131,7 +131,8 @@ Flags:
   member. CI integrations pass the impacted-package list from their
   test-impact step so that impact-scoped runs only gate the packages
   whose tests actually ran. A selector that matches no member is a
-  configuration error (exit 2).
+  configuration error (exit 2). A malformed glob is reported separately as
+  invalid selector syntax rather than as a valid selector with no matches.
 - `--target <triple>` — collect coverage and evaluate target-specific package
   policies for the supplied Rust target. For standalone evaluation, omission
   resolves the rustc host only when target policies exist. `run` always

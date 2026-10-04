@@ -37,14 +37,15 @@ mod types;
 mod values;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 use indexes::{Indexes, NumericUses, indexes_in};
 use noop::is_noop;
 use predicates::{
-    binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs, is_assign_op, is_capacity_call,
-    is_capacity_result, is_catch_all, is_default_call, is_diagnostic_message, is_integer_zero_literal, is_numeric_binding,
-    is_numeric_return, is_numeric_type, is_promotable, is_textual, is_unsigned_binding, loop_produces_value, returns_float,
+    binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs, ident_returns_float, is_assign_op,
+    is_capacity_call, is_capacity_result, is_catch_all, is_default_call, is_diagnostic_message, is_integer_zero_literal,
+    is_numeric_binding, is_numeric_return, is_numeric_type, is_promotable, is_textual, is_unsigned_binding, loop_produces_value,
     returns_numeric, returns_result, stmt_attrs,
 };
 use tables::{binary_replacements, in_place_reorder, method_renames};
@@ -70,6 +71,7 @@ enum Undo {
     /// the prior type evidence back, `None` removes a name the block introduced.
     Binding(String, Option<bool>),
     BindingType(String, Option<Box<Type>>),
+    InferredUnsigned(String, bool),
 
     /// Restores whether `deferred` contained `name` before the block changed it.
     Deferred(String, bool),
@@ -192,6 +194,9 @@ pub(super) struct Collector<'a> {
 
     /// Source-written types of in-scope parameters and locals.
     binding_types: HashMap<String, Type>,
+    /// Bindings known to be unsigned from their initializer or use, without inventing an exact
+    /// source type for them.
+    inferred_unsigned: HashSet<String>,
     parameter_types: HashMap<String, Type>,
 
     /// Whether each field name declared anywhere in this file holds a number.
@@ -222,7 +227,7 @@ pub(super) struct Collector<'a> {
     /// Locally visible function return types and aliases.
     returns: HashMap<String, Option<Type>>,
     parameters: HashMap<String, Option<Vec<Type>>>,
-    aliases: HashMap<String, Option<Type>>,
+    aliases: HashMap<String, Option<types::Alias>>,
 
     /// Names in the enclosing function declared by a `let` that supplies no initialiser.
     ///
@@ -350,6 +355,7 @@ impl<'a> Collector<'a> {
             foreign_error_return: false,
             bindings: HashMap::default(),
             binding_types: HashMap::default(),
+            inferred_unsigned: HashSet::default(),
             parameter_types: HashMap::default(),
             fields: indexes.fields,
             imports: indexes.imports,
@@ -911,7 +917,10 @@ impl<'a> Collector<'a> {
 
     /// Reverses a literal element list while preserving its delimiters and every element.
     fn reverse_elements(&mut self, mutator: &'static str, whole: Range<usize>, elements: &Punctuated<Expr, Comma>) {
-        if elements.len() < 2
+        // Guard instrumentation changes temporary lifetime extension, so reversing an array that
+        // contains a borrowed temporary slice could turn compiling source into a build failure.
+        if !self.wants(mutator)
+            || elements.len() < 2
             || mutator == "collection.reverse_array" && elements.iter().any(|element| self.text_of(element.span()).contains(".as_slice()"))
         {
             return;
@@ -987,6 +996,10 @@ impl<'a> Collector<'a> {
     }
 
     fn rename_method_as(&mut self, node: &ExprMethodCall, mutator: &'static str, replacement: &str, shape: Shape) {
+        if !self.wants(mutator) {
+            return;
+        }
+
         if let Some(rewritten) = self.rewrite_part(node.span(), node.method.span(), replacement) {
             self.emit_shaped(mutator, node.span(), rewritten, 0, shape);
         }
@@ -1145,10 +1158,39 @@ impl<'a> Collector<'a> {
                 Expr::MethodCall(call)
                     if matches!(call.method.to_string().as_str(), "and_then" | "or" | "or_else" | "xor")
             )
+            || matches!(
+                expression,
+                Expr::MethodCall(call)
+                    if matches!(call.method.to_string().as_str(), "as_ref" | "as_mut")
+                        && self.is_option_receiver(&call.receiver)
+            )
+            || matches!(
+                expression,
+                Expr::MethodCall(call)
+                    if call.method == "ok" && self.is_result_expression(&call.receiver)
+            )
+            || matches!(
+                expression,
+                Expr::Call(call)
+                    if matches!(&*call.func, Expr::Path(path)
+                        if path_matches(&path.path, &["std", "env", "var_os"]))
+            )
+    }
+
+    fn is_result_expression(&self, expression: &Expr) -> bool {
+        self.type_of_expression(expression)
+            .is_some_and(|ty| resolve_type(self.types().resolve_alias(ty)) == Kind::Result)
+            || matches!(
+                expression,
+                Expr::Call(call)
+                    if matches!(&*call.func, Expr::Path(path)
+                        if path_matches(&path.path, &["std", "env", "var"]))
+            )
     }
 
     fn boolean_expression(&mut self, expression: &Expr, expected: &Type) {
-        if resolve_type(self.types().resolve_alias(expected)) != Kind::Bool
+        if !self.wants("bool_expr.negate")
+            || resolve_type(self.types().resolve_alias(expected)) != Kind::Bool
             || matches!(
                 expression,
                 Expr::Lit(ExprLit { lit: Lit::Bool(_), .. }) | Expr::Unary(ExprUnary { op: UnOp::Not(_), .. })
@@ -1163,7 +1205,10 @@ impl<'a> Collector<'a> {
     }
 
     fn parameter_shadows(&mut self, sig: &Signature, body: &Block) {
-        if sig.constness.is_some() || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(_))) {
+        if !self.wants("parameter.default_shadow")
+            || sig.constness.is_some()
+            || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(_)))
+        {
             return;
         }
         let body_range = body.span().byte_range();
@@ -1224,14 +1269,18 @@ impl<'a> Collector<'a> {
         if !self.can_directly_default(ty) {
             return;
         }
-        let call = self.text_of(node.span()).to_owned();
-        self.emit("call.replace_with_default", node.span(), "Default::default()", 0);
-        self.emit(
-            "call_result.default",
-            node.span(),
-            format_compact!("{{ let _ = {call}; Default::default() }}"),
-            0,
-        );
+        if self.wants("call.replace_with_default") {
+            self.emit("call.replace_with_default", node.span(), "Default::default()", 0);
+        }
+        if self.wants("call_result.default") {
+            let call = self.text_of(node.span());
+            self.emit(
+                "call_result.default",
+                node.span(),
+                format_compact!("{{ let _ = {call}; Default::default() }}"),
+                0,
+            );
+        }
     }
 
     fn regex_semantics(&mut self, node: &ExprCall) {
@@ -1249,8 +1298,7 @@ impl<'a> Collector<'a> {
         let Expr::Path(path) = &*node.func else {
             return;
         };
-        let segments: Vec<_> = path.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-        if !matches!(segments.as_slice(), [.., regex, new] if regex == "Regex" && new == "new") || node.args.len() != 1 {
+        if !path_ends_with(&path.path, &["Regex", "new"]) || node.args.len() != 1 {
             return;
         }
         let Some(Expr::Lit(ExprLit {
@@ -1290,7 +1338,10 @@ impl<'a> Collector<'a> {
             let floating = self
                 .type_of_expression(expression)
                 .is_some_and(|ty| resolve_type(self.types().resolve_alias(ty)) == Kind::Float)
-                || matches!(expression, Expr::MethodCall(call) if returns_float(&call.method.to_string()));
+                || matches!(
+                    expression,
+                    Expr::MethodCall(call) if ident_returns_float(&call.method) && self.is_known_temporal(&call.receiver)
+                );
             self.perturb_proven(expression, floating);
         }
     }
@@ -1328,19 +1379,69 @@ impl<'a> Collector<'a> {
     fn type_of_expression<'b>(&'b self, expression: &'b Expr) -> Option<&'b Type> {
         match expression {
             Expr::Cast(cast) => Some(&cast.ty),
-            Expr::Call(call) => callee_name(&call.func)
-                .and_then(|name| self.returns.get(&name))
-                .and_then(Option::as_ref),
+            Expr::Call(call) => match &*call.func {
+                Expr::Path(path) => path
+                    .path
+                    .get_ident()
+                    .and_then(|ident| self.returns.get(ident.to_string().as_str()))
+                    .and_then(Option::as_ref),
+                _ => None,
+            },
             Expr::Paren(paren) => self.type_of_expression(&paren.expr),
             Expr::Group(group) => self.type_of_expression(&group.expr),
             other => self.type_of_place(other),
         }
     }
 
+    fn inferred_expression_type(&self, expression: &Expr) -> Option<Type> {
+        if let Some(ty) = self.type_of_expression(expression) {
+            return Some(ty.clone());
+        }
+
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let path = called_path(&call.func)?;
+        let mut segments = path.segments.iter().rev();
+        let method = &segments.next()?.ident;
+        let qualifier = &segments.next()?.ident;
+        let imported_from = imported_path(&self.imports, qualifier);
+        let chrono = imported_from.is_some_and(|path| path.first().is_some_and(|root| root == "chrono"));
+        let standard_time =
+            imported_from.is_some_and(|path| matches!(path, [root, module] if matches!(root.as_str(), "std" | "core") && module == "time"));
+
+        if qualifier == "Utc" && chrono && method == "now" {
+            return syn::parse_str("chrono::DateTime").ok();
+        }
+        if qualifier == "DateTime" && chrono {
+            return syn::parse_str("chrono::DateTime").ok();
+        }
+        if qualifier == "NaiveDateTime" && chrono {
+            return syn::parse_str("chrono::NaiveDateTime").ok();
+        }
+        if qualifier == "Instant" && standard_time {
+            return syn::parse_str("std::time::Instant").ok();
+        }
+        if qualifier == "SystemTime" && standard_time {
+            return syn::parse_str("std::time::SystemTime").ok();
+        }
+        if qualifier == "Duration" && standard_time {
+            return syn::parse_str("std::time::Duration").ok();
+        }
+
+        None
+    }
+
     fn is_known_textual_or_temporal(&self, expression: &Expr) -> bool {
         let Some(ty) = self.type_of_expression(expression) else {
-            return false;
+            return self
+                .inferred_expression_type(expression)
+                .is_some_and(|ty| self.is_known_textual_or_temporal_type(&ty));
         };
+        self.is_known_textual_or_temporal_type(ty)
+    }
+
+    fn is_known_textual_or_temporal_type(&self, ty: &Type) -> bool {
         let types = Types {
             abstracts: &self.generics,
             defaulted: &self.defaulted,
@@ -1355,6 +1456,11 @@ impl<'a> Collector<'a> {
         match values::strip(ty) {
             Type::Reference(reference) => matches!(&*reference.elem, Type::Path(path) if path.path.is_ident("str")),
             Type::Path(path) => {
+                let standard_option =
+                    (path.path.is_ident("Option") && !self.imports.contains_key("Option") && !self.defaults.defines("Option"))
+                        || standard_type_path(&path.path, &self.imports, "Option", &["std", "option"])
+                        || standard_type_path(&path.path, &self.imports, "Option", &["core", "option"]);
+
                 (path.path.is_ident("String") && !self.imports.contains_key("String") && !self.defaults.defines("String"))
                     || standard_type_path(&path.path, &self.imports, "String", &["std", "string"])
                     || standard_type_path(&path.path, &self.imports, "String", &["alloc", "string"])
@@ -1367,13 +1473,20 @@ impl<'a> Collector<'a> {
                     || ["DateTime", "NaiveDateTime"]
                         .iter()
                         .any(|name| standard_type_path(&path.path, &self.imports, name, &["chrono"]))
+                    || standard_option
             }
             _ => false,
         }
     }
 
     fn is_known_temporal(&self, expression: &Expr) -> bool {
-        let Some(ty) = self.type_of_expression(expression) else {
+        let inferred;
+        let ty = if let Some(ty) = self.type_of_expression(expression) {
+            ty
+        } else if let Some(ty) = self.inferred_expression_type(expression) {
+            inferred = ty;
+            &inferred
+        } else {
             return false;
         };
         let types = Types {
@@ -1402,7 +1515,7 @@ impl<'a> Collector<'a> {
         match expression {
             Expr::Path(path) => path.path.get_ident().is_some_and(|ident| {
                 let name = ident.to_string();
-                self.binding_types.get(&name).is_some_and(is_unsigned_binding)
+                self.binding_types.get(&name).is_some_and(is_unsigned_binding) || self.inferred_unsigned.contains(&name)
             }),
             Expr::Field(field) => match &field.member {
                 Member::Named(name) => self
@@ -1420,7 +1533,6 @@ impl<'a> Collector<'a> {
                         .and_then(Option::as_ref)
                         .is_some_and(is_unsigned_binding)
             }
-            Expr::MethodCall(call) => returns_unsigned(&call.method.to_string()),
             Expr::Paren(paren) => self.is_known_unsigned(&paren.expr),
             Expr::Group(group) => self.is_known_unsigned(&group.expr),
             _ => false,
@@ -1577,12 +1689,22 @@ impl<'a> Collector<'a> {
             // more reliably than any inference here could.
             Expr::MethodCall(call) => {
                 let method = call.method.to_string();
-                returns_numeric(&method) || returns_float(&method)
+                if ident_returns_float(&call.method) {
+                    self.is_known_temporal(&call.receiver)
+                } else {
+                    returns_numeric(&method)
+                }
             }
 
             // `usize::from(..)`, `u64::try_from(..).unwrap()`: the type is written at the call
             // site, so there is nothing to guess.
-            Expr::Call(call) => callee_type(&call.func).is_some_and(|name| is_numeric_type(&name)),
+            Expr::Call(call) => {
+                callee_type(&call.func).is_some_and(|name| is_numeric_type(&name))
+                    || callee_name(&call.func)
+                        .and_then(|name| self.returns.get(&name))
+                        .and_then(Option::as_ref)
+                        .is_some_and(is_numeric_binding)
+            }
 
             // A field's type is written in the `struct` that declares it, which the pre-pass read.
             Expr::Field(field) => match &field.member {
@@ -1684,6 +1806,7 @@ impl<'a> Collector<'a> {
         let mark = self.undo.len();
         let outer_bindings = take(&mut self.bindings);
         let outer_binding_types = take(&mut self.binding_types);
+        let outer_inferred_unsigned = take(&mut self.inferred_unsigned);
         let outer_parameter_types = take(&mut self.parameter_types);
         let outer_deferred = take(&mut self.deferred);
 
@@ -1703,6 +1826,7 @@ impl<'a> Collector<'a> {
 
         self.bindings = outer_bindings;
         self.binding_types = outer_binding_types;
+        self.inferred_unsigned = outer_inferred_unsigned;
         self.parameter_types = outer_parameter_types;
         self.deferred = outer_deferred;
         self.undo.truncate(mark);
@@ -1854,7 +1978,24 @@ impl<'a> Collector<'a> {
 
     fn bind_type(&mut self, name: String, ty: Type) {
         let prior = self.binding_types.insert(name.clone(), ty).map(Box::new);
-        self.undo.push(Undo::BindingType(name, prior));
+        self.undo.push(Undo::BindingType(name.clone(), prior));
+        let prior_unsigned = self.inferred_unsigned.remove(&name);
+        self.undo.push(Undo::InferredUnsigned(name, prior_unsigned));
+    }
+
+    fn bind_inferred_unsigned(&mut self, name: String) {
+        let prior_type = self.binding_types.remove(&name).map(Box::new);
+        self.undo.push(Undo::BindingType(name.clone(), prior_type));
+        let prior = self.inferred_unsigned.contains(&name);
+        let _inserted = self.inferred_unsigned.insert(name.clone());
+        self.undo.push(Undo::InferredUnsigned(name, prior));
+    }
+
+    fn bind_unknown_type(&mut self, name: String) {
+        let prior_type = self.binding_types.remove(&name).map(Box::new);
+        self.undo.push(Undo::BindingType(name.clone(), prior_type));
+        let prior_unsigned = self.inferred_unsigned.remove(&name);
+        self.undo.push(Undo::InferredUnsigned(name, prior_unsigned));
     }
 
     /// Runs `body` with the binding evidence scoped to one lexical block.
@@ -1903,6 +2044,12 @@ impl<'a> Collector<'a> {
                 }
                 Undo::BindingType(name, None) => {
                     let _dropped = self.binding_types.remove(&name);
+                }
+                Undo::InferredUnsigned(name, true) => {
+                    let _restored = self.inferred_unsigned.insert(name);
+                }
+                Undo::InferredUnsigned(name, false) => {
+                    let _dropped = self.inferred_unsigned.remove(&name);
                 }
                 Undo::Deferred(name, true) => {
                     let _restored = self.deferred.insert(name);
@@ -2057,13 +2204,6 @@ fn value_position_loop_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
     }
 }
 
-fn returns_unsigned(method: &str) -> bool {
-    matches!(
-        method,
-        "len" | "count" | "capacity" | "leading_zeros" | "trailing_zeros" | "count_ones" | "count_zeros"
-    )
-}
-
 fn is_unsigned_type_name(name: &str) -> bool {
     matches!(name, "u8" | "u16" | "u32" | "u64" | "u128" | "usize")
 }
@@ -2092,23 +2232,71 @@ fn unsigned_context(ty: &Type) -> bool {
         return false;
     };
     path.path.segments.last().is_some_and(|segment| {
-        matches!(segment.ident.to_string().as_str(), "Range" | "RangeInclusive")
-            && values::type_argument(ty, 0).is_some_and(is_unsigned_binding)
+        (segment.ident == "Range" || segment.ident == "RangeInclusive") && values::type_argument(ty, 0).is_some_and(is_unsigned_binding)
     })
 }
 
+fn path_matches(path: &syn::Path, expected: &[&str]) -> bool {
+    path.segments.len() == expected.len()
+        && path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.ident == *expected)
+}
+
+fn called_path(callee: &Expr) -> Option<&syn::Path> {
+    match callee {
+        Expr::Path(path) => Some(&path.path),
+        Expr::Paren(paren) => called_path(&paren.expr),
+        _ => None,
+    }
+}
+
+fn path_ends_with(path: &syn::Path, expected: &[&str]) -> bool {
+    path.segments.len() >= expected.len()
+        && path
+            .segments
+            .iter()
+            .rev()
+            .zip(expected.iter().rev())
+            .all(|(actual, expected)| actual.ident == **expected)
+}
+
+fn imported_path<'a>(imports: &'a HashMap<String, Option<Vec<String>>>, ident: &syn::Ident) -> Option<&'a [String]> {
+    imports
+        .iter()
+        .find_map(|(name, path)| (ident == name.as_str()).then_some(path.as_deref()).flatten())
+}
+
+fn ident_is_nonzero_unsigned(ident: &syn::Ident) -> bool {
+    ["NonZeroU8", "NonZeroU16", "NonZeroU32", "NonZeroU64", "NonZeroU128", "NonZeroUsize"]
+        .iter()
+        .any(|name| ident == name)
+}
+
+fn ident_is_atomic_unsigned(ident: &syn::Ident) -> bool {
+    ["AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64", "AtomicUsize"]
+        .iter()
+        .any(|name| ident == name)
+}
+
 fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<String>>>, name: &str, prefix: &[&str]) -> bool {
-    let segments = path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
-    let Some((actual_name, qualifier)) = segments.split_last() else {
+    let Some(actual_name) = path.segments.last() else {
         return false;
     };
+    let qualifier_len = path.segments.len() - 1;
 
-    actual_name == name
-        && (qualifier.iter().map(String::as_str).eq(prefix.iter().copied())
-            || qualifier.is_empty()
-                && imports
-                    .get(name)
-                    .and_then(Option::as_ref)
+    actual_name.ident == name
+        && ((qualifier_len == prefix.len()
+            && path
+                .segments
+                .iter()
+                .take(qualifier_len)
+                .zip(prefix)
+                .all(|(actual, expected)| actual.ident == *expected))
+            || qualifier_len == 0
+                && imported_path(imports, &actual_name.ident)
                     .is_some_and(|actual| actual.iter().map(String::as_str).eq(prefix.iter().copied())))
 }
 
@@ -2122,27 +2310,29 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
     let Expr::Path(path) = callee else {
         return false;
     };
-    let segments = path
-        .path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    let Some((method, type_path)) = segments.split_last() else {
+    let mut reversed = path.path.segments.iter().rev();
+    let Some(method) = reversed.next().map(|segment| &segment.ident) else {
         return false;
     };
-    let Some((ty, qualifier)) = type_path.split_last() else {
+    let Some(ty) = reversed.next().map(|segment| &segment.ident) else {
         return false;
     };
+    let qualifier_len = path.path.segments.len() - 2;
 
     let imported_from = |expected: &[&str]| {
-        qualifier.is_empty()
-            && imports
-                .get(ty)
-                .and_then(Option::as_ref)
-                .is_some_and(|actual| actual.iter().map(String::as_str).eq(expected.iter().copied()))
+        qualifier_len == 0
+            && imported_path(imports, ty).is_some_and(|actual| actual.iter().map(String::as_str).eq(expected.iter().copied()))
     };
-    let qualified_by = |expected: &[&str]| qualifier.iter().map(String::as_str).eq(expected.iter().copied());
+    let qualified_by = |expected: &[&str]| {
+        qualifier_len == expected.len()
+            && path
+                .path
+                .segments
+                .iter()
+                .take(qualifier_len)
+                .zip(expected)
+                .all(|(actual, expected)| actual.ident == *expected)
+    };
 
     if ty == "Duration"
         && (qualified_by(&["std", "time"])
@@ -2150,13 +2340,12 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
             || imported_from(&["std", "time"])
             || imported_from(&["core", "time"]))
     {
-        return matches!(
-            (method.as_str(), index),
-            ("new", 0 | 1) | ("from_secs" | "from_millis" | "from_micros" | "from_nanos", 0)
-        );
+        return (method == "new" && matches!(index, 0 | 1))
+            || (matches!(index, 0)
+                && (method == "from_secs" || method == "from_millis" || method == "from_micros" || method == "from_nanos"));
     }
 
-    if ty.starts_with("NonZeroU")
+    if ident_is_nonzero_unsigned(ty)
         && (qualified_by(&["std", "num"])
             || qualified_by(&["core", "num"])
             || imported_from(&["std", "num"])
@@ -2165,7 +2354,7 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
         return method == "new" && index == 0;
     }
 
-    if ty.starts_with("AtomicU")
+    if ident_is_atomic_unsigned(ty)
         && (qualified_by(&["std", "sync", "atomic"])
             || qualified_by(&["core", "sync", "atomic"])
             || imported_from(&["std", "sync", "atomic"])
@@ -2174,7 +2363,7 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
         return method == "new" && index == 0;
     }
 
-    ty == "char" && qualifier.is_empty() && method == "from_u32" && index == 0
+    ty == "char" && qualifier_len == 0 && method == "from_u32" && index == 0
 }
 
 /// Records variant replacements whose required default is proved by an explicit expected type.
@@ -2183,15 +2372,15 @@ fn admissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_
 
     match expression {
         Expr::Path(path) if path.path.is_ident("None") && resolve_type(resolved) == Kind::Option => {
-            if types.payload(expected, 0).is_some_and(|payload| types.has_default(payload)) {
+            if types.payload(expected, 0).is_some_and(|payload| types.has_default(&payload)) {
                 spans.push(expression.span().byte_range());
             }
         }
         Expr::Call(call) if resolve_type(resolved) == Kind::Result => match callee_name(&call.func).as_deref() {
-            Some("Ok") if types.payload(expected, 1).is_some_and(|payload| types.has_default(payload)) => {
+            Some("Ok") if types.payload(expected, 1).is_some_and(|payload| types.has_default(&payload)) => {
                 spans.push(expression.span().byte_range());
             }
-            Some("Err") if types.payload(expected, 0).is_some_and(|payload| types.has_default(payload)) => {
+            Some("Err") if types.payload(expected, 0).is_some_and(|payload| types.has_default(&payload)) => {
                 spans.push(expression.span().byte_range());
             }
             _ => {}
@@ -2239,10 +2428,10 @@ fn reusable_payload_spans(
     };
     if let Some(index) = payload_index
         && let Some(payload) = types.payload(expected, index)
-        && !types.has_default(payload)
-        && let Some(name) = parameters
-            .iter()
-            .find_map(|(name, ty)| (types.resolve_alias(ty) == types.resolve_alias(payload) && copy_safe_payload(payload)).then_some(name))
+        && !types.has_default(&payload)
+        && let Some(name) = parameters.iter().find_map(|(name, ty)| {
+            (types.resolve_alias(ty) == types.resolve_alias(&payload) && copy_safe_payload(&payload)).then_some(name)
+        })
     {
         spans.push((expression.span().byte_range(), CompactString::from(name)));
     }
@@ -2413,12 +2602,25 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             Pat::Ident(ident) => {
                 let name = ident.ident.to_string();
                 if let Some(init) = node.init.as_ref().filter(|init| init.diverge.is_none()) {
-                    if self.is_known_numeric(&init.expr) || self.numeric_uses.names.contains(&name) {
-                        self.bind(name.clone(), true);
+                    let inferred_type = self.inferred_expression_type(&init.expr);
+                    let inferred_unsigned = inferred_type.as_ref().is_some_and(is_unsigned_binding)
+                        || self.is_known_unsigned(&init.expr)
+                        || self.numeric_uses.unsigned_names.contains(&name);
+                    self.bind(
+                        name.clone(),
+                        self.is_known_numeric(&init.expr) || self.numeric_uses.names.contains(&name),
+                    );
+
+                    if let Some(ty) = inferred_type {
+                        self.bind_type(name, ty);
+                    } else if inferred_unsigned {
+                        self.bind_inferred_unsigned(name);
+                    } else {
+                        self.bind_unknown_type(name);
                     }
-                    if self.is_known_unsigned(&init.expr) {
-                        self.bind_type(name, syn::parse_quote!(usize));
-                    }
+                } else {
+                    self.bind_unknown_type(name.clone());
+                    self.bind(name, self.numeric_uses.names.contains(&ident.ident.to_string()));
                 }
             }
 
@@ -2440,7 +2642,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 self.visit_let_else_diverge(diverge);
             }
         } else if let Some(init) = &node.init {
-            self.visit_expr(&init.expr);
+            let inferred_unsigned = declared_name(&node.pat).is_some_and(|name| self.inferred_unsigned.contains(&name));
+            if inferred_unsigned {
+                self.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
+            } else {
+                self.visit_expr(&init.expr);
+            }
             if let Some((_, diverge)) = &init.diverge {
                 self.visit_let_else_diverge(diverge);
             }
@@ -3260,6 +3467,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             Lit::Int(value) => {
                 let digits = value.base10_digits();
 
+                // Replacement indices are stable identity assignments: canonical boundary values
+                // precede directional perturbations, and existing assignments must not be reused.
                 // The perturbations go first so that where they collide with the value family on a
                 // small literal — `0` becoming `1` is both an increment and a "to one" — the name
                 // that survives is the one a reader checking a boundary is looking for.
@@ -3325,6 +3534,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 if value.value() != '\0' {
                     self.emit("literal.char_to_nul", span, "'\\0'", 0);
                 }
+                // Printable ASCII sentinels keep reports readable while guaranteeing a distinct
+                // replacement without needing locale- or Unicode-sensitive classification.
                 let distinct = if value.value() == 'x' { "'y'" } else { "'x'" };
                 self.emit("literal.char_to_distinct", span, distinct, 1);
             }
@@ -3333,6 +3544,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 if value.value() != b'\0' {
                     self.emit("literal.byte_to_nul", span, "b'\\0'", 0);
                 }
+                // Use the same readable, always-distinct sentinel policy as character literals.
                 let distinct = if value.value() == b'x' { "b'y'" } else { "b'x'" };
                 self.emit("literal.byte_to_distinct", span, distinct, 1);
             }
@@ -3350,13 +3562,16 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_try(&mut self, node: &'ast ExprTry) {
-        let value = self.text_of(node.expr.span()).to_owned();
-        self.emit("try.propagate_to_unwrap", node.span(), format_compact!("({value}).unwrap()"), 0);
+        if self.wants("try.propagate_to_unwrap") {
+            let value = self.text_of(node.expr.span());
+            self.emit("try.propagate_to_unwrap", node.span(), format_compact!("({value}).unwrap()"), 0);
+        }
         visit::visit_expr_try(self, node);
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod mutation_tests {
     use syn::{ExprGroup, token};
 

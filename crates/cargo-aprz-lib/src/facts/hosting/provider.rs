@@ -379,12 +379,14 @@ impl Provider {
             }
             let remaining = wait_until - Utc::now();
             let remaining_mins = remaining.num_minutes();
-            if let Some(message) = remaining_progress_message(display_name, remaining_mins, &formatted_time) {
+            if should_report_remaining_minutes(remaining_mins) {
                 log::info!(
                     target: LOG_TARGET,
                     "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                 );
-                print_to_tracker_if_needed(&tracker, log::log_enabled!(log::Level::Info), || message);
+                print_to_tracker_if_needed(&tracker, log::log_enabled!(log::Level::Info), || {
+                    format!("{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}")
+                });
             }
         }
     }
@@ -456,11 +458,10 @@ impl Provider {
             issues: raw_issues.issues,
         };
 
-        #[cfg(all(test, not(miri)))]
-        crate::facts::test_logging::enable_log_argument_evaluation();
+        let request_noun = if raw_issues.request_count == 1 { "request" } else { "requests" };
         log::debug!(
             target: LOG_TARGET,
-            "Completed one repository API request and {} issue API request(s) to {} for '{repo_spec}'",
+            "Completed one repository API request and {} issue API {request_noun} to {} for '{repo_spec}'",
             raw_issues.request_count,
             host.display_name
         );
@@ -507,15 +508,18 @@ impl Provider {
     }
 
     async fn get_issues_and_pulls(&self, client: &Client, owner: &str, repo: &str) -> HostingApiResult<RawIssues> {
-        let since = Utc::now() - chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
+        self.get_issues_and_pulls_at(client, owner, repo, Utc::now()).await
+    }
+
+    async fn get_issues_and_pulls_at(&self, client: &Client, owner: &str, repo: &str, now: DateTime<Utc>) -> HostingApiResult<RawIssues> {
+        let since = now - chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
         let since_str = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         let mut all_issues = Vec::with_capacity(ISSUE_PAGE_SIZE as usize);
         let mut latest_rate_limit: Option<RateLimitInfo> = None;
-        let mut page_num = 1u32;
         let mut request_count = 0u32;
 
-        loop {
+        for page_num in 1..=MAX_ISSUE_PAGES {
             request_count += 1;
             let url = format!(
                 "{}/repos/{owner}/{repo}/issues?state=all&since={since_str}&per_page={ISSUE_PAGE_SIZE}&page={page_num}",
@@ -561,12 +565,8 @@ impl Provider {
                 });
             }
 
-            page_num += 1;
-
-            // #[gamma::skip(cond.always_false, tag = "outofmem", reason = "written by cargo gamma suppress 2026-09-27")]
-            if page_num > MAX_ISSUE_PAGES {
+            if page_num == MAX_ISSUE_PAGES {
                 log::debug!(target: LOG_TARGET, "Reached maximum issue page limit ({MAX_ISSUE_PAGES}) for '{owner}/{repo}', stopping pagination after {} issues", all_issues.len());
-                // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "outofmem", reason = "written by cargo gamma suppress 2026-09-27")]
                 break;
             }
         }
@@ -611,17 +611,8 @@ const fn should_report_remaining_minutes(remaining_mins: i64) -> bool {
     remaining_mins > 0
 }
 
-fn remaining_progress_message(display_name: &str, remaining_mins: i64, formatted_time: &str) -> Option<String> {
-    should_report_remaining_minutes(remaining_mins)
-        .then(|| format!("{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"))
-}
-
 fn most_constrained_rate_limit(first: Option<RateLimitInfo>, second: Option<RateLimitInfo>) -> Option<RateLimitInfo> {
-    match (first, second) {
-        (Some(first), Some(second)) => Some(if first.remaining <= second.remaining { first } else { second }),
-        (Some(rate_limit), None) | (None, Some(rate_limit)) => Some(rate_limit),
-        (None, None) => None,
-    }
+    [first, second].into_iter().flatten().min_by_key(|rate_limit| rate_limit.remaining)
 }
 
 /// Compute age statistics from an iterator of durations in seconds.
@@ -663,7 +654,56 @@ fn percentile(sorted_data: &[f64], percentile: f64) -> f64 {
     sorted_data[idx]
 }
 
-/// Aggregated statistics for one family of issues (all issues, or the bug subset).
+/// Aggregates one family of issues (all issues, or the bug subset).
+#[derive(Default)]
+struct IssueFamilyAccumulator {
+    open: u64,
+    opened: TimeWindowStats,
+    closed: TimeWindowStats,
+    open_ages: Vec<f64>,
+    closed_ages: AgeBuckets,
+}
+
+impl IssueFamilyAccumulator {
+    #[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
+    fn push(&mut self, issue: &CachedIssue, now: DateTime<Utc>, cutoffs: Cutoffs) {
+        increment_window(&mut self.opened, issue.created_at, cutoffs);
+
+        if let Some(closed_at) = issue.closed_at {
+            increment_window(&mut self.closed, closed_at, cutoffs);
+
+            // Age statistics partition issues by current state, so a reopened issue
+            // contributes only to the open-age statistics.
+            if !issue.is_open {
+                self.closed_ages
+                    .push((closed_at - issue.created_at).num_seconds() as f64, closed_at, cutoffs);
+            }
+        }
+
+        if issue.is_open {
+            self.open += 1;
+            self.open_ages.push((now - issue.created_at).num_seconds() as f64);
+        }
+    }
+
+    fn finish(self) -> IssueFamilyStats {
+        let open_age = compute_age_stats(self.open_ages.into_iter());
+        let (closed_age, closed_age_last_365_days, closed_age_last_180_days, closed_age_last_90_days) = self.closed_ages.finish();
+
+        IssueFamilyStats {
+            open: self.open,
+            opened: self.opened,
+            closed: self.closed,
+            open_age,
+            closed_age,
+            closed_age_last_90_days,
+            closed_age_last_180_days,
+            closed_age_last_365_days,
+        }
+    }
+}
+
+/// Final statistics for one family of issues.
 struct IssueFamilyStats {
     open: u64,
     opened: TimeWindowStats,
@@ -675,7 +715,57 @@ struct IssueFamilyStats {
     closed_age_last_365_days: AgeStats,
 }
 
-/// Aggregated pull request statistics.
+/// Aggregates pull request statistics.
+#[derive(Default)]
+struct PullRequestAccumulator {
+    open: u64,
+    opened: TimeWindowStats,
+    merged: TimeWindowStats,
+    closed: TimeWindowStats,
+    open_ages: Vec<f64>,
+    merged_ages: AgeBuckets,
+}
+
+impl PullRequestAccumulator {
+    #[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
+    fn push(&mut self, pull: &CachedIssue, now: DateTime<Utc>, cutoffs: Cutoffs) {
+        increment_window(&mut self.opened, pull.created_at, cutoffs);
+
+        if let Some(closed_at) = pull.closed_at {
+            increment_window(&mut self.closed, closed_at, cutoffs);
+        }
+
+        if let Some(merged_at) = pull.merged_at {
+            increment_window(&mut self.merged, merged_at, cutoffs);
+            self.merged_ages
+                .push((merged_at - pull.created_at).num_seconds() as f64, merged_at, cutoffs);
+        }
+
+        if pull.is_open {
+            self.open += 1;
+            self.open_ages.push((now - pull.created_at).num_seconds() as f64);
+        }
+    }
+
+    fn finish(self) -> PullRequestStats {
+        let open_age = compute_age_stats(self.open_ages.into_iter());
+        let (merged_age, merged_age_last_365_days, merged_age_last_180_days, merged_age_last_90_days) = self.merged_ages.finish();
+
+        PullRequestStats {
+            open: self.open,
+            opened: self.opened,
+            merged: self.merged,
+            closed: self.closed,
+            open_age,
+            merged_age,
+            merged_age_last_90_days,
+            merged_age_last_180_days,
+            merged_age_last_365_days,
+        }
+    }
+}
+
+/// Final pull request statistics.
 struct PullRequestStats {
     open: u64,
     opened: TimeWindowStats,
@@ -764,125 +854,49 @@ impl AgeBuckets {
     }
 }
 
-/// Compute statistics for a family of issues (excludes pull requests).
-///
-/// This is called once for all issues and again for the bug subset, so the two
-/// metric families are guaranteed to be computed identically.
-#[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
-fn compute_issue_family_stats(issues: &[&CachedIssue], now: DateTime<Utc>) -> IssueFamilyStats {
-    let cutoffs = Cutoffs::new(now);
-
-    let mut opened = TimeWindowStats::default();
-    let mut closed = TimeWindowStats::default();
-    let mut open_ages = Vec::new();
-    let mut closed_ages = AgeBuckets::default();
-
-    for issue in issues {
-        increment_window(&mut opened, issue.created_at, cutoffs);
-
-        if let Some(closed_at) = issue.closed_at {
-            increment_window(&mut closed, closed_at, cutoffs);
-
-            // Age statistics partition issues by current state, so a reopened issue
-            // (open, but carrying the `closed_at` of a previous closure) contributes
-            // only to the open-age statistics.
-            if !issue.is_open {
-                closed_ages.push((closed_at - issue.created_at).num_seconds() as f64, closed_at, cutoffs);
-            }
-        }
-
-        if issue.is_open {
-            open_ages.push((now - issue.created_at).num_seconds() as f64);
-        }
-    }
-
-    let open_age = compute_age_stats(open_ages.into_iter());
-    let (closed_age, closed_age_last_365_days, closed_age_last_180_days, closed_age_last_90_days) = closed_ages.finish();
-
-    IssueFamilyStats {
-        open: issues.iter().filter(|issue| issue.is_open).count() as u64,
-        opened,
-        closed,
-        open_age,
-        closed_age,
-        closed_age_last_90_days,
-        closed_age_last_180_days,
-        closed_age_last_365_days,
-    }
-}
-
-/// Compute statistics for pull requests.
-#[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
-fn compute_pull_request_stats(pulls: &[&CachedIssue], now: DateTime<Utc>) -> PullRequestStats {
-    let cutoffs = Cutoffs::new(now);
-
-    let mut opened = TimeWindowStats::default();
-    let mut merged = TimeWindowStats::default();
-    let mut closed = TimeWindowStats::default();
-    let mut open_ages = Vec::new();
-    let mut merged_ages = AgeBuckets::default();
-
-    for pull in pulls {
-        increment_window(&mut opened, pull.created_at, cutoffs);
-
-        if let Some(closed_at) = pull.closed_at {
-            increment_window(&mut closed, closed_at, cutoffs);
-        }
-
-        if let Some(merged_at) = pull.merged_at {
-            increment_window(&mut merged, merged_at, cutoffs);
-            merged_ages.push((merged_at - pull.created_at).num_seconds() as f64, merged_at, cutoffs);
-        }
-
-        if pull.is_open {
-            open_ages.push((now - pull.created_at).num_seconds() as f64);
-        }
-    }
-
-    let open_age = compute_age_stats(open_ages.into_iter());
-    let (merged_age, merged_age_last_365_days, merged_age_last_180_days, merged_age_last_90_days) = merged_ages.finish();
-
-    PullRequestStats {
-        open: pulls.iter().filter(|pull| pull.is_open).count() as u64,
-        opened,
-        merged,
-        closed,
-        open_age,
-        merged_age,
-        merged_age_last_90_days,
-        merged_age_last_180_days,
-        merged_age_last_365_days,
-    }
-}
-
-/// Compute the share of issues carrying at least one label, as a percentage (0-100).
-///
-/// This lets expressions distinguish "this repository has no bugs" from "this repository
-/// does not label its issues", which would otherwise both report zero bugs.
-#[expect(clippy::cast_precision_loss, reason = "issue counts are far below f64 precision limits")]
-#[expect(clippy::cast_possible_truncation, reason = "value is clamped to 0-100")]
-#[expect(clippy::cast_sign_loss, reason = "value is non-negative")]
-fn compute_labeled_issue_ratio(issues: &[&CachedIssue]) -> u32 {
-    let labeled = issues.iter().filter(|issue| !issue.labels.is_empty()).count();
-    let issue_count = issues.len().max(1);
-    ((labeled as f64 / issue_count as f64) * 100.0).round().clamp(0.0, 100.0) as u32
-}
-
 /// Compute the full set of hosting metrics from raw cached repository data.
 ///
 /// Bug metrics are a strict subset of the corresponding issue metrics: an issue counted as a
 /// bug is also counted in the general issue metrics. Issues with no labels are never counted
 /// as bugs; use `labeled_issue_ratio` to detect repositories that do not label issues at all.
 pub(super) fn compute_hosting_data(repo: &CachedRepo, bug_labels: &BugLabelMatcher) -> HostingData {
-    let now = Utc::now();
+    compute_hosting_data_at(repo, bug_labels, Utc::now())
+}
 
-    let issues: Vec<&CachedIssue> = repo.issues.iter().filter(|issue| !issue.is_pr).collect();
-    let pulls: Vec<&CachedIssue> = repo.issues.iter().filter(|issue| issue.is_pr).collect();
-    let bugs: Vec<&CachedIssue> = issues.iter().copied().filter(|issue| issue.is_bug(bug_labels)).collect();
+pub(super) fn compute_hosting_data_at(repo: &CachedRepo, bug_labels: &BugLabelMatcher, now: DateTime<Utc>) -> HostingData {
+    aggregate_hosting_data_at(repo, bug_labels, now, || {})
+}
 
-    let issue_stats = compute_issue_family_stats(&issues, now);
-    let bug_stats = compute_issue_family_stats(&bugs, now);
-    let pr_stats = compute_pull_request_stats(&pulls, now);
+fn aggregate_hosting_data_at<F>(repo: &CachedRepo, bug_labels: &BugLabelMatcher, now: DateTime<Utc>, mut visit_record: F) -> HostingData
+where
+    F: FnMut(),
+{
+    let cutoffs = Cutoffs::new(now);
+    let mut issue_accumulator = IssueFamilyAccumulator::default();
+    let mut bug_accumulator = IssueFamilyAccumulator::default();
+    let mut pull_accumulator = PullRequestAccumulator::default();
+    let mut issue_count = 0_u64;
+    let mut labeled_issue_count = 0_u64;
+
+    for record in &repo.issues {
+        visit_record();
+        if record.is_pr {
+            pull_accumulator.push(record, now, cutoffs);
+            continue;
+        }
+
+        issue_count += 1;
+        labeled_issue_count += u64::from(!record.labels.is_empty());
+        issue_accumulator.push(record, now, cutoffs);
+        if record.is_bug(bug_labels) {
+            bug_accumulator.push(record, now, cutoffs);
+        }
+    }
+
+    let issue_stats = issue_accumulator.finish();
+    let bug_stats = bug_accumulator.finish();
+    let pr_stats = pull_accumulator.finish();
+    let labeled_issue_ratio = labeled_issue_ratio(labeled_issue_count, issue_count);
 
     HostingData {
         stars: repo.stars,
@@ -906,7 +920,7 @@ pub(super) fn compute_hosting_data(repo: &CachedRepo, bug_labels: &BugLabelMatch
         closed_bug_age_last_90_days: bug_stats.closed_age_last_90_days,
         closed_bug_age_last_180_days: bug_stats.closed_age_last_180_days,
         closed_bug_age_last_365_days: bug_stats.closed_age_last_365_days,
-        labeled_issue_ratio: compute_labeled_issue_ratio(&issues),
+        labeled_issue_ratio,
 
         open_prs: pr_stats.open,
         open_pr_age: pr_stats.open_age,
@@ -920,14 +934,26 @@ pub(super) fn compute_hosting_data(repo: &CachedRepo, bug_labels: &BugLabelMatch
     }
 }
 
+/// Compute the share of issues carrying at least one label, as a percentage (0-100).
+#[expect(clippy::cast_precision_loss, reason = "issue counts are far below f64 precision limits")]
+#[expect(clippy::cast_possible_truncation, reason = "value is clamped to 0-100")]
+#[expect(clippy::cast_sign_loss, reason = "value is non-negative")]
+fn labeled_issue_ratio(labeled: u64, issue_count: u64) -> u32 {
+    ((labeled as f64 / issue_count.max(1) as f64) * 100.0).round().clamp(0.0, 100.0) as u32
+}
+
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     use semver::Version;
 
     use super::*;
+    use crate::facts::Progress;
+    #[cfg(not(miri))]
+    use crate::facts::test_logging;
 
     #[test]
     fn test_percentile_empty() {
@@ -1000,6 +1026,48 @@ mod tests {
             .join(format!("{name}-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&path).expect("test cache directory is creatable under target");
         path
+    }
+
+    /// Test reporter that captures tracker fallback messages; all other callbacks are inert.
+    #[derive(Debug, Default)]
+    struct RecordingProgress {
+        messages: Mutex<Vec<String>>,
+    }
+
+    impl RecordingProgress {
+        fn messages(&self) -> Vec<String> {
+            // A panic while recording cannot invalidate a `Vec<String>`; recover it so a prior
+            // assertion failure does not turn later diagnostics into an unrelated poison panic.
+            self.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Progress for RecordingProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, msg: &str) {
+            self.messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(msg.to_string());
+        }
+        fn done(&self) {}
+    }
+
+    #[derive(Debug)]
+    struct NoOpProgress;
+
+    // An inert reporter: the tracker only calls a couple of these, and asserting on a
+    // reporter that does nothing would prove nothing.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Progress for NoOpProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, _msg: &str) {}
+        fn done(&self) {}
     }
 
     #[test]
@@ -1094,6 +1162,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn provider_uses_exactly_the_configured_request_concurrency() {
         let provider = Provider::new(
             None,
@@ -1112,22 +1181,23 @@ mod tests {
                     .expect("every configured permit must be immediately available"),
             );
         }
+        let waiting = provider.throttler.acquire();
+        tokio::pin!(waiting);
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), provider.throttler.acquire())
-                .await
-                .is_err(),
+            futures_util::poll!(&mut waiting).is_pending(),
             "one request beyond the configured limit must wait"
         );
 
         drop(permits.pop());
-        let _permit = tokio::time::timeout(Duration::from_millis(100), provider.throttler.acquire())
+        tokio::task::yield_now().await;
+        let _permit = tokio::time::timeout(Duration::from_millis(100), waiting)
             .await
             .expect("releasing one permit must admit one waiting request");
     }
 
     #[test]
     fn repository_request_tracking_uses_the_exact_total() {
-        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
 
         track_repo_requests(&tracker, [2, 3].into_iter());
 
@@ -1186,11 +1256,6 @@ mod tests {
         assert!(should_report_remaining_minutes(1));
         assert!(!should_report_remaining_minutes(0));
         assert!(!should_report_remaining_minutes(-1));
-        assert_eq!(
-            remaining_progress_message("GitHub", 1, "12:34").as_deref(),
-            Some("GitHub rate limit: ~1 minute(s) remaining until 12:34")
-        );
-        assert!(remaining_progress_message("GitHub", 0, "12:34").is_none());
     }
 
     #[test]
@@ -1257,9 +1322,17 @@ mod tests {
         }
     }
 
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid")
+    }
+
+    fn compute_hosting_data(repo: &CachedRepo, bug_labels: &BugLabelMatcher) -> HostingData {
+        compute_hosting_data_at(repo, bug_labels, fixed_now())
+    }
+
     #[test]
     fn test_increment_window_recent() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
 
         let mut stats = TimeWindowStats::default();
@@ -1272,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_increment_window_old() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
 
         let mut stats = TimeWindowStats::default();
@@ -1285,7 +1358,7 @@ mod tests {
 
     #[test]
     fn test_increment_window_very_old() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
 
         let mut stats = TimeWindowStats::default();
@@ -1298,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_increment_window_includes_the_exact_365_day_boundary() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
         let mut stats = TimeWindowStats::default();
         increment_window(&mut stats, cutoffs.days_365, cutoffs);
@@ -1307,7 +1380,7 @@ mod tests {
 
     #[test]
     fn time_windows_include_every_exact_boundary() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
 
         let mut at_90 = TimeWindowStats::default();
@@ -1355,7 +1428,7 @@ mod tests {
 
     #[test]
     fn test_compute_hosting_data_mixed_issues_and_prs() {
-        let now = Utc::now();
+        let now = fixed_now();
         let day_ago = now - chrono::Duration::days(1);
         let week_ago = now - chrono::Duration::days(7);
         let two_days_ago = now - chrono::Duration::days(2);
@@ -1389,7 +1462,7 @@ mod tests {
 
     #[test]
     fn test_unlabeled_repo_reports_issues_but_no_bugs() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let data = compute_hosting_data(
@@ -1410,7 +1483,7 @@ mod tests {
 
     #[test]
     fn test_bugs_are_a_subset_of_issues() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
         let day_ago = now - chrono::Duration::days(1);
 
@@ -1440,7 +1513,7 @@ mod tests {
 
     #[test]
     fn test_pr_labels_never_count_as_bugs() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let mut labeled_pr = pull(week_ago, None, None);
@@ -1455,7 +1528,7 @@ mod tests {
 
     #[test]
     fn test_empty_bug_labels_disables_bug_classification() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let data = compute_hosting_data(&repo(vec![issue(week_ago, None, &["bug"])]), &BugLabelMatcher::default());
@@ -1466,7 +1539,7 @@ mod tests {
 
     #[test]
     fn test_custom_bug_labels_are_honored() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let patterns = BugLabelMatcher::new(&["crash".to_string()]).unwrap();
@@ -1481,7 +1554,7 @@ mod tests {
 
     #[test]
     fn test_regex_bug_labels_are_honored() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let patterns = BugLabelMatcher::new(&["^(c|kind)[-/]bug$".to_string()]).unwrap();
@@ -1496,7 +1569,7 @@ mod tests {
 
     #[test]
     fn test_bug_ages_are_computed_over_the_bug_subset_only() {
-        let now = Utc::now();
+        let now = fixed_now();
 
         // A bug closed after 2 days and a non-bug closed after 10 days.
         let data = compute_hosting_data(
@@ -1518,7 +1591,7 @@ mod tests {
 
     #[test]
     fn test_reopened_issue_counts_as_open_only_for_age_stats() {
-        let now = Utc::now();
+        let now = fixed_now();
 
         // A reopened issue: currently open, but retains the closed_at of its prior closure.
         let reopened = CachedIssue {
@@ -1544,7 +1617,7 @@ mod tests {
 
     #[test]
     fn test_closed_issue_without_closed_at_is_excluded_from_ages() {
-        let now = Utc::now();
+        let now = fixed_now();
 
         let closed_without_timestamp = CachedIssue {
             created_at: now - chrono::Duration::days(10),
@@ -1564,7 +1637,7 @@ mod tests {
 
     #[test]
     fn test_labeled_issue_ratio() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let data = compute_hosting_data(
@@ -1582,7 +1655,7 @@ mod tests {
 
     #[test]
     fn test_labeled_issue_ratio_ignores_pull_requests() {
-        let now = Utc::now();
+        let now = fixed_now();
         let week_ago = now - chrono::Duration::days(7);
 
         let data = compute_hosting_data(
@@ -1595,7 +1668,7 @@ mod tests {
 
     #[test]
     fn test_open_bug_age_uses_open_bugs_only() {
-        let now = Utc::now();
+        let now = fixed_now();
 
         let data = compute_hosting_data(
             &repo(vec![
@@ -1619,7 +1692,7 @@ mod tests {
 
     #[test]
     fn test_inconsistent_timestamps_are_excluded_from_age_stats() {
-        let now = Utc::now();
+        let now = fixed_now();
 
         // A record whose closing predates its creation cannot yield a meaningful age,
         // so it must not skew the statistics.
@@ -1663,7 +1736,8 @@ mod tests {
 
     /// A provider whose GitHub client points at `github_url`.
     fn test_provider(cache_dir: &std::path::Path, github_url: &str) -> Provider {
-        crate::facts::test_logging::enable_log_argument_evaluation();
+        #[cfg(not(miri))]
+        test_logging::enable_log_argument_evaluation();
         let endpoints = Endpoints::default().with_github_url(github_url);
         Provider::new(
             None,
@@ -1709,7 +1783,7 @@ mod tests {
             repo_spec,
         );
         let crates: Arc<[CrateSpec]> = vec![crate_spec].into();
-        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
 
         let results: Vec<_> = provider.get_hosting_data(crates, &tracker).await.collect();
 
@@ -1753,7 +1827,10 @@ mod tests {
         let provider = test_provider(&cache_dir, &server.uri());
 
         let (_, client) = github_client(&provider);
-        let result = provider.get_issues_and_pulls(client, "owner", "repo").await;
+        let now = DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .expect("fixed timestamp is valid")
+            .with_timezone(&Utc);
+        let result = provider.get_issues_and_pulls_at(client, "owner", "repo", now).await;
 
         let HostingApiResult::Success(raw_issues, _) = result else {
             panic!("pagination should succeed against the mock server");
@@ -1772,12 +1849,7 @@ mod tests {
         let since = DateTime::parse_from_rfc3339(first_query.get("since").expect("issues request includes the since query parameter"))
             .expect("since is RFC3339")
             .with_timezone(&Utc);
-        let age = Utc::now() - since;
-        let expected = chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
-        assert!(
-            age >= expected && age < expected + chrono::Duration::seconds(5),
-            "since should be exactly {ISSUE_LOOKBACK_DAYS} days ago within request latency, got {age:?}"
-        );
+        assert_eq!(since, now - chrono::Duration::days(ISSUE_LOOKBACK_DAYS));
     }
 
     #[tokio::test]
@@ -1912,9 +1984,15 @@ mod tests {
 
         let result = provider.fetch_hosting_data_for_repo(client, host, &repo_spec).await;
 
-        assert!(matches!(result.result, ProviderResult::Found(_)));
+        let ProviderResult::Found(data) = result.result else {
+            panic!("successful fixture must return hosting data");
+        };
+        assert_eq!((data.stars, data.forks, data.subscribers), (1, 2, 3));
         let filename = Provider::get_cache_filename("github.com", "owner", "repo");
-        assert!(matches!(provider.cache.load::<CachedRepo>(&filename), CacheResult::Data(_)));
+        let CacheResult::Data(cached) = provider.cache.load::<CachedRepo>(&filename) else {
+            panic!("successful fixture must cache repository data");
+        };
+        assert_eq!((cached.stars, cached.forks, cached.subscribers), (1, 2, 3));
     }
 
     #[tokio::test]
@@ -1966,7 +2044,7 @@ mod tests {
     async fn begin_rate_limit_pause_pauses_the_throttler() {
         let cache_dir = test_cache_dir("begin-rate-limit-pause");
         let provider = test_provider(&cache_dir, "http://127.0.0.1:1");
-        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
         let now = Utc::now();
 
         provider.begin_rate_limit_pause(
@@ -1985,7 +2063,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn rate_limit_progress_waits_until_the_throttler_resumes() {
         let throttler = Throttler::new(1);
-        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
         tracker.add_requests(TrackedTopic::Repos, 1);
         tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
         assert!(throttler.pause_for(Duration::from_millis(40)));
@@ -2016,7 +2094,7 @@ mod tests {
     #[test]
     fn tracker_fallback_prints_only_when_the_same_message_was_not_logged() {
         let progress = Arc::new(RecordingProgress::default());
-        let tracker = RequestTracker::new(&(Arc::clone(&progress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::clone(&progress) as Arc<dyn Progress>));
 
         print_to_tracker_if_needed(&tracker, false, || "fallback".to_string());
         print_to_tracker_if_needed(&tracker, true, || "duplicate".to_string());
@@ -2034,7 +2112,7 @@ mod tests {
             .await;
         let cache_dir = test_cache_dir("completed-fetch");
         let provider = test_provider(&cache_dir, &server.uri());
-        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
         tracker.add_requests(TrackedTopic::Repos, 1);
         let (host, client) = github_client(&provider);
 
@@ -2093,52 +2171,17 @@ mod tests {
         assert_eq!(server.received_requests().await.map_or(0, |r| r.len()), 1);
     }
 
-    #[derive(Debug, Default)]
-    struct RecordingProgress {
-        messages: std::sync::Mutex<Vec<String>>,
-    }
-
-    impl RecordingProgress {
-        fn messages(&self) -> Vec<String> {
-            self.messages.lock().expect("recording lock not poisoned").clone()
-        }
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    impl crate::facts::Progress for RecordingProgress {
-        fn set_phase(&self, _phase: &str) {}
-        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
-        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
-        fn println(&self, msg: &str) {
-            self.messages.lock().expect("recording lock not poisoned").push(msg.to_string());
-        }
-        fn done(&self) {}
-    }
-
-    #[derive(Debug)]
-    struct NoOpProgress;
-
-    // An inert reporter: the tracker only calls a couple of these, and asserting on a
-    // reporter that does nothing would prove nothing.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    impl crate::facts::Progress for NoOpProgress {
-        fn set_phase(&self, _phase: &str) {}
-        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
-        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
-        fn println(&self, _msg: &str) {}
-        fn done(&self) {}
-    }
-
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn a_rate_limit_pauses_the_throttler_and_the_request_is_retried() {
         // The rate limit is also reported at debug level; evaluate those arguments too.
-        crate::facts::test_logging::enable_log_argument_evaluation();
+        #[cfg(not(miri))]
+        test_logging::enable_log_argument_evaluation();
 
         let server = wiremock::MockServer::start().await;
         let cache_dir = tempfile::tempdir().expect("temporary directories are creatable");
         let provider = test_provider(cache_dir.path(), &server.uri());
-        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn crate::facts::Progress>));
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
         tracker.add_requests(TrackedTopic::Repos, 1);
         assert!(
             !provider.throttler.is_paused(),
@@ -2189,7 +2232,7 @@ mod tests {
 
     #[test]
     fn age_buckets_only_fill_the_windows_an_event_falls_into() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
         let mut buckets = AgeBuckets::default();
 
@@ -2215,7 +2258,7 @@ mod tests {
 
     #[test]
     fn age_buckets_include_the_exact_365_and_180_day_boundaries() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
         let mut buckets = AgeBuckets::default();
 
@@ -2230,7 +2273,7 @@ mod tests {
 
     #[test]
     fn age_buckets_include_the_exact_90_day_boundary() {
-        let now = Utc::now();
+        let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
         let mut buckets = AgeBuckets::default();
 
