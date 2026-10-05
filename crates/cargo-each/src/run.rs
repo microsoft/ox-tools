@@ -312,7 +312,6 @@ fn execute_parallel_with(
     mut spawn: impl FnMut(usize, Invocation, Option<Duration>) -> io::Result<RunningWorker>,
     mut emit: impl FnMut(&Invocation, &mut BufferedOutcome) -> io::Result<()>,
 ) -> Result<ExitCode, AppError> {
-    let invocations = plan.invocations.clone();
     let mut workers = Vec::with_capacity(worker_count.get());
     let mut outcomes = Vec::with_capacity(worker_count.get());
     let mut stop_launching = false;
@@ -320,11 +319,11 @@ fn execute_parallel_with(
     let mut first_failure = None;
     let mut next_index = 0;
 
-    for wave in invocations.chunks(worker_count.get()) {
-        for invocation in wave.iter().cloned() {
+    for wave in plan.invocations.chunks(worker_count.get()) {
+        for invocation in wave {
             let index = next_index;
             next_index += 1;
-            match spawn(index, invocation, timeout) {
+            match spawn(index, invocation.clone(), timeout) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
                     outcomes.push(IndexedOutcome {
@@ -344,7 +343,7 @@ fn execute_parallel_with(
 
         outcomes.sort_by_key(|outcome| outcome.index);
         for indexed in &mut outcomes {
-            emit(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
+            emit(&plan.invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
             record_emitted_failure(
                 &indexed.outcome.result,
                 keep_going,

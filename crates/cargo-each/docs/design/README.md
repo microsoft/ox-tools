@@ -72,9 +72,9 @@ per object.
    recipes collapses to flags.
 5. **Bare names for free.** `{name}` yields the un-qualified package name, so
    `@version` stripping disappears from callers even though the input carries it.
-6. **Bounded execution.** Per-package and per-target commands may run with a
-   caller-selected concurrency limit and timeout. Defaults remain sequential and
-   unbounded for backward compatibility.
+6. **Bounded execution.** Per-package, per-target, and JSON-record commands may
+   run with a caller-selected concurrency limit and timeout. Defaults remain
+   sequential and unbounded for backward compatibility.
 7. **Works identically locally and in CI**, on any platform, with no shell
    dialect assumptions. **Open source**: ships from `ox-tools` to crates.io.
 
@@ -167,7 +167,7 @@ arbitrary-command + metadata-filter spine do not overlap.
 ## 4. CLI surface
 
 ```
-cargo each [SELECTION] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
+cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 ```
 
 Everything after `--` is the command template. `cargo-each` never interprets it
@@ -257,7 +257,7 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
-| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package or per-target commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
+| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package, per-target, or JSON-record commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
 | `--timeout <DURATION>` | Terminate an invocation's Windows job object or Unix process group when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Unix descendants can escape by starting a new session, so termination is best-effort for those escaped descendants. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |

@@ -110,7 +110,7 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
-    /// Run at most N per-package or per-target commands concurrently. Use
+    /// Run at most N per-package, per-target, or JSON-record commands concurrently. Use
     /// `auto` to detect available parallelism once. Defaults to 1. Buffered
     /// output is redirected to unique temporary files and emitted in plan order.
     /// Only an effective count above 1 disconnects child standard input for capture.

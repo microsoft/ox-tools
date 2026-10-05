@@ -94,10 +94,11 @@ can be double-quoted. Expression atoms:
   `--target-required-feature` further narrows targets.
 
 `--keep-going` runs every invocation and exits non-zero if any failed
-(default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package or
-per-target work. Omitting it runs exactly one invocation at a time; `auto`
-resolves once to the machine’s available parallelism. Detection failure is
-reported explicitly without falling back. `--timeout <DURATION>` terminates
+(default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package,
+per-target, or JSON-record work. Omitting it runs exactly one invocation at
+a time; `auto` resolves once to the machine’s available parallelism.
+Detection failure is reported explicitly without falling back.
+`--timeout <DURATION>` terminates
 each invocation’s Windows job object or Unix process group independently
 (`250ms`, `30s`, or `2m`). Unix descendants can escape a process group by
 starting a new session, so timeout cleanup is best-effort for those escaped
