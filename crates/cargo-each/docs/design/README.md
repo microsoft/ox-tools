@@ -36,10 +36,12 @@ The same four chores, re-spelled per recipe, are the bulk of the PowerShell in
 `checks/`. Two recipes already carry a `TODO(anvil-runner)` noting that a helper
 "absorbs the skip/splat preamble" is wanted.
 
-`cargo-each` is that helper: one cargo-native tool that resolves a
-cargo-style package selection, optionally filters it by a metadata predicate,
-and runs a command over the result — once per package, once per matching Cargo
-target (with placeholder substitution), or exactly once for the whole set.
+`cargo-each` is that helper: one portable tool that either resolves a
+cargo-style package selection (optionally filtered by metadata) or reads JSON
+Lines records, then runs a command over the result with placeholder
+substitution. Cargo-backed execution runs once per package, once per matching
+target, or exactly once for the whole set; record-backed execution runs once
+per object.
 
 ## 2. Goals
 
@@ -52,7 +54,7 @@ target (with placeholder substitution), or exactly once for the whole set.
    supplied as ordinary `-p` flags or as one Cargo package spec per line in a
    `--package-file`, so callers do not need shell array expansion. cargo-each
    stays agnostic about who produced the file and what the selection means.
-3. **Three execution modes.** *per-package* (run the command once per member,
+3. **Four execution modes.** *per-package* (run the command once per member,
    substituting `{name}`/`{spec}`/`{version}`/`{manifest}`) covers per-manifest
    tools; *once* (run the command a single time when the set is non-empty)
    covers workspace-wide tools and single-invocation cargo commands, with a
@@ -60,7 +62,9 @@ target (with placeholder substitution), or exactly once for the whole set.
    *per-target* runs once for each Cargo target of requested kinds, preserving
    the package placeholders and adding `{target}`. The workspace-scoped
    `{workspace-rust-version}` placeholder exposes the root compatibility floor
-   to commands that provision or validate a shared toolchain.
+   to commands that provision or validate a shared toolchain. *JSON-record*
+   runs once per input object without loading Cargo metadata and expands
+   top-level string fields through `{json:key}`.
 4. **A small, general filter language** (`--filter` and `--exclude-filter`)
    with `not`, `and`, `or`, and parentheses over cargo metadata — target kinds,
    publication state, declared features and dependencies, and

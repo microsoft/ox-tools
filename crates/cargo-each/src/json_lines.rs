@@ -72,9 +72,8 @@ fn parse_line(raw_line: &str, source: &Arc<str>, line_number: usize, records: &m
         raw_line.strip_prefix('\u{feff}').unwrap_or(raw_line)
     } else {
         raw_line
-    }
-    .trim();
-    if line.is_empty() {
+    };
+    if line.trim().is_empty() {
         return Ok(());
     }
     let value: Value = serde_json::from_str(line).map_err(|error| {
@@ -124,6 +123,11 @@ mod tests {
         assert!(invalid.contains("line 1"));
         assert!(invalid.contains("column 2"));
         assert!(!invalid.contains("line 1 column"), "{invalid}");
+
+        let indented = load(&["  {bad".to_owned()], &[])
+            .expect_err("invalid indented JSON must fail")
+            .to_string();
+        assert!(indented.contains("line 1, column 4"), "{indented}");
 
         let array = load(&["[]".to_owned()], &[]).expect_err("array records must fail").to_string();
         assert!(array.contains("must be an object"));
