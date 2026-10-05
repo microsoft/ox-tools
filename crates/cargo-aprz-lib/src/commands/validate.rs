@@ -117,6 +117,7 @@ mod tests {
         assert!(result.is_ok(), "Default configuration should validate successfully: {result:?}");
     }
 
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[test]
     fn metadata_errors_keep_their_context() {
         let mut host = TestHost::new();

@@ -15,10 +15,20 @@ use crate::model::{Mutant, Outcome, Summary};
 /// The same discipline as [`crate::elements`]: a consumer reading a figure whose meaning has
 /// silently changed is worse off than one that refuses to read it. Bump this whenever a field's
 /// meaning changes or a field is removed; adding one does not need it.
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "5";
 
-/// How many rows the ranked tables keep, matching the prose dump.
+/// How many rows bounded ranking tables keep, matching the prose dump.
+///
+/// Compiler-withdrawal groups are intentionally exempt so failed campaigns remain classifiable.
 const TOP: usize = 20;
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive shared references"
+)]
+const fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
 
 /// How much of the identifier hash is kept.
 ///
@@ -308,6 +318,20 @@ pub struct Build {
     /// unavoidable cost of instrumenting the tree at all.
     pub withdrawals: Vec<Withdrawal>,
 
+    /// How many lower-density withdrawal groups were omitted from [`Self::withdrawals`].
+    ///
+    /// Kept for compatibility with older readers. New writers retain every compiler
+    /// withdrawal group and therefore leave this at zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub withdrawal_groups_omitted: usize,
+
+    /// How many mutants the omitted withdrawal groups account for.
+    ///
+    /// Kept for compatibility with older readers. New writers retain every compiler
+    /// withdrawal group and therefore leave this at zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub withdrawal_mutants_omitted: usize,
+
     /// The largest peak memory any one test binary reached during the baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_peak_bytes: Option<u64>,
@@ -386,7 +410,7 @@ impl RoundPackage {
 pub struct Withdrawal {
     /// The package identifier after applying the bundle's redaction policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub package: Option<String>,
+    pub(crate) package: Option<String>,
 
     /// The rustc error code, or empty when the diagnostic carried none.
     pub code: String,
@@ -394,11 +418,13 @@ pub struct Withdrawal {
     /// The normalized primary diagnostic message category after applying the bundle's redaction
     /// policy.
     #[serde(default)]
-    pub category: String,
+    pub(crate) category: String,
 
     /// Whether the diagnostic's primary span identified the replacement text.
-    #[serde(default)]
-    pub replacement_site: bool,
+    ///
+    /// `None` means the bundle predates this observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) replacement_site: Option<bool>,
 
     /// The mutator whose mutants drew it, or empty when it could not be attributed.
     pub mutator: String,
@@ -806,11 +832,13 @@ fn build_of(session: &Session, redaction: Redaction) -> Build {
                 package: redact_package(&entry.package, redaction),
                 code: entry.code.clone(),
                 category: redact_category(&entry.category, redaction),
-                replacement_site: entry.replacement_site,
+                replacement_site: Some(entry.replacement_site),
                 mutator: entry.mutator.clone(),
                 mutants: entry.mutants,
             })
             .collect(),
+        withdrawal_groups_omitted: 0,
+        withdrawal_mutants_omitted: 0,
         baseline_peak_bytes: session.peak,
 
         // A run with no hint at all reports nothing rather than three zeros: zeros would read as
@@ -1028,20 +1056,20 @@ fn millis(duration: Duration) -> u64 {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::fixtures;
 
     #[test]
-    fn legacy_withdrawals_default_the_new_reason_dimensions() {
+    fn withdrawals_missing_reason_dimensions_use_defaults() {
         let withdrawal: Withdrawal = serde_json::from_str(r#"{"code":"E0308","mutator":"literal.int_decrement","mutants":3}"#)
-            .expect("the pre-M1 withdrawal schema remains readable");
+            .expect("a withdrawal without reason dimensions remains readable");
 
         assert_eq!(withdrawal.code, "E0308");
         assert!(withdrawal.package.is_none());
         assert!(withdrawal.category.is_empty());
-        assert!(!withdrawal.replacement_site);
+        assert_eq!(withdrawal.replacement_site, None);
         assert_eq!(withdrawal.mutants, 3);
     }
 
@@ -1281,7 +1309,34 @@ mod tests {
         assert_eq!((round.elapsed_ms, round.withdrew), (250, 3));
         assert_eq!(round.packages[0].mutants(), 3);
         assert_ne!(round.packages[0].name(), Some("private-package"));
-        assert_ne!(build.withdrawals[0].package.as_deref(), Some("private-package"));
+        let withdrawal = &build.withdrawals[0];
+        assert_ne!(withdrawal.package.as_deref(), Some("private-package"));
+        assert_eq!(withdrawal.code, "E0308");
+        assert_ne!(withdrawal.category, "mismatched types");
+        assert_eq!(withdrawal.replacement_site, Some(true));
+        assert_eq!(withdrawal.mutator, "literal.int_decrement");
+        assert_eq!(withdrawal.mutants, 3);
+    }
+
+    #[test]
+    fn build_withdrawals_retain_the_complete_census() {
+        let mut session = session_with(crate::exec::Phases::default());
+        session.census = (0..TOP + 2)
+            .map(|index| crate::exec::Withdrawal {
+                package: format!("package-{index}"),
+                code: format!("E{index:04}"),
+                category: format!("category-{index}"),
+                replacement_site: index % 2 == 0,
+                mutator: format!("mutator-{index}"),
+                mutants: TOP + 2 - index,
+            })
+            .collect();
+
+        let build = bundle(&plan(), Some(&session), &context()).build.expect("build");
+
+        assert_eq!(build.withdrawals.len(), TOP + 2);
+        assert_eq!(build.withdrawal_groups_omitted, 0);
+        assert_eq!(build.withdrawal_mutants_omitted, 0);
     }
 
     #[test]
@@ -1412,7 +1467,7 @@ mod tests {
 
     #[test]
     fn the_bundle_says_which_schema_it_is() {
-        assert_eq!(bundle(&plan(), None, &context()).schema_version, "3");
+        assert_eq!(bundle(&plan(), None, &context()).schema_version, "5");
     }
 
     #[test]
@@ -1477,6 +1532,9 @@ mod tests {
     }
 
     #[test]
+    // This test owns a process environment marker and relaunches the test binary so the serialized
+    // child process observes the real environment-redaction boundary.
+    #[cfg(not(miri))]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn serialized_redacted_bundles_hide_workspace_wrapper_environment_paths() {
         const CHILD: &str = "CARGO_GAMMA_DIAG_REDACTION_CHILD";

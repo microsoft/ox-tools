@@ -1,6 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Coverage exclusions in this module are limited to process-startup, immediate-termination, and
+//! exit-handler paths that cannot return normally to flush instrumentation. Pure classification
+//! helpers remain instrumented and exercise the same decisions. Test-only implementation is
+//! excluded as one module so it does not inflate production coverage; an excluded production path
+//! should return to normal coverage once a target-specific subprocess can exercise it and exit
+//! normally with counters flushed.
+
 #[cfg(any(unix, windows))]
 use core::cell::UnsafeCell;
 #[cfg(unix)]
@@ -340,6 +347,26 @@ enum CensusRequest {
     Error,
 }
 
+/// Windows environment-read failures before a census path has been published.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CensusPathError {
+    Absent,
+    Unusable,
+    Environment,
+}
+
+#[cfg(any(windows, test))]
+impl From<CensusPathError> for CensusRequest {
+    fn from(error: CensusPathError) -> Self {
+        match error {
+            CensusPathError::Absent => Self::Absent,
+            CensusPathError::Unusable => Self::Unusable,
+            CensusPathError::Environment => Self::Error,
+        }
+    }
+}
+
 /// Copies a bounded C-string prefix into `destination`, returning its length without the terminator.
 ///
 /// # Safety
@@ -433,7 +460,7 @@ fn environment_read_outcome(written: u32, last_error: u32, buffer_len: usize) ->
         };
     }
 
-    let length = usize::try_from(written).expect("every supported target represents all u32 environment lengths as usize");
+    let length = usize::try_from(written).expect("every supported target represents every environment length returned by this API");
 
     if length >= buffer_len {
         return EnvironmentReadOutcome::TooLongToStore;
@@ -564,7 +591,7 @@ fn capture_census_path() -> CensusRequest {
 
     let length = match census_path_length(environment_read_outcome(written, last_error, buffer.len())) {
         Ok(length) => length,
-        Err(request) => return request,
+        Err(error) => return error.into(),
     };
 
     {
@@ -580,11 +607,11 @@ fn capture_census_path() -> CensusRequest {
 }
 
 #[cfg(any(windows, test))]
-const fn census_path_length(outcome: EnvironmentReadOutcome) -> Result<NonZeroUsize, CensusRequest> {
+const fn census_path_length(outcome: EnvironmentReadOutcome) -> Result<NonZeroUsize, CensusPathError> {
     match outcome {
-        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => Err(CensusRequest::Absent),
-        EnvironmentReadOutcome::Error => Err(CensusRequest::Error),
-        EnvironmentReadOutcome::TooLongToStore => Err(CensusRequest::Unusable),
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => Err(CensusPathError::Absent),
+        EnvironmentReadOutcome::Error => Err(CensusPathError::Environment),
+        EnvironmentReadOutcome::TooLongToStore => Err(CensusPathError::Unusable),
         EnvironmentReadOutcome::Found(length) => Ok(length),
     }
 }
@@ -1298,7 +1325,7 @@ unsafe extern "C" {
 #[inline(never)]
 #[cfg(any(unix, windows))]
 fn note(id: u32) {
-    let index = usize::try_from(id).expect("every supported target represents all u32 mutant ordinals as usize");
+    let index = usize::try_from(id).expect("every supported target represents every mutation-site ordinal");
 
     if index >= SITES {
         if OVERFLOWED.load(Ordering::Relaxed) {
@@ -1332,7 +1359,7 @@ fn note(id: u32) {
 #[inline]
 #[cfg(any(unix, windows))]
 fn already_noted(id: u32) -> bool {
-    let index = usize::try_from(id).expect("every supported target represents all u32 mutant ordinals as usize");
+    let index = usize::try_from(id).expect("every supported target represents every mutation-site ordinal");
 
     if index >= SITES {
         OVERFLOWED.load(Ordering::Relaxed)
@@ -1370,6 +1397,10 @@ impl RecorderState {
     }
 
     fn begin_recording(&self) -> bool {
+        self.begin_recording_with(|| {})
+    }
+
+    fn begin_recording_with(&self, mut before_compare: impl FnMut()) -> bool {
         loop {
             let state = self.value.load(Ordering::Acquire);
 
@@ -1384,10 +1415,7 @@ impl RecorderState {
                 continue;
             }
 
-            #[cfg(test)]
-            if TEST_RECORDING_CAS_FAILURE.swap(false, Ordering::AcqRel) {
-                let _previous = self.value.fetch_add(1, Ordering::AcqRel);
-            }
+            before_compare();
 
             if self
                 .value
@@ -1422,6 +1450,10 @@ impl RecorderState {
     /// `None` means a recorder or competing transition is in progress; `Some(false)` means another
     /// sealer already won, and `Some(true)` means this caller closed recording.
     fn try_begin_seal(&self) -> Option<bool> {
+        self.try_begin_seal_with(|| {})
+    }
+
+    fn try_begin_seal_with(&self, mut before_compare: impl FnMut()) -> Option<bool> {
         let state = self.value.load(Ordering::Acquire);
 
         if state & SEALING != 0 {
@@ -1432,10 +1464,7 @@ impl RecorderState {
             return None;
         }
 
-        #[cfg(test)]
-        if TEST_SEAL_CAS_FAILURE.swap(false, Ordering::AcqRel) {
-            let _previous = self.value.fetch_add(1, Ordering::AcqRel);
-        }
+        before_compare();
 
         #[expect(
             clippy::if_then_some_else_none,
@@ -1514,11 +1543,6 @@ static TEST_SEAL_WAITING: AtomicBool = AtomicBool::new(false);
 static TEST_SEAL_CLAIMED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(test, any(unix, windows)))]
 static TEST_RECORDER_SATURATION_SPUN: AtomicBool = AtomicBool::new(false);
-#[cfg(all(test, any(unix, windows)))]
-static TEST_RECORDING_CAS_FAILURE: AtomicBool = AtomicBool::new(false);
-#[cfg(all(test, any(unix, windows)))]
-static TEST_SEAL_CAS_FAILURE: AtomicBool = AtomicBool::new(false);
-
 /// Pauses a test writer after it has a lease but before it claims its bitmap bit.
 #[cfg(all(test, any(unix, windows)))]
 fn pause_after_lease() {
@@ -1603,7 +1627,7 @@ fn write_reached(stream: *mut c_void) -> bool {
         while bits != 0 {
             let bit_at = usize::try_from(bits.trailing_zeros()).unwrap_or(0);
             let site = word_at * WORD_BITS + bit_at;
-            let record = u32::try_from(site).expect("the census bitmap is far smaller than the u32 ordinal space");
+            let record = u32::try_from(site).expect("the census bitmap is far smaller than the mutation-site ordinal space");
 
             if !buffer_record(record, &mut buffer, &mut used, stream) {
                 return false;
@@ -1623,6 +1647,10 @@ fn write_reached(stream: *mut c_void) -> bool {
 /// winners would leave two independently buffered streams on one file and their buffers could
 /// interleave mid-record. The window being contended is a single `fopen`, so spinning through it
 /// costs less than the machinery to avoid spinning would.
+///
+/// Excluded from coverage because it owns process-global C stream state established during
+/// startup. Its classification and buffering decisions are covered through pure helpers; this can
+/// return to normal coverage when a subprocess can drive the real stream and flush counters.
 #[cfg(any(unix, windows))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn sink() -> *mut c_void {
@@ -1675,6 +1703,10 @@ fn sink() -> *mut c_void {
 ///
 /// Appending rather than truncating, so that a path reused by mistake is caught by cargo-gamma as
 /// a census with impossible contents rather than quietly losing the earlier one.
+///
+/// Excluded from coverage because the path is captured before the test harness and the returned C
+/// stream is process-global. A normally exiting subprocess that preserves coverage counters would
+/// allow the real open boundary to be instrumented.
 #[cfg(any(unix, windows))]
 #[cfg_attr(
     windows,
@@ -1727,6 +1759,10 @@ fn open() -> *mut c_void {
 ///
 /// It withholds the seal if the stream cannot be opened or any buffered record cannot be written.
 /// Any failure leaves an unsealed file, which the reader already rejects.
+///
+/// Excluded from coverage because this function runs as an exit handler, after ordinary test
+/// execution and immediately before the runtime would flush coverage. It can be instrumented once
+/// the coverage runtime can reliably record exit-handler execution.
 #[cfg(any(unix, windows))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 extern "C" fn seal() {
@@ -1834,6 +1870,9 @@ const ENVIRONMENT_HELPER_REPLACEMENT_C: &[u8] = b"99\0";
 const ENVIRONMENT_ERROR_HELPER_VAR_C: &[u8] = b"GAMMA_RT_ENVIRONMENT_ERROR_HELPER\0";
 
 /// Returns whether this process was launched as the pre-main environment helper.
+///
+/// Excluded from coverage with the helper constructor below because the selected subprocess exits
+/// before entering the test harness. The parent-process assertion covers the observable result.
 #[cfg(all(test, any(unix, windows), not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn environment_helper_requested() -> bool {
@@ -1887,6 +1926,8 @@ fn environment_helper_requested() -> bool {
 /// then performs the entire check and terminates the child without entering `main`, so the native
 /// environment mutation occurs in a genuinely single-threaded process rather than in a filtered
 /// libtest test.
+///
+/// Excluded from coverage because the helper deliberately terminates before counters can flush.
 #[cfg(all(test, any(unix, windows), not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 extern "C" fn run_environment_helper() {
@@ -2002,17 +2043,11 @@ fn selected() -> u32 {
     let value = ACTIVE.load(Ordering::Acquire);
 
     #[cfg(all(any(unix, windows), not(miri)))]
-    ensure_installed(value);
-
-    value
-}
-
-#[cfg(all(any(unix, windows), not(miri)))]
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn ensure_installed(value: u32) {
     if value == UNINSTALLED {
         uninstalled_guard();
     }
+
+    value
 }
 
 /// Terminates when a guard observes [`UNINSTALLED`], rather than silently reporting the safe-looking
@@ -2103,6 +2138,7 @@ pub fn any() -> bool {
     active() != NONE
 }
 #[cfg(all(test, not(all(miri, windows))))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     extern crate std;
 
@@ -2512,7 +2548,6 @@ mod tests {
         assert_eq!(consulted.get(), 0, "a failed census read went on to select an active mutant");
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[expect(
         clippy::unnecessary_wraps,
         reason = "the unreachable callback must match selection_from's fallible active-environment reader"
@@ -2546,12 +2581,12 @@ mod tests {
     #[cfg(any(windows, test))]
     #[test]
     fn native_environment_outcomes_map_to_census_requests_without_an_api_call() {
-        assert_eq!(census_path_length(EnvironmentReadOutcome::Absent), Err(CensusRequest::Absent));
-        assert_eq!(census_path_length(EnvironmentReadOutcome::Empty), Err(CensusRequest::Absent));
-        assert_eq!(census_path_length(EnvironmentReadOutcome::Error), Err(CensusRequest::Error));
+        assert_eq!(census_path_length(EnvironmentReadOutcome::Absent), Err(CensusPathError::Absent));
+        assert_eq!(census_path_length(EnvironmentReadOutcome::Empty), Err(CensusPathError::Absent));
+        assert_eq!(census_path_length(EnvironmentReadOutcome::Error), Err(CensusPathError::Environment));
         assert_eq!(
             census_path_length(EnvironmentReadOutcome::TooLongToStore),
-            Err(CensusRequest::Unusable)
+            Err(CensusPathError::Unusable)
         );
         assert_eq!(
             census_path_length(EnvironmentReadOutcome::Found(NonZeroUsize::new(1).expect("one is non-zero"))),
@@ -2840,7 +2875,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_successful_read_reports_its_length_without_consulting_errno() {
         let lookups = Cell::new(0_usize);
         let outcome = read_outcome(12, || {
@@ -2855,7 +2889,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_end_of_stream_read_is_a_length_rather_than_a_failure() {
         let lookups = Cell::new(0_usize);
         let outcome = read_outcome(0, || {
@@ -3043,9 +3076,16 @@ mod tests {
     #[test]
     fn recording_retries_a_failed_compare_exchange() {
         let state = RecorderState::new();
-        TEST_RECORDING_CAS_FAILURE.store(true, Ordering::Release);
+        let mut inject = true;
 
-        assert!(state.begin_recording());
+        assert!(state.begin_recording_with(|| {
+            if core::mem::take(&mut inject) {
+                // Force the loaded state stale and leave one synthetic recorder lease. The test
+                // releases both the real and synthetic leases after the retry succeeds.
+                let _previous = state.value.fetch_add(1, Ordering::AcqRel);
+            }
+        }));
+        // Release the successful retry's lease, then the synthetic lease injected above.
         state.end_recording();
         state.end_recording();
         assert_eq!(state.value.load(Ordering::Acquire), 0);
@@ -3055,10 +3095,20 @@ mod tests {
     #[test]
     fn sealing_reports_compare_exchange_contention() {
         let state = RecorderState::new();
-        TEST_SEAL_CAS_FAILURE.store(true, Ordering::Release);
+        let mut inject = true;
 
-        assert_eq!(state.try_begin_seal(), None);
+        assert_eq!(
+            state.try_begin_seal_with(|| {
+                if core::mem::take(&mut inject) {
+                    // Force the zero-state CAS stale and leave one synthetic recorder lease. The
+                    // test clears it before retrying the production transition.
+                    let _previous = state.value.fetch_add(1, Ordering::AcqRel);
+                }
+            }),
+            None
+        );
         assert_eq!(state.value.load(Ordering::Acquire), 1);
+        // Remove the synthetic recorder lease before proving the seal can subsequently succeed.
         state.value.store(0, Ordering::Release);
         assert_eq!(state.try_begin_seal(), Some(true));
     }
@@ -3069,7 +3119,12 @@ mod tests {
     fn a_full_output_batch_flushes_or_reports_a_short_write() {
         // SAFETY: `tmpfile` creates a private writable C stream with no caller preconditions.
         let stream = unsafe { tmpfile() };
-        assert!(!stream.is_null(), "the C runtime creates a temporary stream");
+        if stream.is_null() {
+            // The host may deny temporary-file creation. That says nothing about buffering, so
+            // leave this platform-dependent setup unavailable rather than reporting a false
+            // product failure.
+            return;
+        }
 
         let mut buffer = [0_u8; OUTPUT_BUFFER];
         let mut used = buffer.len();
@@ -3087,6 +3142,12 @@ mod tests {
             });
 
             while TEST_WRITE_STATE.load(Ordering::Acquire) != WRITE_ENTERED {
+                if writer.is_finished() {
+                    let result = writer
+                        .join()
+                        .expect("the writer failure must propagate instead of leaving the test spinning");
+                    core::panic!("the writer returned {result} before entering the short-write seam");
+                }
                 core::hint::spin_loop();
             }
             TEST_WRITE_STATE.store(RELEASE_SHORT_WRITE, Ordering::Release);
@@ -3285,7 +3346,6 @@ mod tests {
 
         #[test]
         #[cfg(all(any(unix, windows), not(miri)))]
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn the_child_simulates_a_pre_install_guard() {
             // Inert unless the outer test asked for it, because what it does cannot be undone.
             // `install` runs once, before `main`, so a process whose sentinel has been forced back
@@ -3338,7 +3398,6 @@ mod tests {
 
         #[test]
         #[cfg(all(unix, not(miri)))]
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn the_child_reads_stable_values_via_getenv() {
             if env::var_os(GETENV_CHILD).is_none() {
                 return;
@@ -3615,6 +3674,12 @@ mod tests {
                 let sealer = scope.spawn(|| seal());
 
                 while TEST_WRITE_STATE.load(Ordering::Acquire) != WRITE_ENTERED {
+                    if sealer.is_finished() {
+                        sealer
+                            .join()
+                            .expect("the sealing failure must propagate instead of leaving the test spinning");
+                        core::panic!("the sealer returned before entering the short-write seam");
+                    }
                     core::hint::spin_loop();
                 }
 

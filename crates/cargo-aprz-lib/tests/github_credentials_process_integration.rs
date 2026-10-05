@@ -10,6 +10,9 @@
 
 mod support;
 
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;

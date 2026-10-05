@@ -147,6 +147,9 @@ pub fn raise_interrupt() {
 /// raised at the process running the test and that is not a thing to make general: `SIGQUIT` is
 /// the terminal's *other* stop keystroke, and what the test asks is whether a run handles it or
 /// dies of it and leaves its subtree behind.
+///
+/// Coverage excludes this helper because the uncaught signal terminates the subprocess before
+/// instrumentation can flush its counters.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn raise_quit() {
     // SAFETY: as for `raise_interrupt` — `raise` receives one integer signal number, dereferences
@@ -156,6 +159,7 @@ pub fn raise_quit() {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
     use std::process::Command;

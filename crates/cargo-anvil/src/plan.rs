@@ -18,6 +18,7 @@
 //! protocol.
 
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, bail};
@@ -417,7 +418,7 @@ impl Plan {
                 }
                 (Target::Region { .. }, Decision::Propose) => unreachable!("only owned files can propose"),
                 (Target::File { path }, Decision::Remove) => {
-                    let actual_path = resolve_existing_case_insensitive(repo_root, path);
+                    let actual_path = resolve_existing_case_insensitive(repo_root, path)?;
                     let abs = contained_path(repo_root, &actual_path)?;
                     if let Err(e) = std::fs::remove_file(&abs)
                         && e.kind() != std::io::ErrorKind::NotFound
@@ -427,7 +428,7 @@ impl Plan {
                 }
                 (Target::Region { host, .. }, Decision::Remove) => {
                     let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
-                    let actual_host = resolve_existing_case_insensitive(repo_root, host);
+                    let actual_host = resolve_existing_case_insensitive(repo_root, host)?;
                     write_file(&contained_path(repo_root, &actual_host)?, spliced)?;
                 }
                 (_, Decision::InSync | Decision::LeaveAlone | Decision::OrphanedKept) => {}
@@ -577,7 +578,9 @@ fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
 }
 
 fn write_temporary_file(path: &Path, content: &str) -> Result<(), AppError> {
-    std::fs::write(path, content).into_app_err_with(|| format!("failed to write {}", path.display()))
+    // Keep the raw write as a separate boundary so its failure context can be
+    // tested deterministically without filesystem fault injection.
+    fs::write(path, content).into_app_err_with(|| format!("failed to write {}", path.display()))
 }
 
 fn make_temp_path(path: &Path) -> PathBuf {
@@ -699,7 +702,10 @@ mod tests {
     #[cfg_attr(miri, ignore = "canonicalizes a missing path; miri isolation forbids it")]
     #[test]
     fn a_missing_repository_root_returns_an_error() {
-        contained_path(Path::new("a-directory-that-does-not-exist"), "file.txt").unwrap_err();
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing-repository");
+        let err = contained_path(&missing, "file.txt").unwrap_err();
+        assert!(err.to_string().contains("failed to resolve the repository root"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -1272,7 +1278,7 @@ mod tests {
         // a non-NotFound error that must propagate (not be absorbed like the
         // idempotent already-gone case).
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("blocked")).unwrap();
+        fs::create_dir(tmp.path().join("blocked")).unwrap();
         let mut prev = Manifest::default();
         prev.set_file("blocked", "sha256:old");
         let mut plan = Plan::default();
@@ -1297,7 +1303,7 @@ mod tests {
     #[test]
     fn apply_returns_a_write_failure_instead_of_panicking() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("blocked")).unwrap();
+        fs::create_dir(tmp.path().join("blocked")).unwrap();
         let mut plan = Plan::default();
         plan.push(PlanItem::write_file("blocked", "data".to_owned(), "sha256:data".to_owned()));
 
@@ -1337,7 +1343,7 @@ mod tests {
     #[test]
     fn proposed_file_propagates_write_failure() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("file.txt.anvil-proposed.anvil-tmp")).unwrap();
+        fs::create_dir(tmp.path().join("file.txt.anvil-proposed.anvil-tmp")).unwrap();
         let mut plan = Plan::default();
         plan.push(PlanItem::propose_file(
             "file.txt",
@@ -1353,7 +1359,7 @@ mod tests {
     #[test]
     fn region_write_propagates_write_failure() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
+        fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
         let mut plan = Plan::default();
         plan.push(PlanItem::write_region(
             "Justfile",
@@ -1371,7 +1377,7 @@ mod tests {
     #[test]
     fn region_removal_propagates_write_failure() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
+        fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
         let mut plan = Plan::default();
         plan.push(PlanItem::remove_region("Justfile", "anvil-imports", "spliced".to_owned()));
 

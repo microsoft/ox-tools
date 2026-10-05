@@ -448,7 +448,6 @@ impl CargoConfig {
     ///
     /// A cargo configuration key of this shape accepts either one string or a list of them, and
     /// the lists in several files are concatenated rather than shadowing one another.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn strings(&self, path: &[&str]) -> Vec<String> {
         self.tables
             .iter()
@@ -905,6 +904,7 @@ fn lookup_bool(config: &CargoConfig, manifest: Option<&Table>, profile: &str, ke
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

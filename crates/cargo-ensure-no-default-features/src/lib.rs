@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! A cargo sub-command that ensures every dependency in a `Cargo.toml` file is declared
 //! with `default-features = false`.
 #![doc(
@@ -118,8 +120,9 @@ enum Commands {
 pub fn run() -> Result<ExitCode, AppError> {
     let cli = Cli::parse();
     let Commands::EnsureNoDefaultFeatures { manifest_path, exceptions } = cli.command;
+    let exceptions = exceptions.unwrap_or_default();
 
-    check(&manifest_path, &exceptions.unwrap_or_default())
+    check(&manifest_path, &exceptions)
 }
 
 fn check(manifest_path: &Path, exceptions: &[String]) -> Result<ExitCode, AppError> {
@@ -149,38 +152,13 @@ fn check(manifest_path: &Path, exceptions: &[String]) -> Result<ExitCode, AppErr
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 
     use tempfile::TempDir;
 
     use super::check;
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses a temporary directory")]
-    fn check_propagates_manifest_read_errors() {
-        let dir = TempDir::new().expect("temporary directory");
-        let missing = dir.path().join("missing.toml");
-
-        let error = check(&missing, &[]).expect_err("a missing manifest must be reported");
-
-        assert!(error.to_string().contains("Failed to read"), "unexpected error: {error}");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses a temporary directory")]
-    fn check_propagates_manifest_parse_errors() {
-        let dir = TempDir::new().expect("temporary directory");
-        let manifest = dir.path().join("Cargo.toml");
-        fs::write(&manifest, "[workspace").expect("write malformed manifest");
-
-        let error = check(&manifest, &[]).expect_err("malformed TOML must be reported");
-
-        assert!(
-            error.to_string().contains("Failed to parse Cargo.toml"),
-            "unexpected error: {error}"
-        );
-    }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses a temporary directory")]

@@ -118,6 +118,7 @@ impl Error for PlatformError {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

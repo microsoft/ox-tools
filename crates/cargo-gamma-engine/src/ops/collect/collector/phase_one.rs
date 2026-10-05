@@ -184,7 +184,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     }
 
     fn visit_item_type(&mut self, node: &'ast ItemType) {
-        self.walk.alias(&node.ident.to_string(), &node.ty);
+        self.walk.alias(&node.ident.to_string(), &node.generics, &node.ty);
         visit::visit_item_type(self, node);
     }
 
@@ -241,6 +241,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

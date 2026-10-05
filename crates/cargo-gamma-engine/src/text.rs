@@ -285,6 +285,7 @@ fn color_component(component: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::once;
 

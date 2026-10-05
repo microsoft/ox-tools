@@ -78,10 +78,10 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`shift`](#shift) | 2 | Is this shift's direction load-bearing? |
 | [`assign`](#assign) | 10 | Does this compound assignment's operator matter? |
 | [`logical`](#logical) | 6 | Is this `&&` really an `&&`? |
-| [`bool_expr`](#bool_expr) | 1 | Does anything observe this boolean value's polarity? |
+| [`bool_expr`](#bool_expr) | 1 | Does anything observe whether this boolean value is true or false? |
 | [`cond`](#cond) | 3 | Does anything depend on this branch being taken? |
 | [`match_guard`](#match_guard) | 3 | Does anything depend on this guard being right? |
-| [`match_arm`](#match_arm) | 1 | Is this arm reachable, and does anything notice when it stops matching? |
+| [`match_arm`](#match_arm) | 1 | Does anything depend on what this pattern matches? |
 | [`struct_field`](#struct_field) | 1 | Does this field's value matter, or is the default good enough? |
 | [`range`](#range) | 2 | Is this bound inclusive on purpose? |
 | [`loop`](#loop) | 5 | Does this `break` or `continue` carry the loop's meaning? |
@@ -92,7 +92,7 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`expr`](#expr) | 2 | Would an off-by-one here be caught? |
 | [`option`](#option) | 4 | Is the present case distinguished from the absent one? |
 | [`result`](#result) | 4 | Is success distinguished from failure? |
-| [`try`](#try) | 1 | Is graceful propagation distinguished from a panic? |
+| [`try`](#try) | 1 | Does anything distinguish propagation with `?` from a panic? |
 | [`fallback`](#fallback) | 4 | Does the absent or error path produce the right fallback value? |
 | [`iter`](#iter) | 12 | Does anything observe that this was ordered, deduplicated, or taken from one end? |
 | [`string`](#string) | 6 | Does the prefix, the case, or the trimmed end actually matter? |
@@ -144,6 +144,8 @@ returning `impl Iterator` is the exception: the schema wraps original and replac
 its shared `Either` type, as described below. When a workspace-defined type shadows a standard
 collection name and positively implements `Default`, its empty replacement uses that proved default
 rather than assuming the shadow also provides the standard type's `new` constructor.
+Here, a **resolved workspace Default type** is a workspace type whose direct declarations establish
+`Default`; an **unresolved concrete type or alias** has no such positive evidence.
 
 ### `relational`
 
@@ -350,8 +352,10 @@ Replaces a literal constant with a nearby one of the same kind: an integer zeroe
 
 An explicitly unsigned zero is not decremented. Explicit evidence includes a suffix, cast, return
 type, directly enclosing binding annotation, or the visible fixed signature of selected standard
-constructors such as `Duration::from_secs`, `NonZeroU32::new`, and `AtomicUsize::new`. Unknown API
-signatures retain the candidate rather than guessing that an integer-looking argument is unsigned.
+constructors such as `Duration::from_secs`, `NonZeroU32::new`, and `AtomicUsize::new`. A call to a
+locally declared function with an explicit numeric return type carries the same evidence. Unknown
+API signatures retain the candidate rather than guessing that an integer-looking argument is
+unsigned.
 
 ```rust
 // original
@@ -378,8 +382,9 @@ fn take_first(n: usize, items: &[Item]) -> &[Item] { &items[..(n + 1)] }
 
 Deliberately narrower than the `literal` family: the two mutators only fire on evidence, not guesswork, avoiding unviable mutants on genuinely non-numeric expressions.
 When the written type is floating point, the replacement uses `1.0` rather than an integer `1`.
-Arithmetic over a value explicitly typed as text or a standard temporal type is not taken as
-evidence that its result accepts an integer offset.
+Arithmetic over recognized text, path, and time types — `String`, `&str`, `OsString`, `PathBuf`,
+`Duration`, `Instant`, `SystemTime`, Chrono `DateTime` and `NaiveDateTime`, and their recognized
+qualified forms — is not taken as evidence that its result accepts an integer offset.
 
 ### `unary`
 
@@ -884,9 +889,9 @@ A `Result<Option<bool>, E>` yields `Err(Default::default())`, `Ok(None)`, `Ok(So
 `Cow` and `NonZero`. Depth and width are bounded so a deeply generic signature cannot generate an
 unbounded population.
 
-Where the tool cannot name a value of a type it falls back to `Default::default()` only when the
-source provides positive evidence that the type implements `Default`, or when an unresolved
-concrete name is not proved otherwise. It withholds that guess for a bare type parameter, an
+Where the tool cannot name a value of a type it falls back to `Default::default()` for a resolved
+workspace Default type, or as a conservative guess for an unresolved concrete type or alias. It
+withholds that guess for a bare type parameter, an
 unresolved associated type such as `D::Error` or `Self::Value`, an `impl Trait` that is not an
 iterator, a trait object, or a workspace type whose declarations establish no `Default`
 implementation. A parameter declared `T: Default` keeps its mutant, because there the promise is
@@ -911,15 +916,15 @@ bare, fully qualified, or re-exported and there is no name resolution here to te
 stop that taking every type ending in `Vec` for the standard one, the type arguments are counted as
 well: your own `Vec` carrying none is not the standard `Vec`, which carries an element type, so it
 falls back to `Default::default()` instead of being handed `Vec::new()`. A type that shadows a
-standard name *and* matches its shape is genuinely indistinguishable and will produce a mutant that
-does not compile, reported as unviable.
+standard name and matches its shape remains ambiguous only without positive workspace `Default`
+evidence. With that evidence it uses `Default::default()`; without it, the guessed standard
+constructor may produce an unviable mutant.
 
-A function returning a shared reference is not given a fabricated leaked allocation. Such a
+A function returning a reference is not given a fabricated leaked allocation. Such a
 replacement can change ownership and lifetime behavior independently of the returned value, and
-reference payloads frequently lack enough source evidence to construct a compiling value. Mutable
-string slices are the exception: `&mut str` replacements use leaked `String` allocations because
-there is no borrowed empty mutable string with a suitable lifetime. Use `#[gamma::value(...)]`
-where a stable reference value is available and meaningful.
+reference payloads frequently lack enough source evidence to construct a compiling value. This
+includes `&mut str`: its only source-independent construction would leak a fresh `String` on every
+invocation. Use `#[gamma::value(...)]` where a stable reference value is available and meaningful.
 
 A function returning `impl Iterator` is offered `core::iter::empty()`, and `core::iter::once(v)` for
 each value its `Item` type yields. This is the one return type whose mutant cannot simply be dropped
@@ -962,7 +967,7 @@ It is worth reaching for in two situations:
   ones at that site rather than joining them, so `#[gamma::value(u32::MAX)]` on a function the tool
   would have handed `0` asks the question you meant to ask instead of one more you did not.
 
-Behind an unresolved alias or concrete type, `Default::default()` may still be a guess. Stating a
+Behind an unresolved concrete type or alias, `Default::default()` may still be a guess. Stating a
 value is how that hope becomes a fact.
 
 The rules are deliberately few:

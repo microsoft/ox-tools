@@ -59,20 +59,37 @@ prior verdict before a rejected transaction is rolled back. Source paths in
 explicitly consumed records must be relative, normal workspace paths; roots and
 parent traversal are rejected before edit planning.
 
-Package-by-package discovery indexes plan file paths once before stage
-convergence. Each scan moves retained source text, including any leading UTF-8
-byte-order mark removed for parsing, directly into its indexed slot. This keeps
-source retention linear in the number of files rather than rescanning the full
-workspace file list for every dependency stage. Source generation validation
-uses normalized text and is limited to the freshly scanned plan before it is
-absorbed and instrumented; accumulated plans can still contain guards written
-by an earlier stage.
+Package-by-package discovery indexes plan file paths once before complete
+population instrumentation. Each dependency-ordered scan moves retained source
+text, including any leading UTF-8 byte-order mark removed for parsing, directly
+into its indexed slot. This keeps source retention linear in the number of
+files rather than rescanning the full workspace file list for every package.
+Source generation validation uses normalized text and is limited to the
+freshly scanned plan before it is absorbed. After every selected package has
+been scanned, the complete population is instrumented and handed to global
+schema convergence.
+
+Schema convergence first checks normal libraries, binaries, and test targets
+for every package with pending mutations. Compiler diagnostics are decoded
+with package and target context; unattributed failures use bounded,
+target-specific proof checks over the failing package's dependency cone. `build/isolation.rs`
+owns diagnostic contexts, tier construction, campaign-wide context/proof budgets, exact active
+schemas, memoized proof verdicts, and interaction minimization. `build.rs` snapshots all
+verdict-bearing state before either narrow-to-wide fallback and restores it before retrying.
+`build/splices.rs` dirties symmetric-difference files and maintains the live guard index
+incrementally. Cargo convergence evidence is decoded only when an `Events` consumer opts in.
+Compiled-source dep-info from these checks is retained alongside the final
+test-binary build so a mutated package without a test harness is reported
+uncovered rather than `notbuilt`.
 
 ## Hint artifacts
 
 Checked-in hints use grouped YAML schema version 3 and independently versioned
 generalized schema version 2. Generations validate forbidden YAML references
-before deserializing the strict typed schema. Incremental exact and generalized
+before deserializing the strict typed schema. Automatic reuse decodes the strict
+envelope, recognizes an unsupported generalized section without decoding its
+contents, and keeps otherwise reusable exact hints.
+Incremental exact and generalized
 replacement uses Fx-keyed tables;
 canonical sorting and reach-set interning restore deterministic output before
 publication. Identical generalized generations merge without duplicating reach
@@ -85,7 +102,11 @@ to treat those carried entries as newly selected evidence.
 
 Unsupported generalized versions remain fail-open for automatic scheduling
 and fail-closed for incremental promotion, which cannot safely round-trip
-unknown fields.
+unknown fields. Ordinary promotion leaves the original artifact bytes untouched
+rather than pretending the unsupported section can be promoted. Generalized
+version 1 is the supported migration case:
+decoding upgrades it to version 2, preserves seed counts with a minimum of one,
+and resets hit, miss, measured-time, and sample counters.
 Each generalized tier atomically reserves from a campaign-wide eight-attempt
 budget immediately before launching a hinted subprocess. A first hit makes the
 tier productive and removes that bound; concurrent zero-hit workers cannot

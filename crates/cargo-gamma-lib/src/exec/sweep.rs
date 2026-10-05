@@ -2,6 +2,13 @@
 // Licensed under the MIT License.
 
 //! Running the suite once per mutant and turning each result into a verdict.
+//!
+//! The lifecycle is:
+//! 1. planning builds [`ScheduledWork`] and the borrowed [`GeneralizedPlanning`] hint indexes;
+//! 2. the scheduler assigns work while resource admission controls each process launch;
+//! 3. execution and adjudication turn observations into verdicts;
+//! 4. events publish progress and selection telemetry; and
+//! 5. [`FileLearning`] records safe ordering knowledge for later mutants.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
@@ -43,8 +50,19 @@ pub(super) const MIN_SCOUT_WAIT: Duration = Duration::from_millis(5);
 /// Workers reserve one of these slots atomically immediately before launch. Once any attempt hits,
 /// later workers may continue without the bound because the tier has proved productive.
 const GENERALIZED_ZERO_HIT_LIMIT: usize = 8;
+/// Persisted exact probes usually terminate before a quarter of the binary baseline.
+const EXACT_PROBE_COST_DIVISOR: u32 = 4;
+/// Cold killed-mutant work usually consumes about half of its complete fallback.
+const KILLED_MUTANT_COST_DIVISOR: u32 = 2;
+/// Canonical misses are half as strong as direct transfer misses.
+const CANONICAL_MISS_DIVISOR: u32 = 2;
+/// Two direct misses retire a candidate that has never produced a hit.
+const MISS_RETIREMENT_THRESHOLD: u32 = 2;
 
 /// How long a quiet sweep may leave time-dependent progress displays unchanged.
+///
+/// This matches the dashboard repaint limit, so the next eligible repaint is flushed without
+/// waking the coordinator more often than the display can change.
 const SWEEP_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Describes a mutant stopped by the memory ceiling installed for its test binary.
@@ -174,8 +192,16 @@ fn receive_sweep_event<E: Events>(
     events: &mut E,
     heartbeat_interval: Duration,
 ) -> Option<SweepEvent> {
+    receive_sweep_event_with(events, heartbeat_interval, |timeout| receiver.recv_timeout(timeout))
+}
+
+fn receive_sweep_event_with<E: Events>(
+    events: &mut E,
+    heartbeat_interval: Duration,
+    mut receive: impl FnMut(Duration) -> core::result::Result<SweepEvent, mpsc::RecvTimeoutError>,
+) -> Option<SweepEvent> {
     loop {
-        match receiver.recv_timeout(heartbeat_interval) {
+        match receive(heartbeat_interval) {
             Ok(event) => return Some(event),
             Err(mpsc::RecvTimeoutError::Timeout) => events.heartbeat(),
             Err(mpsc::RecvTimeoutError::Disconnected) => return None,
@@ -218,12 +244,14 @@ fn take_selection_trace() -> Vec<SelectionAttempt> {
 fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &Census, killers: &Killers) -> Duration {
     let mutant = &plan.mutants[position];
 
-    // A mutant with a persisted killer hint is expected to be killed by one probe.
+    // Persisted exact killers usually terminate early, so their prior is one quarter of the
+    // binary baseline. Cold selected/whole work below uses one half because killed mutants rarely
+    // consume the complete fallback. Keep these fractions aligned with `generalized_fallback_cost`.
     if let Some(hint) = killers.hint(&mutant.id)
         && let Some(binaries) = reach.reachable(mutant)
         && let Some(binary) = binaries.iter().find(|b| hint.names(&b.package, &b.target))
     {
-        return binary.baseline / 4;
+        return binary.baseline / EXACT_PROBE_COST_DIVISOR;
     }
 
     let Some(binaries) = reach.reachable(mutant) else {
@@ -235,8 +263,8 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
     for binary in binaries {
         let ordinal = mutant.ordinal;
         match census.work(binary, ordinal) {
-            CensusWork::Selected(duration) => total += duration / 2,
-            CensusWork::Whole => total += binary.baseline / 2,
+            CensusWork::Selected(duration) => total += duration / KILLED_MUTANT_COST_DIVISOR,
+            CensusWork::Whole => total += binary.baseline / KILLED_MUTANT_COST_DIVISOR,
             CensusWork::Uncovered => {}
             CensusWork::Hinted(duration) => {
                 total = total
@@ -266,7 +294,11 @@ fn mutant_work_with_hints(
         let fallback = binaries
             .iter()
             .fold(Duration::ZERO, |total, binary| total.saturating_add(binary.baseline));
-        return crate::estimate::MutationWork::hinted(crate::estimate::WorkKind::Exact, binary.baseline / 4, fallback);
+        return crate::estimate::MutationWork::hinted(
+            crate::estimate::WorkKind::Exact,
+            binary.baseline / EXACT_PROBE_COST_DIVISOR,
+            fallback,
+        );
     }
 
     if let Some(work) = generalized_mutant_work(mutant, reach, generalized) {
@@ -286,7 +318,7 @@ fn mutant_work_with_hints(
                 }
                 CensusWork::Whole => {
                     whole = true;
-                    killed = killed.saturating_add(binary.baseline / 2);
+                    killed = killed.saturating_add(binary.baseline / KILLED_MUTANT_COST_DIVISOR);
                 }
                 CensusWork::Hinted(duration) => {
                     hinted = true;
@@ -314,6 +346,10 @@ fn mutant_work_with_hints(
     crate::estimate::MutationWork::costed(kind, killed)
 }
 
+/// Once-per-planning-pass borrowed indexes over supported generalized hints.
+///
+/// Lookups are keyed by file-and-item identity, file identity, and stable reach-site identity.
+/// Unsupported generalized generations deliberately produce an empty view.
 struct GeneralizedPlanning<'a> {
     items: crate::HashMap<(&'a Utf8Path, &'a str), &'a [RankedHint<Killer>]>,
     files: crate::HashMap<&'a Utf8Path, &'a [RankedHint<BinaryHint>]>,
@@ -360,7 +396,19 @@ fn mutant_work(
     mutant_work_with_hints(position, plan, reach, census, killers, &generalized)
 }
 
-type GeneralizedCandidate<'a> = (&'a TestBinary, u64, u32, u32, u32, bool);
+struct GeneralizedCandidate<'a> {
+    binary: &'a TestBinary,
+    measured_ms: u64,
+    samples: u32,
+    successes: u32,
+    misses: u32,
+    probe: GeneralizedProbe,
+}
+
+enum GeneralizedProbe {
+    Filtered,
+    Whole,
+}
 
 fn reached_work_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[Killer]) -> Option<GeneralizedCandidate<'a>> {
     for candidate in candidates {
@@ -369,7 +417,14 @@ fn reached_work_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[Killer]
             .copied()
             .find(|binary| candidate.names(&binary.package, &binary.target))
         {
-            return Some((binary, 0, 0, 0, 0, true));
+            return Some(GeneralizedCandidate {
+                binary,
+                measured_ms: 0,
+                samples: 0,
+                successes: 0,
+                misses: 0,
+                probe: GeneralizedProbe::Filtered,
+            });
         }
     }
     None
@@ -382,14 +437,14 @@ fn item_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<Kill
             .copied()
             .find(|binary| candidate.candidate.names(&binary.package, &binary.target))
         {
-            return Some((
+            return Some(GeneralizedCandidate {
                 binary,
-                candidate.measured_ms,
-                candidate.samples,
-                candidate.hits,
-                candidate.misses,
-                true,
-            ));
+                measured_ms: candidate.measured_ms,
+                samples: candidate.samples,
+                successes: candidate.hits,
+                misses: candidate.misses,
+                probe: GeneralizedProbe::Filtered,
+            });
         }
     }
     None
@@ -402,14 +457,14 @@ fn file_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<Bina
             .copied()
             .find(|binary| candidate.candidate.package == binary.package && candidate.candidate.target == binary.target)
         {
-            return Some((
+            return Some(GeneralizedCandidate {
                 binary,
-                candidate.measured_ms,
-                candidate.samples,
-                candidate.hits,
-                candidate.misses,
-                false,
-            ));
+                measured_ms: candidate.measured_ms,
+                samples: candidate.samples,
+                successes: candidate.hits,
+                misses: candidate.misses,
+                probe: GeneralizedProbe::Whole,
+            });
         }
     }
     None
@@ -426,7 +481,7 @@ fn generalized_mutant_work(
         .iter()
         .fold(Duration::ZERO, |total, binary| total.saturating_add(binary.baseline));
 
-    let (binary, measured_ms, samples, successes, misses, filtered) = hints
+    let candidate = hints
         .reach
         .get(&site)
         .and_then(|candidates| reached_work_candidate(binaries, candidates))
@@ -442,15 +497,18 @@ fn generalized_mutant_work(
                 .get(mutant.file.as_ref())
                 .and_then(|candidates| file_candidate(binaries, candidates))
         })?;
-    let probe = if samples > 0 {
-        Duration::from_millis(measured_ms / u64::from(samples))
-    } else if filtered {
-        binary.baseline / 4
+    let probe = if candidate.samples > 0 {
+        Duration::from_millis(candidate.measured_ms / u64::from(candidate.samples))
+    } else if matches!(candidate.probe, GeneralizedProbe::Filtered) {
+        candidate.binary.baseline / EXACT_PROBE_COST_DIVISOR
     } else {
-        binary.baseline / 2
+        candidate.binary.baseline / KILLED_MUTANT_COST_DIVISOR
     };
     Some(crate::estimate::MutationWork::hinted_with_observations(
-        probe, fallback, successes, misses,
+        probe,
+        fallback,
+        candidate.successes,
+        candidate.misses,
     ))
 }
 
@@ -680,7 +738,10 @@ impl Scheduler {
     }
 
     fn claim(&self, abandoned: &OnceLock<String>) -> Option<usize> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .state
+            .lock()
+            .expect("a scheduler panic can leave coupled queue and reservation state inconsistent");
 
         loop {
             if abandoned.get().is_some() {
@@ -690,16 +751,26 @@ impl Scheduler {
             if let Some(index) = self.select(&state) {
                 let work = &self.work[index];
                 let packages = self.detach_file(&mut state, work.file);
+                debug_assert!(state.remaining[index], "only remaining work may be claimed");
+                debug_assert!(state.remaining_count > 0, "remaining work implies a positive remaining count");
                 state.remaining[index] = false;
-                state.remaining_count = state.remaining_count.saturating_sub(1);
-                state.active_files[work.file] = state.active_files[work.file].saturating_add(1);
+                state.remaining_count -= 1;
+                state.active_files[work.file] = state.active_files[work.file]
+                    .checked_add(1)
+                    .expect("active file count cannot exceed the finite worker population");
                 let active_item = state.active_items.entry((work.file, Arc::clone(&work.item))).or_default();
-                *active_item = active_item.saturating_add(1);
+                *active_item = active_item
+                    .checked_add(1)
+                    .expect("active item count cannot exceed the finite worker population");
                 let package = self.package_slots[index];
-                state.package_turns[package] = state.package_turns[package].saturating_add(1);
+                state.package_turns[package] = state.package_turns[package]
+                    .checked_add(1)
+                    .expect("package turns cannot exceed the finite mutant population");
                 for resource in &work.resources {
                     let active = state.active_resources.entry(Arc::clone(resource)).or_default();
-                    *active = active.saturating_add(1);
+                    *active = active
+                        .checked_add(1)
+                        .expect("active resource count cannot exceed the finite worker population");
                 }
                 self.attach_file(&mut state, work.file, &packages);
                 return Some(index);
@@ -709,7 +780,10 @@ impl Scheduler {
                 return None;
             }
 
-            state = self.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+            state = self
+                .changed
+                .wait(state)
+                .expect("a scheduler panic can leave coupled queue and reservation state inconsistent");
         }
     }
 
@@ -728,25 +802,35 @@ impl Scheduler {
 
     fn release(&self, index: usize, learned: bool) {
         let work = &self.work[index];
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .state
+            .lock()
+            .expect("a scheduler panic can leave coupled queue and reservation state inconsistent");
         let packages = self.detach_file(&mut state, work.file);
         let key = (work.file, Arc::clone(&work.item));
         if learned {
             let _inserted = state.learned_items.insert(key.clone());
         }
-        state.active_files[work.file] = state.active_files[work.file].saturating_sub(1);
-        if let Some(active) = state.active_items.get_mut(&key) {
-            *active = active.saturating_sub(1);
+        debug_assert!(state.active_files[work.file] > 0, "a released file must have an active assignment");
+        state.active_files[work.file] -= 1;
+        let active = state
+            .active_items
+            .get_mut(&key)
+            .expect("every released assignment must have an active item reservation");
+        debug_assert!(*active > 0, "an active item reservation must be positive");
+        *active -= 1;
+        if *active == 0 {
+            state.active_items.remove(&key);
+        }
+        for resource in &work.resources {
+            let active = state
+                .active_resources
+                .get_mut(resource)
+                .expect("every released assignment must have all of its resource reservations");
+            debug_assert!(*active > 0, "an active resource reservation must be positive");
+            *active -= 1;
             if *active == 0 {
-                state.active_items.remove(&key);
-            }
-            for resource in &work.resources {
-                if let Some(active) = state.active_resources.get_mut(resource) {
-                    *active = active.saturating_sub(1);
-                    if *active == 0 {
-                        state.active_resources.remove(resource);
-                    }
-                }
+                state.active_resources.remove(resource);
             }
         }
         self.attach_file(&mut state, work.file, &packages);
@@ -761,6 +845,11 @@ impl Scheduler {
     fn select(&self, state: &SchedulerState) -> Option<usize> {
         if self.resource_capacities.is_empty() {
             return state.heads.first().map(|head| head.local.index);
+        }
+        if let Some(index) = state.heads.first().map(|head| head.local.index)
+            && self.resources_available(state, index)
+        {
+            return Some(index);
         }
 
         state
@@ -843,6 +932,8 @@ fn priority(work: &[ScheduledWork], state: &SchedulerState, index: usize) -> Opt
     let key = (item.file, Arc::clone(&item.item));
     let learned = state.learned_items.contains(&key);
     let item_contention = state.active_items.get(&key).copied().unwrap_or(0);
+    // Prefer an uncontended file, then an uncontended item, then informed work that can safely
+    // share an active item. Cold siblings wait for their scout to publish learning.
     let distance = if file_contention == 0 {
         (0, 0)
     } else if item_contention == 0 {
@@ -863,6 +954,8 @@ fn priority(work: &[ScheduledWork], state: &SchedulerState, index: usize) -> Opt
 }
 
 fn learning_priority(left: &LocalPriority, right: &LocalPriority) -> core::cmp::Ordering {
+    // Within the same contention class, maximize expected sibling benefit per unit of estimated
+    // cost; stable ordering is applied by `LocalPriority::cmp` after this comparison.
     let left_value = (left.benefit as u128).saturating_mul(right.cost);
     let right_value = (right.benefit as u128).saturating_mul(left.cost);
 
@@ -873,29 +966,32 @@ fn remove_head(state: &mut SchedulerState, package: usize) {
     let Some(local) = state.package_queues[package].first().copied() else {
         return;
     };
-    let _removed = state.heads.remove(&PackageHead {
+    let removed = state.heads.remove(&PackageHead {
         package,
         turns: state.package_turns[package],
         local,
     });
+    debug_assert!(removed, "the cached package head must be present before it is refreshed");
 }
 
 fn insert_head(state: &mut SchedulerState, package: usize) {
     let Some(local) = state.package_queues[package].first().copied() else {
         return;
     };
-    let _inserted = state.heads.insert(PackageHead {
+    let inserted = state.heads.insert(PackageHead {
         package,
         turns: state.package_turns[package],
         local,
     });
+    debug_assert!(inserted, "a package may have only one cached head");
 }
 
 fn remove_priority(package_slots: &[usize], state: &mut SchedulerState, index: usize) {
     let Some(priority) = state.priorities[index].take() else {
         return;
     };
-    let _removed = state.package_queues[package_slots[index]].remove(&priority);
+    let removed = state.package_queues[package_slots[index]].remove(&priority);
+    debug_assert!(removed, "the cached local priority must be present before it is refreshed");
 }
 
 fn insert_priority(work: &[ScheduledWork], package_slots: &[usize], state: &mut SchedulerState, index: usize) {
@@ -904,7 +1000,8 @@ fn insert_priority(work: &[ScheduledWork], package_slots: &[usize], state: &mut 
         state.priority_updates = state.priority_updates.saturating_add(1);
     }
     if let Some(priority) = priority(work, state, index) {
-        let _inserted = state.package_queues[package_slots[index]].insert(priority);
+        let inserted = state.package_queues[package_slots[index]].insert(priority);
+        debug_assert!(inserted, "a work item may have only one cached local priority");
         state.priorities[index] = Some(priority);
     }
 }
@@ -2256,7 +2353,7 @@ fn judge_ranked(
             if observation == Some(false)
                 && let Some((observed, item_path)) = learning
             {
-                FileLearning::canonical_miss(observed, item_path, binary, matches!(run.reach, ReachObservation::Reached));
+                FileLearning::record_canonical_pass(observed, item_path, binary, matches!(run.reach, ReachObservation::Reached));
             }
             if negative_reach_is_final(&run, attempt.only, negative.is_some_and(|(_, _, deterministic)| deterministic))
                 && let Some((negative, site, _)) = negative
@@ -2294,7 +2391,7 @@ fn judge_ranked(
             if observation == Some(false)
                 && let Some((observed, item_path)) = learning
             {
-                FileLearning::canonical_miss(observed, item_path, binary, matches!(run.reach, ReachObservation::Reached));
+                FileLearning::record_canonical_pass(observed, item_path, binary, matches!(run.reach, ReachObservation::Reached));
             }
             if negative_reach_is_final(&run, Only::All, negative.is_some_and(|(_, _, deterministic)| deterministic))
                 && let Some((negative, site, _)) = negative
@@ -2576,16 +2673,18 @@ struct RankedCandidate<T> {
     seeds: u32,
     hits: u32,
     misses: u32,
-    canonical_misses: u32,
+    canonical_passes: u32,
     measured: Duration,
     samples: u32,
     order: u64,
 }
 
 impl<T> RankedCandidate<T> {
+    // A canonical pass is weaker evidence than a direct transfer miss, so two canonical passes
+    // count as one miss. Integer division deliberately truncates an unmatched half.
     fn score(&self) -> (u32, core::cmp::Reverse<u32>, Duration, u64) {
         (
-            self.misses.saturating_mul(2).saturating_add(self.canonical_misses) / 4,
+            self.misses.saturating_mul(2).saturating_add(self.canonical_passes) / 4,
             core::cmp::Reverse(self.hits),
             if self.samples == 0 {
                 Duration::MAX
@@ -2606,13 +2705,14 @@ impl<T> RankedCandidate<T> {
         self.samples = self.samples.saturating_add(1);
     }
 
-    fn observe_canonical_miss(&mut self) {
-        self.canonical_misses = self.canonical_misses.saturating_add(1);
+    fn observe_canonical_pass(&mut self) {
+        self.canonical_passes = self.canonical_passes.saturating_add(1);
     }
 
     fn is_admissible(&self, fallback: Duration) -> bool {
-        let weighted_misses = self.misses.saturating_add(self.canonical_misses / 2);
-        if self.hits == 0 && weighted_misses >= 2 {
+        // Keep the same half-weight relationship when applying the two-miss retirement rule.
+        let weighted_misses = self.misses.saturating_add(self.canonical_passes / CANONICAL_MISS_DIVISOR);
+        if self.hits == 0 && weighted_misses >= MISS_RETIREMENT_THRESHOLD {
             return false;
         }
         if self.samples == 0 {
@@ -2632,7 +2732,7 @@ impl<T: Clone> RankedCandidate<T> {
             seeds: hint.seeds,
             hits: hint.hits,
             misses: hint.misses,
-            canonical_misses: 0,
+            canonical_passes: 0,
             measured: Duration::from_millis(hint.measured_ms),
             samples: hint.samples,
             order: hint.order,
@@ -2861,7 +2961,7 @@ impl FileLearning {
         }
     }
 
-    fn canonical_miss(&self, item_path: &str, binary: &TestBinary, reached: bool) {
+    fn record_canonical_pass(&self, item_path: &str, binary: &TestBinary, reached: bool) {
         let identity = BinaryIdentity::from_binary(binary);
         let mut state = self.locked();
 
@@ -2873,7 +2973,7 @@ impl FileLearning {
             .iter_mut()
             .find(|candidate| same_identity(&candidate.identity, &identity))
         {
-            found.observe_canonical_miss();
+            found.observe_canonical_pass();
         }
         if reached
             && let Some(found) = state
@@ -2881,14 +2981,14 @@ impl FileLearning {
                 .iter_mut()
                 .find(|candidate| same_identity(&candidate.identity, &identity))
         {
-            found.observe_canonical_miss();
+            found.observe_canonical_pass();
         }
         if let Some(found) = state
             .binaries
             .iter_mut()
             .find(|candidate| same_identity(&candidate.identity, &identity))
         {
-            found.observe_canonical_miss();
+            found.observe_canonical_pass();
         }
     }
 
@@ -2947,7 +3047,7 @@ fn reached_candidate(identity: BinaryIdentity, elapsed: Duration, order: u64) ->
         seeds: 1,
         hits: 0,
         misses: u32::from(false),
-        canonical_misses: 0,
+        canonical_passes: 0,
         measured: elapsed,
         samples: u32::from(true),
         order,
@@ -2960,7 +3060,7 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
         seeds: 1,
         hits: 0,
         misses: u32::from(false),
-        canonical_misses: 0,
+        canonical_passes: 0,
         measured: Duration::ZERO,
         samples: u32::from(false),
         order,
@@ -3005,36 +3105,28 @@ mod tests {
 
     #[test]
     fn a_quiet_sweep_emits_heartbeats_until_an_event_arrives() {
-        struct HeartbeatSender {
-            sender: Option<mpsc::Sender<SweepEvent>>,
-            heartbeats: usize,
-        }
+        struct HeartbeatCounter(usize);
 
-        impl Events for HeartbeatSender {
+        impl Events for HeartbeatCounter {
             fn phase(&mut self, _verb: &str, _detail: &str) {}
 
             fn mutant(&mut self, _mutant: &Mutant) {}
 
             fn heartbeat(&mut self) {
-                self.heartbeats += 1;
-                self.sender
-                    .take()
-                    .expect("only one heartbeat is needed")
-                    .send(SweepEvent::Started)
-                    .expect("the coordinator is still listening");
+                self.0 += 1;
             }
         }
 
-        let (sender, receiver) = mpsc::channel();
-        let mut events = HeartbeatSender {
-            sender: Some(sender),
-            heartbeats: 0,
-        };
+        let mut scripted = [Err(mpsc::RecvTimeoutError::Timeout), Ok(SweepEvent::Started)].into_iter();
+        let mut events = HeartbeatCounter(0);
 
-        let event = receive_sweep_event(&receiver, &mut events, Duration::from_millis(5)).expect("worker event");
+        let event = receive_sweep_event_with(&mut events, Duration::from_millis(5), |_timeout| {
+            scripted.next().unwrap_or(Err(mpsc::RecvTimeoutError::Disconnected))
+        })
+        .expect("worker event");
 
         assert!(matches!(event, SweepEvent::Started));
-        assert_eq!(events.heartbeats, 1);
+        assert_eq!(events.0, 1);
     }
 
     #[test]
@@ -5220,7 +5312,7 @@ mod tests {
             seeds: 1,
             hits: 0,
             misses: 0,
-            canonical_misses: 0,
+            canonical_passes: 0,
             measured: Duration::ZERO,
             samples: 0,
             order: 9,
@@ -5268,7 +5360,7 @@ mod tests {
             seeds: 1,
             hits,
             misses,
-            canonical_misses: 0,
+            canonical_passes: 0,
             measured: Duration::from_millis(measured),
             samples,
             order: 0,
@@ -5287,7 +5379,7 @@ mod tests {
             seeds: 1,
             hits: 0,
             misses: 0,
-            canonical_misses: 0,
+            canonical_passes: 0,
             measured: Duration::ZERO,
             samples: 0,
             order: 0,
@@ -5295,8 +5387,8 @@ mod tests {
         let mut explicit = candidate();
         explicit.observe(false, Duration::ZERO);
         let mut canonical = candidate();
-        canonical.observe_canonical_miss();
-        canonical.observe_canonical_miss();
+        canonical.observe_canonical_pass();
+        canonical.observe_canonical_pass();
 
         assert_eq!(canonical.score().0, explicit.score().0);
         assert!(
@@ -5305,8 +5397,8 @@ mod tests {
         );
         assert!(canonical.is_admissible(Duration::from_millis(30)));
 
-        canonical.observe_canonical_miss();
-        canonical.observe_canonical_miss();
+        canonical.observe_canonical_pass();
+        canonical.observe_canonical_pass();
         assert!(!canonical.is_admissible(Duration::from_millis(30)));
     }
 
@@ -5923,7 +6015,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_misses_do_not_create_candidates() {
+    fn canonical_passes_do_not_create_candidates() {
         let learning = FileLearning::new();
         let binary = TestBinary {
             package: "subject".to_owned(),
@@ -5931,7 +6023,7 @@ mod tests {
             ..crate::testing::test_binary("unused")
         };
 
-        learning.canonical_miss("subject::a", &binary, true);
+        learning.record_canonical_pass("subject::a", &binary, true);
 
         assert!(learning.candidates("subject::a", Duration::MAX).is_empty());
         assert!(learning.candidates("subject::b", Duration::MAX).is_empty());

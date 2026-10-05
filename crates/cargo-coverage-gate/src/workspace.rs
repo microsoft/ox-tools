@@ -44,6 +44,8 @@ pub(crate) struct Workspace {
 pub(crate) struct Member {
     /// Cargo package name.
     pub(crate) name: String,
+    /// Cargo package version.
+    pub(crate) version: String,
     /// Absolute directory containing this member's `Cargo.toml`.
     pub(crate) manifest_dir: PathBuf,
     /// Effective package-level `min-lines-percent`, if set. A matching target
@@ -58,6 +60,10 @@ pub(crate) struct Member {
 }
 
 impl Member {
+    pub(crate) fn spec(&self) -> String {
+        format!("{}@{}", self.name, self.version)
+    }
+
     fn apply_policy_override(&mut self, policy: PolicyOverride) {
         self.expect_no_coverable_lines = matches!(policy, PolicyOverride::ExpectNoCoverableLines);
         match policy {
@@ -120,6 +126,7 @@ impl Workspace {
             }
             members.push(Member {
                 name: pkg.name.to_string(),
+                version: pkg.version.to_string(),
                 manifest_dir,
                 min_lines_percent: gate.min_lines_percent,
                 expect_no_coverable_lines: gate.expect_no_coverable_lines,
@@ -769,6 +776,7 @@ expect-no-coverable-lines = false
     fn policy_overrides_clear_the_other_behavior() {
         let mut member = Member {
             name: "alpha".to_owned(),
+            version: "1.2.3".to_owned(),
             manifest_dir: PathBuf::from("alpha"),
             min_lines_percent: Some(75.0),
             expect_no_coverable_lines: true,

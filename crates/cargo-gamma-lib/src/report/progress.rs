@@ -26,6 +26,12 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 /// column every time a counter gains a digit.
 const BAR_WIDTH: usize = 25;
 
+/// Width assumed when the host cannot report terminal dimensions.
+const DEFAULT_WIDTH: usize = 80;
+
+/// Smallest width that leaves room for the verb and useful progress content.
+const MINIMUM_WIDTH: usize = 20;
+
 /// The live progress display.
 ///
 /// Every subject that reaches this type is control-character encoded on the way in, because the
@@ -59,6 +65,12 @@ pub struct Progress {
     out_of_memory: usize,
 }
 
+const _: () = {
+    const fn assert_unwind_safe<T: core::panic::UnwindSafe + core::panic::RefUnwindSafe>() {}
+
+    assert_unwind_safe::<Progress>();
+};
+
 impl Progress {
     /// Creates a display.
     ///
@@ -73,7 +85,7 @@ impl Progress {
             pending: None,
             shown: None,
             styler,
-            width: width.map_or(80, |value| usize::from(value).max(20)),
+            width: Self::normalized_width(width),
             last_draw: None,
             dirty: false,
             total: 0,
@@ -86,7 +98,7 @@ impl Progress {
 
     /// Updates the width used for subsequent renders.
     pub(crate) fn resize(&mut self, width: Option<u16>) {
-        self.width = width.map_or(80, |value| usize::from(value).max(20));
+        self.width = Self::normalized_width(width);
         self.dirty = true;
     }
 
@@ -100,14 +112,19 @@ impl Progress {
         self.dirty = true;
     }
 
+    const fn normalized_width(width: Option<u16>) -> usize {
+        match width {
+            Some(width) => {
+                let width = width as usize;
+                if width < MINIMUM_WIDTH { MINIMUM_WIDTH } else { width }
+            }
+            None => DEFAULT_WIDTH,
+        }
+    }
+
     /// Records one evaluated mutant.
     pub fn record(&mut self, outcome: Outcome) {
         self.record_outcome(outcome);
-    }
-
-    /// Records a completed mutant with its identity and measured service time.
-    pub(crate) fn record_mutant(&mut self, mutant: &crate::model::Mutant) {
-        self.record_outcome(mutant.outcome);
     }
 
     fn record_outcome(&mut self, outcome: Outcome) {
@@ -171,6 +188,28 @@ impl Progress {
         self.pending = Some((active, completed, subject));
     }
 
+    /// Replaces the subject of the phase opened by [`begin`](Self::begin).
+    ///
+    /// When the phase is still visible, the existing terminal row is replaced atomically. When
+    /// another line temporarily owns the row, only the retained subject changes so restore or
+    /// completion uses the latest value.
+    pub fn update_phase<H: Host>(&mut self, host: &mut H, subject: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        let Some((active, _completed, current)) = self.pending.as_mut() else {
+            return;
+        };
+        *current = encode_controls(subject).into_owned();
+
+        if self.open {
+            paint(host, &format!("\r\x1b[2K{active} {current}"));
+        }
+
+        self.dirty = true;
+    }
+
     /// Closes the line [`begin`](Self::begin) opened.
     ///
     /// A phase that had to print something mid-flight — a build's progress bar, a compiler error —
@@ -189,7 +228,6 @@ impl Progress {
     }
 
     /// Closes an open phase, either extending or replacing its in-progress subject.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn close<H: Host>(&mut self, host: &mut H, subject: &str, extend: bool) {
         if !self.enabled {
             return;
@@ -279,7 +317,6 @@ impl Progress {
     }
 
     /// Restores the active phase line after a borrowed build-progress row is released.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn restore<H: Host>(&mut self, host: &mut H) {
         if !self.enabled || self.open {
             return;
@@ -302,7 +339,6 @@ impl Progress {
     }
 
     /// Draws a completed/total bar for the phase currently in progress.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn phase_progress<H: Host>(&mut self, host: &mut H, completed: usize, total: usize, unit: &str) {
         if total == 0 {
             return;
@@ -478,7 +514,6 @@ impl Progress {
     /// Split from [`borrowed`](Self::borrowed) so the phase bar this type composes itself — whose
     /// only untrusted part, the unit, is encoded where it enters — is not encoded a second time
     /// and stripped of the styling its own label carries.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn draw_borrowed<H: Host>(&mut self, host: &mut H, line: &str) {
         if !self.enabled {
             return;
@@ -570,11 +605,11 @@ impl Progress {
         let counted = format!("[{bar}] {}/{} mutants evaluated", self.done, self.total);
         let full = format!("{counted}{verdicts}");
 
-        let body = if full.chars().count() <= room {
+        let body = if visible_width(&full) <= room {
             full
         } else {
             // Everything after the bar is optional, in the order it is least useful.
-            if counted.chars().count() <= room {
+            if visible_width(&counted) <= room {
                 counted
             } else {
                 truncate(&counted, room)
@@ -594,57 +629,8 @@ impl Progress {
 /// cargo's progress bar, which arrives styled. Counting its escape sequences as columns would
 /// truncate a line that fits, and taking characters by count could cut an escape in half and leave
 /// the terminal reading the rest of the line as a command.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn truncate(text: &str, width: usize) -> String {
-    if visible_width(text) <= width {
-        return text.to_owned();
-    }
-
-    let keep = width.saturating_sub(3);
-    let mut kept = String::with_capacity(text.len());
-    let mut shown = 0;
-    let mut styled = false;
-    let mut characters = text.chars();
-
-    while let Some(character) = characters.next() {
-        if character == '\u{1b}' {
-            styled = true;
-            kept.push(character);
-
-            if let Some(next) = characters.next() {
-                kept.push(next);
-
-                if next == '[' {
-                    for byte in characters.by_ref() {
-                        kept.push(byte);
-
-                        if matches!(byte, '\u{40}'..='\u{7e}') {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            continue;
-        }
-
-        if shown == keep {
-            break;
-        }
-
-        kept.push(character);
-        shown += 1;
-    }
-
-    kept.push_str("...");
-
-    // The escapes kept above are unterminated once the text carrying them is cut, so the styling
-    // would otherwise run on into whatever is printed next.
-    if styled {
-        kept.push_str("\u{1b}[0m");
-    }
-
-    kept
+    crate::report::fit(text, width)
 }
 
 /// Writes one complete terminal update in a single call.
@@ -669,10 +655,11 @@ fn paint<H: Host>(host: &mut H, update: &str) {
 
 /// The number of columns text occupies, ignoring the escape sequences that occupy none.
 fn visible_width(text: &str) -> usize {
-    crate::report::unstyled(text).chars().count()
+    crate::report::unstyled_width(text)
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io;
 
@@ -711,7 +698,6 @@ mod tests {
     }
 
     impl Host for CountingHost {
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn output(&mut self) -> impl Write {
             &mut self.out
         }
@@ -720,12 +706,10 @@ mod tests {
             &mut self.err
         }
 
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn is_terminal(&self) -> bool {
             true
         }
 
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn terminal_width(&self) -> Option<u16> {
             Some(80)
         }
@@ -951,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn setting_a_new_total_resets_the_previous_testing_counts() {
+    fn setting_a_new_total_resets_the_previous_verdict_counts() {
         let mut progress = Progress::new(true, Styler::new(false), Some(200));
 
         progress.set_total(3);
@@ -974,8 +958,17 @@ mod tests {
     }
 
     #[test]
-    fn truncation_counts_characters_not_bytes() {
+    fn truncation_respects_narrow_terminal_widths() {
+        assert_eq!(truncate("abc", 0), "");
+        assert_eq!(truncate("abc", 1), ".");
+        assert_eq!(truncate("abc", 2), "..");
+    }
+
+    #[test]
+    fn truncation_measures_terminal_columns_and_keeps_complete_sequences() {
         assert_eq!(truncate("ééééé", 5).chars().count(), 5);
+        assert_eq!(truncate("界界界", 5), "界...");
+        assert_eq!(truncate("👩‍💻abcd", 5), "👩‍💻...");
     }
 
     #[test]
@@ -1058,7 +1051,7 @@ mod tests {
     #[test]
     fn baseline_phase_progress_contains_only_the_binary_count() {
         let screen = visible(&written(|progress, host| {
-            progress.begin(host, "Baselining", "Baseline", "building the test binaries and running the suite");
+            progress.begin(host, "Baselining", "Baseline", "running the unmutated suite");
             progress.phase_progress(host, 2, 4, "test binaries");
         }));
 
@@ -1301,7 +1294,7 @@ mod tests {
     #[test]
     fn a_completed_result_can_replace_the_in_progress_subject() {
         let screen = visible(&written(|progress, host| {
-            progress.begin(host, "Baselining", "Baseline", "building the test binaries and running the suite");
+            progress.begin(host, "Baselining", "Baseline", "running the unmutated suite");
             progress.complete(host, "42 tests ran in 1.2s");
         }));
 

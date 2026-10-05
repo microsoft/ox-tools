@@ -44,6 +44,7 @@ use serde_json::Value;
     ResolveTargetError,
     ParseLcovError,
     ReadLcovError,
+    InvalidPackageSelectorError,
     UnknownPackageSelectorError
 )]
 pub struct CoverageGateError;
@@ -219,6 +220,14 @@ pub(crate) struct ReadLcovError {
     pub path: String,
 }
 
+/// A `--package` selector is not valid Cargo glob syntax.
+#[ohno::error]
+#[display("invalid `--package` selector `{selector}`")]
+#[from(glob::PatternError)]
+pub(crate) struct InvalidPackageSelectorError {
+    pub selector: String,
+}
+
 /// A `--package` selector did not match any workspace member.
 #[ohno::error]
 #[display("`--package` selector `{selector}` did not match any workspace member")]
@@ -261,6 +270,14 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("nope-*"));
         assert!(rendered.contains("did not match"));
+    }
+
+    #[test]
+    fn invalid_package_selector_carries_pattern_and_parse_error() {
+        let err = InvalidPackageSelectorError::caused_by("lib[".to_owned(), glob::Pattern::new("lib[").unwrap_err());
+        let rendered = err.to_string();
+        assert!(rendered.contains("lib["));
+        assert!(rendered.contains("invalid"));
     }
 
     #[test]

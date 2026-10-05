@@ -31,7 +31,8 @@ pub struct Listings {
     /// List every mutant that could not be compiled.
     pub unviable: bool,
 
-    /// Whether the live display already named the survivors and timeouts as they happened.
+    /// Whether the live display already named survivors, timeouts, and out-of-memory outcomes as
+    /// they happened.
     ///
     /// When it did, repeating them here prints every finding twice on one screen and buries the
     /// `Found` and `Summary` lines between the two copies. When it did not — output is piped, or
@@ -306,7 +307,7 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
     if suppressible {
         writeln!(
             stream,
-            "{note} Run `cargo gamma suppress --apply` to automatically suppress timed-out and out-of-memory mutants"
+            "{note} Run `cargo gamma suppress` to preview automatic suppression of timed-out and out-of-memory mutants"
         )?;
     }
 
@@ -633,7 +634,7 @@ mod tests {
                 "Summary: 2 mutants (1 killed, 0 survived, 1 timed out, 0 out of memory, 0 uncovered => 50.0%)\n",
                 "Note   : 1 superfluous skip directive could be removed with `cargo gamma unsuppress --apply`\n",
                 "  src/a.rs:9: skip(relational) — the site no longer produces a mutant\n",
-                "Note   : Run `cargo gamma suppress --apply` to automatically suppress timed-out and out-of-memory mutants\n",
+                "Note   : Run `cargo gamma suppress` to preview automatic suppression of timed-out and out-of-memory mutants\n",
                 "Note   : Run `cargo gamma hints` to update your hint file and accelerate subsequent cargo-gamma runs\n",
             )
         );
@@ -755,7 +756,7 @@ mod tests {
         let text = rendered_with(&population, Listings::default());
 
         assert!(
-            text.ends_with("Note   : Run `cargo gamma suppress --apply` to automatically suppress timed-out and out-of-memory mutants\n")
+            text.ends_with("Note   : Run `cargo gamma suppress` to preview automatic suppression of timed-out and out-of-memory mutants\n")
         );
     }
 

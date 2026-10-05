@@ -37,7 +37,10 @@ fn anvil_cli_meta() -> CliMeta {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use clap::CommandFactory as _;
+
     use super::*;
+    use crate::cli::Cli;
 
     #[test]
     fn anvil_catalog_has_identity_and_artifacts() {
@@ -46,7 +49,10 @@ mod tests {
         assert_eq!(catalog.cli().bin_name, "cargo-anvil");
         assert_eq!(
             catalog.cli().about,
-            "Update local recipes, cloud-workflow building blocks, and managed regions for the anvil unified build setup"
+            Cli::command()
+                .get_about()
+                .expect("the CLI declares an about description")
+                .to_string()
         );
         assert!(!catalog.artifacts().is_empty());
     }

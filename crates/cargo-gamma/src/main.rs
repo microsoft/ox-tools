@@ -156,12 +156,17 @@
 //!
 //! ```bash
 //! cargo gamma run --only-survivors
-//! cargo gamma run --mutant c6d3802ceceb      # rerun one exact current mutant
 //! ```
 //!
-//! The option reads `gamma-report.json` from the artifact directory. Mutant identities remain
+//! `--only-survivors` reads `gamma-report.json` from the artifact directory. Mutant identities remain
 //! stable when only tests change. Timeout and memory-limit outcomes are not selected, even though
 //! the report format represents them as survived.
+//!
+//! To select an exact mutant from the current source population without consulting that report:
+//!
+//! ```bash
+//! cargo gamma run --mutant c6d3802ceceb
+//! ```
 //!
 //! ## Mutators
 //!
@@ -218,13 +223,14 @@
 //!
 //! | Phase | What happens | What it costs |
 //! |---|---|---|
-//! | **Analysis** | Parse source tree and identify mutation sites. | Seconds |
+//! | **Analysis** | Resolve configuration, Cargo metadata, packages, targets, and source scope. | Seconds |
 //! | **Mutation** | Copy workspace to temporary location and introduce<br>all mutations. | Seconds |
-//! | **Building** | Compile instrumented tree.<br>Unviable mutants are eliminated. | Seconds or minutes, this does a full debug build |
+//! | **Building** | Check the instrumented tree, exclude unviable mutants,<br>then generate the test binaries. | Seconds or minutes |
 //! | **Baselining** | Run unmutated suite to verify baseline<br>duration and peak memory. | One suite run |
 //! | **Testing** | Test in parallel, stopping at<br>first test failure. | N test runs — where all<br>the time goes |
 //!
-//! The Building phase will take a little longer than a normal debug build of your workspace/crate,
+//! The Building phase checks the complete instrumented schema and may take longer than a normal
+//! debug build of your workspace/crate,
 //! the Baselining phase will take a little longer than one run of your test suite. And the Testing phase
 //! will take (number-of-mutants * time-it-takes-to-run-your-test-suite / N) where N varies based on the test suite.
 //! In an idealized setting, N is around 2. So if you have a test suite that takes 1/2 hour to run and you have
@@ -364,9 +370,9 @@
 //! cargo gamma run --jobs 8                      # mutants tested in parallel
 //! cargo gamma run --test-timeout-multiplier 2.0 # multiple of each test binary's baseline duration
 //! cargo gamma run --minimum-test-timeout 5      # floor under the computed budget
-//! cargo gamma run --build-timeout 600           # bound the single build
+//! cargo gamma run --build-timeout 600           # bound each compiler invocation
 //! cargo gamma run --min-score 80                # fail the run below a score
-//! cargo gamma run --max-flaky 0                 # fail if any inconclusive flakes remain
+//! cargo gamma run --max-flaky 0                 # fail if any unresolved flaky outcomes remain
 //! cargo gamma run --dry-run                     # report the plan without building anything
 //! cargo gamma run --show-killed                 # list what the suite killed, not just what survived
 //! cargo gamma run --show-unviable               # list the mutants that could not compile
@@ -379,9 +385,17 @@
 //! ```
 //!
 //! A run computes each mutant's budget from the unmutated suite, so a fast suite gets a tight one.
-//! `--minimum-test-timeout` stops a loaded machine from reporting scheduling noise as a hang. The build
-//! is paid for exactly once, so a build that never finishes costs the whole run; `--build-timeout` and
-//! `--build-timeout-multiplier` bound it, and a build that outstays its budget is stopped.
+//! `--minimum-test-timeout` stops a loaded machine from reporting scheduling noise as a hang.
+//! Compiler work consists of convergence checks, bounded proof checks when attribution needs them,
+//! and one final code-generating build. `--build-timeout` and `--build-timeout-multiplier` bound
+//! each invocation, and an invocation that outstays its budget is stopped with its Cargo stage named.
+//!
+//! The campaign establishes a compiler-viable mutant schema before any mutant is executed.
+//! `cargo check` examines the instrumented packages together and compiler-rejected mutants are
+//! withdrawn until the schema checks; a code-generating build then produces the converged test
+//! binaries. A code-generation or linking failure uses the same bounded convergence rules.
+//! `--build-timeout` bounds each compiler invocation, while
+//! `--build-timeout-multiplier` bounds later convergence rounds relative to the first.
 //!
 //! The workspace is copied to `workspace/` under cargo-gamma's external scratch area before
 //! anything is rewritten. By default, Cargo artifacts and campaign state live under
@@ -404,11 +418,11 @@
 //! `gamma-selection.jsonl`. Every mutant verdict is appended and flushed to the progress journal as
 //! it arrives, using the console's outcome-line format but without color or redraw escapes. Unlike
 //! the console, the journal includes ordinary killed mutants as well as survivors, timeouts, memory
-//! exhaustion, flakes and uncovered mutants. The JSON Lines selection journal similarly flushes one
-//! structured record for every mutant test-process launch, including its selection tier, candidate identity
-//! and rank, conclusive hit, clean miss, or inconclusive result, elapsed time, and fallback estimate.
-//! An interrupted run therefore leaves every complete verdict and selection attempt already reached
-//! available for recovery and heuristic analysis, even though its final reports were never written.
+//! exhaustion, flakes and uncovered mutants. The JSON Lines selection journal is transient,
+//! non-verdict scheduling telemetry; its fields are explained with the test-selection model below.
+//! An interrupted run therefore leaves every complete verdict and the retained prefix of complete
+//! selection attempts available for recovery and heuristic analysis, even though its final reports
+//! were never written.
 //!
 //! What gets copied follows version control: files git tracks are always copied, whatever an ignore
 //! rule says about them. `--copy-ignored` adds the untracked ones, and is for the build that reads
@@ -451,8 +465,9 @@
 //! cargo gamma run --nextest                 # a process per test, for suites that need the isolation
 //! ```
 //!
-//! An optimized profile can be the right trade because the build is paid once and thousands of
-//! mutants run against it. Avoid using `release` without considering its semantics: it normally turns
+//! An optimized profile can be the right trade because code generation is normally paid once for the
+//! converged binaries and thousands of mutants run against them. Avoid using `release` without
+//! considering its semantics: it normally turns
 //! `debug_assertions` and overflow checks off, so mutants those checks would have caught may survive
 //! instead. [Optimizing compute-heavy suites](#optimizing-compute-heavy-suites) defines a safer
 //! opt-in profile and explains when it pays.
@@ -484,9 +499,9 @@
 //! trees measurable at all.
 //!
 //! It costs less than it appears to. Nextest is handed the already-built tree and never invokes cargo,
-//! so the single build is still paid for once, and budgets, ordering, timeouts and memory accounting
-//! work as they do otherwise. It does need `cargo-nextest` on the path. The two runners agree on the
-//! verdicts for any suite that passes under both.
+//! so it adds no compiler work, and budgets, ordering, timeouts and memory accounting work as they do
+//! otherwise. It does need `cargo-nextest` on the path. The two runners agree on the verdicts for any
+//! suite that passes under both.
 //!
 //! Point the run somewhere other than the current directory, or say explicitly that the whole workspace
 //! is in scope:
@@ -509,9 +524,11 @@
 //! slower than the baseline a mutant may run in that binary before it is called a timeout, and `--minimum-test-timeout` provides a floor under the budget.
 //!
 //! Some mutants cannot compile — replacing a body with `Some(Default::default())` only works when the
-//! type implements `Default`. These are withdrawn automatically, rebuilt without, and reported as
-//! unviable rather than counted against the score. Withdrawal is iterative, because rustc reports only
-//! the errors it reaches before it gives up, so a large tree can need several rounds to converge.
+//! type implements `Default`. cargo-gamma checks the complete instrumented schema first, withdraws
+//! compiler-rejected mutants, and checks again. The converged test binaries are generated only after
+//! these rounds finish. Withdrawn mutants are reported as unviable rather than counted against the
+//! score. Convergence is iterative because rustc reports only the errors it reaches before it gives
+//! up, so a large tree can need several rounds.
 //! `--rollback-rounds` raises the cap; raise it when a run stops with a rollback-limit error and the
 //! withdrawal counts it is printing are still falling.
 //!
@@ -527,11 +544,11 @@
 //! styling alone, so a log can stay colorless without losing the progress the flag would otherwise
 //! suppress.
 //!
-//! The two builds a run performs — the instrumented tree, then the baseline test binaries — are the
-//! longest silences in it, so cargo's own progress bar is shown while they run, alongside the first few
-//! compiler errors. Only errors: an instrumented tree emits a great many warnings, and none of them say
-//! whether the build will produce the binaries the run needs. `--show-build` lets the rest of cargo's
-//! output through unfiltered, which is what to reach for when the build itself is what is going wrong:
+//! Compiler convergence can invoke Cargo several times with different unit graphs. Cargo's `X/Y`
+//! counter therefore resets and does not measure progress toward a viable schema. The normal display
+//! hides it and instead reports a monotonic `Excluding unviable mutants (N found)` phase, followed by
+//! the final unviable and viable counts. `--show-build` exposes Cargo's raw narration for
+//! troubleshooting:
 //!
 //! ```bash
 //! cargo gamma run --show-build
@@ -1050,7 +1067,7 @@
 //! cargo gamma explain relational.lt_to_le   # a mutator
 //! cargo gamma explain @arithmetic           # everything a preset selects
 //! cargo gamma explain c6d3802ceceb           # a current mutant
-//! cargo gamma explain --report old.json c6d3802ceceb # a retained historical finding
+//! cargo gamma explain --report old.json c6d3802ceceb # a mutant from a retained report
 //! ```
 //!
 //! To write directives in bulk for the mutants a run could not decide on, see
@@ -1421,9 +1438,9 @@
 //! observations that can vary even when every captured input is unchanged, so they are never reused.
 //!
 //! **A skip directive is not a cache and must never be treated as one.**
-//! `cargo gamma suppress --apply` writes a finding into the source, where it is reviewed, committed,
-//! and survives a clean checkout. That is a claim you stand behind. Everything in the record — and
-//! everything in the hints file, committed or
+//! `cargo gamma suppress --apply` writes a suppression directive into the source, where it is
+//! reviewed, committed, and survives a clean checkout. That is a claim you stand behind.
+//! Everything in the record — and everything in the hints file, committed or
 //! not — is a convenience that must be safe to delete: removing the cargo-gamma cache and
 //! `rm gamma-hints.yaml` cost you time and nothing else.
 //!
@@ -1685,10 +1702,6 @@ rallocator::rallocator!();
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> process::ExitCode {
-    #[cfg(not(miri))]
-    // #[gamma::skip(stmt.delete_call, reason = "cargo-gamma uses rallocator only as its ordinary global allocator and creates no allocation-hint heaps or domains, so backend registration has no current behavioral effect")]
-    rallocator::initialize();
-
     if let Some(code) = cargo_gamma_lib::run_rustc_wrapper_if_requested(env::args_os()) {
         return code;
     }

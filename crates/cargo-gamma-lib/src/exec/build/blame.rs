@@ -2,6 +2,11 @@
 // Licensed under the MIT License.
 
 //! Which mutant a compiler error belongs to.
+//!
+//! Rustc spans first provide direct replacement blame or the deletion-only containment fallback.
+//! A non-empty replacement that remains unresolved is handed back to the parent build coordinator
+//! for proof-build isolation. Every resulting withdrawal is summarized as a bounded
+//! [`CompilerReason`].
 
 use core::ops::{Range, RangeInclusive};
 
@@ -13,6 +18,15 @@ use crate::schema::{Guard, Position};
 use crate::{HashMap, HashSet};
 
 /// A bounded, host-independent account of why rustc rejected a mutant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(super) enum AttributionEvidence {
+    #[default]
+    OtherDiagnostic,
+    ReplacementPrimary,
+    ProofBuild,
+}
+
+/// A bounded, host-independent account of why rustc rejected a mutant.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(super) struct CompilerReason {
     /// The primary rustc error code, empty when the diagnostic carried none.
@@ -21,16 +35,21 @@ pub(super) struct CompilerReason {
     /// A normalized form of the primary diagnostic message.
     pub(super) category: String,
 
-    /// Whether a primary span landed in the replacement text itself.
-    pub(super) replacement_site: bool,
+    /// How the compiler failure was attributed to this mutant.
+    pub(super) evidence: AttributionEvidence,
 }
 
 impl CompilerReason {
     pub(super) fn isolated() -> Self {
         Self {
             category: "isolated compiler failure".to_owned(),
+            evidence: AttributionEvidence::ProofBuild,
             ..Self::default()
         }
+    }
+
+    pub(super) const fn replacement_site(&self) -> bool {
+        matches!(self.evidence, AttributionEvidence::ReplacementPrimary)
     }
 
     pub(super) fn note(&self) -> String {
@@ -39,10 +58,10 @@ impl CompilerReason {
         } else {
             format!(" {}", self.code)
         };
-        let site = if self.replacement_site {
-            "; primary span identified the replacement site"
-        } else {
-            "; primary span did not identify the replacement site"
+        let site = match self.evidence {
+            AttributionEvidence::ReplacementPrimary => "; primary span identified the replacement site",
+            AttributionEvidence::OtherDiagnostic => "; primary span did not identify the replacement site",
+            AttributionEvidence::ProofBuild => "; isolated by proof builds without diagnostic-span attribution",
         };
 
         format!("rustc{code}: {}{site}", self.category)
@@ -62,8 +81,9 @@ impl CompilerReason {
 /// diagnostic remains sufficient evidence. Containment involving a non-empty replacement is only
 /// a candidate: proof builds must isolate it before the mutant is reported as unviable.
 #[expect(clippy::too_many_lines, reason = "the attribution tiers share one parsed diagnostic walk")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, CompilerReason> {
+    const SECONDARY_ATTRIBUTION_BUDGET: usize = 65_536;
+
     let mut exact_blame: HashMap<u32, CompilerReason> = HashMap::default();
     let mut deletion_blame: HashMap<u32, CompilerReason> = HashMap::default();
 
@@ -174,6 +194,7 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
         // enclosing-site attribution—it routinely names innocent declarations—but intersection
         // with a mutated branch is exact evidence: that text exists only because gamma emitted it.
         if exact.is_empty() {
+            let mut remaining = SECONDARY_ATTRIBUTION_BUDGET;
             for span in diagnostic.spans.iter().filter(|span| !span.is_primary) {
                 let Some(file_name) = span.file_name.as_deref() else {
                     continue;
@@ -185,6 +206,10 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
                     continue;
                 };
                 let matched = by_path.get(relative).map(Vec::as_slice).unwrap_or_default();
+                if matched.len() > remaining {
+                    break;
+                }
+                remaining -= matched.len();
 
                 for (ordinal, guard) in matched.iter().copied() {
                     if guard.mutated.as_ref().is_some_and(|mutated| overlaps(mutated, &reported)) {
@@ -207,6 +232,10 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
         };
 
         if let Some(ordinals) = ordinals {
+            if ordinals.iter().all(|ordinal| blamed.contains_key(ordinal)) {
+                continue;
+            }
+
             // The first diagnostic to name a mutant is the one kept. A single unviable mutant can
             // draw a thousand follow-on complaints, and the later ones describe the wreckage rather
             // than the cause; the census is only worth reading if each mutant contributes the one
@@ -215,12 +244,19 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
             let category = normalize_category(&diagnostic.message);
 
             for ordinal in ordinals {
+                if blamed.contains_key(&ordinal) {
+                    continue;
+                }
                 let reason = CompilerReason {
                     code: code.to_owned(),
                     category: category.clone(),
-                    replacement_site: replacement_sites.contains(&ordinal),
+                    evidence: if replacement_sites.contains(&ordinal) {
+                        AttributionEvidence::ReplacementPrimary
+                    } else {
+                        AttributionEvidence::OtherDiagnostic
+                    },
                 };
-                let _ = blamed.entry(ordinal).or_insert(reason);
+                let _previous = blamed.insert(ordinal, reason);
             }
         }
     }
@@ -238,9 +274,31 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
 /// tokens become another, digit runs collapse, whitespace is normalized, and the result is capped.
 /// The category remains readable enough to distinguish type, ownership, and initialization
 /// failures while never becoming a copy of an arbitrarily long compiler message.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn normalize_category(message: &str) -> String {
+    // Long enough to retain rustc's distinguishing category while bounding source-authored text
+    // in diagnostics; the redaction policy is applied after this normalization.
     const LIMIT: usize = 96;
+
+    fn consume_path_tail(characters: &mut core::iter::Peekable<core::str::Chars<'_>>) {
+        loop {
+            while characters.peek().is_some_and(|next| !next.is_whitespace()) {
+                let _ = characters.next();
+            }
+
+            let mut lookahead = characters.clone();
+            while lookahead.peek().is_some_and(|next| next.is_whitespace()) {
+                let _ = lookahead.next();
+            }
+            let next_component: String = lookahead.take_while(|next| !next.is_whitespace()).collect();
+            if !next_component.contains('/') && !next_component.contains('\\') {
+                break;
+            }
+
+            while characters.peek().is_some_and(|next| next.is_whitespace()) {
+                let _ = characters.next();
+            }
+        }
+    }
 
     let mut normalized = String::new();
     let mut characters = message.chars().peekable();
@@ -273,17 +331,20 @@ fn normalize_category(message: &str) -> String {
         }
 
         if character == '/' || character == '\\' {
-            while characters.peek().is_some_and(|next| !next.is_whitespace()) {
-                let _ = characters.next();
-            }
-            while normalized.chars().next_back().is_some_and(|last| !last.is_whitespace()) {
-                let _ = normalized.pop();
+            consume_path_tail(&mut characters);
+            for _ in 0..normalized.len() {
+                if normalized.chars().next_back().is_none_or(char::is_whitespace) {
+                    break;
+                }
+                let _last = normalized.pop();
             }
             push_piece(&mut normalized, "<path>", LIMIT);
             continue;
         }
 
-        push_piece(&mut normalized, &character.to_string(), LIMIT);
+        if normalized.len().saturating_add(character.len_utf8()) <= LIMIT {
+            normalized.push(character);
+        }
     }
 
     let normalized = normalized.trim().trim_end_matches([':', ';', ',', '.']).trim();
@@ -295,7 +356,6 @@ fn normalize_category(message: &str) -> String {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn push_piece(target: &mut String, piece: &str, limit: usize) {
     for character in piece.chars() {
         if target.len().saturating_add(character.len_utf8()) > limit {

@@ -250,18 +250,39 @@ fn write_census(text: &mut String, session: &Session) {
         return;
     }
 
-    let _ = writeln!(text, "withdrew  by package, rustc reason and mutator");
+    let _ = writeln!(
+        text,
+        "withdrew  {:<24}{:<8}{:<28}{:<24}{:<42}count",
+        "package", "code", "mutator", "primary span relation", "category"
+    );
 
-    for entry in &session.census {
+    for entry in session.census.iter().take(TOP) {
+        // Fixed widths keep ordinary rustc codes, mutator names, and normalized categories aligned;
+        // longer values intentionally extend their row rather than being truncated.
         let _ = writeln!(
             text,
-            "  {:<24}{:<8}{:<28}{:<12}{:<42}{}",
+            "  {:<24}{:<8}{:<28}{:<24}{:<42}{}",
             if entry.package.is_empty() { "(unknown)" } else { &entry.package },
             if entry.code.is_empty() { "(none)" } else { &entry.code },
             if entry.mutator.is_empty() { "(unknown)" } else { &entry.mutator },
-            if entry.replacement_site { "replacement" } else { "follow-on" },
+            if entry.replacement_site {
+                "identifies replacement"
+            } else {
+                "does not identify it"
+            },
             entry.category,
             quantity(entry.mutants, "mutant")
+        );
+    }
+
+    let omitted = session.census.len().saturating_sub(TOP);
+    if omitted > 0 {
+        let mutants: usize = session.census[TOP..].iter().map(|entry| entry.mutants).sum();
+        let _ = writeln!(
+            text,
+            "  {} omitted, accounting for {}",
+            quantity(omitted, "withdrawal group"),
+            quantity(mutants, "mutant")
         );
     }
 }
@@ -854,15 +875,66 @@ mod tests {
 
         let text = render(&plan(Vec::new()), Some(&live), 4, Duration::from_secs(20));
 
-        assert!(text.contains("withdrew  by package, rustc reason and mutator"), "{text}");
-        assert!(text.contains("cargo-gamma-lib"), "{text}");
-        assert!(text.contains("E0308"), "{text}");
-        assert!(text.contains("lit.true_to_false"), "{text}");
-        assert!(text.contains("replacement"), "{text}");
-        assert!(text.contains("mismatched types"), "{text}");
-        assert!(text.contains("12 mutants"), "{text}");
-        assert!(text.contains("(none)"), "{text}");
-        assert!(text.contains("(unknown)"), "{text}");
+        assert!(
+            text.contains("package")
+                && text.contains("code")
+                && text.contains("mutator")
+                && text.contains("primary span relation")
+                && text.contains("category")
+                && text.contains("count"),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                [
+                    "cargo-gamma-lib",
+                    "E0308",
+                    "lit.true_to_false",
+                    "identifies replacement",
+                    "mismatched types",
+                    "12 mutants",
+                ]
+                .iter()
+                .all(|part| line.contains(part))
+            }),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                [
+                    "(unknown)",
+                    "(none)",
+                    "does not identify it",
+                    "isolated compiler failure",
+                    "1 mutant",
+                ]
+                .iter()
+                .all(|part| line.contains(part))
+            }),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn withdrawal_diagnostics_bound_rows_and_account_for_the_omitted_tail() {
+        let live = Session {
+            census: (0..TOP + 2)
+                .map(|index| crate::exec::Withdrawal {
+                    package: format!("package-{index}"),
+                    code: format!("E{index:04}"),
+                    category: format!("category-{index}"),
+                    replacement_site: false,
+                    mutator: format!("mutator-{index}"),
+                    mutants: TOP + 2 - index,
+                })
+                .collect(),
+            ..session(Vec::new())
+        };
+
+        let text = render(&plan(Vec::new()), Some(&live), 4, Duration::from_secs(20));
+
+        assert!(text.contains("2 withdrawal groups omitted, accounting for 3 mutants"), "{text}");
+        assert!(!text.contains("package-10"), "{text}");
     }
 
     /// A run that withdrew nothing has nothing to say, and a heading over an empty list reads as a

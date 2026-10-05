@@ -374,6 +374,9 @@ Cargo-gamma estimates each pending mutant's serial test cost:
 
 Persisted generalized candidates seed their scheduling probability and probe
 cost from the hint artifact's hit, miss, measured-time, and sample counters.
+Speculative hint probes are bounded candidates, not an exhaustive isolation
+search: a miss or inconclusive probe falls back to the authoritative admitted
+selection instead of enumerating every possible test subset.
 
 The cost order is still partitioned into package queues and interleaved. That
 order supplies deterministic package-fair, longest-work-first secondary
@@ -519,15 +522,19 @@ After the sweep:
   circuit-breaker-rejected opportunities for exact mutant hints and
   generalized item, reach, file, and census tiers;
 - `gamma-selection.jsonl` receives each mutant's completed attempts as one worker-side batch, then
-  records and immediately flushes every selection attempt with its mutant ordinal, candidate tier and rank, binary
-  and optional test identity, hit/miss/inconclusive result, elapsed time, and
-  canonical fallback estimate, so interrupted campaigns can be replayed
-  without treating telemetry as verdict evidence;
+  records and immediately flushes every retained selection attempt with its mutant ordinal,
+  candidate tier and rank, binary and optional test identity, hit/miss/inconclusive result, elapsed
+  time, and canonical fallback estimate. Serialization reuses one buffer and issues one write per
+  complete record. The journal retains at most 64 MiB per campaign and appends a truncation record
+  when the ceiling is reached, so diagnostic growth cannot stop mutant execution; the retained
+  prefix of complete records can still be replayed without treating telemetry as verdict evidence;
 - package sweep timelines report first start, final completion, and wall span
   relative to sweep start. These spans can overlap under concurrency and are
   distinct from the package CPU totals; and
 - diagnostics retain total launches and launches saved, including the subset
-  saved by learned reach evidence.
+  saved by learned reach evidence. The live dashboard's estimated hint savings subtract every
+  attempted selection in the successful mutant's chain from the canonical fallback estimate, not
+  only the final successful launch.
 
 Promotion writes version 3 YAML atomically. File groups, mutant entries, killer
 tables, generalized identities, and interned reach sets use canonical ordering,

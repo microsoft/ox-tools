@@ -19,6 +19,7 @@
 //! becomes an ordinary mutant, and one that does not type-check is withdrawn by the same rollback
 //! that withdraws a bad guess.
 
+use core::fmt::{self, Display, Formatter};
 use core::ops::Range;
 
 use proc_macro2::TokenStream;
@@ -28,6 +29,7 @@ use syn::{Attribute, Expr, ImplItemFn, ItemFn, Meta, TraitItemFn};
 
 use crate::error::Error;
 use crate::parse::SourceFile;
+use crate::text::encode_controls;
 use crate::{HashSet, Result};
 
 /// The two path segments a stated value is written under.
@@ -53,6 +55,43 @@ const CONSTANT: &str = "`#[gamma::value(...)]` states what a mutant substitutes,
 
 /// What to say about a stated value on a function whose body is empty.
 const EMPTY: &str = "`#[gamma::value(...)]` requires a non-empty function body; empty bodies are not eligible for stated-value mutation";
+
+/// The distinct ways a stated-value annotation can be invalid.
+///
+/// [`check`](super::check_stated) and the fused collection entry point attach this value as the
+/// source of their public [`crate::Error`], so callers can preserve failure identity while the
+/// display text remains the command-line diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum StatedValueError {
+    Malformed,
+    Misplaced,
+    Duplicated,
+    Bodiless,
+    Constant,
+    Empty,
+}
+
+impl StatedValueError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Malformed => MALFORMED,
+            Self::Misplaced => MISPLACED,
+            Self::Duplicated => DUPLICATED,
+            Self::Bodiless => BODILESS,
+            Self::Constant => CONSTANT,
+            Self::Empty => EMPTY,
+        }
+    }
+}
+
+impl Display for StatedValueError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl core::error::Error for StatedValueError {}
 
 /// Returns the byte range of the expression an item's attributes state, if they state one.
 ///
@@ -108,17 +147,21 @@ pub fn check(file: &SourceFile) -> Result<()> {
 pub(super) fn fault(file: &SourceFile, mut audit: Audit) -> Result<()> {
     for span in audit.stated {
         if !audit.on_functions.contains(&span.start) {
-            audit.faults.push((span, MISPLACED.to_owned()));
+            audit.faults.push((span, StatedValueError::Misplaced));
         }
     }
 
     // By position rather than by the order the walk happened to reach them, so a file with two
     // mistakes always reports the same one first.
-    let Some((at, message)) = audit.faults.iter().min_by_key(|(at, _message)| at.start) else {
+    let Some((at, fault)) = audit.faults.iter().min_by_key(|(at, _fault)| at.start) else {
         return Ok(());
     };
 
-    Err(Error::new(format!("{}:{}: {message}", file.path, file.line_of(at.start))).usage())
+    Err(
+        Error::new(format!("{}:{}", encode_controls(file.path.as_str()), file.line_of(at.start)))
+            .caused_by(*fault)
+            .usage(),
+    )
 }
 
 /// Every stated value in a file, and everything wrong with the ones that are wrong.
@@ -140,7 +183,7 @@ pub(super) struct Audit {
     on_functions: HashSet<usize>,
 
     /// What is wrong, and where.
-    faults: Vec<(Range<usize>, String)>,
+    faults: Vec<(Range<usize>, StatedValueError)>,
 }
 
 impl Audit {
@@ -158,7 +201,7 @@ impl Audit {
         let stated: Vec<&Attribute> = attrs.iter().filter(|attribute| is_stated_value(attribute)).collect();
 
         if let Some(second) = stated.get(1) {
-            self.faults.push((second.span().byte_range(), DUPLICATED.to_owned()));
+            self.faults.push((second.span().byte_range(), StatedValueError::Duplicated));
         }
 
         for attribute in stated {
@@ -167,9 +210,16 @@ impl Audit {
             let malformed = arguments(attribute).is_none_or(|tokens| syn::parse2::<Expr>(tokens).is_err());
 
             if malformed {
-                self.faults.push((attribute.span().byte_range(), MALFORMED.to_owned()));
+                self.faults.push((attribute.span().byte_range(), StatedValueError::Malformed));
             } else if let Some(message) = inert {
-                self.faults.push((attribute.span().byte_range(), message.to_owned()));
+                let fault = if message == CONSTANT {
+                    StatedValueError::Constant
+                } else if message == EMPTY {
+                    StatedValueError::Empty
+                } else {
+                    StatedValueError::Bodiless
+                };
+                self.faults.push((attribute.span().byte_range(), fault));
             }
         }
     }
@@ -198,7 +248,7 @@ impl Audit {
         // would read as a hint that works and generate nothing anywhere.
         let Some(default) = node.default.as_ref() else {
             for attribute in node.attrs.iter().filter(|attribute| is_stated_value(attribute)) {
-                self.faults.push((attribute.span().byte_range(), BODILESS.to_owned()));
+                self.faults.push((attribute.span().byte_range(), StatedValueError::Bodiless));
                 let _claimed = self.on_functions.insert(attribute.span().byte_range().start);
             }
 
@@ -279,6 +329,7 @@ fn arguments(attribute: &Attribute) -> Option<TokenStream> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -390,6 +441,17 @@ mod tests {
                 "`{arguments}`: {rejected}"
             );
         }
+    }
+
+    #[test]
+    fn a_stated_value_error_encodes_terminal_controls_in_the_path() {
+        let parsed = SourceFile::parse("bad\n\u{1b}[2K.rs", "#[gamma::value(0, 1)]\nfn f() -> u32 { 2 }".to_owned())
+            .expect("the fixture must parse");
+
+        let rejected = check(&parsed).expect_err("the fixture states two values").to_string();
+
+        assert!(rejected.starts_with("bad\\n\\e[2K.rs:1:"), "{rejected}");
+        assert!(!rejected.chars().any(char::is_control), "{rejected}");
     }
 
     /// A bare path and a name-value pair carry no argument list at all, and neither states a value.

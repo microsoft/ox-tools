@@ -430,11 +430,11 @@ impl Provider {
         crate_data: &HashMap<CrateId, PerCrateData>,
     ) -> (HashSet<VersionId>, HashMap<CrateId, HashSet<VersionId>>) {
         let mut needed_version_ids = HashSet::default();
-        let mut crate_to_dependent_versions = hash_map_with_capacity(crate_data.iter().size_hint().0);
+        let mut crate_to_dependent_versions = hash_map_with_capacity(crate_data.len());
 
         // No requested crate exists in the database, so every row would be rejected.
         // #[gamma::skip(cond.always_true, reason = "with no requested crate data every dependency row is rejected; this guard only avoids an unnecessary full scan")]
-        if crate_data.keys().next().is_some() {
+        if !crate_data.is_empty() {
             for (row, _) in self.table_mgr.dependencies_table().iter() {
                 if crate_data.contains_key(&row.crate_id) {
                     let _ = needed_version_ids.insert(row.version_id);
@@ -559,7 +559,7 @@ impl Provider {
             }
 
             // Early-exit once we've found everything (can't early-exit for latest versions since we need full scan)
-            // #[gamma::skip(cond.always_true, reason = "when no latest version is requested, breaking after all exact versions and dependency mappings are found is only a scan optimization")]
+            // #[gamma::skip(reason = "when no latest version is requested, breaking after all exact versions and dependency mappings are found is only a scan optimization")]
             if remaining_versions == 0 && remaining_mappings == 0 && need_latest_version.is_empty() {
                 break;
             }
@@ -760,6 +760,7 @@ impl Provider {
     }
 
     fn load_categories(&self) -> HashMap<CategoryId, CategoriesTableIndex> {
+        // Fixed-width table iterators report their exact row count as the lower size hint.
         let mut map = hash_map_with_capacity(self.table_mgr.categories_table().iter().size_hint().0);
         for (row, index) in self.table_mgr.categories_table().iter() {
             let _ = map.insert(row.id, index);
@@ -792,7 +793,7 @@ impl Provider {
     }
 
     fn collect_crate_owners(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<TableOwnerKind>> {
-        let mut collected = hash_map_with_capacity(crate_data.iter().size_hint().0);
+        let mut collected = hash_map_with_capacity(crate_data.len());
         for (row, _) in self.table_mgr.crate_owners_table().iter() {
             if crate_data.contains_key(&row.crate_id) {
                 collected.entry(row.crate_id).or_insert_with(Vec::new).push(row.owner());
@@ -802,7 +803,7 @@ impl Provider {
     }
 
     fn collect_crate_categories(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<CategoryId>> {
-        let mut collected = hash_map_with_capacity(crate_data.iter().size_hint().0);
+        let mut collected = hash_map_with_capacity(crate_data.len());
         for (row, _) in self.table_mgr.crates_categories_table().iter() {
             if crate_data.contains_key(&row.crate_id) {
                 collected.entry(row.crate_id).or_insert_with(Vec::new).push(row.category_id);
@@ -812,7 +813,7 @@ impl Provider {
     }
 
     fn collect_crate_keywords(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<KeywordId>> {
-        let mut collected = hash_map_with_capacity(crate_data.iter().size_hint().0);
+        let mut collected = hash_map_with_capacity(crate_data.len());
         for (row, _) in self.table_mgr.crates_keywords_table().iter() {
             if crate_data.contains_key(&row.crate_id) {
                 collected.entry(row.crate_id).or_insert_with(Vec::new).push(row.keyword_id);
@@ -852,14 +853,14 @@ impl Provider {
         all_version_to_crate: &HashMap<VersionId, CrateId>,
         crate_data: &HashMap<CrateId, PerCrateData>,
     ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
-        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(version_ids.iter().size_hint().0);
-        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(crate_data.iter().size_hint().0);
-
         // Nothing was resolved, so every row would be rejected: skip the largest scan entirely.
         // #[gamma::skip(cond.always_false, reason = "with no resolved versions every download row is rejected and both result maps remain empty; this return is only a fast path")]
         if all_version_to_crate.is_empty() {
-            return (monthly_btree_to_vec(version_monthly), monthly_btree_to_vec(crate_monthly));
+            return (HashMap::default(), HashMap::default());
         }
+
+        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(version_ids.len());
+        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(crate_data.len());
 
         // Only the recent window is aggregated. The daily rows can extend arbitrarily far
         // back, and consumers of this series report downloads over the last 90 days: taking
@@ -878,7 +879,14 @@ impl Provider {
             // Check crate membership first — version_ids is always a subset of all_version_to_crate keys,
             // so a single lookup handles the common rejection path (~99.99% of rows match neither).
             if let Some(&crate_id) = all_version_to_crate.get(&row.version_id) {
-                let date = row.date_naive();
+                let Some(date) = row.date_naive() else {
+                    log::warn!(
+                        target: LOG_TARGET,
+                        "Ignoring version download row with invalid encoded date {}",
+                        row.date
+                    );
+                    continue;
+                };
                 let month_key = (date.year(), date.month());
 
                 *crate_monthly.entry(crate_id).or_default().entry(month_key).or_insert(0) += row.downloads;
@@ -1062,7 +1070,7 @@ fn count_dependents(
     version_id_to_crate_id: &HashMap<VersionId, CrateId>,
 ) {
     // Map version_ids to crate_ids using prebuilt HashMap (no table scan!)
-    let mut dependents: HashMap<CrateId, HashSet<CrateId>> = hash_map_with_capacity(crate_data.iter().size_hint().0);
+    let mut dependents: HashMap<CrateId, HashSet<CrateId>> = hash_map_with_capacity(crate_data.len());
     for (depended_upon, version_set) in crate_to_dependent_versions {
         for &version_id in version_set {
             if let Some(&crate_id) = version_id_to_crate_id.get(&version_id) {
@@ -1082,10 +1090,10 @@ fn count_dependents(
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration as StdDuration;
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -1103,11 +1111,6 @@ mod tests {
 
     struct NoOpProgress;
 
-    #[derive(Default)]
-    struct RecordingProgress {
-        message: Mutex<Option<Box<dyn Fn() -> String + Send + Sync>>>,
-    }
-
     impl Progress for NoOpProgress {
         fn set_phase(&self, _phase: &str) {}
 
@@ -1118,6 +1121,12 @@ mod tests {
         fn println(&self, _msg: &str) {}
 
         fn done(&self) {}
+    }
+
+    /// Captures the latest indeterminate-message callback while ignoring other progress signals.
+    #[derive(Default)]
+    struct RecordingProgress {
+        message: Mutex<Option<Box<dyn Fn() -> String + Send + Sync>>>,
     }
 
     impl Progress for RecordingProgress {
@@ -1822,7 +1831,7 @@ mod tests {
 
     #[test]
     fn monthly_conversion_uses_the_first_day_of_each_month() {
-        let monthly = HashMap::from_iter([(CrateId(1), std::collections::BTreeMap::from_iter([((2026, 8), 42)]))]);
+        let monthly = HashMap::from_iter([(CrateId(1), BTreeMap::from_iter([((2026, 8), 42)]))]);
 
         let converted = monthly_btree_to_vec(monthly);
 

@@ -159,7 +159,7 @@ pub struct SuppressArgs {
     #[arg(long, value_name = "PATH", help_heading = "Cache")]
     pub cache_dir: Option<Utf8PathBuf>,
 
-    /// Write the generated directives instead of printing what would be written.
+    /// Write and verify the generated directives instead of printing the proposed diff.
     #[arg(long, help_heading = "Suppressing")]
     pub apply: bool,
 
@@ -352,27 +352,25 @@ pub struct ConfigArgs {
     pub no_config: bool,
 }
 
-/// How long a build may take before it is abandoned.
-///
-/// A run builds once, so these limits bound campaign startup rather than individual mutant
-/// executions.
+/// Limits on the compiler work that prepares a campaign.
 #[derive(Debug, Args, Default)]
 #[command(next_help_heading = "Building")]
 pub struct BuildLimitArgs {
-    /// Seconds the build may take before the run is abandoned.
+    /// Seconds a compiler invocation may take before the run is abandoned.
     ///
-    /// A run builds once, so a build that never finishes costs everything rather than one mutant.
+    /// These invocations happen before mutant execution, so one that never finishes blocks the
+    /// whole campaign.
     #[arg(long, value_name = "SECONDS", value_parser = seconds, conflicts_with = "build_timeout_multiplier")]
     pub build_timeout: Option<f64>,
 
-    /// Multiple of the first successful build's duration that a later build round is allowed.
+    /// Multiple of the first compiler round's duration that a later round is allowed.
     ///
-    /// Rollback rounds rebuild the same tree with fewer mutants, so a round that runs far longer
-    /// than the first one is not making progress.
+    /// Convergence checks the same warm tree with fewer admitted mutants, so a later round that
+    /// runs far longer than the first one is not making progress.
     #[arg(long, value_name = "FACTOR", value_parser = factor)]
     pub build_timeout_multiplier: Option<f64>,
 
-    /// How many times the tree may be rebuilt while withdrawing mutants that do not compile.
+    /// How many compiler rounds may withdraw mutants that do not compile.
     ///
     /// A mutant like `Some(Default::default())` only compiles when the type happens to implement
     /// `Default`, and rustc reports only the errors it reaches before it stops, so a large tree can
@@ -390,11 +388,11 @@ pub struct BuildLimitArgs {
     reason = "each is an independent command-line flag, and grouping them would only obscure that"
 )]
 pub struct MeasureArgs {
-    /// Let cargo's own build output through, instead of only its progress bar.
+    /// Show Cargo's raw build output.
     ///
-    /// A run reports how far along the build is and any errors it hits, and swallows the rest so
-    /// that compiling several thousand instrumented files does not bury the run. This shows all of
-    /// it, which is what you want when the build itself is what is going wrong.
+    /// Cargo's per-invocation progress resets during compiler convergence, so the normal display
+    /// shows cargo-gamma's monotonic unviable-mutant count instead. This exposes Cargo's narration
+    /// for troubleshooting.
     #[arg(long)]
     pub show_build: bool,
 
@@ -1454,6 +1452,56 @@ mod tests {
         for argument in run.get_arguments() {
             assert_ne!(argument.get_short(), Some('v'), "{} claimed -v", argument.get_id());
         }
+    }
+
+    #[test]
+    fn command_specific_help_inventories_match_the_complete_command_model() {
+        use std::collections::BTreeSet;
+
+        use clap::CommandFactory as _;
+
+        fn visible_longs(command: &clap::Command) -> BTreeSet<&str> {
+            command
+                .get_arguments()
+                .filter(|argument| !argument.is_hide_set())
+                .filter_map(clap::Arg::get_long)
+                .filter(|name| !matches!(*name, "help" | "version"))
+                .collect()
+        }
+
+        let command = Cli::command();
+        let list = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "list")
+            .expect("list exists");
+        assert_eq!(
+            list.get_subcommands().map(clap::Command::get_name).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["files", "mutants", "mutators", "presets"])
+        );
+
+        let mutators = list
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "mutators")
+            .expect("list mutators exists");
+        assert_eq!(
+            visible_longs(mutators),
+            BTreeSet::from(["config", "dir", "json", "mutators", "no-config"])
+        );
+
+        let suppress = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "suppress")
+            .expect("suppress exists");
+        assert_eq!(
+            visible_longs(suppress),
+            BTreeSet::from(["allow-dirty", "apply", "cache-dir", "dir", "eligible"])
+        );
+
+        let hints = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "hints")
+            .expect("hints exists");
+        assert_eq!(visible_longs(hints), BTreeSet::from(["cache-dir", "dir", "dry-run", "replace"]));
     }
 
     /// Artifact routing is directory-wide.

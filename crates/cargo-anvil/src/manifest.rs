@@ -374,10 +374,13 @@ impl Manifest {
             id: id.to_owned(),
         };
         self.regions.get(&key).map(String::as_str).or_else(|| {
-            self.regions
+            let mut matches = self
+                .regions
                 .iter()
-                .find(|(key, _)| key.id == id && key.host.as_str().eq_ignore_ascii_case(host))
-                .map(|(_, checksum)| checksum.as_str())
+                .filter(|(key, _)| key.id == id && key.host.as_str().eq_ignore_ascii_case(host))
+                .map(|(_, checksum)| checksum.as_str());
+            let checksum = matches.next()?;
+            matches.next().is_none().then_some(checksum)
         })
     }
 }
@@ -719,6 +722,16 @@ mod tests {
         assert_eq!(manifest.region_checksum("Deny.toml", "anvil-deny-licenses"), Some("sha256:upper"));
         assert_eq!(manifest.region_checksum("deny.toml", "anvil-deny-licenses"), Some("sha256:lower"));
         assert_eq!(manifest.region_checksum("other.toml", "anvil-deny-licenses"), None);
+    }
+
+    /// Without an exact key, two folded matches provide no stable provenance.
+    #[test]
+    fn region_checksum_rejects_an_ambiguous_case_insensitive_host() {
+        let mut manifest = Manifest::default();
+        manifest.set_region("Deny.toml", "anvil-deny-licenses", "sha256:upper");
+        manifest.set_region("DENY.toml", "anvil-deny-licenses", "sha256:louder");
+
+        assert_eq!(manifest.region_checksum("deny.toml", "anvil-deny-licenses"), None);
     }
 
     #[test]

@@ -3,8 +3,10 @@
 
 use core::ops::Range;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::env::{current_dir, var_os};
 use std::fs;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, id};
 
 use compact_str::CompactString;
 use syn::parse_file;
@@ -28,40 +30,95 @@ fn mutators(source: &str, ops: &str) -> Vec<&'static str> {
     candidates(source, ops).into_iter().map(|c| c.mutator).collect()
 }
 
+struct CompileFixtureDir(PathBuf);
+
+impl CompileFixtureDir {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        let current = current_dir().expect("the test process has a current directory");
+        let target = var_os("CARGO_TARGET_DIR").map_or_else(
+            || current.join("target"),
+            |configured| {
+                let configured = PathBuf::from(configured);
+                if configured.is_absolute() {
+                    configured
+                } else {
+                    current.join(configured)
+                }
+            },
+        );
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let directory = target
+            .join("cargo-gamma-engine-compile-fixtures")
+            .join(format!("{}-{sequence}", id()));
+        fs::create_dir_all(&directory).expect("the fixture output directory can be created");
+
+        Self(directory)
+    }
+}
+
+impl Drop for CompileFixtureDir {
+    fn drop(&mut self) {
+        let _removed = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn compile_fixture(directory: &Path, rustc: &std::ffi::OsStr, stem: &str, source: &str) -> Output {
+    let input = directory.join(format!("{stem}.rs"));
+    let output = directory.join(format!("{stem}.rmeta"));
+    fs::write(&input, source).expect("the compile fixture can be written");
+    let result = Command::new(rustc)
+        .arg("--crate-type=lib")
+        // Keep this aligned with `workspace.package.edition`; this helper invokes rustc directly
+        // instead of inheriting Cargo's package settings.
+        .arg("--edition=2024")
+        .arg("--emit=metadata")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input)
+        .output()
+        .expect("rustc can be launched for a compile fixture");
+    let _removed = fs::remove_file(&input);
+    let _removed = fs::remove_file(&output);
+
+    result
+}
+
 fn assert_candidates_compile(source: &str, ops: &str) {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::current_dir().expect("the test process has a current directory");
-    let directory = root.join("target").join("cargo-gamma-engine-compile-fixtures");
-    fs::create_dir_all(&directory).expect("the fixture output directory can be created");
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let directory = CompileFixtureDir::new();
+    let rustc = var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let fixtures: Vec<_> = candidates(source, ops)
+        .into_iter()
+        .filter(|candidate| {
+            // Direct replacement cannot validate the later schema wrapper that makes the two
+            // iterator branch types agree; dedicated instrumentation tests exercise `IterBlock`.
+            candidate.shape != Shape::IterBlock
+        })
+        .map(|candidate| {
+            let replacement = match candidate.shape {
+                Shape::Block => format!("{{ {} }}", candidate.replacement),
+                _ => candidate.replacement.to_string(),
+            };
+            let mut mutated = source.to_owned();
+            mutated.replace_range(candidate.span.clone(), &replacement);
+            (candidate, mutated)
+        })
+        .collect();
 
-    for candidate in candidates(source, ops) {
-        if candidate.shape == Shape::IterBlock {
-            continue;
-        }
-        let replacement = match candidate.shape {
-            Shape::Block => format!("{{ {} }}", candidate.replacement),
-            _ => candidate.replacement.to_string(),
-        };
-        let mut mutated = source.to_owned();
-        mutated.replace_range(candidate.span.clone(), &replacement);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let stem = format!("fixture-{}-{id}", std::process::id());
-        let input = directory.join(format!("{stem}.rs"));
-        let output = directory.join(format!("{stem}.rmeta"));
-        fs::write(&input, mutated).expect("the compile fixture can be written");
-        let result = Command::new(&rustc)
-            .arg("--crate-type=lib")
-            .arg("--edition=2024")
-            .arg("--emit=metadata")
-            .arg("-o")
-            .arg(&output)
-            .arg(&input)
-            .output()
-            .expect("rustc can be launched for a compile fixture");
-        let _ = fs::remove_file(&input);
-        let _ = fs::remove_file(&output);
+    let batch = fixtures
+        .iter()
+        .enumerate()
+        .map(|(index, (_candidate, mutated))| format!("mod candidate_{index} {{ {mutated} }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let batch_result = compile_fixture(&directory.0, &rustc, "batch", &batch);
+    if batch_result.status.success() {
+        return;
+    }
 
+    for (index, (candidate, mutated)) in fixtures.iter().enumerate() {
+        let result = compile_fixture(&directory.0, &rustc, &format!("candidate-{index}"), mutated);
         assert!(
             result.status.success(),
             "{} => {}\n{}",
@@ -70,6 +127,11 @@ fn assert_candidates_compile(source: &str, ops: &str) {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+
+    panic!(
+        "batched candidate fixture failed although every isolated candidate compiled:\n{}",
+        String::from_utf8_lossy(&batch_result.stderr)
+    );
 }
 
 #[test]
@@ -1080,12 +1142,193 @@ fn expression_perturbations_use_a_float_unit_when_the_type_is_written() {
 }
 
 #[test]
-fn a_generic_local_collection_shadow_uses_the_safe_collection_constructor() {
+fn float_named_methods_on_unresolved_receivers_are_not_assumed_numeric() {
+    let source = "trait Clock { fn as_secs_f64(&self) -> f64; } fn f(value: impl Clock) { consume(value.as_secs_f64()); }";
+    let found = candidates(source, "expr.increment,expr.decrement");
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn inferred_local_types_override_file_wide_numeric_name_evidence() {
+    let source = "
+        fn text_newline() -> &'static str { \"\\n\" }
+        fn writes() {
+            let newline = text_newline();
+            consume(newline);
+        }
+        fn numeric(newline: usize) {
+            consume(newline + 1);
+        }
+    ";
+    let found = candidates(source, "expr.increment,expr.decrement");
+
+    assert!(
+        found
+            .iter()
+            .all(|candidate| !candidate.replacement.contains("(newline)") || candidate.item_path.as_ref() == "numeric"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn qualified_calls_do_not_consume_bare_local_return_signatures() {
+    let source = "
+        fn value() -> String { String::new() }
+        fn f() -> i32 { external::value() }
+    ";
+    let found = candidates(source, "expr.increment,expr.decrement");
+
+    assert!(
+        found.iter().any(|candidate| candidate.replacement == "(external::value()) + 1"),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|candidate| candidate.replacement == "(external::value()) - 1"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn collector_inference_classes_keep_their_positive_and_shadow_boundaries() {
+    struct Case {
+        source: &'static str,
+        mutators: &'static str,
+        forbidden: &'static str,
+        expected_control: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            source: "fn f(mut value: Option<String>) { value.as_mut().filter(|value| !value.is_empty()); }",
+            mutators: "iter.remove_filter",
+            forbidden: "filter",
+            expected_control: None,
+        },
+        Case {
+            source: "fn f(name: &str) { std::env::var(name).ok().filter(|value| !value.is_empty()); }",
+            mutators: "iter.remove_filter",
+            forbidden: "filter",
+            expected_control: None,
+        },
+        Case {
+            source: "use chrono::DateTime; fn f() { let value = DateTime::from_timestamp(0, 0); consume(value + 1); }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "(value)",
+            expected_control: None,
+        },
+        Case {
+            source: "use chrono::NaiveDateTime; fn f() { let value = NaiveDateTime::from_timestamp_opt(0, 0); consume(value + 1); }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "(value)",
+            expected_control: None,
+        },
+        Case {
+            source: "use std::time::Instant; fn f() { let value = Instant::now(); consume(value + 1); }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "(value)",
+            expected_control: None,
+        },
+        Case {
+            source: "use core::time::Duration; fn f() { let value = Duration::from_secs(1); consume(value + 1); }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "(value)",
+            expected_control: None,
+        },
+        Case {
+            source: "struct Cell; impl Cell { fn as_mut(&mut self) -> usize { 0 } fn filter(self, _: impl Fn(usize) -> bool) {} } fn f(mut value: Cell) { value.as_mut(); value.filter(|_| true); }",
+            mutators: "iter.remove_filter",
+            forbidden: "unreachable",
+            expected_control: Some("value"),
+        },
+        Case {
+            source: "mod env { pub fn var(_: &str) -> usize { 0 } } fn f() -> usize { env::var(\"X\") }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "unreachable",
+            expected_control: Some("(env::var(\"X\")) + 1"),
+        },
+        Case {
+            source: "struct DateTime; impl DateTime { fn now() -> usize { 0 } } fn f() -> usize { DateTime::now() }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "unreachable",
+            expected_control: Some("(DateTime::now()) + 1"),
+        },
+        Case {
+            source: "struct Duration; impl Duration { fn from_secs(_: usize) -> usize { 0 } } fn f() -> usize { Duration::from_secs(1) }",
+            mutators: "expr.increment,expr.decrement",
+            forbidden: "unreachable",
+            expected_control: Some("(Duration::from_secs(1)) + 1"),
+        },
+    ];
+
+    for case in cases {
+        let found = candidates(case.source, case.mutators);
+        assert!(
+            found.iter().all(|candidate| !candidate.replacement.contains(case.forbidden)),
+            "{}: {found:?}",
+            case.source
+        );
+        if let Some(expected) = case.expected_control {
+            assert!(
+                found.iter().any(|candidate| candidate.replacement.contains(expected)),
+                "{}: {found:?}",
+                case.source
+            );
+        }
+    }
+}
+
+#[test]
+fn an_inferred_unsigned_index_marks_its_zero_initializer() {
+    let source = "fn f(bytes: &[u8]) { let mut cursor = 0; consume(&bytes[cursor..]); cursor += 1; }";
+    let found = candidates(source, "literal.int_decrement");
+
+    assert!(found.iter().all(|candidate| candidate.replacement != "-1"), "{found:?}");
+}
+
+#[test]
+fn option_producing_chains_do_not_offer_iterator_filter_removal() {
+    for source in [
+        "fn f(name: &str) -> Option<std::ffi::OsString> { std::env::var_os(name).filter(|value| !value.is_empty()) }",
+        "fn f(value: Option<String>) -> Option<&String> { value.as_ref().filter(|value| !value.is_empty()) }",
+        "fn read() -> Result<String, ()> { todo!() } fn f() -> Option<String> { read().ok().filter(|value| !value.is_empty()) }",
+    ] {
+        let found = candidates(source, "iter.remove_filter");
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn an_inferred_float_local_uses_float_perturbation_units() {
+    let source = "fn ratio() -> f64 { 0.5 } fn f() { let value = ratio(); consume(value); }";
+    let found = candidates(source, "expr.increment,expr.decrement");
+    let replacements = found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>();
+
+    assert!(replacements.contains(&"(value) + 1.0"), "{found:?}");
+    assert!(replacements.contains(&"(value) - 1.0"), "{found:?}");
+}
+
+#[test]
+fn a_generic_local_collection_shadow_uses_its_proven_default() {
     let source = "#[derive(Default)] struct Vec<T>(std::marker::PhantomData<T>); fn f() -> Vec<u8> { make() }";
     let found = candidates(source, "fn_value.empty_collection");
 
     assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Vec::new()");
+    assert_eq!(found[0].replacement, "Default::default()");
+}
+
+#[test]
+fn a_generic_local_collection_shadow_without_satisfied_default_bounds_has_no_empty_constructor() {
+    let source = "
+        struct NoDefault;
+        #[derive(Default)]
+        struct Vec<T>(T);
+        fn f() -> Vec<NoDefault> { make() }
+    ";
+    let found = candidates(source, "fn_value.empty_collection");
+
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -2316,6 +2559,37 @@ fn explicit_return_types_keep_defaultable_option_payloads() {
 }
 
 #[test]
+fn bounded_value_flow_shapes_produce_only_in_bounds_candidates() {
+    const BODIES: &[&str] = &[
+        "let result: usize = value; result",
+        "let result = (value); result",
+        "let result = { value }; result",
+        "let result = if ready { value } else { fallback }; result",
+        "let result = option.map_or(fallback, |item| item); result",
+        "let mut result = fallback; result = value; result",
+        "return value;",
+    ];
+    const SELECTIONS: &[&str] = &[
+        "literal.int_decrement,expr.increment,expr.decrement",
+        "fn_value,assign_value.default",
+        "fallback,return_value.default",
+    ];
+
+    bolero::check!().with_type::<(u8, u8)>().for_each(|(body_index, selection_index)| {
+        let body = BODIES[usize::from(*body_index) % BODIES.len()];
+        let selection = SELECTIONS[usize::from(*selection_index) % SELECTIONS.len()];
+        let source = format!("fn value_flow(value: usize, fallback: usize, ready: bool, option: Option<usize>) -> usize {{ {body} }}");
+
+        for candidate in candidates(&source, selection) {
+            assert!(candidate.span.start <= candidate.span.end, "{candidate:?}");
+            assert!(candidate.span.end <= source.len(), "{candidate:?}");
+            assert!(source.is_char_boundary(candidate.span.start), "{candidate:?}");
+            assert!(source.is_char_boundary(candidate.span.end), "{candidate:?}");
+        }
+    });
+}
+
+#[test]
 fn syntax_type_evidence_withholds_only_proven_incompatible_numeric_mutations() {
     let source = r#"
                 use std::ops::Range;
@@ -2338,6 +2612,7 @@ fn syntax_type_evidence_withholds_only_proven_incompatible_numeric_mutations() {
                 }
             "#;
     let found = candidates(source, "literal.int_decrement,arith.add_to_mul");
+    let originals: Vec<_> = found.iter().map(|candidate| &source[candidate.span.clone()]).collect();
 
     assert_eq!(
         found
@@ -2349,6 +2624,13 @@ fn syntax_type_evidence_withholds_only_proven_incompatible_numeric_mutations() {
     );
     let multiplications = found.iter().filter(|candidate| candidate.mutator == "arith.add_to_mul").count();
     assert_eq!(multiplications, 2, "signed and unresolved overloaded additions remain: {found:?}");
+    assert_eq!(
+        originals.iter().filter(|original| **original == "0").count(),
+        2,
+        "only the signed and unresolved zero sites remain: {originals:?}"
+    );
+    assert!(originals.contains(&"signed + signed"), "{originals:?}");
+    assert!(originals.contains(&"unknown + unknown"), "{originals:?}");
 }
 
 #[test]
@@ -2378,7 +2660,7 @@ fn unsigned_zero_inference_does_not_cross_function_or_binding_scopes() {
     let negative_zeros = found.iter().filter(|candidate| candidate.replacement == "-1").count();
 
     assert_eq!(
-        negative_zeros, 6,
+        negative_zeros, 3,
         "file-wide name reuse must not make unrelated or shadowed bindings unsigned: {found:?}"
     );
 }
@@ -2607,7 +2889,8 @@ fn deletion_gates_only_concrete_local_data_flow_hazards() {
 }
 
 #[test]
-fn positive_milestone_counterexamples_compile_after_direct_replacement() {
+#[cfg_attr(miri, ignore = "writes compile fixtures and spawns rustc; Miri supports neither")]
+fn representative_emitted_candidates_compile_after_direct_replacement() {
     assert_candidates_compile(
         "pub fn arithmetic(a: i32, b: i32) -> i32 { a + b }",
         "arith.add_to_mul,expr.increment,expr.decrement",
@@ -3678,99 +3961,24 @@ fn stating_a_value_leaves_every_other_family_alone() {
 }
 
 #[test]
-fn f4_catalog_families_discover_every_default_on_operator() {
-    let expected = [
-        "logical.and_remove_left",
-        "logical.and_remove_right",
-        "logical.or_remove_left",
-        "logical.or_remove_right",
-        "option.is_some_to_is_none",
-        "option.is_none_to_is_some",
-        "result.is_ok_to_is_err",
-        "result.is_err_to_is_ok",
-        "try.propagate_to_unwrap",
-        "fallback.unwrap_or_to_default",
-        "fallback.unwrap_or_else_to_default",
-        "fallback.map_or_to_default",
-        "fallback.map_or_else_to_default",
-        "collection.reverse_vec",
-        "collection.reverse_array",
-        "literal.float_to_zero",
-        "literal.float_to_one",
-        "literal.float_negate",
-        "literal.char_to_nul",
-        "literal.char_to_distinct",
-        "literal.byte_to_nul",
-        "literal.byte_to_distinct",
-        "loop.break_value_default",
-        "return_value.default",
-        "bool_expr.negate",
-        "call.replace_with_default",
-        "call_result.default",
-        "iter.remove_rev",
-        "iter.remove_filter",
-        "iter.take_to_skip",
-        "iter.skip_to_take",
-        "parameter.default_shadow",
-        "regex.remove_start_anchor",
-        "regex.remove_end_anchor",
-        "regex.star_to_plus",
-        "regex.plus_to_star",
-        "regex.optional_to_required",
-        "regex.negate_character_class",
-    ];
-    let source = r#"
-        struct Regex;
-        impl Regex { fn new(_: &str) -> Result<Self, ()> { Ok(Self) } }
+fn default_on_registry_families_are_discoverable() {
+    let file = SourceFile::parse("fixture.rs", EVERY_FAMILY_FIXTURE.to_owned()).unwrap();
 
-        fn helper() -> usize { 7 }
-        fn early(flag: bool) -> usize { if flag { return 7; } 8 }
-        fn boolean(flag: bool, other: bool) -> bool {
-            let _: bool = flag && other;
-            let _: bool = flag || other;
-            return flag;
+    for mutator in REGISTRY.iter().filter(|mutator| mutator.default_on) {
+        let mut selection = Selection::parse(mutator.name).unwrap();
+        if mutator.name == "fn_value.err_with" {
+            selection.set_errors(vec!["MyError::Boom".to_owned()]);
         }
-        fn semantics(option: Option<usize>, result: Result<usize, usize>) -> Result<usize, usize> {
-            let _ = option.is_some();
-            let _ = option.is_none();
-            let _ = result.is_ok();
-            let _ = result.is_err();
-            let _ = result?;
-            let _ = option.unwrap_or(7);
-            let _ = option.unwrap_or_else(|| 7);
-            let _ = option.map_or(7, |value| value);
-            let _ = option.map_or_else(|| 7, |value| value);
-            let _: usize = helper();
-            return Ok(helper());
-        }
-        fn collections() {
-            let _ = vec![1, 2, 3];
-            let _ = [1, 2, 3];
-            let _ = 2.5f64;
-            let _ = 'a';
-            let _ = b'a';
-            let _: usize = loop { break 3; };
-            for _ in [1, 2, 3].into_iter().rev().filter(|value| *value > 0).take(2).skip(1) {}
-            let _ = Regex::new("^a+b*[cd]?$");
-        }
-    "#;
-    let selection = expected.join(",");
-    let found = mutators(source, &selection);
+        let found = collect(&file, &selection);
 
-    for name in expected {
-        assert!(found.contains(&name), "`{name}` was not discovered: {found:#?}");
         assert!(
-            REGISTRY.iter().any(|mutator| mutator.name == name && mutator.default_on),
-            "`{name}` is not default-on"
+            found.iter().any(|candidate| candidate.mutator == mutator.name),
+            "`{}` was not discovered: {found:#?}",
+            mutator.name
         );
     }
 }
 
-/// The named error values keep the replacement indices they had before.
-///
-/// Their indices continue the guessed list's, so if a stated value shortened that list the
-/// `--error` mutants at every annotated site would be renumbered, and a renumbered mutant is a
-/// new id: suppressions by id stop matching and an incremental run re-runs work it had settled.
 #[test]
 fn regex_end_anchor_is_active_after_an_even_backslash_run() {
     for source in [
@@ -3786,6 +3994,11 @@ fn regex_end_anchor_is_active_after_an_even_backslash_run() {
     assert!(mutators(escaped, "regex.remove_end_anchor").is_empty());
 }
 
+/// The named error values keep the replacement indices they had before.
+///
+/// Their indices continue the guessed list's, so if a stated value shortened that list the
+/// `--error` mutants at every annotated site would be renumbered, and a renumbered mutant is a
+/// new id: suppressions by id stop matching and an incremental run re-runs work it had settled.
 #[test]
 fn a_stated_value_does_not_renumber_the_named_error_mutants() {
     let plain = with_errors("fn f() -> Result<i32, MyError> { Ok(1) }", &["MyError::Io"]);
@@ -4247,17 +4460,23 @@ fn the_fused_pass_reports_the_same_fault_as_check_stated_and_collects_nothing() 
     let cfg = CfgSet::unconditional();
     let defaults = Defaults::of(&file.ast);
 
-    let expected = check_stated(&file)
-        .expect_err("the fixture states two values on one item")
-        .to_string();
+    let expected = check_stated(&file).expect_err("the fixture states two values on one item");
     let actual = check_stated_and_collect_with(&file, &selection, &cfg, &defaults)
-        .expect_err("the fused pass must reject what check_stated alone rejects")
-        .to_string();
+        .expect_err("the fused pass must reject what check_stated alone rejects");
 
     assert_eq!(
-        actual, expected,
+        actual.to_string(),
+        expected.to_string(),
         "the fused pass must report the identical fault check_stated would have reported alone"
     );
+    for error in [expected, actual] {
+        let parts = error.into_parts();
+        assert_eq!(
+            parts.cause.as_deref().and_then(|cause| cause.downcast_ref::<StatedValueError>()),
+            Some(&StatedValueError::Duplicated),
+            "both public entry points preserve the typed stated-value fault"
+        );
+    }
 }
 
 /// Runs both entry points over one fixture and returns their candidates side by side, reduced to

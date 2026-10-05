@@ -26,6 +26,12 @@ all-features = true
 # we are forced to re-expose.
 allowed_external_types = ["ohno::*"]
 
+# Production code is measured while test-only modules and scaffolding opt out with
+# `#[cfg_attr(coverage_nightly, coverage(off))]`. This floor records the lowest cross-platform
+# production result from the coverage-gate CI matrix; raise it only after that matrix improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 99.82758
+
 [[bin]]
 name = "cargo-coverage-gate"
 path = "src/bin/cargo-coverage-gate/main.rs"
@@ -34,12 +40,14 @@ path = "src/bin/cargo-coverage-gate/main.rs"
 cargo-platform = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+glob = { workspace = true }
 lcov = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
+# Windows production paths carry mutation annotations; tests on every host annotate test-only helpers.
 mutants = { workspace = true }
 
 [dev-dependencies]
