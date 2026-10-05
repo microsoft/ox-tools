@@ -60,7 +60,6 @@ impl Endpoints {
 
     /// Address of the docs.rs API.
     #[must_use]
-    // #[gamma::skip(fn_value.empty_string, fn_value.xyzzy_string, tag = "timeout", reason = "invalidating the configured docs endpoint drives integration tests into HTTP retry timeouts")]
     pub fn docs_url(&self) -> &str {
         &self.docs_url
     }
@@ -89,9 +88,7 @@ impl Endpoints {
 
     /// Redirect the crates.io database dump.
     #[must_use]
-    // #[gamma::skip(fn_value.default, tag = "timeout", reason = "returning default endpoints discards the test dump URL and starts a production crates.io download")]
     pub fn with_dump_url(mut self, url: impl Into<String>) -> Self {
-        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "discarding the test dump URL starts a production crates.io download")]
         self.dump_url = url.into();
         self
     }

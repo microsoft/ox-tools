@@ -60,10 +60,15 @@ bytes.
 
 The independently versioned generalized section is schema version 2. It separates seed
 observations from transfer hits and misses and interns repeated test and binary identities.
-Older generalized schemas are unsupported.
+Version 1 is migrated on read: seed counts are retained with a minimum of one,
+while hit, miss, measured-time, and sample counters are reset. Other generalized
+schema versions are unsupported.
 
 Runs read the artifact automatically and it needs no setting here. Malformed artifacts, unsupported
-versions, and artifacts whose producer is not cargo-gamma are ignored safely. See
+versions, and artifacts whose producer is not cargo-gamma are ignored safely. An unsupported
+generalized section is recognized but its contents are not decoded; the supported envelope and exact
+hints remain reusable for automatic scheduling. Ordinary promotion leaves the original artifact
+untouched because it cannot round-trip that section. See
 [checking in the hints file](../README.md#checking-in-the-hints-file).
 
 Explicit promotion is stricter than automatic reading. Ordinary promotion refuses a malformed,
@@ -172,21 +177,26 @@ profile = "test"
 # Extra arguments for every cargo invocation. These reach cargo, not the test binaries.
 cargo-args = ["--offline", "--locked"]
 
-# Seconds the build may take before the run is abandoned. Default: unlimited.
+# Seconds one compiler invocation may take before the run is abandoned. Default: unlimited.
 build-timeout = 1800.0
 
-# The multiple of the first successful build's duration a later build round is allowed.
+# The multiple of the first compiler round's duration a later round is allowed.
 build-timeout-multiplier = 3.0
 ```
 
 `cargo-args` does not support Cargo's `--config` option. Put that setting in a Cargo configuration
 file gamma can inspect, so discovery and cache provenance describe the same build Cargo runs.
+When `test-lib = true`, `cargo-args` must not contain Cargo target selectors such as `--tests`,
+`--test`, `--bins`, or `--all-targets`: those selectors would widen or replace the library-only
+oracle, so the effective configuration is rejected.
 
-A run builds once and then runs the suite once per mutant, so a build that never finishes costs the
-whole run rather than one mutant — which is why the build gets its own timeout rather than sharing
-the per-mutant one. `build-timeout-multiplier` covers the rollback rounds: those rebuild the same
-tree with fewer mutants, so a round taking far longer than the first is evidence of a problem rather
-than of a slow machine.
+A run establishes a compiler-viable mutant schema before it executes any mutant. It checks the
+instrumented packages, withdraws compiler-rejected mutants, and repeats until the schema checks;
+then it generates the test binaries. A compiler invocation that never finishes therefore blocks
+the whole campaign rather than one mutant, which is why compiler work has its own timeout.
+`build-timeout-multiplier` covers later convergence rounds: they check the same warm tree with fewer
+admitted mutants, so a round taking far longer than the first is evidence of a problem rather than
+of a slow machine.
 
 An optimized profile can pay when mutant execution dominates a CPU-heavy run: the slower build is
 paid once, while the faster suite is paid once per mutant. It is less useful for build-heavy narrow
@@ -264,7 +274,8 @@ inline module solely to declare that binary-wide resource. Command-line
 all resources needed by the selected tests, so tests requiring more than one resource cannot
 deadlock by acquiring them in different orders. A capacity whose resource is not active in the
 selected packages is ignored, allowing workspace-wide configuration to apply to package-scoped
-campaigns.
+campaigns. Each resource name may appear at most once on the command line; duplicate capacities are
+rejected rather than resolved by argument order.
 
 A derived budget adapts to the machine it runs on and to each specific test binary.
 `minimum-test-timeout` exists because a test binary finishing in milliseconds would otherwise get a budget of

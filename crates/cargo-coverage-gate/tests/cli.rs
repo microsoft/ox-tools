@@ -11,6 +11,10 @@
 //! cargo's subcommand convention does.
 
 #![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
+use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output, Stdio};
@@ -110,7 +114,7 @@ impl FakeCoverageTools {
     fn compile() -> Self {
         let directory = TempDir::new().expect("fake tools tempdir");
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-coverage-tool.rs");
-        let helper = directory.path().join(format!("fake-coverage-tool{}", std::env::consts::EXE_SUFFIX));
+        let helper = directory.path().join(format!("fake-coverage-tool{EXE_SUFFIX}"));
         let status = ProcessCommand::new("rustc")
             .args(["--edition=2024"])
             .arg(&source)
@@ -120,14 +124,14 @@ impl FakeCoverageTools {
             .expect("compile fake coverage tool");
         assert!(status.success(), "fake coverage tool must compile");
 
-        let cargo = directory.path().join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
-        let rustc = directory.path().join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+        let cargo = directory.path().join(format!("cargo{EXE_SUFFIX}"));
+        let rustc = directory.path().join(format!("rustc{EXE_SUFFIX}"));
         let rustlib = directory.path().join("rustlib");
         let llvm_bin = rustlib.join("bin");
         let target_libdir = rustlib.join("lib");
         fs::create_dir_all(&llvm_bin).expect("create fake LLVM bin");
         fs::create_dir_all(&target_libdir).expect("create fake target libdir");
-        let llvm_cov = llvm_bin.join(format!("llvm-cov{}", std::env::consts::EXE_SUFFIX));
+        let llvm_cov = llvm_bin.join(format!("llvm-cov{EXE_SUFFIX}"));
         fs::copy(&helper, &cargo).expect("copy fake cargo");
         fs::copy(&helper, &rustc).expect("copy fake rustc");
         fs::copy(&helper, &llvm_cov).expect("copy fake llvm-cov");
@@ -723,7 +727,7 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
 
     let object_dir = tmp.path().join("objects with spaces");
     fs::create_dir_all(&object_dir).expect("create object directory");
-    let object = object_dir.join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = object_dir.join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
 
     let tools = FakeCoverageTools::compile();
@@ -917,7 +921,7 @@ fn windows_report_overflow_failure_preserves_stable_artifact() {
 fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -959,7 +963,7 @@ fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
 fn collection_preserves_shared_coverage_and_test_artifacts() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let sentinels = [
         tmp.path().join("target/llvm-cov/html/sentinel"),
@@ -989,7 +993,7 @@ fn run_passes_a_successful_empty_lcov_export_to_evaluation() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(tmp.path(), &[("alpha", "expect-no-coverable-lines = true")]);
 
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
 
     let tools = FakeCoverageTools::compile();
@@ -1078,7 +1082,7 @@ fn run_reports_collection_and_upstream_report_failures() {
     ] {
         let tmp = TempDir::new().expect("tempdir");
         make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-        let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+        let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
         fs::write(&object, b"object").expect("write fake object");
         let tools = FakeCoverageTools::compile();
 
@@ -1095,7 +1099,7 @@ fn run_reports_collection_and_upstream_report_failures() {
 fn run_preserves_nextest_output_and_rendered_compiler_diagnostics() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1124,7 +1128,7 @@ fn run_rejects_stable_rust_and_old_cargo_llvm_cov() {
     ] {
         let tmp = TempDir::new().expect("tempdir");
         make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-        let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+        let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
         fs::write(&object, b"object").expect("write fake object");
         let tools = FakeCoverageTools::compile();
 
@@ -1144,7 +1148,7 @@ fn run_rejects_stable_rust_and_old_cargo_llvm_cov() {
 fn run_preserves_inherited_rustup_toolchain() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1160,7 +1164,7 @@ fn run_preserves_inherited_rustup_toolchain() {
 fn zero_threshold_only_selection_is_instrumented_and_accepts_empty_lcov() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("0"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1195,7 +1199,7 @@ fn explicit_target_is_propagated_to_collection_and_evaluation() {
              min-lines-percent = 0",
         )],
     );
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1242,7 +1246,7 @@ fn omitted_target_uses_one_host_for_collection_and_evaluation() {
             ("beta", "min-lines-percent = 0"),
         ],
     );
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1282,7 +1286,7 @@ fn omitted_target_uses_one_host_for_collection_and_evaluation() {
 fn configured_no_coverage_target_runs_plain_tests_without_advertising_coverage() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("unused-object{EXE_SUFFIX}"));
     let tools = FakeCoverageTools::compile();
 
     fake_collection_command(tmp.path(), &tools, &object)
@@ -1324,7 +1328,7 @@ fn configured_no_coverage_target_runs_plain_tests_without_advertising_coverage()
 fn configured_no_coverage_host_target_is_resolved_and_propagated_without_tool_validation() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("unused-object{EXE_SUFFIX}"));
     let tools = FakeCoverageTools::compile();
 
     fake_collection_command(tmp.path(), &tools, &object)
@@ -1353,7 +1357,7 @@ fn configured_no_coverage_host_target_is_resolved_and_propagated_without_tool_va
 fn quiet_suppresses_all_collection_stdout_and_still_writes_summary() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
     let summary = tmp.path().join("summary.md");
@@ -1377,7 +1381,7 @@ fn quiet_suppresses_all_collection_stdout_and_still_writes_summary() {
 fn quiet_suppresses_report_stdout_when_no_coverage_data_exists() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(tmp.path(), &[("alpha", "expect-no-coverable-lines = true")]);
-    let object = tmp.path().join(format!("empty-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("empty-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1396,7 +1400,7 @@ fn quiet_suppresses_report_stdout_when_no_coverage_data_exists() {
 fn quiet_suppresses_plain_nextest_stdout_but_preserves_skip_diagnostic() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("unused-object{EXE_SUFFIX}"));
     let tools = FakeCoverageTools::compile();
     let summary = tmp.path().join("summary.md");
 
@@ -1428,7 +1432,7 @@ fn quiet_suppresses_plain_nextest_stdout_but_preserves_skip_diagnostic() {
 fn explicitly_configured_plain_test_failures_propagate() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("unused-object{EXE_SUFFIX}"));
     let tools = FakeCoverageTools::compile();
 
     fake_collection_command(tmp.path(), &tools, &object)
@@ -1461,7 +1465,7 @@ fn run_delegates_object_discovery_and_export_to_cargo_llvm_cov_report() {
             ("beta", "min-lines-percent = 100"),
         ],
     );
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
@@ -1485,7 +1489,7 @@ fn run_reports_rustc_validation_failures() {
     for (variable, expected) in [("FAKE_FAIL_RUSTC", "exited with"), ("FAKE_INVALID_RUSTC_OUTPUT", "was not UTF-8")] {
         let tmp = TempDir::new().expect("tempdir");
         make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-        let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+        let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
         fs::write(&object, b"object").expect("write fake object");
         let tools = FakeCoverageTools::compile();
 
@@ -1500,7 +1504,7 @@ fn run_reports_rustc_validation_failures() {
 
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
     fake_collection_command(tmp.path(), &tools, &object)
@@ -1512,7 +1516,7 @@ fn run_reports_rustc_validation_failures() {
 
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    let object = tmp.path().join(format!("test-object{EXE_SUFFIX}"));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
     let fake_rustc_dir = tools.rustc.parent().expect("fake rustc path must have a parent directory");

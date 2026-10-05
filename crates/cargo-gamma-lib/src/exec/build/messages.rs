@@ -39,6 +39,101 @@ pub(super) struct CargoMessage<'line> {
     /// The manifest of the package being built, used to put the caller's own errors first.
     #[serde(borrow, default)]
     pub(super) manifest_path: Option<Cow<'line, str>>,
+
+    /// Cargo's package identity for the target producing this message.
+    #[serde(borrow, default)]
+    pub(super) package_id: Option<Cow<'line, str>>,
+
+    /// The target this message belongs to.
+    #[serde(borrow, default)]
+    pub(super) target: Option<CargoTarget<'line>>,
+
+    /// Whether Cargo reused this compiler artifact without invoking rustc.
+    #[serde(default)]
+    pub(super) fresh: bool,
+
+    /// The compilation profile on a `compiler-artifact`.
+    #[serde(default)]
+    pub(super) profile: CargoProfile,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CargoTarget<'line> {
+    #[serde(borrow, default)]
+    pub(super) name: Cow<'line, str>,
+
+    #[serde(borrow, default)]
+    pub(super) kind: Vec<Cow<'line, str>>,
+}
+
+#[derive(Default, Deserialize)]
+pub(super) struct CargoProfile {
+    #[serde(default)]
+    pub(super) test: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct BuildEvidence {
+    pub(super) fresh: usize,
+    pub(super) rebuilt: usize,
+    pub(super) rebuilt_targets: Vec<String>,
+    pub(super) failed_targets: Vec<String>,
+}
+
+pub(super) fn build_evidence(stdout: &str, may_compile_test_harnesses: bool) -> BuildEvidence {
+    let mut evidence = BuildEvidence::default();
+    let mut rebuilt = HashSet::default();
+    let mut failed = HashSet::default();
+
+    for line in stdout.lines() {
+        let Some(message) = cargo_message(line) else {
+            continue;
+        };
+
+        match message.reason.as_ref() {
+            "compiler-artifact" => {
+                if message.fresh {
+                    evidence.fresh = evidence.fresh.saturating_add(1);
+                } else {
+                    evidence.rebuilt = evidence.rebuilt.saturating_add(1);
+                    if let Some(target) = message.target {
+                        let _ = rebuilt.insert(target.label(message.profile.test));
+                    }
+                }
+            }
+            "compiler-message" if message.message.as_ref().is_some_and(|diagnostic| diagnostic.level == "error") => {
+                if let Some(target) = message.target {
+                    let may_be_test_harness = may_compile_test_harnesses
+                        && target
+                            .kind
+                            .first()
+                            .is_some_and(|kind| matches!(kind.as_ref(), "lib" | "proc-macro" | "bin"));
+                    let _ = failed.insert(target.label(false));
+                    if may_be_test_harness {
+                        let _ = failed.insert(target.label(true));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    evidence.rebuilt_targets = rebuilt.into_iter().collect();
+    evidence.rebuilt_targets.sort();
+    evidence.failed_targets = failed.into_iter().collect();
+    evidence.failed_targets.sort();
+    evidence
+}
+
+impl CargoTarget<'_> {
+    fn label(&self, test: bool) -> String {
+        let kind = if test {
+            "test"
+        } else {
+            self.kind.first().map_or("target", AsRef::as_ref)
+        };
+        format!("{} ({kind})", self.name)
+    }
 }
 
 /// A compiler diagnostic, and the children that carry the rest of what it knows.

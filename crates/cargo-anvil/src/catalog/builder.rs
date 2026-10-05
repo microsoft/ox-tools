@@ -247,11 +247,11 @@ impl CatalogBuilder {
 /// assets live.
 fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
     let Artifact::OwnedFile(spec) = artifact else {
-        return Option::default();
+        return None;
     };
     let path = std::path::Path::new(spec.path);
     if !spec.path.starts_with("justfiles/") || path.extension().is_some_and(|extension| extension == "just") {
-        return Option::default();
+        return None;
     }
     Some(format!(
         "owned file '{}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (it is the recipe tree, not an asset directory)",
@@ -264,6 +264,7 @@ fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
 mod tests {
     use super::*;
     use crate::anvil::artifacts;
+    use crate::{CommentSyntax, HostSelector, RegionId, RegionSpec};
 
     #[test]
     fn subcommand_derives_bin_name() {
@@ -497,19 +498,22 @@ mod tests {
 
     #[test]
     fn canonical_repr_uses_explicit_stable_tags() {
-        let file = Artifact::backend_file(crate::backend::Backend::GitHub, "x.txt", "body");
-        let region = Artifact::region(crate::catalog::RegionSpec {
-            host: crate::catalog::HostSelector::Path("Cargo.toml".to_owned()),
-            id: crate::catalog::RegionId::new("anvil"),
+        let github_file = Artifact::backend_file(crate::backend::Backend::GitHub, "x.txt", "body");
+        let ado_file = Artifact::backend_file(crate::backend::Backend::Ado, "x.txt", "body");
+        let region = Artifact::region(RegionSpec {
+            host: HostSelector::Path("Cargo.toml".to_owned()),
+            id: RegionId::new("anvil"),
             body: "region-body".to_owned(),
-            syntax: crate::region::CommentSyntax::SlashSlash,
+            syntax: CommentSyntax::SlashSlash,
         });
 
-        let file_repr = canonical_repr(&file);
+        let github_repr = canonical_repr(&github_file);
+        let ado_repr = canonical_repr(&ado_file);
         let region_repr = canonical_repr(&region);
 
-        assert!(file_repr.contains("gate=github"));
-        assert!(file_repr.contains("file"));
+        assert!(github_repr.contains("gate=github"));
+        assert!(github_repr.contains("file"));
+        assert!(ado_repr.contains("gate=ado"));
         assert!(region_repr.contains("path:Cargo.toml"));
         assert!(!region_repr.contains("single_crate_cargo_toml"));
         assert!(region_repr.contains("slashslash"));

@@ -771,7 +771,7 @@ fn nextest_runner_failure(code: Option<i32>, output: &str) -> String {
 /// This deliberately excludes the inherited environment and the loader path's value. The latter
 /// contains inherited path entries, while the fact that cargo-gamma configured it is enough to
 /// diagnose a loader mismatch without copying ambient process data into an artifact.
-pub(super) fn baseline_environment(work: &Workspace) -> serde_json::Value {
+pub(super) fn baseline_environment(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> serde_json::Value {
     let launch = work.launch();
     let mut set = BTreeMap::from([
         (UNDER_GAMMA_VAR, "1".to_owned()),
@@ -779,7 +779,12 @@ pub(super) fn baseline_environment(work: &Workspace) -> serde_json::Value {
         (INSTA_FORCE_PASS_VAR, "0".to_owned()),
     ]);
 
-    if let Some(threads) = work.harness_threads() {
+    let threads = if work.required_resources(binary, only).is_empty() {
+        work.harness_threads()
+    } else {
+        Some("1")
+    };
+    if let Some(threads) = threads {
         let _ = set.insert(TEST_THREADS_VAR, threads.to_owned());
     }
 
@@ -2169,7 +2174,8 @@ mod tests {
     fn baseline_and_binary_environments_record_every_controlled_value() {
         let (_directory, work) = crate::testing::helper_workspace("verdict-environment", &[]);
         work.calibrate_harness(1);
-        let environment = baseline_environment(&work);
+        let binary = crate::testing::helper();
+        let environment = baseline_environment(&work, &binary, Only::All);
         let set = environment["set"].as_object().expect("the set is an object");
 
         assert_eq!(set[UNDER_GAMMA_VAR], "1");
@@ -2213,6 +2219,18 @@ mod tests {
         assert_eq!(env[gamma_rt::ACTIVE_VAR].as_deref(), Some("11"));
         assert_eq!(env[gamma_rt::CENSUS_VAR].as_deref(), Some("census.bin"));
         assert_eq!(env["CARGO_MANIFEST_DIR"].as_deref(), Some("manifest"));
+    }
+
+    #[test]
+    fn baseline_environment_records_the_resource_thread_override() {
+        let (_directory, mut work) = crate::testing::helper_workspace("verdict-resource-environment", &[]);
+        work.calibrate_harness(8);
+        let binary = crate::testing::helper();
+        work.set_resources(super::super::resources::Resources::fake_binary(&binary));
+
+        let environment = baseline_environment(&work, &binary, Only::All);
+
+        assert_eq!(environment["set"][TEST_THREADS_VAR], "1");
     }
 
     #[test]

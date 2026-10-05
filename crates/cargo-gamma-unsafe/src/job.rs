@@ -8,6 +8,8 @@
 //! limit for it and report what it reached. Neither is reachable from `std`, so both are made here
 //! through Win32 and handed out as safe methods.
 
+#[cfg(test)]
+use core::cell::Cell;
 use core::ffi::c_void;
 use core::mem;
 use std::io;
@@ -189,18 +191,19 @@ fn native_limit(limit: u64) -> Option<usize> {
 /// space. The 64-bit CI targets exercise the installed policy through the kernel-facing tests.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn install_memory_limit(limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, limit: u64) -> Option<()> {
-    let bytes = native_limit(limit)?;
+    let limit = native_limit(limit)?;
     limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
-    limits.JobMemoryLimit = bytes;
+    limits.JobMemoryLimit = limit;
     Some(())
 }
 
 #[cfg(test)]
+/// Test backend that delegates native calls, injects requested failures, and records selected arguments.
 struct FaultInjectingCalls;
 
 #[cfg(test)]
 thread_local! {
-    static LAST_OPEN_THREAD: core::cell::Cell<Option<u32>> = const { core::cell::Cell::new(None) };
+    static LAST_OPEN_THREAD_REQUEST: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -222,7 +225,7 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn open_thread(&self, thread: u32) -> HANDLE {
-        LAST_OPEN_THREAD.set(Some(thread));
+        LAST_OPEN_THREAD_REQUEST.set(Some(thread));
         if native_faults::fired(NativeCall::OpenThread) {
             core::ptr::null_mut()
         } else {
@@ -682,6 +685,7 @@ const fn in_job_answer(answer: &JobMembershipQuery) -> Option<bool> {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::process::Stdio;
     use std::sync::Arc;
@@ -744,11 +748,11 @@ mod tests {
     fn the_safe_open_thread_wrapper_preserves_the_requested_identifier() {
         // SAFETY: this takes no arguments and returns the calling thread's numeric identifier.
         let current = unsafe { GetCurrentThreadId() };
-        LAST_OPEN_THREAD.set(None);
+        LAST_OPEN_THREAD_REQUEST.set(None);
         let opened = open_thread(current);
 
         assert!(valid_handle(opened), "the wrapper must open the requested current thread");
-        assert_eq!(LAST_OPEN_THREAD.get(), Some(current));
+        assert_eq!(LAST_OPEN_THREAD_REQUEST.get(), Some(current));
 
         // SAFETY: the successful call above returned this newly owned handle.
         drop(unsafe { OwnedHandle::from_raw_handle(opened) });

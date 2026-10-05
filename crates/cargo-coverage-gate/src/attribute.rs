@@ -75,6 +75,7 @@ mod tests {
     fn member(name: &str, manifest_dir: &str) -> Member {
         Member {
             name: name.to_owned(),
+            version: "1.2.3".to_owned(),
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent: None,
             expect_no_coverable_lines: false,

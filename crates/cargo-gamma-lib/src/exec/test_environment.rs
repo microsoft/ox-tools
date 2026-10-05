@@ -430,15 +430,22 @@ mod tests {
 
     #[test]
     fn absent_optional_package_strings_become_empty_cargo_variables() {
-        let mut metadata = metadata();
-        let package = metadata["packages"][0].as_object_mut().expect("package object");
-        let _ = package.remove("description");
-        let _ = package.remove("homepage");
-        let packages = package_environments(&metadata);
-        let package = &packages[PACKAGE_ID];
+        for (field, variable) in [
+            ("description", "CARGO_PKG_DESCRIPTION"),
+            ("homepage", "CARGO_PKG_HOMEPAGE"),
+            ("repository", "CARGO_PKG_REPOSITORY"),
+            ("license", "CARGO_PKG_LICENSE"),
+            ("license_file", "CARGO_PKG_LICENSE_FILE"),
+            ("readme", "CARGO_PKG_README"),
+            ("rust_version", "CARGO_PKG_RUST_VERSION"),
+        ] {
+            let mut metadata = metadata();
+            let package = metadata["packages"][0].as_object_mut().expect("package object");
+            let _ = package.remove(field);
+            let packages = package_environments(&metadata);
 
-        assert_eq!(value(package, "CARGO_PKG_DESCRIPTION"), Some(""));
-        assert_eq!(value(package, "CARGO_PKG_HOMEPAGE"), Some(""));
+            assert_eq!(value(&packages[PACKAGE_ID], variable), Some(""), "{field}");
+        }
     }
 
     #[test]

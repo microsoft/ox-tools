@@ -84,6 +84,19 @@ configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
 
+### Progress and dashboard
+
+The ordinary live display uses one active phase line at a time. Workspace
+discovery completes `Analyzing the workspace` as `Analyzed the workspace`.
+Compiler convergence hides Cargo's invocation-local unit counter and reports
+the monotonic number of unviable mutants found; `--show-build` exposes Cargo's
+raw narration for troubleshooting. Planning and testing use the ordinary
+cargo-style progress line. `--dashboard` replaces those lines, when progress
+display is eligible, with a multiline view of mutant verdicts, explicit and
+inferred hint effectiveness, and test-process cost. Both modes share the same
+lifecycle and finish before the durable summary and artifact notices are
+written.
+
 The testing progress display reports completed and total mutants plus observed
 verdict counts. It does not predict completion time: scheduling, contention,
 timeouts, and learned test selection make a live ETA misleading.
@@ -102,8 +115,10 @@ before the runtime constructor installed its selection; either fixed marker
 disqualifies the process as mutation-score evidence.
 
 Source-declared test resources are recovered from ignored harness markers
-before baseline execution. A function marker maps a resource to one qualified
-test name; a module marker maps it to every launch of that test target.
+before baseline execution. A function annotation maps a resource to one
+qualified test name; an inline module annotation maps it to every launch of
+that test target. The attribute macro emits the ignored harness markers that
+the coordinator enumerates to recover those declarations.
 Campaign configuration supplies capacities, defaulting each declared resource
 to one. Every launch path uses one shared admission coordinator, including
 baseline, census, mutant probes, whole-binary fallbacks, and confirmations.
@@ -111,9 +126,10 @@ Custom harnesses have no libtest marker registry and therefore contribute no
 source-declared resources. Resource-bearing nextest launches additionally limit
 the runner to one concurrent test process.
 
-Interactive build progress reuses Cargo's progress text while cargo-gamma owns
-the terminal redraw. Cargo's leading erase control is consumed rather than
-rendered visibly, and its color styling remains intact.
+When `--show-build` is enabled, Cargo's leading erase control is consumed
+rather than rendered visibly and its color styling remains intact. Without
+that flag, Cargo progress and convergence diagnostics remain hidden behind the
+stable cargo-gamma phase line.
 
 Each Cargo output stream is retained up to 256 MiB for artifact and diagnostic
 processing, and each logical line is bounded at 1 MiB. The buffers grow with
@@ -129,43 +145,91 @@ line using the platform's native path separator, followed by the aggregate count
 Baseline-failure diagnostics use the settled post-build plan, preserving the complete population,
 compiler-withdrawn outcomes, pending viable mutants, and their mutator and package breakdowns.
 Successful observations retain none of this output. Before a build, the command
-removes stale baseline records. On failure it writes one structured record per failed test beneath
+removes stale baseline records. On failure it writes one structured record for
+each of at most 64 unique failed tests across the whole campaign beneath
 `baseline-failures/<package>/<target>/tests/<test>/failure.json`; unnamed
-binary-level failures use categorical leaves. Components are cross-platform
-safe and length-bounded, and colliding readable paths receive a short
-identity-derived digest. Each failure directory also receives `diags.json`,
-and the ordinary canonical diagnostics bundle is retained at its configured
-path. Only environment values cargo-gamma explicitly controls are eligible for
-diagnostic records, never the inherited process environment.
+binary-level failures use categorical leaves. Binaries are folded in plan order
+and each binary's retained tests are sorted for deterministic selection. Every
+record carries the retained identities for its binary in
+`observedFailedTests` and the number beyond the cap in
+`observedFailedTestsOmitted`. The campaign-wide 64-record cap applies only to
+per-test `testFailure` artifacts; a timeout, stall, memory limit, enumeration
+failure, or infrastructure failure remains a single categorical record and
+retains its own bounded failed-test evidence even after that cap is exhausted.
+Components are cross-platform safe and
+length-bounded, and colliding readable paths receive a short identity-derived
+digest. Each failure directory also receives `diags.json`, and the ordinary
+canonical diagnostics bundle is retained at its configured path. Only
+environment values cargo-gamma explicitly controls are eligible for diagnostic
+records, never the inherited process environment.
+
+Counted baseline summaries state that the observed tests ran across the measured
+test binaries; custom harnesses that announce no count instead report that the
+suite passed.
 
 Completed runs publish the five ordinary `gamma-report.json`, HTML, SARIF,
 performance-advice, and diagnostics artifacts. An early baseline failure
-instead publishes every failure's nested `failure.json` and `diags.json`, plus
-the canonical diagnostics bundle, before the scratch workspace is removed.
-The baseline record uses `schemaVersion: 1`
-and records the failure kind and reason; package, target, runner, executable,
-and working directory; cargo-gamma's explicit environment overrides; failing
-and last-observed tests; termination, elapsed time, budget, peak, and memory
-limit; and control-character-encoded stdout and stderr tails with a truncation
-flag.
+instead publishes nested `failure.json` and `diags.json` artifacts for up to 64
+retained failed tests, plus the canonical diagnostics bundle, before the
+scratch workspace is removed. The baseline record uses `schemaVersion: 1` and
+records the failure kind and reason; package, target, runner, executable, and
+working directory; cargo-gamma's explicit environment overrides; retained
+failing-test identities, the omitted failing-test count, and the last observed
+test; termination, elapsed time, budget, peak, and memory limit; and
+control-character-encoded stdout and stderr tails with a truncation flag.
 
-When Cargo's resolved package selection covers the whole workspace, every stage
-checks mutation viability with that constant Cargo root set, and preflight
-validates the same roots even when some packages contain no mutable files. This
-keeps dependency feature unification identical across validation and stages
-instead of compiling a new dependency variant for each downstream package
-selection. Only the current stage's mutants are instrumented; mutants belonging
-to other stages are restored before each ordinary, probe, or isolation build.
-Diagnostic blame, isolation, and withdrawal therefore remain limited to the
-current stage even though Cargo checks the wider graph. The final test-target
-build retains its reachability-based package selection; runs whose original
-Cargo selection is a package subset retain their narrowed graph throughout.
+All selected target packages are scanned in dependency order and instrumented
+before compilation begins. Schema convergence runs `cargo check` over every
+package with pending mutations, including a package with no runnable test
+target, while the final code-generating build retains the reachability-based
+test-package selection. This keeps the complete mutation population visible to
+one convergence and lets Cargo expose independent failures together without
+generating or linking test binaries in every round. Runs whose original Cargo
+selection is a package subset retain their narrowed graph throughout.
+
+Structured compiler messages carry package, target, diagnostic, and primary
+span context. Direct generated-text blame withdraws a mutant immediately.
+Otherwise isolation considers diagnostic-file mutants, then the failing
+package, then its transitive dependency cone; checks only the failing target;
+and admits at most 4,096 candidates and 32 proof checks per target. A campaign additionally admits
+at most 64 diagnostic contexts and 256 proof checks in total; unresolved contexts become
+`notbuilt` rather than extending compiler work without bound. Independent
+failing targets are isolated in one global round. A minimal interaction group
+excludes one deterministic member as `notbuilt` rather than calling any member
+individually unviable. Proofs activate exactly their requested subset and restore every unrelated
+pending mutant. They preserve the failed invocation's selected package roots and Cargo feature
+graph while narrowing mutation activity and graph-equivalent target work. No isolation path expands
+to the whole workspace. Cargo compiler-message rows do not carry artifact profiles. For a failed
+invocation that can compile both ordinary targets and test harnesses, ambiguous library,
+proc-macro, and binary diagnostics retain the exact failed Cargo verb rather than guessing a mode
+or duplicating proof contexts. A context that compiles with the complete dependency cone is
+discarded rather than producing unresolved evidence. Direct compiler blame dominates overlapping
+unresolved or interaction results from another diagnostic context.
+
+Narrow-to-wide fallback is transactional for verdict state. Before a narrowed check or build, the
+coordinator snapshots withdrawals, compiler reasons, abandoned and unavailable populations,
+interaction and unresolved evidence, probes, ordering counters, and compiled-source evidence. A
+stuck narrow attempt restores that snapshot before the wider graph runs, so only blame confirmed
+under the successful graph survives.
+
+The isolation subsystem lives under `exec/build/isolation.rs`; the coordinator owns stage
+transitions, while the subordinate module owns diagnostic contexts, tiers, campaign budgets, proof
+memoization, and interaction minimization. Splice invalidation uses the symmetric withdrawal delta,
+and its guard index is updated only for dirty files.
+
+Cargo convergence evidence is decoded only for event consumers that explicitly request it.
+Diagnostic consumers retain the full opt-in evidence, exposed with standard-library path views;
+the normal console retains only monotonic compiler-unviability counts.
+
+Target-frontier acceptance remains deliberately absent. Deterministic command-count fixtures show
+that frontiers followed by mandatory global confirmation add invocations to clean, direct,
+downstream, and interaction cases. Omitting confirmation is unsound under Cargo feature unification
+and cross-target interactions, so no package-at-a-time acceptance is permitted.
 
 Instrumentation reads the synchronized scratch tree rather than re-reading the
 live checkout after discovery. Each copied source is checked against the
 generation digest recorded when its mutants were discovered after that source
-is scanned and before its current stage is instrumented. Earlier stages are not
-revalidated while their guards remain in the synchronized tree. The comparison
+is scanned and before the complete population is instrumented. The comparison
 omits a leading UTF-8 byte-order mark, matching discovery and parsing. A
 mismatch stops the campaign and asks the user to rerun after edits settle rather
 than attributing build or mutation results to the earlier source generation.
@@ -220,7 +284,10 @@ revalidated scheduling advice, not context-gated evidence. The independently
 versioned generalized schema is version 2. It distinguishes seed observations
 from cross-mutant transfer hits and misses, interns repeated killing-test and
 binary identities, and persists stable reach sites with the engine-owned site
-digest rather than normalized source text. Older generalized schemas are
+digest rather than normalized source text. Version-1 generalized hints are
+migrated to version 2 when decoded: seed counts are retained with a minimum of
+one, while hit, miss, measured-time, and sample counters are reset because their
+version-1 meanings are not comparable. Other generalized schema versions remain
 unsupported. Promotion output reports only records added, updated, removed,
 and preserved; aggregate hint and mutant counts remain available from the
 artifact rather than being repeated in the command status line.

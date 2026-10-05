@@ -39,7 +39,14 @@ normal = ["unicode-ident"]
 allowed = ["unicode-ident"]
 
 [package.metadata.coverage-gate]
+# Every retained production line must be exercised across the supported test configurations;
+# regressions are addressed in tests rather than by lowering this gate.
 min-lines-percent = 100.0
+
+# The unit-test binary alone exceeds GitHub Actions' six-hour job limit under Miri.
+# Standard, coverage, and mutation checks continue to exercise the complete test suite.
+[package.metadata.anvil.miri]
+exclude = true
 
 [features]
 # Re-exports the crate internals under `internals` so the crate's own integration tests can reach

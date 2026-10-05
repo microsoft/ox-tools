@@ -26,8 +26,9 @@ fn adjust_lock_flags(args: &[String]) -> Vec<String> {
 
 /// How cargo and the test binaries are invoked.
 ///
-/// A run builds once and then executes that build thousands of times, so these are the settings
-/// that decide what gets compiled and what the compiled thing is asked to do.
+/// A run converges through checks and bounded proofs, generates test binaries once, and then
+/// executes those binaries thousands of times. These settings decide what gets compiled and what
+/// the compiled programs are asked to do.
 #[derive(Debug, Clone, Default)]
 pub struct CargoOptions {
     /// Feature arguments, already rendered in the form cargo accepts.

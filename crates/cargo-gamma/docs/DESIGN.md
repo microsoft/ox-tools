@@ -163,12 +163,11 @@ sequenceDiagram
     Gamma->>Schema: Instrument selected mutants
 
     loop Until the schema compiles
-        Gamma->>Cargo: Build instrumented packages
+        Gamma->>Cargo: Build all instrumented test targets
         Cargo-->>Gamma: Structured diagnostics
         Gamma->>Schema: Withdraw blamed mutants
     end
 
-    Gamma->>Cargo: Build test binaries
     Gamma->>Tests: Run unmutated baseline
     Tests-->>Gamma: Timing, output, and memory evidence
     Gamma->>Tests: Census test-to-site reachability
@@ -184,11 +183,11 @@ sequenceDiagram
 
 The visible phases correspond to these architectural stages:
 
-- **Analyzing:** configuration, Cargo metadata, source discovery, and any safe incremental
-  validation.
+- **Analyzing:** configuration, Cargo metadata, and discovery of the workspace source scope.
 - **Copying:** synchronizing the checkout into the scratch workspace.
-- **Mutating and building:** collecting candidates, rewriting source, and converging on a schema
-  Cargo accepts.
+- **Mutating:** collecting candidates and rewriting every selected target package.
+- **Building:** checking all instrumented test targets together, withdrawing compiler-rejected
+  mutants until the complete schema checks, then building the converged binaries once.
 - **Baselining:** proving the unmutated test oracle is green and measuring its behavior.
 - **Optimizing:** learning which tests reach which mutation sites.
 - **Testing:** activating and judging the remaining mutants.
@@ -237,7 +236,10 @@ where custom attributes remain unstable, can use the comment spelling
 `// #[gamma::skip(...)]`. The source engine interprets the comment form;
 the attribute crate validates the compiled form while expanding to the annotated item unchanged.
 Both channels permit one timeout multiplier per directive across positional and named spellings;
-stating another is a usage error rather than an ordered override.
+stating another is a usage error rather than an ordered override. A genuinely bare directive
+selects every mutator in scope, while every comma-delimited argument in a non-bare directive must
+be non-empty; malformed leading, repeated, comma-only, and trailing commas are usage errors rather
+than alternate spellings of the all-mutator form.
 For `cfg_attr`, a definitely false predicate leaves the nested directive inactive, a true
 predicate applies it, and an unknown predicate applies it conservatively rather than manufacturing
 a survivor the author believed suppressed.
@@ -348,14 +350,26 @@ one such mutation can prevent every test binary from being built.
 cargo-gamma resolves this with a rollback fixpoint:
 
 1. Instrument the currently admitted population.
-2. Ask Cargo to build while continuing past independent failures.
+2. Ask Cargo to check every selected test target while continuing past independent failures.
 3. Attribute structured compiler diagnostics to mutation guards.
 4. Withdraw every blamed mutant.
 5. Rewrite only files whose admitted population changed.
-6. Repeat until the schema compiles or convergence can no longer be established safely.
+6. Repeat until the schema checks or convergence can no longer be established safely.
+7. Build the converged test targets once to produce the baseline binaries. If code generation or
+   linking exposes a failure that checking could not, converge that final build under the same
+   bounded attribution rules.
 
 Withdrawn mutants are reported as unviable. They are not silently discarded, because the score is
 meaningful only when its excluded population remains visible.
+
+The source collector prevents a mutation before this loop only when syntax proves the replacement
+invalid. Its local evidence distinguishes explicit and inferred integer, unsigned, floating-point,
+textual, optional, and temporal values; expected types flow through local returns, arguments,
+fields, casts, indices, and initializers. Proven unsigned zeroes do not receive `-1`, proven floats
+use floating-point perturbation units, and proven non-additive values do not receive integer
+operators. Option-producing chains are kept out of iterator-shaped rewrites. Ambiguous external
+trait implementations, constructors, moves, and overloaded operators remain candidates: guessing
+that they are invalid could remove a viable survivor and improve the score incorrectly.
 
 Each compiler-blamed unviable mutant retains a bounded reason: rustc's primary error code when
 present, a normalized and length-capped primary-message category, and whether a primary span
@@ -365,10 +379,35 @@ attributed root cause. Proof builds that isolate a compiler failure without an a
 use a fixed `isolated compiler failure` category. Mutants abandoned because a build could not be
 converged remain `notbuilt`, not unviable.
 
-Workspace packages are handled in dependency order so that failures are localized and useful work
-can progress without waiting for one global rollback loop. A final workspace build applies Cargo's
-real feature unification and produces the test binaries. Example and benchmark targets are not
-built: cargo-gamma does not execute them, so they are not part of its compilation oracle.
+All selected target packages are instrumented before compilation begins. cargo-gamma asks Cargo to
+check their test targets together, letting Cargo schedule independent packages concurrently and one
+compiler round withdraw failures from unrelated packages without repeatedly paying for code
+generation and linking. After check convergence, one build produces the test binaries consumed by
+baseline measurement. Example and benchmark targets are not built: cargo-gamma does not execute
+them, so they are not part of its compilation oracle. A selected package with mutations but no test
+target is still included in schema checking; after its source is proven buildable, its mutants are
+reported uncovered rather than being mistaken for a build cargo-gamma failed to perform.
+
+During convergence, the normal progress display says only how many unviable mutants have been found;
+Cargo's per-invocation unit counter and isolation diagnostics are hidden because their changing
+denominators do not measure progress toward a converged schema. `--show-build` retains Cargo's raw
+build narration for troubleshooting. When convergence completes, cargo-gamma reports the unviable,
+viable, and not-built counts. If a diagnostic cannot be attributed directly, cargo-gamma reads the
+failing Cargo package and target from the structured message. Isolation starts with mutants in
+diagnostic files, expands to the failing package, and only then to that package's transitive dependency cone.
+Within each tier, rustc's error code orders mutators whose compile-time effects can plausibly cause
+that diagnostic ahead of type- and trait-invariant value changes. The complete tier is always tried
+if the compiler does not prove the narrower heuristic sufficient, so unusual const-generic or
+downstream effects cannot hide a viable cause. Unrelated and downstream packages never enter the
+candidate set. Each proof checks only the failing target and activates exactly the requested
+candidate subset; every other pending mutant, including candidates from another tier, is restored
+to pristine source. This is what prevents a cross-tier interaction from being blamed on either
+member individually.
+The implementation retains diagnostic evidence about the admitted population, rewritten-file
+count, Cargo reuse and rebuild counts, and failing targets without adding it to the normal console
+display. Independent failing targets from one global check are isolated
+together and withdrawn before the next global check, rather than forcing one complete workspace
+round per target.
 
 Diagnostic attribution uses guard locations in the instrumented text, not original line numbers.
 Instrumentation changes line positions, and nested mutations can share original spans. The mutated
@@ -379,9 +418,41 @@ instead triggers proof-build isolation before that mutant can be reported as unv
 have no generated replacement text, so containment and gated flow-sensitive attribution remain
 valid evidence for them. Within one compiler batch, exact generated-text attribution takes
 precedence over deletion fallbacks so follow-on diagnostics cannot withdraw neighboring mutants;
-any independent failure is exposed by the next rollback round. Isolation builds are bounded proof
-work and do not consume the configured rollback-round allowance; a confirmed mutant is charged to
-the ordinary failed round that required isolation.
+any independent failure is exposed by the next rollback round. Isolation admits at most 4,096
+candidates and performs at most 32 proof checks for one failing target. Across the campaign it
+examines at most 64 diagnostic contexts and launches at most 256 proof checks. The first two limits
+cover binary narrowing of a 4,096-candidate target with interaction work left over; the aggregate
+limits admit a broad multi-crate failure wave while placing a strict ceiling on contributor-shaped
+Cargo process multiplication. Contexts left after either aggregate limit are reported as
+`notbuilt`, with the unresolved target named. These values may be raised only from deterministic
+candidate, context, and invocation counts from representative campaigns, not from host-specific
+wall-clock samples. Isolation never falls back to workspace-wide isolation. Proof builds preserve
+the failed invocation's selected package roots and therefore its Cargo feature-unification graph;
+only the active mutation subset and graph-equivalent target work are narrowed. A mutant is
+compiler-unviable only after the target checks without it and
+fails with it while every mutation outside the candidate population remains fixed. A minimal group
+that fails only in combination is recorded as a compiler interaction: one deterministic member is
+excluded as `notbuilt`, without calling any member individually unviable, and the rest remain in the
+schema. Direct compiler blame takes precedence if another diagnostic context also leaves that mutant
+unresolved or includes it in an interaction. Isolation work does not consume the configured rollback-round allowance; a confirmed mutant
+is charged to the ordinary failed round that required isolation.
+
+Proof results are memoized within a diagnostic context. In particular, halves already proved clean
+while detecting an interaction are not launched again when delta debugging begins; an
+indeterminate timeout remains indeterminate and consumes its original proof-budget slot.
+
+Convergence evidence is decoded only when an event consumer opts in. The normal console consumes
+only the monotonic compiler-unviability census, while diagnostic reporters can request rewritten
+paths, Cargo reuse/rebuild counts, and failed targets. The public event surface exposes standard
+path views rather than committing consumers to the internal Camino representation.
+
+Target-frontier acceptance was evaluated and rejected. A deterministic direct/downstream/
+interaction command-count model found that a clean global check takes one invocation, whereas
+checking target frontiers and still performing the required global confirmation takes at least one
+invocation per frontier plus that confirmation. Removing the confirmation is unsound: Cargo feature
+unification and interactions spanning targets can make individually clean frontiers fail together.
+The implementation therefore retains global confirmation and does not accept packages one at a
+time.
 
 ## The scratch workspace
 
@@ -415,12 +486,11 @@ Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sari
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
 `target/cargo-gamma/`. `last-gamma-run.json`, `gamma-progress.log`, and
 `gamma-selection.jsonl` remain reusable cache state rather than published artifacts. The selection
-journal is append-only JSON Lines. A worker delivers the completed selection attempts for one
-mutant as a batch; the writer then appends and flushes one record per attempt: mutant ordinal,
-candidate tier and rank, binary and optional test identity, conclusive hit, clean miss, or
-inconclusive result, observed duration, and the mutant's canonical fallback estimate. It therefore
-remains useful when a campaign is interrupted and supports later replay of selection heuristics
-without turning diagnostic telemetry into persisted verdict evidence. An explicit `--cache-dir`
+journal is append-only, flushed during the campaign, and remains non-verdict scheduling telemetry.
+It retains at most 64 MiB per campaign, ending with an explicit truncation record when further
+attempts are omitted; reaching that diagnostic ceiling never stops mutant execution.
+Its attempt-level interpretation is described under
+[Cheapest evidence first](#cheapest-evidence-first). An explicit `--cache-dir`
 retains the all-in-one layout and relocates the synchronized workspace, Cargo artifacts, and
 campaign state together. The default external synchronized workspace exposes the original
 checkout's version-control metadata to build scripts. When `--cache-dir` explicitly relocates that
@@ -432,13 +502,18 @@ relocating the source workspace. `--artifact-dir` relocates all five published a
 and its directory is created when absent. A relative configured artifact directory is interpreted
 relative to the invoking process for both publication and `explain`.
 
-The diagnostics bundle contains aggregate algorithm-health telemetry rather than one row per
-mutant. Build withdrawals are grouped by package, mutator, error code, normalized message category,
-and whether the replacement site was primary. Package identifiers and free-form message categories
-both follow the bundle's redaction policy: names remain readable, hashed values remain groupable,
-and omitted values carry no source-authored text. The JSON representation adds these fields
-compatibly, with absent fields in older bundles reading as no package, empty category, and `false`. Build
-rounds attribute newly withdrawn mutants to packages while retaining the round's
+The diagnostics bundle uses schema version 5 and contains aggregate algorithm-health telemetry
+rather than one row per mutant. Build withdrawals are grouped by package, mutator, error code,
+normalized message category, and whether the primary diagnostic span identified the replacement
+site. Every group is retained so a failed run remains fully classifiable after its scratch tree is
+removed; legacy omitted-group and omitted-mutant fields remain readable but new bundles leave them
+at zero. Package identifiers and free-form message categories both follow the bundle's redaction
+policy: names remain readable, hashed values remain groupable, and omitted values carry no
+source-authored text. Exact compiler-withdrawn mutant records, including their source identities
+and replacements, remain in the local completed or incomplete campaign record rather than in the
+shareable diagnostics bundle. Absent replacement-site evidence in a legacy bundle remains unknown
+rather than being interpreted as an observed non-replacement span. Build rounds attribute newly
+withdrawn mutants to packages while retaining the round's
 actual workspace-wide elapsed time; they do not invent per-package build durations. Census
 telemetry records candidate binaries and sites, listing attempts and successes, the estimated walk
 cost and economic-gate decision, sample launches, and complete versus partial evidence. Sweep
@@ -465,16 +540,22 @@ target, runner, executable, and working directory; cargo-gamma's explicit enviro
 failing and last-observed tests; termination, elapsed time, budget, peak, and memory limit; and
 safely encoded stdout and stderr tails. Each stream retains at most 64 KiB and 2,000 lines, and the
 record says when output was truncated. Direct libtest baselines run to completion within their time
-and memory budgets instead of stopping at the first `FAILED` announcement, so every named failure
-and libtest's trailing captured output are retained. Mutant attempts still stop at the first
-killing test. All retained binaries settle before one concise aggregate error reports the failure
-count and directs the reader to `baseline-failures/`. The canonical diagnostics and each
+and memory budgets instead of stopping at the first `FAILED` announcement. A record retains at most
+64 named failures and reports how many additional names were omitted; libtest's trailing captured
+output remains retained. Mutant attempts still stop at the first killing test. All retained
+binaries settle before one concise aggregate error reports the failure count and directs the reader
+to `baseline-failures/`. The canonical diagnostics and each
 successfully published `failure.json` and `diags.json` are announced with a `Wrote` line using the
 platform's native path separator, while the verbose per-failure summaries are not repeated. Both
 early-failure artifacts are written before the failed scratch workspace is removed.
 The diagnostics retain the settled plan from the completed instrumented build, so population,
 unviable, pending, mutator, and package data already known before the baseline failure are not
 replaced by an empty survey skeleton.
+The same failure publishes compiler-confirmed unviability to
+`incomplete-gamma-learning.json` before scratch cleanup. That record contains no test-derived
+verdicts; a later run may adopt only its compiler outcomes, under the same source and complete
+compilation-context guards as a completed record. A successful completed-record publication
+atomically replaces this incomplete generation.
 
 The source tree preserves symlinks and honors workspace ignore rules. Relative path dependencies
 that leave the workspace are anchored to their original locations so moving the workspace does not
@@ -570,11 +651,10 @@ so tests in unrelated workspace packages are not presented as costs of the run.
 The unmutated test binaries run first. Direct libtest binaries are allowed to complete after a
 failure announcement, within the existing time and memory budgets, so one pass discovers every
 failure the harness reports and retains its final panic and captured-output section. A test-failing
-binary receives one clean retry so that a transient host or tool failure does not discard an
-otherwise valid campaign; failures observed across the attempts remain represented. Timeouts,
-stalls, resource failures, and infrastructure failures are not retried because repeating them
-cannot establish a trustworthy calibration. A terminal failure does not cancel other retained
-binaries: all settle, then one error reports the failure count and artifact directory. The red
+binary is not retried: even a passing retry would make the baseline flaky and therefore unusable,
+so relaunching it cannot allow the campaign to proceed. A terminal failure does not cancel other
+retained binaries: every selected binary executes exactly once, all settle, then one error reports
+the failure count and artifact directory. The red
 baseline still stops the campaign before mutants run, because a test that already fails makes every
 mutant appear detected and the mutation score meaningless.
 
@@ -626,9 +706,12 @@ letting reverse dependents improve another package's score. `--test-package` nam
 oracle, and `--test-workspace` admits every workspace package.
 
 `--test-lib` narrows the admitted target kinds to library unit-test harnesses. Preflight and final
-test compilation use Cargo's `test --no-run --lib` selection, and fallback may widen package scope
-but never add integration, binary, example, or benchmark harnesses. A selected package with no
-runnable library test harness is an error rather than a successful empty oracle.
+test compilation use Cargo's `test --no-run --lib` selection. Fallback preserves the admitted
+package scope and may broaden target kinds only within that scope; library-only selection never
+adds integration, binary, example, or benchmark harnesses. A selected package with no
+runnable library test harness is an error rather than a successful empty oracle. Target-pattern
+validation retains package ownership: a library target declared only by another workspace member
+cannot satisfy an admitted package's `--include-test` or `--exclude-test` pattern.
 
 Within the admitted package set, a test binary cannot execute code it does not link. The Cargo
 dependency graph first identifies binaries that cannot reach a mutated package. Cargo Gamma then
@@ -735,7 +818,10 @@ launches are inconclusive: they are recorded in `gamma-selection.jsonl` but do n
 hit/miss rankings. A clean canonical pass contributes half-weight negative evidence to an
 already-known item or file binary candidate. This evidence can lower its priority or make its
 expected economics unattractive, but never creates a candidate, excludes a test binary, or changes
-a verdict.
+a verdict. It is weaker than an observed transfer miss because the canonical run was selected for
+verdict completeness rather than as a direct probe of that candidate. Two canonical misses
+therefore equal one transfer miss and interact with the ordinary two-miss retirement rule only
+after four such passes.
 
 Workers choose mutants at assignment time rather than advancing through a fixed queue. The first
 unhinted assignment for an item is its scout. While it runs, workers prefer files with no active
@@ -784,6 +870,13 @@ early interpretation and fall back to the process exit status.
 Workers share the immutable schema and build artifacts. For each mutant they launch a fresh process
 with that mutant's ordinal selected. One process provides isolation for environment state, static
 state, crashes, and resource accounting.
+
+Before any baseline or mutant process starts, cargo-gamma discovers source-declared shared
+resources from the finalized test environment and installs one admission policy. Baseline, census,
+filtered probes, whole-binary fallbacks, and confirmations all use that same coordinator, so
+calibration and verdict execution observe identical contention limits. Resource-marker discovery
+uses the baseline memory policy, because it executes the same test binary before per-mutant limits
+exist.
 
 Every launch is treated as a process **tree**, not a single PID. Tests may start servers, child
 tools, or nested Cargo processes. Timeout and cancellation must terminate descendants as well as the
@@ -878,11 +971,15 @@ SARIF findings, and incremental records.
 
 `run --mutant <ID>` repeats to select an exact current population. Every requested ID must resolve
 after normal discovery and selection; stale, unknown, suppressed, or filtered IDs fail rather than
-silently yielding an empty campaign. These repair runs establish fresh verdicts and do not adopt
-cached verdicts. `explain <ID>` resolves the same current identity and adds verdict context from the
+silently yielding an empty campaign. Executed repair runs establish fresh verdicts and do not adopt
+cached verdicts; `--dry-run` previews the exact selection without claiming a verdict. `explain <ID>`
+resolves the same current identity and adds verdict context from the
 current configured artifact directory's `gamma-report.json`; `--report` overrides that path. An
 explicit retained report remains explainable when its source site or workspace is no longer
 present, using the identity version recorded by that report.
+Explicit report files are untrusted presentation input. Their paths, source fragments, test names,
+and other strings receive the same control-character encoding at the terminal boundary as live
+campaign data.
 
 ### Incremental knowledge
 
@@ -896,6 +993,14 @@ The target-resident campaign cache stores facts and hints learned by an earlier 
 Test verdicts are never reused. A kill is one observation of a potentially nondeterministic test
 suite; unchanged source, configuration, toolchain, and environment cannot prove that the next
 observation will agree. Each run therefore re-establishes every score-bearing outcome.
+
+Compiler convergence is the semantic type-and-trait oracle for facts syntax cannot establish. It
+checks the active target, feature set, compiler, configuration, and dependency graph rather than
+depending on a separate analyzer whose view might differ. When convergence completes but a later
+baseline phase fails, its exact compiler outcomes and ordering are written to the incomplete
+learning record. A later run can therefore reuse definitive negative answers without turning
+uncertain external `Default`, constructor, arithmetic, or move behavior into source-level
+suppression.
 
 Build incremental mode captures compilation inputs before execution. It reads and hashes regular
 workspace files and external path dependencies while excluding generated build, version-control, and
@@ -949,8 +1054,11 @@ configuration, not in an ephemeral cache. A cache directory must always be safe 
 losing accepted policy. A run that produces a timeout or out-of-memory verdict points to
 `cargo gamma suppress`, which reads the persisted outcome ledger and previews the corresponding
 reviewed suppression after using Cargo metadata to validate the current workspace identity, but
-without synchronization, compilation, baselining, or test execution. `--apply` writes the previewed
-edits, matching `unsuppress`. The ledger records stable
+without synchronization, compilation, baselining, or test execution. Preview performs the same
+external-source and recoverability preflight as apply, but describes the diff as proposed because
+only the applied tree can be rediscovered and checked for missed or collateral suppressions.
+`--apply` writes the proposed edits, verifies the resulting mutant population, and reverts them if
+that verification fails, matching `unsuppress`. The ledger records stable
 identity, verdict, workspace-relative source, mutator, source-site identity and location,
 source-generation evidence, and the optional bounded compiler reason for unviable mutants.
 Suppression edits only
@@ -1047,7 +1155,10 @@ verdict forward.
 Command help follows the workspace Cargo-tool convention: green bold headings and usage,
 cyan bold literals, cyan placeholders, and package author/version metadata.
 
-The ordinary live display remains a single cargo-style progress bar. After baseline measurement it
+The ordinary live display uses one active phase line at a time. Workspace discovery begins with
+`Analyzing the workspace` and completes as `Analyzed the workspace`. Compiler convergence replaces
+Cargo's invocation-local unit counters with the monotonic number of unviable mutants found. After
+baseline measurement it
 opens a `Planning` phase, reports how many pending mutants have had their scheduling work
 constructed while reachability, optional census work, hints, projections, and the sweep queue are
 prepared, and closes that phase before workers start. `--dashboard` replaces the planning bar and
@@ -1058,7 +1169,8 @@ baseline line does. It uses the same terminal eligibility as `--progress`,
 selects small, medium, or large layouts from the current terminal width, adapts when the window is
 resized, and redraws no more than once per second.
 While sweep workers are quiet, the coordinator emits a one-second heartbeat so a repaint deferred
-by that rate limit is eventually flushed and wall-clock-derived values remain current.
+by that rate limit is eventually flushed and wall-clock-derived values remain current. Matching the
+heartbeat to the repaint limit avoids coordinator wakeups that cannot produce a visible update.
 The layouts use Unicode box drawing and hierarchy rather than ASCII approximations. Headings,
 separators, and outcome rows use semantic color when the resolved `--color` policy permits it and
 remain structurally identical without color.
@@ -1068,7 +1180,10 @@ Each panel derives its width from its longest rendered row, retaining one space 
 rather than reserving a fixed right margin; metric values therefore remain inside the border.
 Label and value columns use a consistent three-space gutter across all panels.
 The mutant panel uses an adaptive waffle: one cell per mutant through 100 mutants and a fixed
-10-by-10 percentage grid above that. Its legend reports unviable, pending, killed, survived,
+10-by-10 percentage grid above that. The fixed grid keeps large populations readable at ordinary
+terminal widths while giving each cell an approximately one-percent meaning; the gutter is the
+smallest spacing that keeps label and value columns visually distinct across all layouts. Its
+legend reports unviable, pending, killed, survived,
 timed-out, out-of-memory, flaky, and uncovered counts in that order, plus the mutation score.
 The hints panel reports only explicit and inferred hint counts and hit rates. The execution panel
 reports binary count, busy workers, recent throughput, whole and filtered selections,
@@ -1180,6 +1295,9 @@ mutants.
 Tests declare stable semantic resource names with `#[gamma::resource("name")]`.
 Function declarations require a test attribute such as `#[test]` or
 `#[tokio::test]`; inline module declarations apply to the containing test target.
+The coordinator discovers declarations through an ignored-only libtest listing, so an ordinary
+test whose name resembles the reserved marker encoding cannot acquire resources or alter harness
+threading without a resource attribute.
 Declarations do not embed a machine-dependent concurrency value. `gamma.toml` and
 repeatable command-line overrides assign capacities, with an unspecified
 declared resource defaulting to one. Admission applies consistently to
@@ -1232,8 +1350,9 @@ The mutant-schema design makes large campaigns practical, but it is not free.
 - **The instrumented build is larger and slower.** Source duplication and guards increase compile
   time and may affect inlining and code layout. Instrumented binaries are not suitable for
   benchmarking application performance.
-- **One bad mutation can affect the shared build.** The rollback loop contains this cost, but each
-  convergence round is sequential fixed work.
+- **One bad mutation can affect the shared check.** The rollback loop contains this cost, but each
+  convergence round is sequential fixed work. Unattributed failures add bounded, target-scoped
+  proof checks before the final test-binary build.
 - **Process launch remains per mutant.** Activating several mutants together would confound
   causality, so launch overhead is the floor left after compilation is removed.
 - **Survivors remain expensive.** Proving that nothing detects a mutant requires exhausting all
@@ -1256,6 +1375,6 @@ The mutant-schema design makes large campaigns practical, but it is not free.
   time capture and therefore cannot support an earlier native initializer concurrently mutating
   the process environment.
 
-The central trade remains favorable for large Rust workspaces: pay a more complex fixed build once
-to remove compilation from thousands of mutant decisions, then spend effort only where evidence is
-still needed.
+The central trade remains favorable for large Rust workspaces: pay fixed compiler-convergence and
+test-binary generation costs up front to remove compilation from thousands of mutant decisions,
+then spend effort only where evidence is still needed.

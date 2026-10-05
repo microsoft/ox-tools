@@ -558,6 +558,7 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::ops::Range;
 
@@ -771,9 +772,18 @@ mod tests {
         let nested = mutant(1..3, 2, "nested", Shape::Expr);
         let sibling = mutant(4..6, 3, "sibling", Shape::Expr);
 
-        let out = instrument(text, &[&outer, &nested, &sibling]).expect("nested siblings are unambiguous");
+        let (out, guards) = instrument_with_guards(text, &[&outer, &nested, &sibling]).expect("nested siblings are unambiguous");
+        let outer = guards.get(&1).expect("outer recorded");
+        let nested = guards.get(&2).expect("nested recorded");
+        let sibling = guards.get(&3).expect("sibling recorded");
 
         assert_eq!(out.matches("::gamma_rt::a(").count(), 3);
+        assert!(outer.site.start <= nested.site.start && nested.site.end <= outer.site.end);
+        assert!(outer.site.start <= sibling.site.start && sibling.site.end <= outer.site.end);
+        assert!(
+            nested.site.end <= sibling.site.start,
+            "the sibling must follow, not nest inside, the first child"
+        );
     }
 
     #[test]
@@ -824,10 +834,21 @@ mod tests {
         let site = span_of(text, "continue");
         let replacement = mutant(site, 1, "break", Shape::Continue);
 
-        let (_out, guards) = instrument_with_guards(text, &[&replacement]).expect("instrumented");
-        let mutated = guards.get(&1).expect("recorded").mutated.clone();
+        let (out, guards) = instrument_with_guards(text, &[&replacement]).expect("instrumented");
+        let mutated = guards
+            .get(&1)
+            .expect("recorded")
+            .mutated
+            .clone()
+            .expect("a non-deletion replacement has a diagnostic region");
+        let start = out.find("break").expect("the replacement is present");
+        let prefix = &out[..start];
+        let line = u32::try_from(prefix.lines().count()).expect("the fixture has few lines");
+        let column = u32::try_from(prefix.rsplit('\n').next().expect("a prefix has a final line").chars().count() + 1)
+            .expect("the fixture line is short");
+        let expected = at(line, column)..at(line, column + 5);
 
-        assert!(mutated.is_some(), "a non-deletion replacement must have a diagnostic region");
+        assert_eq!(mutated, expected);
     }
 
     #[test]

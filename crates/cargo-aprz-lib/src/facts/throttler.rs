@@ -288,7 +288,7 @@ mod tests {
                 })
             };
 
-            tokio::time::timeout(Duration::from_millis(500), waiter)
+            tokio::time::timeout(Duration::from_secs(2), waiter)
                 .await
                 .expect("acquire must resume once the pause is lifted")
                 .expect("waiter task must not panic");

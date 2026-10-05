@@ -15,6 +15,9 @@
 
 mod support;
 
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
+
 use support::dump::Dump;
 use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db};
 

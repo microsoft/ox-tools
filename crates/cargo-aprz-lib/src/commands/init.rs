@@ -45,6 +45,7 @@ mod tests {
     use super::*;
     use crate::commands::host::TestHost;
 
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetModuleFileNameW")]
     fn test_init_config_default_output_path() {
@@ -78,6 +79,7 @@ mod tests {
         }
     }
 
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[test]
     fn metadata_errors_keep_their_context() {
         let mut host = TestHost::new();

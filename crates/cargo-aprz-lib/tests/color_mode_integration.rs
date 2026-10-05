@@ -10,6 +10,9 @@
 
 mod support;
 
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
+
 use support::{MockWorld, TestHost};
 
 /// The world's arguments with its `--color <mode>` pair removed.

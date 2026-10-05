@@ -7,7 +7,7 @@ use core::fmt;
 
 use crate::expr::{Appraisal, ExpressionDisposition, ExpressionOutcome, Risk};
 use crate::metrics::{Metric, MetricCategory, MetricValue};
-use crate::{HashMap, HashSet};
+use crate::{HashMap, HashSet, hash_map_with_capacity};
 
 /// Format a metric value as a string using consistent formatting rules.
 ///
@@ -224,7 +224,7 @@ impl fmt::Display for IconName<'_> {
 ///
 /// Returns a `HashMap` mapping each category to a vector of metric names.
 pub fn group_metrics_by_category<'a>(metrics: &'a [Metric]) -> HashMap<MetricCategory, Vec<&'a str>> {
-    let mut metrics_by_category: HashMap<MetricCategory, Vec<&'a str>> = HashMap::default();
+    let mut metrics_by_category: HashMap<MetricCategory, Vec<&'a str>> = hash_map_with_capacity(metrics.len());
 
     for metric in metrics {
         metrics_by_category.entry(metric.category()).or_default().push(metric.name());
@@ -277,12 +277,21 @@ pub fn group_all_metrics_by_category<'a>(
 
 /// Build per-crate metric lookup maps for O(1) access by metric name.
 pub fn build_metric_lookup_maps(crates: &[super::ReportableCrate]) -> Vec<HashMap<&str, &Metric>> {
-    crates.iter().map(|c| c.metrics.iter().map(|m| (m.name(), m)).collect()).collect()
+    crates
+        .iter()
+        .map(|c| {
+            let mut metrics = hash_map_with_capacity(c.metrics.len());
+            metrics.extend(c.metrics.iter().map(|m| (m.name(), m)));
+            metrics
+        })
+        .collect()
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::fmt::Write as _;
+
     use chrono::{DateTime, Utc};
 
     use super::*;
@@ -618,8 +627,6 @@ mod tests {
 
     #[test]
     fn test_outcome_icon_name_propagates_writer_errors() {
-        use core::fmt::Write as _;
-
         let outcome = ExpressionOutcome::new(
             "Error".into(),
             "Cannot evaluate.".into(),
@@ -645,17 +652,35 @@ mod tests {
     }
 
     #[test]
-    fn failed_outcome_description_write_failure_is_returned() {
-        use core::fmt::Write as _;
+    fn policy_failure_description_write_failure_is_returned() {
+        struct FailOnDescription {
+            reached_description: bool,
+        }
+
+        impl core::fmt::Write for FailOnDescription {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                if s.contains("The policy was not satisfied.") {
+                    self.reached_description = true;
+                    return Err(core::fmt::Error);
+                }
+                Ok(())
+            }
+        }
 
         let outcome = ExpressionOutcome::new(
             "Denied".into(),
             "The policy was not satisfied.".into(),
             ExpressionDisposition::False,
         );
-        let mut writer = FailAfter { budget: 2, writes: 0 };
+        let mut writer = FailOnDescription {
+            reached_description: false,
+        };
 
         assert!(write!(writer, "{}", outcome_icon_name(&outcome)).is_err());
+        assert!(
+            writer.reached_description,
+            "the injected failure must target the policy description"
+        );
     }
 
     #[test]

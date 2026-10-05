@@ -35,6 +35,7 @@ mod tests {
     use crate::commands::host::TestHost;
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     async fn common_initialization_errors_are_returned() {
         let mut args = CratesArgs::parse_from(["crates"]);
         args.common.manifest_path = Utf8PathBuf::from("missing-manifest-for-crates-test.toml");

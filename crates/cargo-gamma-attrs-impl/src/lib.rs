@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #![cfg(not(all(test, miri)))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![doc(hidden)]
 #![forbid(
     unsafe_code,

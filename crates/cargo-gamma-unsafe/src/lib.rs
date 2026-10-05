@@ -64,6 +64,7 @@ pub fn run_loom_models() {
 pub const fn run_loom_models() {}
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod unwind_contracts {
     use core::panic::{RefUnwindSafe, UnwindSafe};
 

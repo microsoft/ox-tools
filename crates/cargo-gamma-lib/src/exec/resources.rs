@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use camino::Utf8PathBuf;
+use cargo_gamma_process::MemoryRequest;
 
 use super::census;
 use super::test_binary::TestBinary;
@@ -145,7 +146,7 @@ impl Resources {
         }
     }
 
-    pub(super) fn discover(work: &Workspace, binaries: &[TestBinary], limits: &[ResourceLimit]) -> Result<Self> {
+    pub(super) fn discover(work: &Workspace, binaries: &[TestBinary], limits: &[ResourceLimit], request: MemoryRequest) -> Result<Self> {
         let mut seen = BTreeSet::new();
         let mut assignments = HashMap::default();
 
@@ -156,7 +157,7 @@ impl Resources {
             if binary.libtest == Some(false) {
                 continue;
             }
-            let Some(names) = census::list_resource_markers(work, binary) else {
+            let Some(names) = census::list_resource_markers(work, binary, request) else {
                 return Err(error!(
                     "could not list tests in `{}` while discovering its `#[gamma::resource(...)]` declarations.\n\
                      Run that test binary with `--list --format terse` to diagnose why its harness cannot be enumerated.",
@@ -183,7 +184,7 @@ impl Resources {
             }
 
             if !test_markers.is_empty() {
-                let selected: BTreeSet<Box<str>> = census::list_selected_allow_empty(work, binary)
+                let selected: BTreeSet<Box<str>> = census::list_selected_allow_empty(work, binary, request)
                     .ok_or_else(|| {
                         error!(
                             "could not list the selected tests in `{}` while applying its `#[gamma::resource(...)]` declarations.\n\
@@ -482,7 +483,8 @@ mod tests {
         binary.libtest = Some(false);
         census::reset_resource_listing_calls();
 
-        let resources = Resources::discover(&work, &[binary], &[]).expect("custom harness has no libtest markers");
+        let resources =
+            Resources::discover(&work, &[binary], &[], MemoryRequest::default()).expect("custom harness has no libtest markers");
 
         assert!(resources.capacities.is_empty());
         assert!(resources.binaries.is_empty());

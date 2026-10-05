@@ -8,10 +8,10 @@ use chrono::{DateTime, Local};
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::{ReportableCrate, common};
-use crate::Result;
 use crate::expr::{Appraisal, ExpressionDisposition, Risk};
 use crate::metrics::MetricCategory;
 use crate::reports::common::ReportContext;
+use crate::{HashMap, Result};
 
 /// Characters to percent-encode in URL path segments.
 /// Preserves unreserved characters (RFC 3986): ALPHA, DIGIT, `-`, `.`, `_`, `~`
@@ -718,46 +718,24 @@ fn write_summary<W: Write>(
         format!("{count} {label} {noun}")
     };
 
+    let panels = [
+        ("high", "High Risk", high_risk_crates),
+        ("medium", "Medium Risk", medium_risk_crates),
+        ("low", "Low Risk", low_risk_crates),
+        ("not-eval", "Not Evaluated", not_evaluated_crates),
+    ];
     let mut first_pill_emitted = false;
-    if !high_risk_crates.is_empty() {
+    let mut expanded = true;
+    for (class, label, crates) in panels.into_iter().filter(|(_, _, crates)| !crates.is_empty()) {
         write_risk_crate_list(
             writer,
-            "high",
-            &panel_title(high, "High Risk"),
-            high_risk_crates,
-            true,
+            class,
+            &panel_title(crates.len(), label),
+            crates,
+            expanded,
             &mut first_pill_emitted,
         )?;
-    }
-    if !medium_risk_crates.is_empty() {
-        write_risk_crate_list(
-            writer,
-            "medium",
-            &panel_title(medium, "Medium Risk"),
-            medium_risk_crates,
-            high_risk_crates.is_empty(),
-            &mut first_pill_emitted,
-        )?;
-    }
-    if !low_risk_crates.is_empty() {
-        write_risk_crate_list(
-            writer,
-            "low",
-            &panel_title(low, "Low Risk"),
-            low_risk_crates,
-            high_risk_crates.is_empty() && medium_risk_crates.is_empty(),
-            &mut first_pill_emitted,
-        )?;
-    }
-    if !not_evaluated_crates.is_empty() {
-        write_risk_crate_list(
-            writer,
-            "not-eval",
-            &panel_title(not_evaluated, "Not Evaluated"),
-            not_evaluated_crates,
-            high_risk_crates.is_empty() && medium_risk_crates.is_empty() && low_risk_crates.is_empty(),
-            &mut first_pill_emitted,
-        )?;
+        expanded = false;
     }
     Ok(())
 }
@@ -944,8 +922,8 @@ fn write_appraisal_table<W: Write>(writer: &mut W, appraisal: &Appraisal) -> Res
 fn write_metrics_category<W: Write>(
     writer: &mut W,
     category: MetricCategory,
-    metrics_by_category: &crate::HashMap<MetricCategory, Vec<&'static str>>,
-    metric_map: &crate::HashMap<&str, &crate::metrics::Metric>,
+    metrics_by_category: &HashMap<MetricCategory, Vec<&'static str>>,
+    metric_map: &HashMap<&str, &crate::metrics::Metric>,
 ) -> Result<()> {
     let mut metric_buf = String::new();
     if let Some(category_metrics) = metrics_by_category.get(&category) {
@@ -1011,7 +989,7 @@ fn write_metrics_category<W: Write>(
 }
 
 fn crate_anchor_id(name: &str, version: &str) -> String {
-    let mut id = String::new();
+    let mut id = String::with_capacity(name.len() + version.len() + 7);
     id.push_str("crate-");
     for c in name.chars() {
         // #[gamma::skip(logical.or_remove_right, literal.char_to_distinct, literal.char_to_nul, reason = "a name hyphen is preserved by the true branch and replaced with the same hyphen by the false branch, so these condition mutations are behavior-equivalent")]
@@ -1215,8 +1193,9 @@ fn format_keywords_or_categories<W: Write>(value: &str, url_type: &str, writer: 
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::fmt;
     use std::sync::Arc;
 
     use chrono::TimeZone;
@@ -1321,19 +1300,25 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
     fn crate_description_is_rendered_in_the_risk_list() {
-        let metrics = vec![Metric::with_value(
+        let described_metrics = vec![Metric::with_value(
             &CRATE_DESCRIPTION_DEF,
             MetricValue::String("A precise crate description".into()),
         )];
-        let crates = vec![ReportableCrate::new(
-            "described".into(),
-            Arc::new("1.0.0".parse().unwrap()),
-            metrics,
-            Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
-        )];
+        let crates = vec![
+            ReportableCrate::new(
+                "described".into(),
+                Arc::new("1.0.0".parse().unwrap()),
+                described_metrics,
+                Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
+            ),
+            create_test_crate("other", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+        ];
         let mut output = String::new();
         generate(&crates, test_timestamp(), &mut output).unwrap();
-        assert!(output.contains("A precise crate description"), "{output}");
+        assert!(
+            output.contains("title=\"described v1.0.0\nA precise crate description\""),
+            "{output}"
+        );
     }
 
     #[test]
@@ -1911,7 +1896,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
-    fn sorted_risk_and_unevaluated_lists_choose_the_first_visible_crate() {
+    fn sorted_risk_list_chooses_the_first_visible_crate() {
         let crates = vec![
             create_test_crate("medium-later", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 10, 9, 90.0))),
             create_test_crate("medium-first", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 10, 1, 10.0))),
@@ -1926,13 +1911,17 @@ mod tests {
             output.contains(r#"<div class="crate-card" id="crate-medium-later-1.0.0" style="display:none">"#),
             "{output}"
         );
+    }
 
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn unevaluated_list_is_sorted_alphabetically() {
         let crates = vec![
             create_test_crate("risk", "1.0.0", Some(Appraisal::new(Risk::High, vec![], 1, 0, 0.0))),
             create_test_crate("zeta", "1.0.0", None),
             create_test_crate("alpha", "1.0.0", None),
         ];
-        output.clear();
+        let mut output = String::new();
         generate(&crates, test_timestamp(), &mut output).unwrap();
         let alpha = output.find(r#"data-name="alpha""#).expect("alpha must be listed");
         let zeta = output.find(r#"data-name="zeta""#).expect("zeta must be listed");
@@ -2252,8 +2241,8 @@ mod tests {
         struct FailOnCircle;
 
         impl Write for FailOnCircle {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                if s.contains("<circle cx=") { Err(core::fmt::Error) } else { Ok(()) }
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                if s.contains("<circle cx=") { Err(fmt::Error) } else { Ok(()) }
             }
         }
 
@@ -2330,9 +2319,9 @@ mod tests {
     }
 
     impl Write for FailAfter {
-        fn write_str(&mut self, _s: &str) -> core::fmt::Result {
+        fn write_str(&mut self, _s: &str) -> fmt::Result {
             if self.writes >= self.budget {
-                return Err(core::fmt::Error);
+                return Err(fmt::Error);
             }
             self.writes += 1;
             Ok(())
@@ -2439,13 +2428,7 @@ mod tests {
     fn test_write_metrics_category_writes_nothing_for_an_unknown_category() {
         let mut output = String::new();
 
-        write_metrics_category(
-            &mut output,
-            MetricCategory::Metadata,
-            &crate::HashMap::default(),
-            &crate::HashMap::default(),
-        )
-        .unwrap();
+        write_metrics_category(&mut output, MetricCategory::Metadata, &HashMap::default(), &HashMap::default()).unwrap();
 
         assert!(output.is_empty(), "a category with no metrics has no table: {output}");
     }
@@ -2460,9 +2443,9 @@ mod tests {
             default_value: || None,
         };
         let metrics = [Metric::with_value(&PRESENT_DEF, MetricValue::String("visible".into()))];
-        let mut metrics_by_category = crate::HashMap::default();
+        let mut metrics_by_category = HashMap::default();
         let _ = metrics_by_category.insert(MetricCategory::Metadata, vec!["missing", PRESENT_DEF.name]);
-        let mut metric_map = crate::HashMap::default();
+        let mut metric_map = HashMap::default();
         let _ = metric_map.insert(PRESENT_DEF.name, &metrics[0]);
         let mut output = String::new();
 
@@ -2484,15 +2467,15 @@ mod tests {
         struct FailOnValue;
 
         impl Write for FailOnValue {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                if s == "visible" { Err(core::fmt::Error) } else { Ok(()) }
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                if s == "visible" { Err(fmt::Error) } else { Ok(()) }
             }
         }
 
         let metrics = [Metric::with_value(&PLAIN_DEF, MetricValue::String("visible".into()))];
-        let mut metrics_by_category = crate::HashMap::default();
+        let mut metrics_by_category = HashMap::default();
         let _ = metrics_by_category.insert(MetricCategory::Metadata, vec![PLAIN_DEF.name]);
-        let mut metric_map = crate::HashMap::default();
+        let mut metric_map = HashMap::default();
         let _ = metric_map.insert(PLAIN_DEF.name, &metrics[0]);
 
         assert!(write_metrics_category(&mut FailOnValue, MetricCategory::Metadata, &metrics_by_category, &metric_map).is_err());

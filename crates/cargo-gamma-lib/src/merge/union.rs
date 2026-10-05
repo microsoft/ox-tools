@@ -14,6 +14,8 @@ use crate::elements::{FileResult, MergeProvenance, MutantResult, Report, RunInfo
 use crate::model::{MUTANT_ID_VERSION, Scoring};
 
 fn population_is_authoritative(source: (u64, &str, &str), population: (u64, &str, &str)) -> bool {
+    // Equal rank means both sightings describe the same generation, so the selected population is
+    // authoritative about which identities that generation contains.
     source <= population
 }
 
@@ -154,9 +156,9 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
         if crate::elements::is_flaky_status(&verdict.mutant.status, verdict.mutant.status_reason.as_deref()) {
             out.flaky.push(format!(
                 "{} in {}: {}",
-                verdict.mutant.id,
-                verdict.file,
-                verdict.mutant.status_reason.as_deref().unwrap_or("flaky")
+                crate::report::encode_controls(&verdict.mutant.id),
+                crate::report::encode_controls(verdict.file),
+                crate::report::encode_controls(verdict.mutant.status_reason.as_deref().unwrap_or("flaky"))
             ));
         }
 
@@ -738,6 +740,25 @@ mod tests {
         assert_eq!(merged.valid, 2);
         assert_eq!(merged.detected, 1);
         assert!((merged.score() - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn flaky_gate_diagnostics_encode_report_control_characters() {
+        let mut flaky = mutant("evil\r\u{1b}[2Kid", 1, "Ignored");
+        flaky.status_reason = Some("flaky: test\n\u{1b}]8;;https://example.invalid\u{7}link\u{1b}]8;;\u{7}".to_owned());
+        let mut report = report(None, 100, vec![flaky]);
+        let file = report.files.remove("src/lib.rs").expect("the fixture seeds its source file");
+        let _previous = report.files.insert("src/\u{1b}[2Kfile.rs".to_owned(), file);
+
+        let merged = merge(&[("input".to_owned(), report)], 100, None);
+
+        assert_eq!(merged.flaky.len(), 1);
+        assert!(!merged.flaky[0].contains('\r'));
+        assert!(!merged.flaky[0].contains('\n'));
+        assert!(!merged.flaky[0].contains('\u{1b}'));
+        assert!(merged.flaky[0].contains(r"evil\r\e[2Kid"), "{}", merged.flaky[0]);
+        assert!(merged.flaky[0].contains(r"src/\e[2Kfile.rs"), "{}", merged.flaky[0]);
+        assert!(merged.flaky[0].contains(r"test\n\e]8;;"), "{}", merged.flaky[0]);
     }
 
     #[test]

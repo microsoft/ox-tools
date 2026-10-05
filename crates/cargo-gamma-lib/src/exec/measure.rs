@@ -28,7 +28,7 @@ use super::test_binary::{
     unmatched_test,
 };
 use super::workspace::{Workspace, campaign_base};
-use crate::discover::{CompileFailTarget, Plan, Survey, compile_fail_advice};
+use crate::discover::{CompileFailTarget, LibraryTestTarget, Plan, Survey, compile_fail_advice};
 use crate::error::error;
 use crate::model::Outcome;
 use crate::ops::registry::Selection;
@@ -41,7 +41,8 @@ const GROUP_LIMIT: usize = 5;
 ///
 /// # Errors
 ///
-/// Returns an error if the tree cannot be prepared, the build cannot be made to succeed, or the
+/// Returns an error if the test-oracle selection is invalid or empty, source-declared resources
+/// cannot be discovered, the tree cannot be prepared, the build cannot be made to succeed, or the
 /// baseline does not pass — a failing baseline means every comparison in the run has nothing to
 /// compare against.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -176,6 +177,8 @@ pub(crate) fn run_with_locks(
         Err(failure) => {
             // An incomplete campaign has no completed record to carry its partial learning.
             store_incomplete_learning(incremental, &killers, &base, &plan.mutants);
+            failed.plan = Some(plan);
+
             return Err(failure);
         }
     };
@@ -547,12 +550,12 @@ impl Oracle {
 
 /// Checks that the tree compiles before a single mutant is applied to it.
 ///
-/// This is what lets every later compiler error be absorbed. The staged builds and the baseline
-/// compile this same tree with guards written into it, so once this passes, an error that appears
-/// afterwards was introduced by a mutant and the rollback loop can withdraw it without troubling
-/// anyone. Without it, a tree whose own test targets do not compile fails in the middle of a run
-/// and reports a mutant it cannot name, which sends the reader hunting through their own source
-/// for a fault that was there before the tool arrived.
+/// This is what lets every later compiler error be absorbed. The instrumented build compiles this
+/// same tree with guards written into it, so once this passes, an error that appears afterwards was
+/// introduced by a mutant and the rollback loop can withdraw it without troubling anyone. Without
+/// it, a tree whose own test targets do not compile fails in the middle of a run and reports a
+/// mutant it cannot name, which sends the reader hunting through their own source for a fault that
+/// was there before the tool arrived.
 ///
 /// The packages named are the ones the final build will compile, but computed from the packages
 /// this run intends to mutate rather than from the ones that turn out to hold live mutants. That
@@ -582,33 +585,19 @@ fn preflight(
 
     let intended = survey.packages();
     let intending: crate::HashSet<&str> = intended.iter().map(String::as_str).collect();
-    let wide_stages = workspace_stages(&survey.selected, &survey.reach);
     let checking = reaching_packages(&survey.reach, &intending, &scope);
     let cleared = Converger::preflight(work, plan, checking.as_deref(), &intended, config.test_lib, config.build, events)?;
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     record_preflight_discovery(converger, cleared.discovery.clone());
 
-    // A narrow-first check still matters: when only Cargo's whole-workspace feature unification
-    // makes it pass, the final test-target build must stay wide rather than rediscovering that
-    // failure. If the narrow check passed (or retreated), validate the wider roots separately
-    // because every staged check will compile them.
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if needs_wide_preflight(wide_stages, cleared.whole_workspace) {
-        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
-        let unrestricted: Option<&[String]> = None;
-        let _wide = Converger::preflight(work, plan, unrestricted, &intended, config.test_lib, config.build, events)?;
-    }
-
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     end_preflight(events);
 
-    // Staged checks retain a whole-workspace feature scope whenever Cargo's original selection
-    // covers every member, even when packages with no mutable files made preflight narrower. A
-    // check that only passed after widening requires the final build to stay wide too; narrowing
-    // there would reproduce a failure already shown to belong to the scope rather than to any
-    // mutant.
+    // A check that only passed after widening requires the instrumented build to stay wide too;
+    // narrowing there would reproduce a failure already shown to belong to the scope rather than
+    // to any mutant.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    settle_preflight_scope(converger, wide_stages, cleared.whole_workspace);
+    settle_preflight_scope(converger, cleared.whole_workspace);
 
     // The check only passed because it stopped asking about those packages, so the rest of the run
     // stops asking too. Building test targets this run has decided cannot convict anything would be
@@ -620,7 +609,7 @@ fn preflight(
 fn begin_preflight(events: &mut impl Events) {
     const ACTIVE: &str = "Validating";
     const COMPLETE: &str = "Validated";
-    const DETAIL: &str = "workspace";
+    const DETAIL: &str = "the workspace";
     events.begin(ACTIVE, COMPLETE, DETAIL);
 }
 
@@ -632,10 +621,6 @@ fn inferred_package_local(config: &Config) -> bool {
     config.test_packages.is_empty() && !config.test_workspace
 }
 
-fn needs_wide_preflight(wide_stages: bool, already_wide: bool) -> bool {
-    wide_stages && !already_wide
-}
-
 // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 fn record_preflight_discovery(converger: &mut Converger, discovery: String) {
     converger.target_discovery(discovery);
@@ -643,15 +628,9 @@ fn record_preflight_discovery(converger: &mut Converger, discovery: String) {
 
 // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn settle_preflight_scope(converger: &mut Converger, wide_stages: bool, whole_workspace: bool) {
-    match (wide_stages, whole_workspace) {
-        (false, false) => {}
-        (true, false) => Converger::require_workspace_stages(converger),
-        (false, true) => Converger::require_whole_workspace(converger),
-        (true, true) => {
-            Converger::require_workspace_stages(converger);
-            Converger::require_whole_workspace(converger);
-        }
+fn settle_preflight_scope(converger: &mut Converger, whole_workspace: bool) {
+    if whole_workspace {
+        Converger::require_whole_workspace(converger);
     }
 }
 
@@ -667,18 +646,6 @@ fn finish_preflight(requested: Vec<String>, intended: Vec<String>, whole_workspa
         whole_workspace,
         dropped,
     })
-}
-
-/// Whether staged checks need every workspace member as a Cargo root.
-///
-/// Preflight may omit members that contain no mutable files, so its package list alone cannot
-/// identify a whole-workspace invocation. The resolved Cargo selection can: [`Survey::selected`]
-/// contains every package Cargo would act on, while `reach` is keyed by every workspace member.
-fn workspace_stages(selected: &[String], reach: &HashMap<String, HashSet<String>>) -> bool {
-    let distinct: HashSet<&str> = selected.iter().map(String::as_str).collect();
-
-    // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
-    distinct.len() == reach.len() && distinct.iter().all(|package| reach.contains_key(*package))
 }
 
 /// The oracle a preflight retreat leaves behind: what was asked for, less what would not compile.
@@ -730,8 +697,8 @@ struct Cleared {
 
 /// Scans, instruments, builds and measures the baseline, without testing a single mutant.
 ///
-/// Each package is taken from source to compiled object before the next one starts, in an order
-/// where a package always follows what it depends on. That order is forced anyway — a mutant
+/// Packages are scanned in an order where each one follows what it depends on, then the complete
+/// selected population is instrumented and converged together. That order is forced anyway — a mutant
 /// cannot produce a diagnostic until everything its own package depends on compiles clean — and
 /// following it deliberately lets a run say which package it is working on, and say it once, before
 /// the wait rather than after it.
@@ -741,9 +708,10 @@ struct Cleared {
 ///
 /// # Errors
 ///
-/// Returns an error if a file cannot be parsed, the tree cannot be prepared, the build cannot be
-/// made to succeed, or the baseline does not pass — a failing baseline means every comparison in
-/// the run has nothing to compare against.
+/// Returns an error if a file cannot be parsed, the test-oracle selection is invalid or empty,
+/// source-declared resources cannot be discovered, the tree cannot be prepared, the build cannot
+/// be made to succeed, or the baseline does not pass — a failing baseline means every comparison
+/// in the run has nothing to compare against.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: &mut impl Events) -> Result<Measured> {
     let mut failed = FailedMeasurement::default();
@@ -752,32 +720,45 @@ pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: 
 }
 
 fn validate_test_oracle(survey: &Survey, config: &Config) -> Result<()> {
-    let declared_tests = if config.test_lib { &survey.library_tests } else { &survey.tests };
+    let library_tests;
+    let declared_tests = if config.test_lib {
+        library_tests = admitted_library_tests(&survey.library_tests, &survey.selected, config);
+        &library_tests
+    } else {
+        &survey.tests
+    };
     if let Some(pattern) = unmatched_test(declared_tests, &config.include_tests, &config.exclude_tests) {
         return Err(error!("no test target matches `{pattern}`; patterns match cargo target names, not test function names").usage());
     }
 
-    if config.test_lib {
-        let requested = oracle_packages(&survey.selected, config);
-        let has_library_oracle = if config.test_workspace {
-            !survey.library_test_packages.is_empty()
-        } else {
-            requested.iter().any(|package| survey.library_test_packages.contains(package))
-        };
-
-        if !has_library_oracle {
-            return Err(error!(
-                "`--test-lib` selected no runnable library unit-test harness; ensure an oracle package \
-                 has a library target with `test = true`"
-            )
-            .usage());
-        }
+    if config.test_lib && declared_tests.is_empty() {
+        return Err(error!(
+            "`--test-lib` selected no runnable library unit-test harness; ensure an oracle package \
+             has a library target with `test = true`"
+        )
+        .usage());
     }
 
     Ok(())
 }
 
+fn admitted_library_tests(tests: &[LibraryTestTarget], selected: &[String], config: &Config) -> Vec<String> {
+    let requested = oracle_packages(selected, config);
+    let mut targets: Vec<String> = tests
+        .iter()
+        .filter(|test| config.test_workspace || requested.contains(&test.package))
+        .map(|test| test.target.clone())
+        .collect();
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the linear preparation sequence keeps validation, staging, measurement, and cleanup ordering visible"
+)]
 fn measure_with_locks(
     survey: &Survey,
     selection: &Selection,
@@ -832,7 +813,8 @@ fn measure_with_locks(
     let oracle = Oracle::new(packages, inferred_package_local(config), whole_workspace);
     let scope = oracle.scope();
 
-    let Staged { anything_live, mut stuck } = converge_stages(survey, selection, &mut plan, &mut converger, &work, config, events)?;
+    let anything_live = instrument_population(survey, selection, &mut plan, &work, events)?;
+    let mut stuck = Vec::new();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     reorder_plan(&mut plan, &mut converger);
@@ -853,21 +835,20 @@ fn measure_with_locks(
         });
     }
 
-    // One line for the whole fixed cost that is left. The test binaries are built and then
-    // immediately run with no mutant active, and neither half means anything without the other:
-    // the build is what makes a baseline possible, and the baseline is what says the build was
-    // worth having.
+    // Check the complete schema to convergence, then generate its test binaries. The successful
+    // build's artifact stream is retained for the baseline, so convergence does not end with a
+    // redundant cache-hit Cargo invocation.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_baseline(events);
+    begin_schema_build(events);
 
-    // The staged builds compiled libraries only. This is the build that compiles the test targets
-    // and settles the run, and it withdraws whatever only a test target could have revealed. Only
-    // the packages whose tests can actually be selected are asked for: the rest would be compiled,
-    // baselined and never consulted. The preflight check cleared this same set, narrowed from the
-    // packages that turned out to hold live mutants rather than from those the run set out to
-    // mutate, so it is a subset of what was checked.
+    // Build only packages whose tests can actually be selected: the rest would be compiled,
+    // baselined and never consulted. All target packages have already been instrumented, so this
+    // one convergence sees every mutation that can affect those test targets.
     let select = build_packages(&plan, &scope);
     let mut build = converger.finish(&work, &mut plan, select.as_deref(), config.build, events)?;
+    // From this point onward compiler convergence has produced durable score-neutral learning.
+    // If a later preparation step fails, move the plan into `failed` on that error path so the
+    // command layer can publish the learning without retaining a second full population.
 
     // The build that decides the run could not be made to compile, so there is no test binary to
     // judge anything with and nothing left to measure. Every mutant still live carries
@@ -892,28 +873,82 @@ fn measure_with_locks(
         });
     }
 
+    let unviable = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::CompileError)
+        .count();
+    let viable = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+        .count();
+    let not_built = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::NotBuilt)
+        .count();
+    finish_schema_build(events, unviable, viable, not_built);
+
     // Before the baseline, so the shares `apportion` computes describe the suite that will actually
     // run. A run with nothing left to run it cannot decide anything: every mutant would survive
     // unopposed and the report would read as a total failure of the test suite rather than as the
     // filter having eaten it.
     if config.test_lib && build.binaries.is_empty() {
-        return Err(error!(
+        let error = error!(
             "`--test-lib` selected no runnable library unit-test harness; ensure a selected package \
              has a library target with `test = true`"
         )
-        .usage());
+        .usage();
+        failed.plan = Some(plan);
+
+        return Err(error);
     }
 
-    let filtered = restrict_binaries(&mut build.binaries, config)?;
+    let filtered = match restrict_binaries(&mut build.binaries, config) {
+        Ok(filtered) => filtered,
+        Err(error) => {
+            failed.plan = Some(plan);
+
+            return Err(error);
+        }
+    };
 
     let build_time = started.elapsed();
+
+    // The build above already produced the binaries. This phase now describes only execution, so a
+    // test counter cannot sit at its completed value while Cargo is still compiling.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_baseline(events);
 
     // Armed after the build and before the baseline. The metadata nextest is handed describes
     // binaries that do not exist until the build has run, and the baseline has to be measured
     // through the same runner that will judge every mutant — a baseline taken one way and compared
     // against verdicts reached the other measures nothing.
-    arm_selected_runner(&mut work, &build.binaries, &build.artifacts, config.nextest)?;
-    let resources = Resources::discover(&work, &build.binaries, &config.resources)?;
+    if let Err(error) = arm_selected_runner(&mut work, &build.binaries, &build.artifacts, config.nextest) {
+        failed.plan = Some(plan);
+
+        return Err(error);
+    }
+    // Marker enumeration requires that finalized launch environment. Install the resulting policy
+    // before baseline measurement so baseline, census, mutant, and confirmation launches all use
+    // the same admission rules.
+    let resources = match Resources::discover(
+        &work,
+        &build.binaries,
+        &config.resources,
+        MemoryRequest {
+            meter: memory.measuring(),
+            limit: memory.baseline_limit,
+        },
+    ) {
+        Ok(resources) => resources,
+        Err(error) => {
+            failed.plan = Some(plan);
+
+            return Err(error);
+        }
+    };
     work.set_resources(resources);
 
     let session_context = SessionContext {
@@ -1000,7 +1035,7 @@ fn reorder_plan(plan: &mut Plan, converger: &mut Converger) {
 fn begin_baseline(events: &mut impl Events) {
     const ACTIVE: &str = "Baselining";
     const COMPLETE: &str = "Baseline";
-    const DETAIL: &str = "building the test binaries and running the suite";
+    const DETAIL: &str = "running the unmutated suite";
     events.begin(ACTIVE, COMPLETE, DETAIL);
 }
 
@@ -1120,16 +1155,6 @@ fn tally(mutants: &[&crate::model::Mutant], key: impl Fn(&crate::model::Mutant) 
     rendered
 }
 
-/// What the staged builds settled before the run reaches the build that decides it.
-#[derive(Default)]
-struct Staged {
-    /// Whether any stage got as far as compiling live mutants.
-    anything_live: bool,
-
-    /// One rendered diagnostic per stage the run could not build.
-    stuck: Vec<String>,
-}
-
 /// The mutants an earlier run could not compile, offered to the build as an order rather than a fact.
 ///
 /// Two sources, unioned: the scratch record left by whatever ran here last, and the artifact the
@@ -1163,39 +1188,28 @@ fn load_ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate
         .collect()
 }
 
-/// Scans, links and builds each stage in dependency order.
+/// Scans and instruments the complete target population before asking Cargo to build it.
 ///
-/// A stage that cannot be made to compile does not end the run. Its own mutants come back out of
-/// the tree, which restores the very sources the preflight check already proved compile, so every
-/// later stage is asked of a tree in no worse a state than the one this stage started from — and a
-/// run that gets stuck early still ends up saying what it learned everywhere else. Stopping at the
-/// first failure would answer "we got stuck in the first crate" with nothing at all about the
-/// twenty that follow it.
+/// Packages are still scanned in dependency order for deterministic ordinals, but compilation is
+/// deliberately deferred until every target package is present. One workspace-wide convergence
+/// can then expose independent compiler failures together and its successful final round produces
+/// the exact test binaries consumed by the baseline.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn converge_stages(
+fn instrument_population(
     survey: &Survey,
     selection: &Selection,
     plan: &mut Plan,
-    converger: &mut Converger,
     work: &Workspace,
-    config: &Config,
     events: &mut impl Events,
-) -> Result<Staged> {
+) -> Result<bool> {
     let mut ordinals = u32::default();
-    let mut staged = Staged::default();
     let source_indices = plan.source_indices();
+    let packages = survey.packages();
+    let mut live = usize::default();
 
-    for stage in &crate::discover::stages(&survey.packages(), &survey.reach) {
-        let name = stage_name(stage);
-
-        // Named on the way in, before its files have even been read. Scanning and then compiling a
-        // large crate is the longest a run goes without saying anything, and what makes that wait
-        // legible is knowing whose wait it is.
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-        begin_stage(events, &name);
-
-        let mut live = usize::default();
-
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_population(events, packages.len());
+    for stage in &crate::discover::stages(&packages, &survey.reach) {
         for package in stage {
             let scanned = survey.scan(Some(package), selection, &mut ordinals)?;
 
@@ -1203,72 +1217,49 @@ fn converge_stages(
             validate_synchronized_sources(work, &scanned.digests)?;
             plan.absorb_indexed(scanned, &source_indices);
         }
-
-        // A package with nothing to run is still named. A crate that quietly takes no part in a run
-        // is worth noticing, and leaving it out of the sequence would make it look like it had
-        // simply not been looked at.
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-        if live == usize::default() {
-            finish_empty_stage(events);
-        } else {
-            for package in stage {
-                work.link_runtime(package, &plan.files)?;
-            }
-
-            let before = converger.withdrawn();
-            if let Some(abandoned) = converger.stage(work, plan, stage, config.build, events)? {
-                record_stuck_stage(&mut staged, plan, stage, &abandoned, events);
-            } else {
-                staged.anything_live = true;
-
-                // The count that closes the line is what survived compilation, which is why it
-                // waits for the build. A mutant that could not compile is a fact about the tool
-                // rather than about the code, and the summary accounts for all of them once.
-                // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
-                let viable = viable_mutants(live, before, converger.withdrawn());
-                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-                finish_viable_stage(events, viable);
-            }
-        }
     }
 
-    Ok(staged)
+    for package in &packages {
+        work.link_runtime(package, &plan.files)?;
+    }
+
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    finish_population(events, live);
+    Ok(live > usize::default())
 }
 
-fn stage_name(stage: &[String]) -> String {
-    stage.join(", ")
-}
-
-fn begin_stage(events: &mut impl Events, name: &str) {
+fn begin_population(events: &mut impl Events, packages: usize) {
+    let detail = crate::report::quantity(packages, "target package");
     // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
-    events.begin("Mutating", "Mutated", name);
+    events.begin("Mutating", "Mutated", &detail);
 }
 
 fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
     mutants.iter().filter(|mutant| mutant.ordinal > 0).count()
 }
 
-fn finish_empty_stage(events: &mut impl Events) {
-    const DETAIL: &str = ", no mutants";
-    events.end(DETAIL);
-}
-
-fn record_stuck_stage(staged: &mut Staged, plan: &Plan, stage: &[String], abandoned: &Abandoned, events: &mut impl Events) {
-    staged.stuck.push(describe_stuck(plan, stage, abandoned));
-    let detail = format!(
-        ", the build could not be made to compile, {} not run",
-        crate::report::quantity(abandoned.ordinals.len(), "mutant")
-    );
+fn finish_population(events: &mut impl Events, mutants: usize) {
+    let detail = format!(", {}", crate::report::quantity(mutants, "mutant"));
     events.end(&detail);
 }
 
-fn viable_mutants(live: usize, withdrawn_before: usize, withdrawn_after: usize) -> usize {
-    live.saturating_sub(withdrawn_after.saturating_sub(withdrawn_before))
+fn begin_schema_build(events: &mut impl Events) {
+    events.begin("Excluding", "Excluded", "unviable mutants (0 found)");
 }
 
-fn finish_viable_stage(events: &mut impl Events, viable: usize) {
-    let detail = format!(", {}", crate::report::quantity(viable, "viable mutant"));
-    events.end(&detail);
+fn finish_schema_build(events: &mut impl Events, unviable: usize, viable: usize, not_built: usize) {
+    let mut detail = crate::report::quantity(unviable, "unviable mutant");
+    if not_built > 0 {
+        let unavailable = if not_built == 1 {
+            "1 mutant could not be built".to_owned()
+        } else {
+            format!("{not_built} mutants could not be built")
+        };
+        let _ = write!(detail, "; {unavailable}; {viable} are viable");
+    } else {
+        let _ = write!(detail, ", leaving {}", crate::report::quantity(viable, "viable mutant"));
+    }
+    events.complete(&detail);
 }
 
 /// Says so when a test target is going to run the compiler once per mutant.
@@ -1534,7 +1525,7 @@ fn describe(baseline: &Baseline, binaries: usize) -> String {
     };
     let ran = baseline.tests.map_or_else(
         || format!("the suite across {binaries} passed in {duration}"),
-        |tests| format!("{} across {binaries} in {duration}", crate::report::quantity(tests, "test")),
+        |tests| format!("{} ran across {binaries} in {duration}", crate::report::quantity(tests, "test")),
     );
 
     // Reported whenever it was measured, whether or not anything is being enforced. A project
@@ -1564,6 +1555,7 @@ fn calibrate_stall(baseline: &Baseline, config: &Config) -> Stall {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use camino::Utf8Path;
 
@@ -1573,6 +1565,30 @@ mod tests {
     use crate::fixtures;
     use crate::model::Mutant;
     use crate::testing::Recorder;
+
+    #[test]
+    fn library_oracle_validation_keeps_package_and_target_associated() {
+        let tests = [
+            LibraryTestTarget {
+                package: "alpha".to_owned(),
+                target: "alpha-lib".to_owned(),
+            },
+            LibraryTestTarget {
+                package: "beta".to_owned(),
+                target: "beta-lib".to_owned(),
+            },
+        ];
+        let config = Config {
+            test_lib: true,
+            ..Config::default()
+        };
+
+        assert_eq!(
+            admitted_library_tests(&tests, &["alpha".to_owned()], &config),
+            ["alpha-lib"],
+            "a target owned only by beta must not validate alpha's oracle"
+        );
+    }
 
     #[test]
     fn synchronized_workspace_must_match_the_discovered_source_generation() {
@@ -1665,40 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_workspace_selection_requires_wide_stages() {
-        let selected = vec!["mutable".to_owned(), "immutable".to_owned()];
-        let reach = [
-            ("mutable".to_owned(), HashSet::default()),
-            ("immutable".to_owned(), HashSet::default()),
-        ]
-        .into_iter()
-        .collect();
-        let wide_stages = workspace_stages(&selected, &reach);
-
-        assert!(wide_stages);
-    }
-
-    #[test]
-    fn package_selection_keeps_narrow_stages_even_after_unrestricted_preflight() {
-        let selected = vec!["mutable".to_owned()];
-        let reach = [
-            ("mutable".to_owned(), HashSet::default()),
-            ("unselected".to_owned(), HashSet::default()),
-        ]
-        .into_iter()
-        .collect();
-        let wide_stages = workspace_stages(&selected, &reach);
-
-        assert!(!wide_stages);
-        assert!(
-            !workspace_stages(&[], &reach),
-            "an empty selection is not a whole-workspace selection"
-        );
-        assert!(
-            !workspace_stages(&["mutable".to_owned(), "mutable".to_owned()], &reach),
-            "duplicate selections cannot stand in for every distinct workspace member"
-        );
-
+    fn preflight_policy_reports_its_phases_and_preserves_scope() {
         let mut events = Recorder::default();
         begin_preflight(&mut events);
         end_preflight(&mut events);
@@ -1706,12 +1689,9 @@ mod tests {
         assert_eq!(
             events.phases,
             vec![
-                ("Validating".to_owned(), "workspace".to_owned()),
+                ("Validating".to_owned(), "the workspace".to_owned()),
                 (String::new(), String::new()),
-                (
-                    "Baselining".to_owned(),
-                    "building the test binaries and running the suite".to_owned()
-                ),
+                ("Baselining".to_owned(), "running the unmutated suite".to_owned()),
             ]
         );
 
@@ -1724,10 +1704,6 @@ mod tests {
             test_packages: vec!["tests".to_owned()],
             ..Config::default()
         }));
-        assert!(!needs_wide_preflight(false, false));
-        assert!(!needs_wide_preflight(true, true));
-        assert!(needs_wide_preflight(true, false));
-
         let ordinary = finish_preflight(vec!["a".to_owned()], vec!["a".to_owned()], false, Vec::new())
             .expect("an ordinary preflight keeps its request");
         assert_eq!(ordinary.packages, ["a"]);
@@ -1940,41 +1916,25 @@ mod tests {
 
         assert!(described.contains("Not run, by mutator: arith.add_to_sub (1)."), "{described}");
         assert!(!described.contains("relational.lt_to_le"), "{described}");
-
-        let mut staged = Staged::default();
-        let mut events = Recorder::default();
-        record_stuck_stage(&mut staged, &plan, &["subject".to_owned()], &abandoned, &mut events);
-        assert!(!staged.anything_live);
-        assert_eq!(staged.stuck, [described]);
-        assert_eq!(
-            events.phases,
-            [(
-                String::new(),
-                ", the build could not be made to compile, 1 mutant not run".to_owned()
-            )]
-        );
     }
 
     #[test]
-    fn stage_policy_names_counts_and_closes_each_outcome() {
-        assert_eq!(stage_name(&["a".to_owned(), "b".to_owned()]), "a, b");
-        assert_eq!(stage_name(&[]), "");
-
+    fn population_and_build_progress_name_the_complete_work() {
         let mutants = [stuck_mutant(0, "a", "f"), stuck_mutant(1, "b", "f"), stuck_mutant(2, "c", "f")];
         assert_eq!(live_mutants(&mutants), 2);
-        assert_eq!(viable_mutants(5, 2, 4), 3);
-        assert_eq!(viable_mutants(1, 4, 2), 1);
 
         let mut events = Recorder::default();
-        begin_stage(&mut events, "a, b");
-        finish_empty_stage(&mut events);
-        finish_viable_stage(&mut events, 2);
+        begin_population(&mut events, 12);
+        finish_population(&mut events, 3);
+        begin_schema_build(&mut events);
+        finish_schema_build(&mut events, 1, 2, 0);
         assert_eq!(
             events.phases,
             [
-                ("Mutating".to_owned(), "a, b".to_owned()),
-                (String::new(), ", no mutants".to_owned()),
-                (String::new(), ", 2 viable mutants".to_owned()),
+                ("Mutating".to_owned(), "12 target packages".to_owned()),
+                (String::new(), ", 3 mutants".to_owned()),
+                ("Excluding".to_owned(), "unviable mutants (0 found)".to_owned()),
+                (String::new(), "1 unviable mutant, leaving 2 viable mutants".to_owned()),
             ]
         );
     }
@@ -2047,7 +2007,7 @@ mod tests {
 
         assert_eq!(
             describe(&baseline, 3),
-            "4 tests across 3 test binaries in 500.0ms with a peak of 1.0 MB"
+            "4 tests ran across 3 test binaries in 500.0ms with a peak of 1.0 MB"
         );
     }
 
@@ -2061,7 +2021,7 @@ mod tests {
             peak: None,
         };
 
-        assert_eq!(describe(&baseline, 1), "1 test across 1 test binary in 500.0ms");
+        assert_eq!(describe(&baseline, 1), "1 test ran across 1 test binary in 500.0ms");
     }
 
     #[test]

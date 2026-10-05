@@ -65,10 +65,10 @@ pub struct Config {
     pub max_flaky: Option<usize>,
 
     /// How many mutants to test at once.
-    pub jobs: Option<usize>,
+    pub(crate) jobs: Option<usize>,
 
     /// Maximum concurrency for source-declared shared test resources.
-    pub resources: BTreeMap<String, usize>,
+    pub(crate) resources: BTreeMap<String, usize>,
 
     /// The multiple of each test binary's baseline duration a mutant is allowed.
     pub test_timeout_multiplier: Option<f64>,
@@ -315,7 +315,6 @@ impl Config {
     ///
     /// Returns a usage error if the merged settings contradict one another; see
     /// [`validate_effective`](Self::validate_effective).
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn apply(&self, args: &mut RunArgs) -> Result<()> {
         self.apply_selection(&mut args.select)?;
 
@@ -328,7 +327,7 @@ impl Config {
         for limit in &args.measure.resource_concurrency {
             if !command_line_resources.insert(limit.name().to_owned()) {
                 return Err(error!(
-                    "`--resource-concurrency` states `{}` more than once; each resource may have only one command-line capacity",
+                    "`--resource-concurrency` specifies `{}` more than once; each resource may have only one command-line capacity",
                     limit.name()
                 )
                 .usage());
@@ -498,7 +497,58 @@ fn contradiction(first: &str, first_from_file: bool, second: &str, second_from_f
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod miri_tests {
+    use super::*;
+
+    #[test]
+    fn a_flaky_gate_requires_confirmation_after_configuration_is_merged() {
+        let config = Config::parse("max-flaky = 0\nno-confirm = true\n").expect("configuration parses");
+        let mut args = RunArgs::default();
+
+        let failure = config
+            .apply(&mut args)
+            .expect_err("the gate cannot observe flakes without confirmation");
+
+        assert!(failure.is_usage(), "{failure}");
+        assert!(failure.to_string().contains("requires confirmation"), "{failure}");
+    }
+
+    #[test]
+    fn command_line_resource_capacity_overrides_the_file() {
+        let config = Config::parse(
+            r"
+            [resources]
+            cargo-subprocess = 2
+            powershell = 1
+            ",
+        )
+        .expect("resource table parses");
+        let mut args = RunArgs::default();
+        args.measure.resource_concurrency = vec![crate::exec::ResourceLimit::new("cargo-subprocess", 4).expect("valid resource")];
+
+        config.apply(&mut args).expect("resource policies merge");
+
+        assert_eq!(
+            args.measure.resource_concurrency,
+            [
+                crate::exec::ResourceLimit::new("cargo-subprocess", 4).expect("valid resource"),
+                crate::exec::ResourceLimit::new("powershell", 1).expect("valid resource")
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_resource_configuration_is_rejected() {
+        for text in ["[resources]\ncargo = 0", "[resources]\n\"two words\" = 1"] {
+            assert!(Config::parse(text).is_err(), "`{text}` should be rejected");
+        }
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -783,19 +833,6 @@ mod tests {
         config.apply(&mut args).expect("the merged settings do not contradict one another");
 
         assert!(args.measure.test_workspace);
-    }
-
-    #[test]
-    fn a_flaky_gate_requires_confirmation_after_configuration_is_merged() {
-        let config = Config::parse("max-flaky = 0\nno-confirm = true\n").expect("configuration parses");
-        let mut args = RunArgs::default();
-
-        let failure = config
-            .apply(&mut args)
-            .expect_err("the gate cannot observe flakes without confirmation");
-
-        assert!(failure.is_usage(), "{failure}");
-        assert!(failure.to_string().contains("requires confirmation"), "{failure}");
     }
 
     #[test]
@@ -1497,36 +1534,5 @@ mod tests {
         assert!(error.is_usage(), "{error}");
         assert!(error.to_string().contains("test-packages"), "{error}");
         assert!(error.to_string().contains("test-workspace"), "{error}");
-    }
-
-    #[test]
-    fn command_line_resource_capacity_overrides_the_file() {
-        let config = Config::parse(
-            r"
-            [resources]
-            cargo-subprocess = 2
-            powershell = 1
-            ",
-        )
-        .expect("resource table parses");
-        let mut args = RunArgs::default();
-        args.measure.resource_concurrency = vec![crate::exec::ResourceLimit::new("cargo-subprocess", 4).expect("valid resource")];
-
-        config.apply(&mut args).expect("resource policies merge");
-
-        assert_eq!(
-            args.measure.resource_concurrency,
-            [
-                crate::exec::ResourceLimit::new("cargo-subprocess", 4).expect("valid resource"),
-                crate::exec::ResourceLimit::new("powershell", 1).expect("valid resource")
-            ]
-        );
-    }
-
-    #[test]
-    fn invalid_resource_configuration_is_rejected() {
-        for text in ["[resources]\ncargo = 0", "[resources]\n\"two words\" = 1"] {
-            assert!(Config::parse(text).is_err(), "`{text}` should be rejected");
-        }
     }
 }
