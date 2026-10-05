@@ -209,9 +209,13 @@ normal build cache.
 `--all-targets` includes unit and integration tests, examples, and benchmarks,
 so test-only dependency omissions are checked as well as the library and binaries.
 For example, a module enabled by `cfg(test)` may reference an optional dependency
-that must also be declared as a dev-dependency. Examples that need a package
-feature must declare `required-features` or gate the feature-specific scenario.
-Cargo still skips targets whose declared feature requirements are not enabled.
+that must also be declared as a dev-dependency. A target that only makes sense
+with a package feature enabled -- a test, benchmark, example, or binary alike --
+must declare `required-features` or gate the feature-specific scenario behind
+`cfg(feature = "...")`. Cargo still skips targets whose declared feature
+requirements are not enabled, so declaring them is also the supported way to opt
+a target out of the defaults-disabled pass. `[lib]` has no such escape hatch, so
+a library that does not build without its default features always fails here.
 
 This is a compile-time guardrail, not a complete feature matrix or a test runner.
 It complements all-features linting and batched coverage without instrumenting,
