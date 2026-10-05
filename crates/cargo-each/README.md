@@ -34,11 +34,13 @@ cargo install cargo-each
 ## Usage
 
 ```text
-cargo each [SELECTION] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
+cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 ```
 
 Everything after `--` is the command template; `cargo-each` spawns it
 directly (argv, not a shell string) after substituting placeholders.
+Input is either a Cargo workspace selection or JSON Lines records; the two
+sources are deliberately mutually exclusive.
 
 ### Selection (mirrors `cargo build`)
 

@@ -11,7 +11,7 @@ use cargo_metadata::TargetKind;
 
 use crate::error::{ChdirConflictsWithOnceError, EachError};
 use crate::json_lines::JsonRecord;
-use crate::substitute::{Placeholders, substitute, validate_json_placeholders, validate_placeholders};
+use crate::substitute::{Placeholders, substitute, substitute_json_prevalidated, validate_json_placeholders, validate_placeholders};
 use crate::workspace::Member;
 
 /// How the command is run over the selected set.
@@ -82,14 +82,9 @@ impl Plan {
         let invocations = records
             .iter()
             .map(|record| {
-                let placeholders = Placeholders::Json {
-                    fields: &record.fields,
-                    source: &record.source,
-                    line: record.line,
-                };
                 Ok(Invocation {
                     label: Some(record.label()),
-                    argv: substitute(command, &placeholders)?,
+                    argv: substitute_json_prevalidated(command, &record.fields, &record.source, record.line)?,
                     work_dir: None,
                 })
             })
@@ -284,7 +279,7 @@ mod tests {
     fn json_plan_preserves_record_order_duplicates_and_labels() {
         let record = |source: &str, line: usize, value: &str| JsonRecord {
             fields: serde_json::json!({"value": value}).as_object().expect("object").clone(),
-            source: source.to_owned(),
+            source: std::sync::Arc::from(source),
             line,
         };
         let records = [

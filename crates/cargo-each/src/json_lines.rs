@@ -3,7 +3,10 @@
 
 //! Strict JSON Lines input for record-driven command execution.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -13,7 +16,7 @@ use crate::error::{EachError, JsonLineParseError, JsonLinesFileReadError, JsonLi
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct JsonRecord {
     pub(crate) fields: Map<String, Value>,
-    pub(crate) source: String,
+    pub(crate) source: Arc<str>,
     pub(crate) line: usize,
 }
 
@@ -28,40 +31,66 @@ impl JsonRecord {
 pub(crate) fn load(inline: &[String], files: &[PathBuf]) -> Result<Vec<JsonRecord>, EachError> {
     let mut records = Vec::new();
     for (index, text) in inline.iter().enumerate() {
-        parse_source(text, format!("--json-lines #{}", index + 1), &mut records)?;
+        let source = Arc::from(format!("--json-lines #{}", index + 1));
+        parse_inline(text, &source, &mut records)?;
     }
     for path in files {
         let display = path.display().to_string();
-        let bytes = std::fs::read(path).map_err(|error| JsonLinesFileReadError::caused_by(display.clone(), error))?;
-        let text = String::from_utf8(bytes).map_err(|error| JsonLinesFileUtf8Error::caused_by(display.clone(), error))?;
-        parse_source(&text, display, &mut records)?;
+        let file = File::open(path).map_err(|error| JsonLinesFileReadError::caused_by(display.clone(), error))?;
+        let source = Arc::from(display);
+        parse_file(BufReader::new(file), &source, &mut records)?;
     }
     Ok(records)
 }
 
-fn parse_source(text: &str, source: String, records: &mut Vec<JsonRecord>) -> Result<(), EachError> {
+fn parse_inline(text: &str, source: &Arc<str>, records: &mut Vec<JsonRecord>) -> Result<(), EachError> {
     for (index, raw_line) in text.lines().enumerate() {
-        let line_number = index + 1;
-        let line = if index == 0 {
-            raw_line.strip_prefix('\u{feff}').unwrap_or(raw_line)
-        } else {
-            raw_line
-        }
-        .trim();
-        if line.is_empty() {
-            continue;
-        }
-        let value: Value =
-            serde_json::from_str(line).map_err(|error| JsonLineParseError::new(source.clone(), line_number, error.to_string()))?;
-        let Value::Object(fields) = value else {
-            return Err(JsonRecordShapeError::new(source, line_number).into());
-        };
-        records.push(JsonRecord {
-            fields,
-            source: source.clone(),
-            line: line_number,
-        });
+        parse_line(raw_line, source, index + 1, records)?;
     }
+    Ok(())
+}
+
+fn parse_file(mut reader: impl BufRead, source: &Arc<str>, records: &mut Vec<JsonRecord>) -> Result<(), EachError> {
+    let mut bytes = Vec::new();
+    let mut line_number = 0;
+    loop {
+        bytes.clear();
+        let read = reader
+            .read_until(b'\n', &mut bytes)
+            .map_err(|error| JsonLinesFileReadError::caused_by(source.to_string(), error))?;
+        if read == 0 {
+            return Ok(());
+        }
+        line_number += 1;
+        let line = std::str::from_utf8(&bytes).map_err(|error| JsonLinesFileUtf8Error::caused_by(source.to_string(), error))?;
+        parse_line(line, source, line_number, records)?;
+    }
+}
+
+fn parse_line(raw_line: &str, source: &Arc<str>, line_number: usize, records: &mut Vec<JsonRecord>) -> Result<(), EachError> {
+    let line = if line_number == 1 {
+        raw_line.strip_prefix('\u{feff}').unwrap_or(raw_line)
+    } else {
+        raw_line
+    }
+    .trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(line).map_err(|error| {
+        let rendered = error.to_string();
+        let location = format!(" at line {} column {}", error.line(), error.column());
+        let reason = rendered.strip_suffix(&location).unwrap_or(&rendered).to_owned();
+        JsonLineParseError::new(source.to_string(), line_number, error.column(), reason)
+    })?;
+    let Value::Object(fields) = value else {
+        return Err(JsonRecordShapeError::new(source.to_string(), line_number).into());
+    };
+    records.push(JsonRecord {
+        fields,
+        source: Arc::clone(source),
+        line: line_number,
+    });
     Ok(())
 }
 
@@ -84,6 +113,8 @@ mod tests {
         assert_eq!(names, ["inline", "inline", "file", "file"]);
         assert_eq!(records[0].label(), "--json-lines #1:1");
         assert_eq!(records[3].line, 3);
+        assert!(Arc::ptr_eq(&records[0].source, &records[1].source));
+        assert!(Arc::ptr_eq(&records[2].source, &records[3].source));
     }
 
     #[test]
@@ -91,6 +122,8 @@ mod tests {
         let invalid = load(&["{bad".to_owned()], &[]).expect_err("invalid JSON must fail").to_string();
         assert!(invalid.contains("--json-lines #1"));
         assert!(invalid.contains("line 1"));
+        assert!(invalid.contains("column 2"));
+        assert!(!invalid.contains("line 1 column"), "{invalid}");
 
         let array = load(&["[]".to_owned()], &[]).expect_err("array records must fail").to_string();
         assert!(array.contains("must be an object"));

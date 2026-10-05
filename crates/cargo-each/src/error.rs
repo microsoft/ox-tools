@@ -145,17 +145,18 @@ pub(crate) struct JsonLinesFileReadError {
 /// A `--json-lines-file` was not valid UTF-8.
 #[ohno::error]
 #[display("JSON Lines file `{path}` is not valid UTF-8")]
-#[from(std::string::FromUtf8Error)]
+#[from(std::str::Utf8Error)]
 pub(crate) struct JsonLinesFileUtf8Error {
     pub(crate) path: String,
 }
 
 /// A nonempty JSON Lines record could not be parsed.
 #[ohno::error]
-#[display("invalid JSON in {source} at line {line}: {reason}")]
+#[display("invalid JSON in {source} at line {line}, column {column}: {reason}")]
 pub(crate) struct JsonLineParseError {
     pub(crate) source: String,
     pub(crate) line: usize,
+    pub(crate) column: usize,
     pub(crate) reason: String,
 }
 

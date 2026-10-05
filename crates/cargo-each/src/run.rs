@@ -144,6 +144,7 @@ fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
     validate_json_mode(args)?;
     let records = json_lines::load(&args.json_lines, &args.json_lines_files).into_app_err("failed to read JSON Lines input")?;
     let plan = Plan::build_json(&records, &args.command).into_app_err(PLAN_BUILD_CONTEXT)?;
+    drop(records);
     if plan.invocations.is_empty() {
         eprintln!("cargo each: JSON input resolved to no work; nothing to do");
         return Ok(ExitCode::SUCCESS);

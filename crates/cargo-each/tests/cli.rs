@@ -610,6 +610,17 @@ fn none_is_a_successful_noop() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn none_without_optional_workspace_version_is_a_successful_noop() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--none", "--once", "--dry-run", "--", "echo", "{packages}"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("nothing to do"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn empty_filtered_selection_skips_workspace_rust_version_resolution() {
     let (_tmp, manifest) = fixture();
     each(&manifest)

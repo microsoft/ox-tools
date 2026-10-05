@@ -17,7 +17,7 @@ use clap::{Args, Parser};
 #[derive(Parser, Debug)]
 #[command(name = "cargo", bin_name = "cargo")]
 pub(crate) enum CargoCli {
-    /// Run a command over a cargo-style selection of workspace members.
+    /// Run a command over Cargo workspace members or JSON records.
     Each(EachArgs),
 }
 
@@ -25,10 +25,10 @@ pub(crate) enum CargoCli {
 #[derive(Args, Debug, Clone)]
 #[command(
     version,
-    about = "Run a command over a cargo-style selection of workspace members",
-    long_about = "Resolve a cargo-style package selection (-p/--package, --workspace, --exclude), \
-                  optionally filter it with Boolean expressions over Cargo metadata, and run a command over the result \
-                  — once per member, once per matching Cargo target, or once for the whole set."
+    about = "Run a command over Cargo workspace members or JSON records",
+    long_about = "Resolve either a cargo-style package selection (-p/--package, --workspace, --exclude) \
+                  with optional Cargo metadata filters, or JSON Lines records, then run a command once per member, \
+                  matching Cargo target, whole selected set, or JSON record."
 )]
 #[expect(clippy::struct_excessive_bools, reason = "each bool is an independent clap CLI flag")]
 pub(crate) struct EachArgs {
