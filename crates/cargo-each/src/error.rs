@@ -43,7 +43,6 @@
     JsonLineParseError,
     JsonRecordShapeError,
     JsonRecordFieldError,
-    SkipWithoutWorkspaceRustVersionRequiresPlaceholderError,
     WorkspaceManifestReadError,
     WorkspaceManifestParseError,
     WorkspaceRustVersionError
@@ -177,11 +176,6 @@ pub(crate) struct JsonRecordFieldError {
     pub(crate) key: String,
     pub(crate) reason: String,
 }
-
-/// The optional workspace-version flag was supplied without its placeholder.
-#[ohno::error]
-#[display("`--skip-without-workspace-rust-version` requires the command to use `{{workspace-rust-version}}`")]
-pub(crate) struct SkipWithoutWorkspaceRustVersionRequiresPlaceholderError;
 
 /// The root manifest could not be read while resolving
 /// `{workspace-rust-version}`.

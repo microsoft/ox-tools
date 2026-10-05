@@ -14,7 +14,8 @@
 //!   alone as a whole argument; it expands to the resolved selection flags,
 //!   which is several tokens.
 //! - The workspace token `{workspace-rust-version}`, valid in Cargo-backed
-//!   per-package, per-target, and once modes.
+//!   per-package, per-target, and once modes. An absent root declaration
+//!   expands to an empty string.
 //! - JSON-record fields through `{json:key}`, valid only in JSON-record mode.
 //!
 //! Using a token in the wrong mode is a usage error ([`PlaceholderMisuseError`]).
@@ -25,7 +26,7 @@
 //! **verbatim** to the spawned command. There is no brace-escape mechanism, so
 //! this passthrough is a deliberate part of the contract, not an oversight.
 
-use crate::error::{EachError, JsonRecordFieldError, PlaceholderMisuseError, WorkspaceRustVersionError};
+use crate::error::{EachError, JsonRecordFieldError, PlaceholderMisuseError};
 use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
@@ -146,11 +147,9 @@ fn replace_json_arg(
     Ok(replaced)
 }
 
-fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: Vec<(&'static str, &'a str)>) -> Result<String, EachError> {
+fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: Vec<(&'static str, &'a str)>) -> String {
     if arg.contains(WORKSPACE_RUST_VERSION_TOKEN) {
-        let version = placeholders.workspace_rust_version().ok_or_else(|| {
-            WorkspaceRustVersionError::new("the command uses the placeholder but its root value was not resolved".to_owned())
-        })?;
+        let version = placeholders.workspace_rust_version().unwrap_or_default();
         replacements.push((WORKSPACE_RUST_VERSION_TOKEN, version));
     }
 
@@ -170,7 +169,7 @@ fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: 
     }
     replaced.push_str(rest);
 
-    Ok(replaced)
+    replaced
 }
 
 /// Whether a command template uses the lazy workspace Rust-version token.
@@ -289,7 +288,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                     // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package manifest token was emptied")]
                     ("{manifest}", manifest.as_str()),
                 ];
-                let replaced = replace_arg(arg, placeholders, replacements)?;
+                let replaced = replace_arg(arg, placeholders, replacements);
                 out.push(replaced);
             }
             Placeholders::Target {
@@ -311,7 +310,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                     ("{manifest}", manifest.as_str()),
                     (TARGET_TOKEN, target.as_str()),
                 ];
-                let replaced = replace_arg(arg, placeholders, replacements)?;
+                let replaced = replace_arg(arg, placeholders, replacements);
                 out.push(replaced);
             }
             Placeholders::Once { packages, .. } => {
@@ -320,7 +319,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 if arg == PACKAGES_TOKEN {
                     out.extend(packages.iter().cloned());
                 } else {
-                    out.push(replace_arg(arg, placeholders, Vec::new())?);
+                    out.push(replace_arg(arg, placeholders, Vec::new()));
                 }
             }
         }
@@ -501,10 +500,13 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_workspace_rust_version_is_reported_in_package_and_target_modes() {
+    fn absent_workspace_rust_version_expands_to_empty_in_every_mode() {
         let command = args(&["echo", "{workspace-rust-version}"]);
-        let package_error = substitute(&command, &pkg()).expect_err("package value is unresolved");
-        assert!(package_error.to_string().contains("root value was not resolved"), "{package_error}");
+        assert_eq!(substitute(&command, &pkg()).expect("optional package value"), ["echo", ""]);
+        assert_eq!(
+            substitute(&args(&["+{workspace-rust-version}"]), &pkg()).expect("textual empty substitution"),
+            ["+"]
+        );
 
         let target = Placeholders::Target {
             name: "crate".to_owned(),
@@ -514,17 +516,13 @@ mod tests {
             target: "example".to_owned(),
             workspace_rust_version: None,
         };
-        let target_error = substitute(&command, &target).expect_err("target value is unresolved");
-        assert!(target_error.to_string().contains("root value was not resolved"), "{target_error}");
+        assert_eq!(substitute(&command, &target).expect("optional target value"), ["echo", ""]);
 
         let once = Placeholders::Once {
             packages: args(&["--workspace"]),
             workspace_rust_version: None,
         };
-        assert_eq!(
-            substitute(&command, &once).expect_err("once value is unresolved").to_string(),
-            "cannot resolve `{workspace-rust-version}`: the command uses the placeholder but its root value was not resolved"
-        );
+        assert_eq!(substitute(&command, &once).expect("optional once value"), ["echo", ""]);
     }
 
     #[test]

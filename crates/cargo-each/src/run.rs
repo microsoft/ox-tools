@@ -21,9 +21,7 @@ use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
-use crate::error::{
-    InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError, SkipWithoutWorkspaceRustVersionRequiresPlaceholderError,
-};
+use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
 use crate::filter::Predicate;
 use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
@@ -63,9 +61,6 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     }
 
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
-    if args.skip_without_workspace_rust_version && !command_uses_workspace_rust_version {
-        return Err(SkipWithoutWorkspaceRustVersionRequiresPlaceholderError::new()).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
-    }
 
     let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
     let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
@@ -107,17 +102,10 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let workspace_rust_version = if args.skip_without_workspace_rust_version {
-        let Some(version) = workspace
+    let workspace_rust_version = if command_uses_workspace_rust_version {
+        workspace
             .workspace_rust_version_if_declared()
             .into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?
-        else {
-            eprintln!("cargo each: root manifest declares no workspace Rust version; nothing to do");
-            return Ok(ExitCode::SUCCESS);
-        };
-        Some(version)
-    } else if command_uses_workspace_rust_version {
-        Some(workspace.workspace_rust_version().into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?)
     } else {
         None
     };
@@ -171,7 +159,6 @@ fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
         (!args.each_targets.is_empty(), "--each-target"),
         (!args.target_required_feature.is_empty(), "--target-required-feature"),
         (args.chdir, "--chdir"),
-        (args.skip_without_workspace_rust_version, "--skip-without-workspace-rust-version"),
         (args.manifest_path.is_some(), "--manifest-path"),
     ];
     if let Some((_, option)) = conflicts.into_iter().find(|(present, _)| *present) {
