@@ -129,6 +129,15 @@ fn replace_json_arg(
         let Some(value) = value.as_str() else {
             return Err(JsonRecordFieldError::new(source.to_owned(), line, key.to_owned(), "field is not a string".to_owned()).into());
         };
+        if value.contains('\0') {
+            return Err(JsonRecordFieldError::new(
+                source.to_owned(),
+                line,
+                key.to_owned(),
+                "field contains a NUL byte, which cannot be passed in a process argument".to_owned(),
+            )
+            .into());
+        }
         replaced.push_str(value);
         cursor = end;
         Ok(())
@@ -591,10 +600,14 @@ mod tests {
 
     #[test]
     fn json_mode_rejects_missing_nonstring_and_foreign_placeholders() {
-        let fields = serde_json::json!({"number": 1}).as_object().expect("object").clone();
+        let fields = serde_json::json!({"number": 1, "nul": "a\u{0}b"})
+            .as_object()
+            .expect("object")
+            .clone();
         for (command, expected) in [
             ("{json:missing}", "field is missing"),
             ("{json:number}", "field is not a string"),
+            ("{json:nul}", "field contains a NUL byte"),
             ("{name}", "not valid in JSON-record mode"),
             ("{json:", "missing its closing"),
             ("{json:}", "nonempty top-level field name"),

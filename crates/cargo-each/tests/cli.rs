@@ -1661,6 +1661,24 @@ fn json_input_rejects_invalid_records_fields_and_placeholders_before_execution()
     }
 }
 
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and a child process; miri supports neither")]
+#[test]
+fn json_input_rejects_nul_before_running_earlier_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let probe = compile_execution_probe(temp.path());
+    let log = temp.path().join("executed.log");
+    json_each()
+        .args(["--json-lines", "{\"value\":\"alpha\"}\n{\"value\":\"\\u0000\"}", "--"])
+        .arg(probe)
+        .args(["ordered", "{json:value}"])
+        .arg(&log)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("field contains a NUL byte"));
+    assert!(!log.exists(), "complete plan validation must precede every child invocation");
+}
+
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
 #[test]
 fn json_input_rejects_workspace_selection_options() {
