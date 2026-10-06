@@ -210,7 +210,6 @@ expose_internals!(
 /// the integration tests would need their own copy of every fixture.
 #[cfg(any(test, feature = "internals"))]
 #[doc(hidden)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod testing;
 
 #[doc(inline)]
