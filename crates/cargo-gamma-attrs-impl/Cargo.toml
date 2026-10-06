@@ -35,9 +35,10 @@ allowed_external_types = ["proc_macro2::TokenStream"]
 
 # Production code is measured while test-only modules and scaffolding opt out with
 # `#[cfg_attr(coverage_nightly, coverage(off))]`. This floor records the lowest cross-platform
-# production result from the coverage-gate CI matrix; raise it only after that matrix improves.
+# production result with test modules excluded, rounded down to two decimal places.
+# Raise it only after the coverage-gate matrix improves.
 [package.metadata.coverage-gate]
-min-lines-percent = 99.16492
+min-lines-percent = 99.15
 
 [features]
 # Exposes the hand-copied parser limits to the workspace agreement test. This is test plumbing,
