@@ -233,7 +233,7 @@ mod tests {
             .split_once("## Rules")
             .expect("test review rules must include the rules section");
         let rows: Vec<_> = practices.lines().filter(|line| line.starts_with("| ")).skip(2).collect();
-        assert_eq!(rows.len(), 27);
+        assert_eq!(rows.len(), 25);
         for row in rows {
             let columns: Vec<_> = row.split('|').collect();
             assert_eq!(columns.len(), 4, "expected a practice and its recommendations: {row}");

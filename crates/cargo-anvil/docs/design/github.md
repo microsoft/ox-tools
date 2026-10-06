@@ -233,7 +233,7 @@ The skill also links to the separately owned `test-review.md` in the same
 directory. Reviewers read it for test, test-helper, and benchmark changes. It
 puts determinism first: control inputs, isolate state and ordering, verify the
 intended result, and preserve the contract across supported configurations. It
-covers in-process command testing, narrow real boundaries, deterministic and
+covers focused unit testing, mocked collaborators, deterministic and
 isolated fixtures, meaningful outcome assertions, test-only feature gates,
 separate validation budgets, Miri exclusions, and honest benchmark measurements.
 It also covers process-global instrumentation, platform capabilities, hermetic
