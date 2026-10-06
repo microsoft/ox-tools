@@ -230,15 +230,16 @@ across anvil-managed repositories; each corresponds to a class of finding that
 was filed and then disproved.
 
 The skill also links to the separately owned `test-review.md` in the same
-directory. Reviewers read it for test, test-helper, and benchmark changes. It
+directory. Reviewers read it for library unit tests run by `cargo test` and their
+helpers. Benchmarks and wider integration tests are outside its scope. It
 puts determinism first: control inputs, isolate state and ordering, verify the
 intended result, and preserve the contract across supported configurations. It
 covers focused unit testing, mocked collaborators, deterministic and
 isolated fixtures, meaningful outcome assertions, test-only feature gates,
-separate validation budgets, Miri exclusions, and honest benchmark measurements.
+bounded test work, and scoped Miri exclusions.
 Wider integration tests require a design document, not ad hoc provisioned jobs.
 It also covers process-global instrumentation, platform capabilities, hermetic
-security fixtures, protocol setup, optimized-profile assumptions, typed negative
+security fixtures, optimized-profile assumptions, typed negative
 assertions, bounded concurrency models, and coverage-preserving flake fixes.
 String assertions favor deterministic full-result snapshots or exact comparisons,
 with prefix checks only for prefix contracts. Every prohibited practice includes
