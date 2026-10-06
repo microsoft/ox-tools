@@ -231,15 +231,16 @@ was filed and then disproved.
 
 The skill links to the separately owned `test-review.md` in the same directory.
 It covers every test target that `cargo test` runs, including integration tests
-under `tests/`, plus tests embedded in `src/examples`; benchmarks and
-provisioned end-to-end tests are out of scope. It makes determinism the primary
-review focus, because tests that control their inputs avoid real I/O, timers,
-and subprocesses and are therefore also fast. It justifies test-only APIs by
-the Pragmatic Rust Guidelines `M-MOCKABLE-SYSCALLS` and `M-TEST-UTIL`, takes
-precedence over the skill's general convention rule within its scope, and
-groups its rules into input and state control, exact outcome assertions, and
-test cost and placement, with one short section per rule. Both files use the
-normal owned-file update flow and are emitted only for the GitHub backend.
+under `tests/`, plus tests in Cargo example targets under `examples/`;
+benchmarks and provisioned end-to-end tests are out of scope. It makes
+determinism the primary review focus, because tests that control their inputs
+avoid real I/O, timers, and subprocesses and are therefore also fast. It
+justifies test-only APIs by the Pragmatic Rust Guidelines `M-MOCKABLE-SYSCALLS`
+and `M-TEST-UTIL`, takes precedence over the skill's general convention rule
+within its scope, and groups its rules into input and state control, exact
+outcome assertions, and test cost and placement, with one short section per
+rule. Both files use the normal owned-file update flow and are emitted only for
+the GitHub backend.
 
 ## 3. Root workflows
 

@@ -195,13 +195,6 @@ mod tests {
         );
     }
 
-    /// Copilot loads the skill by the name in its front matter.
-    #[test]
-    fn code_review_skill_front_matter_names_the_skill() {
-        let front_matter: Vec<_> = CODE_REVIEW_SKILL.lines().take(2).collect();
-        assert_eq!(front_matter, ["---", "name: code-review"]);
-    }
-
     #[test]
     fn shared_action_templates_are_non_empty() {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));

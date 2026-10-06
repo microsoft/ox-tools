@@ -983,7 +983,7 @@ license: MIT
 This skill applies when reviewing pull requests. It does not apply to the coding
 agent when it writes code — see `AGENTS.md` for that.
 
-When reviewing tests, test helpers, or tests embedded in `src/examples`, apply [Test review rules](test-review.md).
+When reviewing tests, test helpers, or tests in `examples/`, apply [Test review rules](test-review.md).
 
 Every rule below exists because a review comment was filed, argued, and
 withdrawn. The cost of a wrong comment is not zero: the author has to reproduce
@@ -1127,15 +1127,17 @@ for it, leave it out.
 
 # Test review rules
 
-Scope: every test target that `cargo test` runs (unit tests in `src/`, integration tests under `tests/`, and doctests), their helpers, and tests embedded in `<crate>/src/examples`. Benchmarks are out of scope. End-to-end or system tests that need provisioned services, credentials, or dedicated CI jobs are also out of scope: such coverage requires a separate design document defining purpose, boundaries, prerequisites, isolation, and runtime budget, so do not suggest it ad hoc.
+Scope: every test target that `cargo test` runs (unit tests in `src/`, integration tests under `tests/`, and doctests), their helpers, and tests in Cargo example targets under `<crate>/examples/`. Benchmarks are out of scope. End-to-end or system tests that need provisioned services, credentials, or dedicated CI jobs are also out of scope: such coverage requires a separate design document defining purpose, boundaries, prerequisites, isolation, and runtime budget, so do not suggest it ad hoc.
 
-This guide is the repository's test policy. Within its scope it takes precedence over the convention rule in `SKILL.md`: request these forms even where Clippy permits alternatives. Apply them to tests that the pull request adds or changes; do not request cleanup of unrelated existing tests.
+This guide is the repository's test policy. Within its scope it takes precedence over the convention rule in `SKILL.md`: request these forms even where Clippy permits alternatives. Apply them to tests that the pull request adds and to changed behavior within existing tests; adding an entry to an existing test's data does not require rewriting its setup. Do not request cleanup of unrelated existing tests.
 
 ## Determinism first
 
 **Determinism is the primary focus.** A test must reach the same verdict from the same controlled inputs, independent of test order, parallel tests, host state, and timing. Determinism also makes tests fast: a test that avoids real I/O, wall-clock timers, network access, and subprocesses runs in-process in microseconds and never needs retries.
 
 Adding test-only APIs to achieve this is justified. Code that performs I/O or system calls, reads clocks, or uses randomness should be mockable ([M-MOCKABLE-SYSCALLS](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-MOCKABLE-SYSCALLS)), with the testing surface behind a test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)). When no existing seam controls a dependency, recommend adding one.
+
+Doctests are documentation and compile against the crate's default features, so test-feature seams are unavailable to them. Doctests must still avoid network access, processes, sleeps, fixture writes, and assertions on wall-clock or random values. When an example needs real I/O or time, mark it `no_run` instead of mocking it.
 
 ## Review sequence
 
@@ -1236,9 +1238,9 @@ Markers: allocation counts, `Backtrace`, `#[inline`, `black_box`.
 
 ### Tests in examples
 
-Do not embed tests in demonstration examples under `<crate>/src/examples`. Keep examples focused on demonstration, and put regression tests in test modules or `tests/` targets that the CI `cargo test` gate runs. Example-embedded tests do not count as coverage.
+Do not embed tests in Cargo example targets under `<crate>/examples/`. Keep examples focused on demonstration, and put regression tests in test modules or `tests/` targets. `cargo test` compiles example targets but does not run their tests unless the target sets `test = true`, so example-embedded tests are not coverage.
 
-Markers: `#[test]`, `#[tokio::test]`, or `#[cfg(test)]` in `src/examples/`.
+Markers: `#[test]`, `#[tokio::test]`, or `#[cfg(test)]` under `examples/`.
 
 ### Test subject
 
