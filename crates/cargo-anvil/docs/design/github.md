@@ -238,9 +238,8 @@ covers focused unit testing, mocked collaborators, in-memory or committed
 immutable fixtures, meaningful outcome assertions, test-only feature gates,
 bounded test work, and scoped Miri exclusions.
 Wider integration tests require a design document, not ad hoc provisioned jobs.
-It also covers process-global instrumentation, platform capabilities, hermetic
-security fixtures, optimized-profile assumptions, typed negative
-assertions, bounded concurrency models, and coverage-preserving flake fixes.
+It also covers shared-state isolation, mocked host effects, optimized-profile
+invariants, typed negative assertions, and coverage-preserving flake fixes.
 String assertions favor deterministic full-result snapshots or exact comparisons,
 with prefix checks only for prefix contracts. Every prohibited practice includes
 appropriate recommended solutions without a fixed count. Both files
