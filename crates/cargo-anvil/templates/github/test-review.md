@@ -12,7 +12,19 @@ This guide is the repository's test policy. Within its scope it takes precedence
 
 Adding test-only APIs to achieve this is justified. Code that performs I/O or system calls, reads clocks, or uses randomness should be mockable ([M-MOCKABLE-SYSCALLS](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-MOCKABLE-SYSCALLS)), with the testing surface behind a test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)). When no existing seam controls a dependency, recommend adding one.
 
-Doctests are documentation and compile against the crate's default features, so test-feature seams are unavailable to them. Doctests must still avoid network access, processes, sleeps, fixture writes, and assertions on wall-clock or random values. When an example needs real I/O or time, mark it `no_run` instead of mocking it.
+Doctests compile against whatever features the `cargo test` invocation enables, so they must build both with all features and with default features. A doctest that uses a non-default test feature, such as a `test-util` seam, must gate its body with a hidden `cfg` so it runs only when that feature is enabled, without the gate appearing in rendered documentation:
+
+````rust
+/// ```
+/// # #[cfg(feature = "test-util")]
+/// # {
+/// let clock = tick::Clock::new_frozen();
+/// // ...
+/// # }
+/// ```
+````
+
+Doctests otherwise follow the same rules: no network access, processes, sleeps, fixture writes, or assertions on wall-clock or random values. When an example needs real I/O or time that it cannot control, mark it `no_run`.
 
 ## Review sequence
 
