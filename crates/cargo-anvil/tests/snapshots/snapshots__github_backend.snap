@@ -983,7 +983,7 @@ license: MIT
 This skill applies when reviewing pull requests. It does not apply to the coding
 agent when it writes code — see `AGENTS.md` for that.
 
-When reviewing library unit tests run by `cargo test` or their helpers, apply [Library test review rules](test-review.md).
+When reviewing library tests, their helpers, or tests embedded in `src/examples`, apply [Library test review rules](test-review.md).
 
 Every rule below exists because a review comment was filed, argued, and
 withdrawn. The cost of a wrong comment is not zero: the author has to reproduce
@@ -1153,6 +1153,7 @@ Markers are search hints, not proof of a defect; check usage and imported aliase
 | Negative tests that accept any error or generic error text. Markers: `.is_err()`, `.unwrap_err().to_string()`. | Use `.unwrap_err()`/`.expect_err()` and assert typed causes and fields after setup reaches the intended branch. Test exact error wording separately with deterministic inputs. |
 | Boolean checks that discard values/errors or verify only nonempty output. Markers: `.is_ok()`, `.is_some()`, `.is_none()`, `assert!(!x.is_empty())`, `.success()`, `.failure()`. | For expected `Ok`/`Some`, use `.unwrap()`/`.expect()` and compare the value. For expected `None`, use `assert_eq!(actual, None)` or `let None = actual else { panic!("expected None") };`. Assert relevant state changes and side effects too. |
 | Branching on the actual result instead of asserting one expected variant. Markers: `match actual`, `if let`, wildcard arms. | Use `let Enum::A(x) = actual else { panic!("expected A") };`, then assert the payload. Split distinct expected outcomes into separate cases; fail unexpected variants instead of adapting assertions to them. |
+| Tests embedded in standard library examples under `<crate>/src/examples`. Markers: `src/examples/`, `#[test]`, `#[tokio::test]`, `#[cfg(test)]`. | Keep examples focused on demonstration. Put regression tests in library test modules exercised by the existing CI `cargo test` gate; do not count example-embedded tests as CI coverage. |
 | Requiring a full pipeline for a utility test, or mocking the behavior being asserted. | Call the utility directly with deterministic mocked collaborators. Reports, probes, and policies can be mocked when they are dependencies, not the subject of the assertion. |
 | Network services, tool installation, sign-in, browsers, or developer credentials. Markers: `reqwest::`, `TcpStream::connect`, `Command::new`. | Mock service and host dependencies; keep library tests self-contained. |
 | Unspecified collaborators silently succeeding or reaching the host. | Reject unexpected calls; script only scenario-required interactions. |
