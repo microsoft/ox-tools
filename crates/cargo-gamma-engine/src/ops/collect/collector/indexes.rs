@@ -5,9 +5,9 @@
 
 use syn::visit::{self, Visit};
 use syn::{
-    BinOp, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, File, FnArg, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
-    ItemFn, ItemStatic, ItemStruct, ItemType, ItemUse, Member, Pat, ReturnType, Signature, Stmt, TraitItem, TraitItemConst, TraitItemFn,
-    Type, UseTree,
+    BinOp, Block, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, File, FnArg, ImplItem, ImplItemConst, ImplItemFn, Item,
+    ItemConst, ItemFn, ItemMod, ItemStatic, ItemStruct, ItemType, ItemUse, Member, Pat, ReturnType, Signature, Stmt, TraitItem,
+    TraitItemConst, TraitItemFn, Type, UseTree,
 };
 
 use crate::cfg::CfgSet;
@@ -16,6 +16,19 @@ use crate::ops::collect::collector::types::Alias;
 use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
 use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
+
+pub(super) const ABSOLUTE_ROOT: &str = "<absolute>";
+pub(super) type ScopePath = Vec<(usize, usize)>;
+
+pub(super) fn module_id(ident: &syn::Ident) -> (usize, usize) {
+    let start = ident.span().start();
+    (start.line, start.column)
+}
+
+pub(super) fn block_id(block: &Block) -> (usize, usize) {
+    let start = block.brace_token.span.open().start();
+    (start.line, start.column)
+}
 
 fn merge_type(index: &mut HashMap<String, Option<Type>>, name: &str, ty: &Type) {
     let _known = index
@@ -61,6 +74,15 @@ pub(in crate::ops::collect) struct Indexes {
     /// been imported.
     pub(super) imports: HashMap<String, Option<Vec<String>>>,
 
+    /// Imports written directly in the file's root module.
+    pub(super) root_imports: HashMap<String, Option<Vec<String>>>,
+
+    /// Imports and shadows visible in each nested lexical scope.
+    pub(super) scope_imports: HashMap<ScopePath, HashMap<String, Option<Vec<String>>>>,
+
+    /// Scope paths that inherit bindings from their lexical parent.
+    block_scopes: HashSet<ScopePath>,
+
     /// Names the file uses somewhere in a way only a number can be used.
     pub(super) numeric_uses: NumericUses,
 
@@ -78,6 +100,89 @@ pub(in crate::ops::collect) struct Indexes {
     pub(super) aliases: HashMap<String, Option<Alias>>,
 }
 
+impl Indexes {
+    fn canonicalize_imports(&mut self) {
+        let imports = self.imports.clone();
+        for (name, path) in &mut self.imports {
+            if path.is_some() {
+                *path = canonical_import(name, &imports);
+            }
+        }
+        let root_imports = self.root_imports.clone();
+        for (name, path) in &mut self.root_imports {
+            if path.is_some() {
+                *path = canonical_import(name, &root_imports);
+            }
+        }
+
+        let mut scopes = self.scope_imports.keys().cloned().collect::<Vec<_>>();
+        scopes.sort_by_key(Vec::len);
+        for scope in scopes {
+            let mut local = self
+                .scope_imports
+                .get(&scope)
+                .expect("every recorded lexical scope has an import index")
+                .clone();
+            let parent = self.block_scopes.contains(&scope).then(|| {
+                let imports = if scope.len() == 1 {
+                    &self.root_imports
+                } else {
+                    self.scope_imports
+                        .get(&scope[..scope.len() - 1])
+                        .expect("a block's enclosing lexical scope has an import index")
+                };
+                imports
+                    .iter()
+                    .map(|(name, path)| (name.clone(), path.clone().map(protect_import)))
+                    .collect::<HashMap<_, _>>()
+            });
+            let mut visible = parent.clone().unwrap_or_default();
+            visible.extend(local.clone());
+            for (name, path) in &mut local {
+                if path.is_some() {
+                    *path = canonical_import(name, &visible);
+                }
+            }
+            if let Some(parent) = parent {
+                for (name, path) in parent {
+                    let _inherited = local.entry(name).or_insert(path);
+                }
+            }
+            let _previous = self.scope_imports.insert(scope, local);
+        }
+    }
+}
+
+fn protect_import(mut path: Vec<String>) -> Vec<String> {
+    if path.first().is_none_or(|first| first != ABSOLUTE_ROOT) {
+        path.insert(0, ABSOLUTE_ROOT.to_owned());
+    }
+    path
+}
+
+fn canonical_import(name: &str, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
+    let mut path = imports.get(name)?.clone()?;
+    let mut expanded = HashSet::default();
+
+    loop {
+        let first = path.first()?;
+        if first == ABSOLUTE_ROOT {
+            return Some(path);
+        }
+        let Some(imported) = imports.get(first) else {
+            return Some(path);
+        };
+        let prefix = imported.as_ref()?;
+        if prefix.len() == 1 && prefix.first() == Some(first) {
+            return Some(path);
+        }
+        if !expanded.insert(first.clone()) {
+            return None;
+        }
+        let _replaced = path.splice(..1, prefix.iter().cloned());
+    }
+}
+
 /// Fills whichever indexes were asked for, ignoring scope.
 ///
 /// Signature maps are deliberately file-wide and keyed by bare names because their consumers
@@ -85,6 +190,7 @@ pub(in crate::ops::collect) struct Indexes {
 /// receiver methods and associated functions therefore cannot supply bare-function evidence.
 pub(super) struct Walk<'cfg> {
     indexes: Indexes,
+    scope_path: ScopePath,
 
     /// Whether the numeric evidence — fields, constants, uses — is wanted.
     numeric: bool,
@@ -242,14 +348,24 @@ impl Walk<'_> {
             }
 
             UseTree::Name(name) if name.ident == "self" => {
-                if let Some((binding, parent)) = prefix.split_last() {
-                    self.imported(binding.clone(), parent);
+                if let Some(binding) = prefix.last() {
+                    self.imported(binding.clone(), prefix);
                 }
             }
 
-            UseTree::Name(name) => self.imported(name.ident.to_string(), prefix),
+            UseTree::Name(name) => {
+                let mut source = prefix.clone();
+                source.push(name.ident.to_string());
+                self.imported(name.ident.to_string(), &source);
+            }
 
-            UseTree::Rename(rename) => self.imported(rename.rename.to_string(), prefix),
+            UseTree::Rename(rename) => {
+                let mut source = prefix.clone();
+                if rename.ident != "self" {
+                    source.push(rename.ident.to_string());
+                }
+                self.imported(rename.rename.to_string(), &source);
+            }
 
             UseTree::Group(group) => {
                 for item in &group.items {
@@ -257,11 +373,24 @@ impl Walk<'_> {
                 }
             }
 
-            UseTree::Glob(_) => {}
+            UseTree::Glob(_) => {
+                let _previous = self.indexes.imports.insert("*".to_owned(), None);
+                if self.scope_path.is_empty() {
+                    let _previous = self.indexes.root_imports.insert("*".to_owned(), None);
+                } else {
+                    let _previous = self
+                        .indexes
+                        .scope_imports
+                        .entry(self.scope_path.clone())
+                        .or_default()
+                        .insert("*".to_owned(), None);
+                }
+            }
         }
     }
 
-    /// Records where one imported name came from, demoting a name two `use` items disagree about.
+    /// Records the complete source path of one imported name, demoting a name two `use` items
+    /// disagree about.
     ///
     /// The index is keyed by the bare name and spans the whole file, but a file may hold several
     /// modules, and `use crate::Error` in one says nothing about `use std::io::Error` in another.
@@ -275,17 +404,38 @@ impl Walk<'_> {
     /// costs a withdrawn mutant rather than a wrong score. Importing the same path twice is not a
     /// disagreement and does not demote.
     fn imported(&mut self, name: String, prefix: &[String]) {
-        let _known = self
-            .indexes
-            .imports
+        Self::merge_import(&mut self.indexes.imports, name.clone(), prefix);
+        if self.scope_path.is_empty() {
+            Self::merge_import(&mut self.indexes.root_imports, name, prefix);
+        } else {
+            Self::merge_import(self.indexes.scope_imports.entry(self.scope_path.clone()).or_default(), name, prefix);
+        }
+    }
+
+    fn merge_import(imports: &mut HashMap<String, Option<Vec<String>>>, name: String, prefix: &[String]) {
+        let _known = imports
             .entry(name)
             .and_modify(|known| {
                 if known.as_deref() != Some(prefix) {
-                    // #[gamma::skip(assign_value.default, reason = "Option::default() is None, exactly the unknown-import sentinel assigned here")]
                     *known = None;
                 }
             })
             .or_insert_with(|| Some(prefix.to_vec()));
+    }
+
+    pub(super) fn enter_module(&mut self, name: &syn::Ident) {
+        self.scope_path.push(module_id(name));
+        let _imports = self.indexes.scope_imports.entry(self.scope_path.clone()).or_default();
+    }
+
+    pub(super) fn enter_block(&mut self, block: &Block) {
+        self.scope_path.push(block_id(block));
+        let _scope = self.indexes.block_scopes.insert(self.scope_path.clone());
+        let _imports = self.indexes.scope_imports.entry(self.scope_path.clone()).or_default();
+    }
+
+    pub(super) fn exit_scope(&mut self) {
+        let _scope = self.scope_path.pop();
     }
 
     /// The local update `visit_item_struct` makes, without its recursive continuation.
@@ -330,10 +480,37 @@ impl Walk<'_> {
         }
     }
 
+    pub(super) fn on_item_mod(&mut self, node: &ItemMod) {
+        let name = node.ident.to_string();
+        let source = vec!["self".to_owned(), name.clone()];
+
+        self.imported(name, &source);
+    }
+
+    pub(super) fn on_item_trait(&mut self, node: &syn::ItemTrait) {
+        let name = node.ident.to_string();
+        let _previous = self.indexes.imports.insert(name.clone(), None);
+        if self.scope_path.is_empty() {
+            let _previous = self.indexes.root_imports.insert(name, None);
+        } else {
+            let _previous = self
+                .indexes
+                .scope_imports
+                .entry(self.scope_path.clone())
+                .or_default()
+                .insert(name, None);
+        }
+    }
+
     /// The local update `visit_item_use` makes, without its recursive continuation.
     pub(super) fn on_item_use(&mut self, node: &ItemUse) {
         if self.type_evidence {
-            self.descend(&mut Vec::new(), &node.tree);
+            let mut prefix = if node.leading_colon.is_some() {
+                vec![ABSOLUTE_ROOT.to_owned()]
+            } else {
+                Vec::new()
+            };
+            self.descend(&mut prefix, &node.tree);
         }
     }
 
@@ -415,6 +592,12 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     /// `visit_item_static`, keeps one skipped item from reaching any of them.
     fn visit_item(&mut self, node: &'ast Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
+            if let Item::Mod(module) = node {
+                self.on_item_mod(module);
+            }
+            if let Item::Trait(declaration) = node {
+                self.on_item_trait(declaration);
+            }
             visit::visit_item(self, node);
         }
     }
@@ -460,6 +643,18 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         self.on_item_struct(node);
 
         visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        self.enter_module(&node.ident);
+        visit::visit_item_mod(self, node);
+        self.exit_scope();
+    }
+
+    fn visit_block(&mut self, node: &'ast Block) {
+        self.enter_block(node);
+        visit::visit_block(self, node);
+        self.exit_scope();
     }
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
@@ -557,7 +752,7 @@ pub(super) fn indexes_in(file: &File, selection: &Selection, cfg: &CfgSet) -> In
     }
 
     walk.visit_file(file);
-    walk.indexes
+    walk.into_indexes()
 }
 
 impl<'cfg> Walk<'cfg> {
@@ -571,6 +766,9 @@ impl<'cfg> Walk<'cfg> {
             indexes: Indexes {
                 fields: HashMap::default(),
                 imports: HashMap::default(),
+                root_imports: HashMap::default(),
+                scope_imports: HashMap::default(),
+                block_scopes: HashSet::default(),
                 numeric_uses: NumericUses::default(),
                 constants: HashMap::default(),
                 declared_types: HashMap::default(),
@@ -601,12 +799,14 @@ impl<'cfg> Walk<'cfg> {
                 || selection.contains("expr.increment")
                 || selection.contains("expr.decrement")
                 || selection.contains("literal.int_decrement"),
+            scope_path: Vec::new(),
             cfg,
         }
     }
 
     /// Consumes the walk, returning what it found.
-    pub(super) fn into_indexes(self) -> Indexes {
+    pub(super) fn into_indexes(mut self) -> Indexes {
+        self.indexes.canonicalize_imports();
         self.indexes
     }
 }
@@ -623,6 +823,9 @@ mod tests {
             indexes: Indexes {
                 fields: HashMap::default(),
                 imports: HashMap::default(),
+                root_imports: HashMap::default(),
+                scope_imports: HashMap::default(),
+                block_scopes: HashSet::default(),
                 numeric_uses: NumericUses::default(),
                 constants: HashMap::default(),
                 declared_types: HashMap::default(),
@@ -632,6 +835,7 @@ mod tests {
             },
             numeric,
             type_evidence,
+            scope_path: Vec::new(),
             cfg,
         }
     }
@@ -768,6 +972,33 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_aliases_are_demoted_and_disabled_type_evidence_stays_empty() {
+        let cfg = CfgSet::unconditional();
+        let mut enabled = walk(false, true, &cfg);
+        let generics: syn::Generics = parse_quote!(<T>);
+
+        enabled.alias("Value", &generics, &parse_quote!(Option<T>));
+        enabled.alias("Value", &generics, &parse_quote!(Vec<T>));
+        assert!(matches!(enabled.indexes.aliases.get("Value"), Some(None)));
+        enabled.on_item_use(&parse_quote!(
+            use ::std::vec::Vec;
+        ));
+        assert_eq!(
+            enabled.indexes.imports.get("Vec"),
+            Some(&Some(vec![
+                ABSOLUTE_ROOT.to_owned(),
+                "std".to_owned(),
+                "vec".to_owned(),
+                "Vec".to_owned()
+            ]))
+        );
+
+        let mut disabled = walk(false, false, &cfg);
+        disabled.returned("f", &parse_quote!(-> usize));
+        assert!(disabled.indexes.returns.is_empty());
+    }
+
+    #[test]
     fn signatures_record_implicit_unit_and_only_free_functions() {
         let file =
             syn::parse_file("fn free() {} struct Service; impl Service { fn free() -> usize { 1 } } trait Contract { fn free() -> bool; }")
@@ -799,12 +1030,29 @@ mod tests {
 
         walk.descend(&mut Vec::new(), &item.tree);
 
-        assert_eq!(walk.indexes.imports.get("Alias"), Some(&Some(vec!["crate".to_owned()])));
+        assert_eq!(
+            walk.indexes.imports.get("Alias"),
+            Some(&Some(vec!["crate".to_owned(), "Thing".to_owned()]))
+        );
         assert_eq!(
             walk.indexes.imports.get("Item"),
-            Some(&Some(vec!["crate".to_owned(), "inner".to_owned()]))
+            Some(&Some(vec!["crate".to_owned(), "inner".to_owned(), "Item".to_owned()]))
         );
-        assert_eq!(walk.indexes.imports.len(), 2);
+        assert_eq!(walk.indexes.imports.get("*"), Some(&None));
+        assert_eq!(walk.indexes.imports.len(), 3);
+        assert_eq!(walk.indexes.root_imports, walk.indexes.imports);
+    }
+
+    #[test]
+    fn root_imports_include_only_root_trait_shadows() {
+        let file = syn::parse_file("trait Iterator {} mod nested { trait Future {} }").expect("the trait fixture parses");
+        let selection = Selection::parse("iter").expect("the family resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::unconditional());
+
+        assert_eq!(indexes.imports.get("Iterator"), Some(&None));
+        assert_eq!(indexes.imports.get("Future"), Some(&None));
+        assert_eq!(indexes.root_imports.get("Iterator"), Some(&None));
+        assert!(!indexes.root_imports.contains_key("Future"));
     }
 
     #[test]
@@ -823,11 +1071,39 @@ mod tests {
         }
 
         assert_eq!(walk.indexes.imports.get("Thing"), Some(&None));
-        assert_eq!(walk.indexes.imports.get("module"), Some(&Some(vec!["crate".to_owned()])));
         assert_eq!(
-            walk.indexes.imports.get("Item"),
+            walk.indexes.imports.get("module"),
             Some(&Some(vec!["crate".to_owned(), "module".to_owned()]))
         );
+        assert_eq!(
+            walk.indexes.imports.get("Item"),
+            Some(&Some(vec!["crate".to_owned(), "module".to_owned(), "Item".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn import_paths_are_canonicalized_once_and_cycles_are_unknown() {
+        let imports = HashMap::from_iter([
+            ("Base".to_owned(), Some(vec!["external".to_owned(), "Item".to_owned()])),
+            ("Alias".to_owned(), Some(vec!["Base".to_owned()])),
+            ("Left".to_owned(), Some(vec!["Right".to_owned()])),
+            ("Right".to_owned(), Some(vec!["Left".to_owned()])),
+            ("local".to_owned(), Some(vec!["local".to_owned()])),
+            ("Ambiguous".to_owned(), None),
+        ]);
+        let cfg = CfgSet::unconditional();
+        let mut indexes = walk(false, true, &cfg).into_indexes();
+        indexes.imports = imports;
+        indexes.canonicalize_imports();
+
+        assert_eq!(
+            indexes.imports.get("Alias"),
+            Some(&Some(vec!["external".to_owned(), "Item".to_owned()]))
+        );
+        assert_eq!(indexes.imports.get("Left"), Some(&None));
+        assert_eq!(indexes.imports.get("Right"), Some(&None));
+        assert_eq!(indexes.imports.get("local"), Some(&Some(vec!["local".to_owned()])));
+        assert_eq!(indexes.imports.get("Ambiguous"), Some(&None));
     }
 
     #[test]

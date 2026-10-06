@@ -207,7 +207,9 @@ impl SiteIndex {
 /// token-aware source representation. Qualification, generic arguments, reference syntax, and
 /// lexical token boundaries therefore remain distinct. The preceding contract used only the final
 /// path segment and could fall back to source-order occurrence for otherwise distinct self types.
-pub const MUTANT_ID_VERSION: u32 = 5;
+/// Version 6 reserves source-order occurrence slots before confidence filtering, so withholding an
+/// optimistic site cannot renumber the surviving sites.
+pub const MUTANT_ID_VERSION: u32 = 6;
 
 /// Computes the stable, content-addressed identity of a mutant.
 ///
@@ -329,7 +331,6 @@ pub fn normalize_site_text(text: &str) -> CompactString {
         if let Some(end) = crate::parse::literal_end(text, offset) {
             if pending_space {
                 out.push(' ');
-                // #[gamma::skip(assign_value.default, reason = "`pending_space` is bool, whose `Default::default()` is exactly false")]
                 pending_space = false;
             }
 
@@ -354,7 +355,6 @@ pub fn normalize_site_text(text: &str) -> CompactString {
 
         if pending_space {
             out.push(' ');
-            // #[gamma::skip(assign_value.default, reason = "`pending_space` is bool, whose `Default::default()` is exactly false")]
             pending_space = false;
         }
 

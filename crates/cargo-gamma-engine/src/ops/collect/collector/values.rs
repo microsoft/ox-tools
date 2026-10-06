@@ -7,6 +7,7 @@ use compact_str::{CompactString, format_compact};
 use syn::{GenericArgument, PathArguments, PathSegment, ReturnType, Type, TypeParamBound};
 
 use super::types::{Types, is_abstract_type};
+use crate::ops::collect::Confidence;
 
 /// How deep the recursion through nested return types is allowed to go.
 ///
@@ -23,15 +24,35 @@ pub(super) const RETURN_DEPTH: usize = 3;
 /// of them is a separate build round's worth of test time.
 pub(super) const RETURN_WIDTH: usize = 8;
 
-type ReplacementValue = (&'static str, CompactString);
+type ReplacementValue = (&'static str, CompactString, Confidence);
 
-fn some_value((name, text): ReplacementValue) -> ReplacementValue {
+fn proven(name: &'static str, text: impl Into<CompactString>) -> ReplacementValue {
+    (name, text.into(), Confidence::Proven)
+}
+
+fn optimistic(name: &'static str, text: impl Into<CompactString>) -> ReplacementValue {
+    (name, text.into(), Confidence::Optimistic)
+}
+
+fn combined_confidence(left: Confidence, right: Confidence) -> Confidence {
+    if left == Confidence::Optimistic || right == Confidence::Optimistic {
+        Confidence::Optimistic
+    } else {
+        Confidence::Proven
+    }
+}
+
+fn some_value((name, text, confidence): ReplacementValue, outer_confidence: Confidence) -> ReplacementValue {
     let mutator = if name == "fn_value.default" {
         "fn_value.some_default"
     } else {
         "fn_value.some"
     };
-    (mutator, format_compact!("Some({text})"))
+    (
+        mutator,
+        format_compact!("Some({text})"),
+        combined_confidence(confidence, outer_confidence),
+    )
 }
 
 /// The replacement values worth trying for a function's return type.
@@ -45,7 +66,7 @@ fn some_value((name, text): ReplacementValue) -> ReplacementValue {
 /// costs one rollback round rather than losing the mutant entirely.
 pub(super) fn return_values(output: &ReturnType, types: &Types<'_>) -> Vec<ReplacementValue> {
     let ReturnType::Type(_arrow, ty) = output else {
-        return vec![("fn_value.unit", "()".into())];
+        return vec![proven("fn_value.unit", "()")];
     };
 
     values_for(ty, RETURN_DEPTH, types)
@@ -82,15 +103,29 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     if kind == Kind::Unknown && types.lacks_default(resolved) {
         return Vec::new();
     }
+    if types
+        .collection_hasher_index(resolved)
+        .and_then(|index| types.payload(resolved, index))
+        .is_some_and(|hasher| types.lacks_default(&hasher))
+    {
+        return Vec::new();
+    }
     // An alias must preserve its declared constructor shape rather than borrowing the standard
     // collection spelling of the type it resolves to.
-    if aliased && matches!(kind, Kind::Collection | Kind::Map) && !types.has_default(resolved) {
-        return Vec::new();
+    if aliased && matches!(kind, Kind::Collection | Kind::Map) && !types.has_default(resolved) && !types.lacks_default(resolved) {
+        return vec![optimistic("fn_value.default", "Default::default()")];
     }
 
     if depth == 0 {
-        return if kind != Kind::Result && (types.has_default(resolved) || kind == Kind::Unknown && !types.lacks_default(resolved)) {
-            vec![("fn_value.default", "Default::default()".into())]
+        let eligible = types.has_default(resolved)
+            || kind == Kind::Array && types.array_may_default(resolved)
+            || kind == Kind::Unknown && !types.lacks_default(resolved);
+        return if kind != Kind::Result && eligible {
+            vec![if types.has_proven_default(resolved) {
+                proven("fn_value.default", "Default::default()")
+            } else {
+                optimistic("fn_value.default", "Default::default()")
+            }]
         } else {
             Vec::new()
         };
@@ -107,21 +142,65 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // A string literal is shared, and leaking an allocation would invent ownership and
         // lifetime behavior, so `literal_values` deliberately returns nothing for `&mut str`.
         | Kind::MutStr
-        | Kind::String
-        | Kind::NonZero) => literal_values(kind, resolved),
+        | Kind::NonZero) => {
+            let confidence = if (matches!(kind, Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float)
+                && !types.supports_primitive_kind(resolved, kind))
+                || kind == Kind::NonZero && !types.supports_nonzero_api(resolved)
+            {
+                Confidence::Optimistic
+            } else {
+                Confidence::Proven
+            };
+            literal_values(kind, resolved)
+                .into_iter()
+                .map(|(name, text, nested)| (name, text, combined_confidence(nested, confidence)))
+                .collect()
+        }
+
+        Kind::String => {
+            let outer = if types.supports_string_api(resolved) {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
+            literal_values(kind, resolved)
+                .into_iter()
+                .map(|(name, text, confidence)| (name, text, combined_confidence(confidence, outer)))
+                .collect()
+        }
 
         // The empty case is universal; the one-element case needs a value to put in it, which is
         // what the recursion supplies.
         Kind::Option => {
-            let mut values = vec![("fn_value.none", "None".into())];
+            let outer_confidence = if types.supports_option_api(resolved) {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
+            let mut values = vec![(
+                "fn_value.none",
+                CompactString::new("None"),
+                outer_confidence,
+            )];
             let inner = inner_values(source, 0, depth, types);
 
             if inner.is_empty() {
-                if types.payload(source, 0).is_some_and(|inner| types.has_default(&inner)) {
-                    values.push(("fn_value.some_default", "Some(Default::default())".into()));
+                if let Some(inner) = types.payload(source, 0).filter(|inner| types.has_default(inner)) {
+                    values.push((
+                        "fn_value.some_default",
+                        CompactString::new("Some(Default::default())"),
+                        combined_confidence(
+                            if types.has_proven_default(&inner) {
+                                Confidence::Proven
+                            } else {
+                                Confidence::Optimistic
+                            },
+                            outer_confidence,
+                        ),
+                    ));
                 }
             } else {
-                values.extend(inner.into_iter().map(some_value));
+                values.extend(inner.into_iter().map(|value| some_value(value, outer_confidence)));
             }
 
             cap(values)
@@ -129,25 +208,38 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
 
         Kind::Result => {
             if fmt_result {
-                return vec![("fn_value.ok_default", "Ok(Default::default())".into())];
+                return vec![proven("fn_value.ok_default", "Ok(Default::default())")];
             }
+            let outer_confidence = if types.supports_result_api(resolved) {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
             let inner = inner_values(source, 0, depth, types);
             let mut values = if inner.is_empty() {
-                if types.payload(source, 0).is_some_and(|inner| types.has_default(&inner)) {
-                    vec![("fn_value.ok_default", "Ok(Default::default())".into())]
+                if let Some(inner) = types.payload(source, 0).filter(|inner| types.has_default(inner)) {
+                    vec![if types.has_proven_default(&inner) && outer_confidence == Confidence::Proven {
+                        proven("fn_value.ok_default", "Ok(Default::default())")
+                    } else {
+                        optimistic("fn_value.ok_default", "Ok(Default::default())")
+                    }]
                 } else {
                     Vec::new()
                 }
             } else {
                 inner
                     .into_iter()
-                    .map(|(name, text)| {
+                    .map(|(name, text, confidence)| {
                         let mutator = if name == "fn_value.default" {
                             "fn_value.ok_default"
                         } else {
                             "fn_value.ok"
                         };
-                        (mutator, format_compact!("Ok({text})"))
+                        (
+                            mutator,
+                            format_compact!("Ok({text})"),
+                            combined_confidence(confidence, outer_confidence),
+                        )
                     })
                     .collect()
             };
@@ -157,8 +249,12 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             // is whatever the alias fixed it to — almost never something with a `Default`. Offering
             // `Err(Default::default())` on a guess buys one mutant that usually cannot compile, so
             // it is offered only when the second argument is present and not abstract.
-            if types.payload(source, 1).is_some_and(|inner| types.has_default(&inner)) {
-                values.push(("fn_value.err_default", "Err(Default::default())".into()));
+            if let Some(inner) = types.payload(source, 1).filter(|inner| types.has_default(inner)) {
+                values.push(if types.has_proven_default(&inner) && outer_confidence == Confidence::Proven {
+                    proven("fn_value.err_default", "Err(Default::default())")
+                } else {
+                    optimistic("fn_value.err_default", "Err(Default::default())")
+                });
             }
 
             cap(values)
@@ -167,12 +263,24 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // Every one of these builds from an iterator of its element type, so one construction
         // covers all of them and the element values come from the recursion.
         Kind::Collection => {
-            let mut values = if aliased || types.prefers_default_constructor(resolved) {
-                vec![("fn_value.empty_collection", CompactString::new("Default::default()"))]
+            let constructor_supported = types.supports_collection_constructor(resolved);
+            let outer_confidence = if constructor_supported {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
+            let mut values = if aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
+                vec![if types.has_proven_default(resolved) {
+                    proven("fn_value.empty_collection", "Default::default()")
+                } else {
+                    optimistic("fn_value.empty_collection", "Default::default()")
+                }]
             } else if types.is_local_type(resolved) {
                 Vec::new()
+            } else if !constructor_supported {
+                vec![optimistic("fn_value.empty_collection", "Default::default()")]
             } else {
-                vec![(
+                vec![proven(
                     "fn_value.empty_collection",
                     format_compact!("{}::new()", collection_ctor(resolved)),
                 )]
@@ -181,7 +289,17 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             values.extend(
                 inner_values(source, 0, depth, types)
                     .into_iter()
-                    .map(|(_name, text)| ("fn_value.one_element", format_compact!("core::iter::once({text}).collect()"))),
+                    .map(|(_name, text, confidence)| {
+                        (
+                            "fn_value.one_element",
+                            format_compact!("core::iter::once({text}).collect()"),
+                            if confidence == Confidence::Optimistic || outer_confidence == Confidence::Optimistic {
+                                Confidence::Optimistic
+                            } else {
+                                Confidence::Proven
+                            },
+                        )
+                    }),
             );
 
             cap(values)
@@ -190,20 +308,44 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // A map's element is a pair, so its one-element form needs both parameters rather than the
         // first alone.
         Kind::Map => {
-            let empty = if aliased || types.prefers_default_constructor(resolved) {
-                CompactString::new("Default::default()")
+            let constructor_supported = types.supports_collection_constructor(resolved);
+            let outer_confidence = if constructor_supported {
+                Confidence::Proven
             } else {
-                format_compact!("{}::new()", collection_ctor(resolved))
+                Confidence::Optimistic
             };
-            let mut values = vec![("fn_value.empty_collection", empty)];
+            let mut values = if aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
+                vec![if types.has_proven_default(resolved) {
+                    proven("fn_value.empty_collection", "Default::default()")
+                } else {
+                    optimistic("fn_value.empty_collection", "Default::default()")
+                }]
+            } else if types.is_local_type(resolved) {
+                Vec::new()
+            } else if !constructor_supported {
+                vec![optimistic("fn_value.empty_collection", "Default::default()")]
+            } else {
+                vec![proven(
+                    "fn_value.empty_collection",
+                    format_compact!("{}::new()", collection_ctor(resolved)),
+                )]
+            };
 
             let keys = inner_values(source, 0, depth, types);
             let vals = inner_values(source, 1, depth, types);
 
-            if let (Some((_kn, key)), Some((_vn, value))) = (keys.first(), vals.first()) {
+            if let (Some((_kn, key, key_confidence)), Some((_vn, value, value_confidence))) = (keys.first(), vals.first()) {
                 values.push((
                     "fn_value.one_element",
                     format_compact!("core::iter::once(({key}, {value})).collect()"),
+                    if outer_confidence == Confidence::Optimistic
+                        || *key_confidence == Confidence::Optimistic
+                        || *value_confidence == Confidence::Optimistic
+                    {
+                        Confidence::Optimistic
+                    } else {
+                        Confidence::Proven
+                    },
                 ));
             }
 
@@ -213,6 +355,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // A smart pointer is transparent to the caller's reasoning, so the values worth trying are
         // its contents wrapped back up.
         Kind::Wrapper => {
+            let outer_confidence = if types.supports_wrapper_api(resolved) {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
             // Unsized string wrappers need shape-specific constructors; `Default` cannot construct
             // their unsized payload directly.
             if is_unsized_string_wrapper(resolved) {
@@ -220,10 +367,12 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
                     (
                         "fn_value.empty_string",
                         format_compact!("{}::from(\"\")", collection_ctor(resolved)),
+                        outer_confidence,
                     ),
                     (
                         "fn_value.xyzzy_string",
                         format_compact!("{}::from(\"xyzzy\")", collection_ctor(resolved)),
+                        outer_confidence,
                     ),
                 ];
             }
@@ -231,7 +380,13 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
 
             cap(inner_values(source, 0, depth, types)
                 .into_iter()
-                .map(|(name, text)| (name, format_compact!("{ctor}({text})")))
+                .map(|(name, text, confidence)| {
+                    (
+                        name,
+                        format_compact!("{ctor}({text})"),
+                        combined_confidence(confidence, outer_confidence),
+                    )
+                })
                 .collect())
         }
 
@@ -241,10 +396,21 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // type from the one the function returns whenever the author meant somebody else's.
         Kind::Cow => {
             let ctor = collection_ctor(resolved);
+            let outer_confidence = if types.supports_cow_api(resolved) {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
 
             cap(inner_values(source, 0, depth, types)
                 .into_iter()
-                .map(|(name, text)| (name, format_compact!("{ctor}::Owned({text})")))
+                .map(|(name, text, confidence)| {
+                    (
+                        name,
+                        format_compact!("{ctor}::Owned({text})"),
+                        combined_confidence(confidence, outer_confidence),
+                    )
+                })
                 .collect())
         }
 
@@ -257,25 +423,53 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // `once(v)` needs a value, so it is offered only when the signature wrote `Item = T` and
         // `T` is a type this tool can name a value of.
         Kind::Iterator => {
-            let mut values = vec![("fn_value.empty_collection", "core::iter::empty()".into())];
+            let outer_confidence = if types.supports_iterator_trait(resolved, &[]) {
+                Confidence::Proven
+            } else {
+                Confidence::Optimistic
+            };
+            let mut values = vec![(
+                "fn_value.empty_collection",
+                CompactString::new("core::iter::empty()"),
+                outer_confidence,
+            )];
 
             if let Some(item) = iterator_item(resolved) {
                 values.extend(
                     values_for(item, depth.saturating_sub(1), types)
                         .into_iter()
-                        .map(|(_name, text)| ("fn_value.one_element", format_compact!("core::iter::once({text})"))),
+                        .map(|(_name, text, confidence)| {
+                            (
+                                "fn_value.one_element",
+                                format_compact!("core::iter::once({text})"),
+                                combined_confidence(confidence, outer_confidence),
+                            )
+                        }),
                 );
             }
 
             cap(values)
         }
         Kind::Reference => reference_values(resolved, depth, types),
+        Kind::Array => {
+            if types.has_proven_default(resolved) {
+                vec![proven("fn_value.default", "Default::default()")]
+            } else if types.array_may_default(resolved) {
+                vec![optimistic("fn_value.default", "Default::default()")]
+            } else {
+                Vec::new()
+            }
+        }
 
         // Every combination of the elements' values, which is where the product bound earns its
         // keep: three fields with three values each is twenty-seven mutants for one function.
         Kind::Tuple => tuple_values(resolved, depth, types),
 
-        Kind::Unknown => vec![("fn_value.default", "Default::default()".into())],
+        Kind::Unknown => vec![if types.has_proven_default(resolved) {
+            proven("fn_value.default", "Default::default()")
+        } else {
+            optimistic("fn_value.default", "Default::default()")
+        }],
     }
 }
 
@@ -284,17 +478,17 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
 /// user has to read every one of them.
 pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<ReplacementValue> {
     let Type::Tuple(tuple) = strip(ty) else {
-        return vec![("fn_value.default", "Default::default()".into())];
+        return vec![optimistic("fn_value.default", "Default::default()")];
     };
 
-    let mut combinations: Vec<Vec<CompactString>> = vec![Vec::new()];
+    let mut combinations: Vec<(Vec<CompactString>, Confidence)> = vec![(Vec::new(), Confidence::Proven)];
 
     for element in &tuple.elems {
         let choices = values_for(element, depth.saturating_sub(1), types);
         let mut next = Vec::new();
 
-        'combinations: for existing in &combinations {
-            for (_name, text) in &choices {
+        'combinations: for (existing, existing_confidence) in &combinations {
+            for (_name, text, choice_confidence) in &choices {
                 if next.len() >= RETURN_WIDTH {
                     break 'combinations;
                 }
@@ -302,7 +496,12 @@ pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Re
                 let mut combination = existing.clone();
 
                 combination.push(text.clone());
-                next.push(combination);
+                let confidence = if *existing_confidence == Confidence::Optimistic || *choice_confidence == Confidence::Optimistic {
+                    Confidence::Optimistic
+                } else {
+                    Confidence::Proven
+                };
+                next.push((combination, confidence));
             }
         }
 
@@ -315,14 +514,14 @@ pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Re
 
     combinations
         .into_iter()
-        .map(|parts| {
+        .map(|(parts, confidence)| {
             let text = if parts.len() == 1 {
                 format_compact!("({},)", parts[0])
             } else {
                 format_compact!("({})", parts.join(", "))
             };
 
-            ("fn_value.tuple", text)
+            ("fn_value.tuple", text, confidence)
         })
         .collect()
 }
@@ -334,39 +533,39 @@ pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Re
 /// contribute nothing here, because they are handled by the caller.
 pub(super) fn literal_values(kind: Kind, ty: &Type) -> Vec<ReplacementValue> {
     match kind {
-        Kind::Unit => vec![("fn_value.unit", "()".into())],
+        Kind::Unit => vec![proven("fn_value.unit", "()")],
 
-        Kind::Bool => vec![("fn_value.bool_true", "true".into()), ("fn_value.bool_false", "false".into())],
+        Kind::Bool => vec![proven("fn_value.bool_true", "true"), proven("fn_value.bool_false", "false")],
 
         Kind::Signed => vec![
-            ("fn_value.zero", "0".into()),
-            ("fn_value.one", "1".into()),
-            ("fn_value.minus_one", "-1".into()),
+            proven("fn_value.zero", "0"),
+            proven("fn_value.one", "1"),
+            proven("fn_value.minus_one", "-1"),
         ],
 
-        Kind::Unsigned => vec![("fn_value.zero", "0".into()), ("fn_value.one", "1".into())],
+        Kind::Unsigned => vec![proven("fn_value.zero", "0"), proven("fn_value.one", "1")],
 
         Kind::Float => vec![
-            ("fn_value.zero", "0.0".into()),
-            ("fn_value.one", "1.0".into()),
-            ("fn_value.minus_one", "-1.0".into()),
+            proven("fn_value.zero", "0.0"),
+            proven("fn_value.one", "1.0"),
+            proven("fn_value.minus_one", "-1.0"),
         ],
 
         Kind::StaticStr => vec![
-            ("fn_value.empty_string", "\"\"".into()),
-            ("fn_value.xyzzy_string", "\"xyzzy\"".into()),
+            proven("fn_value.empty_string", "\"\""),
+            proven("fn_value.xyzzy_string", "\"xyzzy\""),
         ],
 
         Kind::String => vec![
-            ("fn_value.empty_string", "String::new()".into()),
-            ("fn_value.xyzzy_string", "\"xyzzy\".to_owned()".into()),
+            proven("fn_value.empty_string", "String::new()"),
+            proven("fn_value.xyzzy_string", "\"xyzzy\".to_owned()"),
         ],
 
         // A `NonZero` cannot hold the zero every other numeric type offers, so the interesting
         // values are the smallest it can hold and one that is merely different.
         Kind::NonZero => vec![
-            ("fn_value.one", format_compact!("{}::new(1).unwrap()", type_text(ty))),
-            ("fn_value.two", format_compact!("{}::new(2).unwrap()", type_text(ty))),
+            proven("fn_value.one", format_compact!("{}::new(1).unwrap()", type_text(ty))),
+            proven("fn_value.two", format_compact!("{}::new(2).unwrap()", type_text(ty))),
         ],
 
         _ => Vec::new(),
@@ -385,7 +584,7 @@ pub(super) fn reference_values(ty: &Type, _depth: usize, _types: &Types<'_>) -> 
     };
     match strip(ty) {
         Type::Reference(reference) if reference.mutability.is_none() && matches!(strip(elem), Type::Slice(_)) => {
-            vec![("fn_value.empty_collection", "&[]".into())]
+            vec![proven("fn_value.empty_collection", "&[]")]
         }
         _ => Vec::new(),
     }
@@ -555,6 +754,7 @@ pub(super) enum Kind {
     Wrapper,
     Cow,
     Iterator,
+    Array,
     Tuple,
     Reference,
     Unknown,
@@ -593,6 +793,7 @@ pub(super) fn resolve_type(ty: &Type) -> Kind {
         },
 
         Type::Tuple(_) => Kind::Tuple,
+        Type::Array(_) => Kind::Array,
 
         Type::Paren(paren) => resolve_type(&paren.elem),
 
@@ -691,8 +892,8 @@ mod tests {
 
         assert!(values_for(&foreign_error, RETURN_DEPTH, &types).is_empty());
         assert_eq!(
-            tuple_values(&plain, RETURN_DEPTH, &types),
-            vec![("fn_value.default", "Default::default()".into())]
+            texts(tuple_values(&plain, RETURN_DEPTH, &types)),
+            ["fn_value.default:Default::default()"]
         );
         assert!(literal_values(Kind::Option, &parse_quote!(Option<bool>)).is_empty());
     }
@@ -702,7 +903,7 @@ mod tests {
         let abstracts = vec![String::from("T")];
         let defaulted = vec![String::from("T")];
         let imports = HashMap::default();
-        let defaults = Defaults::default();
+        let defaults = Defaults::of(&syn::parse_file("struct NoDefault;").expect("the default fixture parses"));
         let mut aliases = HashMap::default();
         let _old = aliases.insert(
             "Set".to_owned(),
@@ -730,6 +931,149 @@ mod tests {
         assert_eq!(
             texts(values_for(&parse_quote!(Result<T, NoDefault>), RETURN_DEPTH, &types)),
             ["fn_value.ok_default:Ok(Default::default())"]
+        );
+    }
+
+    #[test]
+    fn hash_collections_with_known_bad_hashers_are_withheld_while_unresolved_hashers_remain_eligible() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::of(&syn::parse_file("struct NoDefault;").expect("the default fixture parses"));
+        let types = test_types(&abstracts, &imports, &defaults);
+
+        assert!(values_for(&parse_quote!(std::collections::HashSet<bool, NoDefault>), RETURN_DEPTH, &types).is_empty());
+        assert!(
+            values_for(
+                &parse_quote!(std::collections::HashMap<bool, bool, NoDefault>),
+                RETURN_DEPTH,
+                &types
+            )
+            .is_empty()
+        );
+        let renamed_imports = HashMap::from_iter([
+            (
+                "Set".to_owned(),
+                Some(vec!["std".to_owned(), "collections".to_owned(), "HashSet".to_owned()]),
+            ),
+            (
+                "Map".to_owned(),
+                Some(vec!["std".to_owned(), "collections".to_owned(), "HashMap".to_owned()]),
+            ),
+        ]);
+        let renamed = test_types(&abstracts, &renamed_imports, &defaults);
+        assert!(values_for(&parse_quote!(Set<bool, NoDefault>), RETURN_DEPTH, &renamed).is_empty());
+        assert!(values_for(&parse_quote!(Map<bool, bool, NoDefault>), RETURN_DEPTH, &renamed).is_empty());
+        for ty in [
+            parse_quote!(std::collections::HashSet<bool, UnknownHasher>),
+            parse_quote!(std::collections::HashMap<bool, bool, UnknownHasher>),
+            parse_quote!(dependency::HashSet<bool, NoDefault>),
+            parse_quote!(dependency::HashMap<bool, bool, NoDefault>),
+        ] {
+            assert!(
+                values_for(&ty, RETURN_DEPTH, &types)
+                    .iter()
+                    .any(|value| value.1 == "Default::default()" && value.2 == Confidence::Optimistic),
+                "{ty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_unknown_values_preserve_optimistic_confidence() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::default();
+        let types = test_types(&abstracts, &imports, &defaults);
+
+        for (ty, mutator) in [
+            (parse_quote!(Option<dependency::Value>), "fn_value.some_default"),
+            (parse_quote!(Result<dependency::Value, String>), "fn_value.ok_default"),
+            (parse_quote!(Vec<dependency::Value>), "fn_value.one_element"),
+            (parse_quote!((bool, dependency::Value)), "fn_value.tuple"),
+            (parse_quote!(dependency::Box<bool>), "fn_value.bool_true"),
+            (parse_quote!(dependency::Box<str>), "fn_value.empty_string"),
+            (parse_quote!(dependency::Cow<'static, bool>), "fn_value.bool_true"),
+        ] {
+            let values = values_for(&ty, RETURN_DEPTH, &types);
+            assert!(
+                values
+                    .iter()
+                    .filter(|(name, _text, _confidence)| *name == mutator)
+                    .all(|(_name, _text, confidence)| *confidence == Confidence::Optimistic),
+                "{ty:?}: {values:?}"
+            );
+            assert!(values.iter().any(|(name, _text, _confidence)| *name == mutator));
+        }
+    }
+
+    #[test]
+    fn positive_default_evidence_proves_unknown_values_at_every_depth() {
+        let abstracts = Vec::new();
+        let defaulted = vec![String::from("T")];
+        let imports = HashMap::default();
+        let defaults = Defaults::of(&syn::parse_file("#[derive(Default)] struct Config;").expect("the default fixture parses"));
+        let types = Types {
+            abstracts: &abstracts,
+            defaulted: &defaulted,
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+
+        for ty in [parse_quote!(Config), parse_quote!(T)] {
+            for depth in [0, RETURN_DEPTH] {
+                assert_eq!(
+                    values_for(&ty, depth, &types),
+                    vec![proven("fn_value.default", "Default::default()")]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_from_iterator_collections_keep_element_candidates_without_empty_constructors() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::of(
+            &syn::parse_file(
+                "struct Vec<T>(T);
+                 impl<T> FromIterator<T> for Vec<T> {
+                     fn from_iter<I: IntoIterator<Item = T>>(_items: I) -> Self { unreachable!() }
+                 }
+                 struct HashMap<K, V>(K, V);
+                 impl<K, V> FromIterator<(K, V)> for HashMap<K, V> {
+                     fn from_iter<I: IntoIterator<Item = (K, V)>>(_items: I) -> Self { unreachable!() }
+                 }",
+            )
+            .expect("the local collection fixture parses"),
+        );
+        let types = test_types(&abstracts, &imports, &defaults);
+
+        assert_eq!(
+            texts(values_for(&parse_quote!(Vec<bool>), RETURN_DEPTH, &types)),
+            [
+                "fn_value.one_element:core::iter::once(true).collect()",
+                "fn_value.one_element:core::iter::once(false).collect()",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(HashMap<bool, bool>), RETURN_DEPTH, &types)),
+            ["fn_value.one_element:core::iter::once((true, true)).collect()"]
+        );
+    }
+
+    #[test]
+    fn unresolved_array_lengths_remain_optimistic() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::default();
+        let types = test_types(&abstracts, &imports, &defaults);
+
+        assert_eq!(
+            values_for(&parse_quote!([bool; LENGTH]), RETURN_DEPTH, &types),
+            vec![optimistic("fn_value.default", "Default::default()")]
         );
     }
 
@@ -842,7 +1186,10 @@ mod tests {
     }
 
     fn texts(values: Vec<ReplacementValue>) -> Vec<String> {
-        values.into_iter().map(|(name, text)| format!("{name}:{text}")).collect()
+        values
+            .into_iter()
+            .map(|(name, text, _confidence)| format!("{name}:{text}"))
+            .collect()
     }
 
     #[test]
@@ -886,6 +1233,32 @@ mod tests {
             ]
         );
         assert_eq!(
+            texts(values_for(
+                &parse_quote!(Option<Option<Option<std::collections::hash_map::HashMap<u8, u8>>>>),
+                RETURN_DEPTH,
+                &types
+            )),
+            [
+                "fn_value.none:None",
+                "fn_value.some:Some(None)",
+                "fn_value.some:Some(Some(None))",
+                "fn_value.some:Some(Some(Some(Default::default())))",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(
+                &parse_quote!(Option<Option<Option<[bool; LENGTH]>>>),
+                RETURN_DEPTH,
+                &types
+            )),
+            [
+                "fn_value.none:None",
+                "fn_value.some:Some(None)",
+                "fn_value.some:Some(Some(None))",
+                "fn_value.some:Some(Some(Some(Default::default())))",
+            ]
+        );
+        assert_eq!(
             texts(values_for(&parse_quote!(Box<bool>), RETURN_DEPTH, &types)),
             ["fn_value.bool_true:Box::new(true)", "fn_value.bool_false:Box::new(false)"]
         );
@@ -909,6 +1282,25 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_iterators_and_unsupported_arrays_stay_conservative() {
+        let abstracts = Vec::new();
+        let imports = HashMap::from_iter([("Iterator".to_owned(), Some(vec!["dependency".to_owned(), "Iterator".to_owned()]))]);
+        let defaults = Defaults::default();
+        let types = test_types(&abstracts, &imports, &defaults);
+        let iterator = values_for(&parse_quote!(impl Iterator<Item = bool>), RETURN_DEPTH, &types);
+
+        assert!(iterator.iter().all(|value| value.2 == Confidence::Optimistic));
+        assert!(values_for(&parse_quote!([std::num::NonZeroU8; 1]), RETURN_DEPTH, &types).is_empty());
+        for depth in [0, RETURN_DEPTH] {
+            assert_eq!(
+                values_for(&parse_quote!([dependency::Box<bool>; 1]), depth, &types),
+                vec![optimistic("fn_value.default", "Default::default()")]
+            );
+        }
+        assert!(type_argument_values(&parse_quote!(impl Send)).is_empty());
+    }
+
+    #[test]
     fn tuple_width_and_type_helpers_have_exact_boundaries() {
         let abstracts = Vec::new();
         let imports = HashMap::default();
@@ -918,9 +1310,15 @@ mod tests {
         let values = tuple_values(&tuple, RETURN_DEPTH, &types);
 
         assert_eq!(values.len(), RETURN_WIDTH);
-        assert_eq!(values.first().map(|(_, text)| text.as_str()), Some("(true, true, true, true)"));
-        assert_eq!(values.last().map(|(_, text)| text.as_str()), Some("(true, false, false, false)"));
-        assert_eq!(cap(vec![("x", "x".into()); RETURN_WIDTH + 1]).len(), RETURN_WIDTH);
+        assert_eq!(
+            values.first().map(|(_, text, _confidence)| text.as_str()),
+            Some("(true, true, true, true)")
+        );
+        assert_eq!(
+            values.last().map(|(_, text, _confidence)| text.as_str()),
+            Some("(true, false, false, false)")
+        );
+        assert_eq!(cap(vec![proven("x", "x"); RETURN_WIDTH + 1]).len(), RETURN_WIDTH);
 
         let qualified: Type = parse_quote!(std::collections::VecDeque<bool>);
         assert_eq!(type_text(&qualified), "std::collections::VecDeque");

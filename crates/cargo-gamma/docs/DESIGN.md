@@ -113,7 +113,12 @@ document only their applicable selection and output controls; bare `list` remain
 
 The engine discovers mutation sites, evaluates source-level suppression, gives sites stable
 identities, and emits instrumented source. It is deterministic for a given source and mutation
-selection. It does not know about Cargo processes, test verdicts, timeouts, or reports.
+selection. Each candidate records whether source-visible evidence proves the replacement,
+whether it is an unresolved optimistic guess, or whether the user explicitly supplied it. The
+classification is diagnostic evidence rather than an automatic filter. The ordinary default
+withholds only measured noisy optimistic site classes; a non-default selector that includes the
+applicable mutator admits them. It does not know about Cargo processes, test verdicts, timeouts,
+or reports.
 
 ### Scratch workspace and Cargo
 
@@ -419,12 +424,14 @@ have no generated replacement text, so containment and gated flow-sensitive attr
 valid evidence for them. Within one compiler batch, exact generated-text attribution takes
 precedence over deletion fallbacks so follow-on diagnostics cannot withdraw neighboring mutants;
 any independent failure is exposed by the next rollback round. Isolation admits at most 4,096
-candidates and performs at most 32 proof checks for one failing target. Across the campaign it
-examines at most 64 diagnostic contexts and launches at most 256 proof checks. The first two limits
-cover binary narrowing of a 4,096-candidate target with interaction work left over; the aggregate
-limits admit a broad multi-crate failure wave while placing a strict ceiling on contributor-shaped
-Cargo process multiplication. Contexts left after either aggregate limit are reported as
-`notbuilt`, with the unresolved target named. These values may be raised only from deterministic
+candidates and performs at most 32 proof checks for one failing target. One Cargo convergence
+invocation examines at most 64 diagnostic contexts and therefore launches at most 2,048 proof
+checks. The candidate and per-context proof limits cover binary narrowing of a 4,096-candidate
+target with interaction work left over. The invocation-wide proof ceiling is derived from the
+context and local-proof limits so every admitted context can use its complete allowance; contexts
+with larger dependency cones run first so diagnostic order cannot strand most of the population.
+Contexts left after either invocation-wide limit are reported as `notbuilt`, with the unresolved
+target named. These values may be raised only from deterministic
 candidate, context, and invocation counts from representative campaigns, not from host-specific
 wall-clock samples. Isolation never falls back to workspace-wide isolation. Proof builds preserve
 the failed invocation's selected package roots and therefore its Cargo feature-unification graph;
@@ -513,9 +520,14 @@ source-authored text. Exact compiler-withdrawn mutant records, including their s
 and replacements, remain in the local completed or incomplete campaign record rather than in the
 shareable diagnostics bundle. Absent replacement-site evidence in a legacy bundle remains unknown
 rather than being interpreted as an observed non-replacement span. Build rounds attribute newly
-withdrawn mutants to packages while retaining the round's
-actual workspace-wide elapsed time; they do not invent per-package build durations. Census
-telemetry records candidate binaries and sites, listing attempts and successes, the estimated walk
+withdrawn mutants to packages while retaining the round's actual workspace-wide elapsed time;
+they do not invent per-package build durations. Mutator, package, and confidence breakdowns report
+generated and viable populations,
+kills, survivors, compiler-confirmed unviability, CPU time, and distinct killing tests observed
+only in that group. Killing-test identity includes the package, Cargo target kind and name, and
+harness test name, so equal test names in different binaries remain distinct. This additional detail is
+diagnostic-file-only and does not add console output or campaign phases. Census telemetry records candidate binaries and sites, listing attempts
+and successes, the estimated walk
 cost and economic-gate decision, sample launches, and complete versus partial evidence. Sweep
 telemetry records whole, case-selected, hinted-fallback, and uncovered
 decisions; named tests available and selected; exact and generalized candidate/probe/hit funnels
@@ -966,6 +978,11 @@ whole population. A mutant ID instead derives from stable semantic context, incl
 - occurrence and `replacement_index` where needed to distinguish repeated forms.
 
 Comments and insignificant inter-token whitespace do not move an identity; literal contents do.
+Occurrence positions are reserved before confidence-based default selection, so a site present in
+both default and explicit populations keeps the same identity when an earlier optimistic site is
+withheld from the default population.
+Identity scheme 6 assigns those reservations in source order. Reports stamped with an earlier
+scheme are incompatible and cannot contribute persisted verdicts to the current population.
 The digest is rendered as twelve hex characters. The identity joins reports, shards, suppressions,
 SARIF findings, and incremental records.
 

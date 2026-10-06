@@ -141,6 +141,10 @@ pub struct Bundle {
     /// axis in the whole document.
     pub mutators: Vec<Breakdown>,
 
+    /// Outcomes grouped by source-evidence confidence.
+    #[serde(default)]
+    pub confidence: Vec<Breakdown>,
+
     /// What each package cost, most expensive first.
     pub packages: Vec<Breakdown>,
 }
@@ -642,8 +646,19 @@ pub struct Breakdown {
 
     pub mutants: usize,
     pub cpu_ms: u64,
+    #[serde(default)]
+    pub viable: usize,
+    #[serde(default)]
+    pub killed: usize,
     pub survivors: usize,
     pub unviable: usize,
+
+    /// Distinct killing tests observed only in this group.
+    ///
+    /// This is evidence that the group exercises behavior no other group made the same test
+    /// reject. It is deliberately a test count, not a claim that any mutant is semantically unique.
+    #[serde(default)]
+    pub unique_killers: usize,
 }
 
 /// Everything the bundle needs that is not on the plan or the session.
@@ -687,6 +702,7 @@ pub fn bundle(plan: &Plan, session: Option<&Session>, context: &Context<'_>) -> 
     let wall_ms = millis(context.wall);
     let fixed_ms = millis(fixed);
     let testing_ms = wall_ms.saturating_sub(fixed_ms);
+    let breakdowns = breakdowns(&plan.mutants, context.redaction);
 
     Bundle {
         schema_version: SCHEMA_VERSION.to_owned(),
@@ -748,8 +764,9 @@ pub fn bundle(plan: &Plan, session: Option<&Session>, context: &Context<'_>) -> 
         phases: session.map(|session| phases_of(session, context.redaction)),
         durations: durations_of(&plan.mutants),
         binaries: session.map(|session| binaries_of(session, context.redaction)).unwrap_or_default(),
-        mutators: breakdown(&plan.mutants, Redaction::Names, |mutant| mutant.mutator.to_string()),
-        packages: breakdown(&plan.mutants, context.redaction, |mutant| mutant.package.to_string()),
+        mutators: breakdowns.mutators,
+        confidence: breakdowns.confidence,
+        packages: breakdowns.packages,
     }
 }
 
@@ -986,41 +1003,126 @@ fn durations_of(mutants: &[Mutant]) -> Option<Durations> {
     })
 }
 
-/// One ranked breakdown of the population, most expensive first.
-// #[gamma::skip(all, reason = "breakdown counts, ranking, and redaction are asserted as one deterministic artifact contract")]
-fn breakdown(mutants: &[Mutant], redaction: Redaction, key: impl Fn(&Mutant) -> String) -> Vec<Breakdown> {
-    let mut buckets: crate::HashMap<String, Breakdown> = crate::HashMap::default();
+struct BreakdownDimensions {
+    mutators: Vec<Breakdown>,
+    confidence: Vec<Breakdown>,
+    packages: Vec<Breakdown>,
+}
 
-    for mutant in mutants {
-        let entry = buckets.entry(key(mutant)).or_insert_with(|| Breakdown {
+#[derive(Default)]
+struct BreakdownAccumulator<'a> {
+    buckets: crate::HashMap<&'a str, Breakdown>,
+    killer_groups: crate::HashMap<KillerKey<'a>, crate::HashSet<&'a str>>,
+    killer_forms: crate::HashMap<&'a str, u8>,
+}
+
+impl<'a> BreakdownAccumulator<'a> {
+    fn add(&mut self, mutant: &'a Mutant, group: &'a str) {
+        if let Some(killer) = KillerKey::of(mutant) {
+            let form = if matches!(killer, KillerKey::Full { .. }) { 1 } else { 2 };
+            *self.killer_forms.entry(killer.test()).or_default() |= form;
+            let _ = self.killer_groups.entry(killer).or_default().insert(group);
+        }
+        let entry = self.buckets.entry(group).or_insert_with(|| Breakdown {
             name: None,
             mutants: 0,
             cpu_ms: 0,
+            viable: 0,
+            killed: 0,
             survivors: 0,
             unviable: 0,
+            unique_killers: 0,
         });
 
         entry.mutants += 1;
         entry.cpu_ms = entry.cpu_ms.saturating_add(mutant.elapsed_ms);
+        if !matches!(
+            mutant.outcome,
+            Outcome::CompileError | Outcome::Ignored | Outcome::NotBuilt | Outcome::Pending
+        ) {
+            entry.viable += 1;
+        }
 
         match mutant.outcome {
+            Outcome::Killed => entry.killed += 1,
             Outcome::Survived => entry.survivors += 1,
             Outcome::CompileError => entry.unviable += 1,
             _other => {}
         }
     }
 
-    let mut rows: Vec<(String, Breakdown)> = buckets.into_iter().collect();
+    fn finish(mut self, redaction: Redaction) -> Vec<Breakdown> {
+        for groups in self
+            .killer_groups
+            .iter()
+            .filter_map(|(killer, groups)| (groups.len() == 1 && self.killer_forms.get(killer.test()) != Some(&3)).then_some(groups))
+        {
+            if let Some(group) = groups.iter().next()
+                && let Some(entry) = self.buckets.get_mut(group)
+            {
+                entry.unique_killers += 1;
+            }
+        }
 
-    rows.sort_by(|(left_name, left), (right_name, right)| right.cpu_ms.cmp(&left.cpu_ms).then_with(|| left_name.cmp(right_name)));
+        let mut rows: Vec<(&str, Breakdown)> = self.buckets.into_iter().collect();
 
-    rows.into_iter()
-        .take(TOP)
-        .map(|(name, row)| Breakdown {
-            name: redaction.apply(&name),
-            ..row
-        })
-        .collect()
+        rows.sort_by(|(left_name, left), (right_name, right)| right.cpu_ms.cmp(&left.cpu_ms).then_with(|| left_name.cmp(right_name)));
+
+        rows.into_iter()
+            .take(TOP)
+            .map(|(name, row)| Breakdown {
+                name: redaction.apply(name),
+                ..row
+            })
+            .collect()
+    }
+}
+
+/// All ranked population breakdowns, accumulated in one population pass.
+// #[gamma::skip(all, reason = "breakdown counts, ranking, and redaction are asserted as one deterministic artifact contract")]
+fn breakdowns(mutants: &[Mutant], package_redaction: Redaction) -> BreakdownDimensions {
+    let mut mutators = BreakdownAccumulator::default();
+    let mut confidence = BreakdownAccumulator::default();
+    let mut packages = BreakdownAccumulator::default();
+
+    for mutant in mutants {
+        mutators.add(mutant, &mutant.mutator);
+        confidence.add(mutant, mutant.confidence.as_str());
+        packages.add(mutant, &mutant.package);
+    }
+
+    BreakdownDimensions {
+        mutators: mutators.finish(Redaction::Names),
+        confidence: confidence.finish(Redaction::Names),
+        packages: packages.finish(package_redaction),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum KillerKey<'a> {
+    Full { package: &'a str, target: &'a str, test: &'a str },
+    Legacy(&'a str),
+}
+
+impl<'a> KillerKey<'a> {
+    fn of(mutant: &'a Mutant) -> Option<Self> {
+        mutant.killer.as_ref().map_or_else(
+            || mutant.killed_by.as_deref().map(Self::Legacy),
+            |killer| {
+                Some(Self::Full {
+                    package: &killer.package,
+                    target: &killer.target,
+                    test: &killer.test,
+                })
+            },
+        )
+    }
+
+    fn test(self) -> &'a str {
+        match self {
+            Self::Full { test, .. } | Self::Legacy(test) => test,
+        }
+    }
 }
 
 /// CPU over the testing window, to one decimal place.
@@ -1071,6 +1173,32 @@ mod tests {
         assert!(withdrawal.category.is_empty());
         assert_eq!(withdrawal.replacement_site, None);
         assert_eq!(withdrawal.mutants, 3);
+    }
+
+    #[test]
+    fn legacy_breakdown_fields_use_compatible_defaults() {
+        let mut value = serde_json::to_value(bundle(&plan(), None, &context())).expect("serialized bundle");
+        let document = value.as_object_mut().expect("bundle is an object");
+        let _confidence = document.remove("confidence");
+        for dimension in ["mutators", "packages"] {
+            for row in document
+                .get_mut(dimension)
+                .and_then(serde_json::Value::as_array_mut)
+                .expect("breakdown dimension is an array")
+            {
+                let row = row.as_object_mut().expect("breakdown row is an object");
+                let _viable = row.remove("viable");
+                let _killed = row.remove("killed");
+                let _unique_killers = row.remove("uniqueKillers");
+            }
+        }
+
+        let legacy: Bundle = serde_json::from_value(value).expect("legacy schema-5 bundle remains readable");
+
+        assert!(legacy.confidence.is_empty());
+        for row in legacy.mutators.iter().chain(&legacy.packages) {
+            assert_eq!((row.viable, row.killed, row.unique_killers), (0, 0, 0));
+        }
     }
 
     fn context() -> Context<'static> {
@@ -1689,7 +1817,7 @@ mod tests {
             })
             .collect();
 
-        let rows = breakdown(&mutants, Redaction::Names, |mutant| mutant.package.to_string());
+        let rows = breakdowns(&mutants, Redaction::Names).packages;
         assert_eq!(rows.len(), TOP);
         assert_eq!(rows.first().and_then(|row| row.name.as_deref()), Some("package-21"));
         assert_eq!(rows.last().and_then(|row| row.name.as_deref()), Some("package-2"));
@@ -1724,6 +1852,122 @@ mod tests {
 
         assert_eq!(built.mutators[0].name.as_deref(), Some("relational.lt_to_le"));
         assert_eq!(built.mutators[0].cpu_ms, 900);
+    }
+
+    #[test]
+    fn confidence_breakdown_reconciles_outcomes_and_counts_exclusive_killers() {
+        let mut plan = plan();
+        let mut proven_unique = mutant("subject", "arith.add_to_sub");
+        proven_unique.confidence = cargo_gamma_engine::ops::collect::Confidence::Proven;
+        proven_unique.outcome = Outcome::Killed;
+        proven_unique.killed_by = Some("same_name".to_owned());
+        proven_unique.killer = Some(crate::model::KillerIdentity {
+            package: "subject".to_owned(),
+            target: "lib:shared".to_owned(),
+            test: "same_name".to_owned(),
+        });
+
+        let mut proven_shared = mutant("subject", "arith.add_to_sub");
+        proven_shared.confidence = cargo_gamma_engine::ops::collect::Confidence::Proven;
+        proven_shared.outcome = Outcome::Killed;
+        proven_shared.killed_by = Some("shared".to_owned());
+
+        let mut optimistic_shared = mutant("subject", "literal.int_decrement");
+        optimistic_shared.confidence = cargo_gamma_engine::ops::collect::Confidence::Optimistic;
+        optimistic_shared.outcome = Outcome::Killed;
+        optimistic_shared.killed_by = Some("shared".to_owned());
+
+        let mut optimistic_unique = mutant("subject", "literal.int_decrement");
+        optimistic_unique.confidence = cargo_gamma_engine::ops::collect::Confidence::Optimistic;
+        optimistic_unique.outcome = Outcome::Killed;
+        optimistic_unique.killed_by = Some("same_name".to_owned());
+        optimistic_unique.killer = Some(crate::model::KillerIdentity {
+            package: "subject".to_owned(),
+            target: "bin:shared".to_owned(),
+            test: "same_name".to_owned(),
+        });
+
+        let mut explicit_unique = mutant("subject", "fn_value.stated");
+        explicit_unique.confidence = cargo_gamma_engine::ops::collect::Confidence::Explicit;
+        explicit_unique.outcome = Outcome::Killed;
+        explicit_unique.killed_by = Some("explicit".to_owned());
+
+        let mut optimistic_unviable = mutant("subject", "literal.int_decrement");
+        optimistic_unviable.confidence = cargo_gamma_engine::ops::collect::Confidence::Optimistic;
+        optimistic_unviable.outcome = Outcome::CompileError;
+        plan.mutants = vec![
+            proven_unique,
+            proven_shared,
+            optimistic_shared,
+            optimistic_unique,
+            optimistic_unviable,
+            explicit_unique,
+        ];
+
+        let built = bundle(&plan, None, &context());
+        let proven = built
+            .confidence
+            .iter()
+            .find(|row| row.name.as_deref() == Some("proven"))
+            .expect("proven confidence row");
+        let optimistic = built
+            .confidence
+            .iter()
+            .find(|row| row.name.as_deref() == Some("optimistic"))
+            .expect("optimistic confidence row");
+        let explicit = built
+            .confidence
+            .iter()
+            .find(|row| row.name.as_deref() == Some("explicit"))
+            .expect("explicit confidence row");
+
+        assert_eq!((proven.mutants, proven.viable, proven.killed, proven.unviable), (2, 2, 2, 0));
+        assert_eq!(proven.unique_killers, 1);
+        assert_eq!(
+            (optimistic.mutants, optimistic.viable, optimistic.killed, optimistic.unviable),
+            (3, 2, 2, 1)
+        );
+        assert_eq!(optimistic.unique_killers, 1);
+        assert_eq!((explicit.mutants, explicit.viable, explicit.killed), (1, 1, 1));
+        assert_eq!(explicit.unique_killers, 1);
+    }
+
+    #[test]
+    fn flaky_mutants_are_viable_but_remain_outside_scoring() {
+        let mut flaky = mutant("subject", "arith.add_to_sub");
+        flaky.outcome = Outcome::Flaky;
+        assert!(!flaky.outcome.is_valid());
+
+        let mut accumulator = BreakdownAccumulator::default();
+        accumulator.add(&flaky, "group");
+        let rows = accumulator.finish(Redaction::Names);
+
+        assert_eq!(rows[0].viable, 1);
+        assert_eq!(rows[0].killed, 0);
+        assert_eq!(rows[0].survivors, 0);
+        assert_eq!(rows[0].unviable, 0);
+    }
+
+    #[test]
+    fn mixed_legacy_and_full_killers_are_not_claimed_as_exclusive() {
+        let mut full = mutant("subject", "arith.add_to_sub");
+        full.outcome = Outcome::Killed;
+        full.killed_by = Some("tests::caught".to_owned());
+        full.killer = Some(crate::model::KillerIdentity {
+            package: "subject".to_owned(),
+            target: "lib:subject".to_owned(),
+            test: "tests::caught".to_owned(),
+        });
+        let mut legacy = mutant("subject", "literal.int_decrement");
+        legacy.outcome = Outcome::Killed;
+        legacy.killed_by = Some("tests::caught".to_owned());
+
+        let mut accumulator = BreakdownAccumulator::default();
+        accumulator.add(&full, "full");
+        accumulator.add(&legacy, "legacy");
+        let rows = accumulator.finish(Redaction::Names);
+
+        assert!(rows.iter().all(|row| row.unique_killers == 0), "{rows:?}");
     }
 
     fn mutant(package: &str, mutator: &str) -> Mutant {

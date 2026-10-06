@@ -515,12 +515,10 @@ pub(super) fn drained(handle: Option<JoinHandle<Pipe>>, deadline: Instant) -> Op
     };
 
     while !handle.is_finished() {
-        // #[gamma::skip(relational.ge_to_gt, reason = "Instant equality cannot be held across clock reads; expiration occurs on this poll or the immediately following poll")]
         if Instant::now() >= deadline {
             return None;
         }
 
-        // #[gamma::skip(stmt.delete_call, reason = "the sleep only yields CPU while waiting for the same completion state and deadline")]
         thread::sleep(BUILD_POLL_INTERVAL);
     }
 

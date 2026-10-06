@@ -191,9 +191,14 @@ Structured compiler messages carry package, target, diagnostic, and primary
 span context. Direct generated-text blame withdraws a mutant immediately.
 Otherwise isolation considers diagnostic-file mutants, then the failing
 package, then its transitive dependency cone; checks only the failing target;
-and admits at most 4,096 candidates and 32 proof checks per target. A campaign additionally admits
-at most 64 diagnostic contexts and 256 proof checks in total; unresolved contexts become
-`notbuilt` rather than extending compiler work without bound. Independent
+and admits at most 4,096 candidates and 32 proof checks per target. Each Cargo convergence
+invocation additionally admits at most 64 diagnostic contexts and therefore at most 2,048 proof
+checks in total. The total is derived from those two local bounds so every admitted context can use
+its complete allowance and one target cannot exhaust the isolation budget needed by a later target;
+only contexts with a nonempty tier inside the candidate limit consume a context slot. Contexts with
+the largest dependency cones are investigated first so Cargo's diagnostic order cannot spend the
+shared ceiling on small targets and strand most of the population. Unresolved
+contexts become `notbuilt` rather than extending compiler work without bound. Independent
 failing targets are isolated in one global round. A minimal interaction group
 excludes one deterministic member as `notbuilt` rather than calling any member
 individually unviable. Proofs activate exactly their requested subset and restore every unrelated
@@ -255,7 +260,7 @@ incremental records are read under a 256 MiB bound. An oversized diff is a
 usage error, while oversized optimization artifacts are ignored under the same
 fail-open contract as corrupt or foreign-version artifacts.
 
-Checked-in hints use grouped YAML schema version 3. `cargo gamma hints` reads
+Checked-in hints use grouped YAML schema version 4. `cargo gamma hints` reads
 the persisted campaign record directly: after resolving and validating the
 current workspace identity, it performs no source walk, parse, or mutation
 discovery, and therefore accepts no mutant selection flags: it promotes the
@@ -275,27 +280,31 @@ knowledge inherited from scopes outside that campaign. Promotion holds the
 workspace lock across a second campaign-locator resolution, campaign-record
 selection, artifact publication, and verification, so a
 concurrently completing campaign cannot be followed by hints derived from the
-record it replaced. Version-10 campaign
-records persist workspace-relative paths for exact identities. Unsupported
+record it replaced. Version-12 campaign
+records persist workspace-relative paths for exact identities and keep ambiguous
+grouped-probe guesses in score-neutral scheduling hints rather than observed
+killer identities. Unsupported
 campaign-record versions are discarded for automatic reuse and rejected by
 state-consuming commands. The hints context
 contains only the generating HEAD commit and UTC date because hints are
 revalidated scheduling advice, not context-gated evidence. The independently
-versioned generalized schema is version 2. It distinguishes seed observations
+versioned generalized schema is version 3. It distinguishes seed observations
 from cross-mutant transfer hits and misses, interns repeated killing-test and
 binary identities, and persists stable reach sites with the engine-owned site
-digest rather than normalized source text. Version-1 generalized hints are
-migrated to version 2 when decoded: seed counts are retained with a minimum of
-one, while hit, miss, measured-time, and sample counters are reset because their
-version-1 meanings are not comparable. Other generalized schema versions remain
-unsupported. Promotion output reports only records added, updated, removed,
-and preserved; aggregate hint and mutant counts remain available from the
-artifact rather than being repeated in the command status line.
+digest rather than normalized source text. Version-1 generalized hints migrate
+with normalized seeds and reset observations because their meanings are not
+comparable; version-2 observations are preserved. Other generalized schema
+versions remain unsupported. Promotion output reports only records added,
+updated, removed, and preserved; aggregate hint and mutant counts remain
+available from the artifact rather than being repeated in the command status
+line.
 
-Campaign records use schema version 10 and contain a complete outcome ledger:
+Campaign records use schema version 12 and contain a complete outcome ledger:
 stable mutant ID, outcome, workspace-relative file, mutator, source-site
 identity and location, replacement identity, existing suppression state, and
-the discovered file digest. Incremental execution still reuses only compiler
+the discovered file digest. A killing test is recorded in that ledger only when
+the harness names it or a single-test selection proves it; ambiguous grouped
+failures remain scheduling hints. Incremental execution still reuses only compiler
 unviability. `cargo gamma suppress` normally resolves the persisted ledger
 after using Cargo metadata to validate the current workspace identity. It
 performs no workspace synchronization, builds, baselines, or tests. Explicit

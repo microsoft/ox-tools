@@ -12,6 +12,7 @@ const ERR_WITH: &str = "fn_value.err_with";
 pub struct Selection {
     names: HashSet<&'static str>,
     errors: Vec<String>,
+    optimistic: HashSet<&'static str>,
 }
 
 impl Selection {
@@ -21,6 +22,7 @@ impl Selection {
         Self {
             names: REGISTRY.iter().filter(|m| m.default_on).map(|m| m.name).collect(),
             errors: Vec::new(),
+            optimistic: HashSet::default(),
         }
     }
 
@@ -30,6 +32,7 @@ impl Selection {
         Self {
             names: REGISTRY.iter().map(|m| m.name).collect(),
             errors: Vec::new(),
+            optimistic: REGISTRY.iter().map(|m| m.name).collect(),
         }
     }
 
@@ -70,6 +73,12 @@ impl Selection {
         self.names.contains(name)
     }
 
+    /// Returns whether unresolved semantic guesses were explicitly requested.
+    #[must_use]
+    pub fn includes_optimistic(&self, name: &str) -> bool {
+        self.optimistic.contains(name)
+    }
+
     /// Returns whether any mutator of a family is selected.
     ///
     /// A family is the part of a name before the dot. Asked by the collector, which builds some of
@@ -92,9 +101,12 @@ impl Selection {
     }
 
     /// Adds every mutator matched by one selector.
-    fn add(&mut self, selector: &str) -> Result<()> {
+    fn add(&mut self, selector: &str, admit_optimistic: bool) -> Result<()> {
         for name in resolve(selector)? {
             let _ = self.names.insert(name);
+            if admit_optimistic {
+                let _ = self.optimistic.insert(name);
+            }
         }
 
         Ok(())
@@ -104,6 +116,7 @@ impl Selection {
     fn remove(&mut self, selector: &str) -> Result<()> {
         for name in resolve(selector)? {
             let _ = self.names.remove(name);
+            let _ = self.optimistic.remove(name);
         }
 
         Ok(())
@@ -126,7 +139,7 @@ impl Selection {
             if let Some(rest) = selector.strip_prefix('!') {
                 self.remove(rest.trim())?;
             } else {
-                self.add(selector)?;
+                self.add(selector, selector != "@default" && selector != "default")?;
             }
         }
 
@@ -190,6 +203,24 @@ mod tests {
         for name in all.sorted() {
             assert!(combined.contains(name), "{name} is not reachable through a shipped preset");
         }
+    }
+
+    #[test]
+    fn only_explicit_selection_admits_optimistic_candidates() {
+        assert!(!Selection::default_preset().includes_optimistic("literal.int_decrement"));
+        assert!(!Selection::parse("@default").unwrap().includes_optimistic("literal.int_decrement"));
+        assert!(
+            Selection::parse("literal.int_decrement")
+                .unwrap()
+                .includes_optimistic("literal.int_decrement")
+        );
+        assert!(
+            !Selection::parse("literal.int_decrement")
+                .unwrap()
+                .includes_optimistic("fn_value.default")
+        );
+        assert!(Selection::parse("@all").unwrap().includes_optimistic("literal.int_decrement"));
+        assert!(Selection::everything().includes_optimistic("literal.int_decrement"));
     }
 
     #[test]

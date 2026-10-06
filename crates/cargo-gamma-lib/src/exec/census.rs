@@ -396,7 +396,7 @@ impl Census {
                         .filter_map(|index| reach.names.get(index))
                         .map(|name| Killer {
                             package: binary.package.clone(),
-                            target: binary.target.clone(),
+                            target: binary.killer_target(),
                             test: name.to_string(),
                         }),
                 );
@@ -765,7 +765,6 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
             Err(cause) if cause.kind() == std::io::ErrorKind::Interrupted => {}
 
             Err(_truncated) => {
-                // #[gamma::skip(assign_value.default, reason = "false is the default bool value, so the replacement is identical")]
                 whole = false;
 
                 // #[gamma::skip(all, reason = "retrying a terminal pipe error spins forever because the same broken reader cannot recover")]
@@ -855,7 +854,6 @@ fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRe
             let _sent = failed.send((Vec::new(), false));
         }
     });
-    // #[gamma::skip(stmt.delete_call, reason = "retaining the coordinator sender prevents channel disconnection and holds a completed listing until its deadline")]
     drop(sender);
 
     let deadline = Instant::now() + budget;
@@ -1721,6 +1719,7 @@ mod tests {
             package: "p".to_owned(),
             package_id: String::new(),
             target: "t".to_owned(),
+            target_kind: String::new(),
             manifest_dir: Utf8PathBuf::new(),
             linked_sources: None,
             libtest: Some(true),

@@ -42,6 +42,22 @@ covers how to turn one off for a particular site.
 The default preset contains the main catalog. Valid mutations with evidence of low yield are kept
 in the opt-in `@pedantic` preset so ordinary runs do not pay for them without asking.
 
+Ordinary runs also skip a few forms that frequently fail to compile when the source does not reveal
+enough type information:
+
+* `literal.int_decrement` does not change an unsuffixed `0` to `-1` unless the surrounding source
+  shows that the value is signed. It still applies in signed contexts and stays out of unsigned
+  contexts. The separate `literal.int_increment` mutation still changes `0` to `1`.
+* `expr.increment` and `expr.decrement` do not change an expression solely because it appears in a
+  use that could accept several different kinds of value. Function items and numeric wrappers that
+  do not support arithmetic with `1` are treated the same way.
+* `iter.remove_filter` applies by default only when the source identifies the receiver as an
+  iterator. A same-named method on an unresolved type is not assumed to be `Iterator::filter`.
+
+A non-default selector that includes one of these mutators — its name, family, another preset, or
+`all` — also includes the skipped forms. This lets focused investigations trade more compile
+failures for a wider candidate set without making ordinary campaigns pay that cost.
+
 A selector is a mutator name, a family prefix, a [preset](#mutator-presets), or an academic alias. `!`
 removes from the set, and selectors apply left to right:
 
@@ -144,8 +160,11 @@ returning `impl Iterator` is the exception: the schema wraps original and replac
 its shared `Either` type, as described below. When a workspace-defined type shadows a standard
 collection name and positively implements `Default`, its empty replacement uses that proved default
 rather than assuming the shadow also provides the standard type's `new` constructor.
-Here, a **resolved workspace Default type** is a workspace type whose direct declarations establish
-`Default`; an **unresolved concrete type or alias** has no such positive evidence.
+Gamma keeps this evidence separate per package and applies it to unambiguous unqualified names, so
+an unrelated same-named type elsewhere in the workspace cannot change the decision. Qualified
+local paths and aliases remain unresolved rather than borrowing evidence by their final segment. A
+**resolved package Default type** is a local type whose declarations establish `Default`; an
+**unresolved concrete type or alias** has no such positive evidence.
 
 ### `relational`
 
@@ -380,7 +399,10 @@ fn take_first(n: usize, items: &[Item]) -> &[Item] { &items[..n] }
 fn take_first(n: usize, items: &[Item]) -> &[Item] { &items[..(n + 1)] }
 ```
 
-Deliberately narrower than the `literal` family: the two mutators only fire on evidence, not guesswork, avoiding unviable mutants on genuinely non-numeric expressions.
+Under the default preset, this family is deliberately narrower than the `literal` family: the two
+mutators only fire on evidence, not guesswork, avoiding unviable mutants on genuinely non-numeric
+expressions. Explicit selectors admit optimistic candidates too, trading more compiler rejections
+for a wider investigation.
 When the written type is floating point, the replacement uses `1.0` rather than an integer `1`.
 Arithmetic over recognized text, path, and time types — `String`, `&str`, `OsString`, `PathBuf`,
 `Duration`, `Instant`, `SystemTime`, Chrono `DateTime` and `NaiveDateTime`, and their recognized

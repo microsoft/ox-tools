@@ -326,6 +326,29 @@ fn standard_default_bound(bound: &TypeParamBound, defaults: &DefaultPaths) -> bo
     matches!(bound, TypeParamBound::Trait(bound) if defaults.is_standard_trait(&bound.path))
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+enum Completeness {
+    #[default]
+    Empty,
+    Complete,
+    Partial,
+}
+
+impl Completeness {
+    const fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Empty, other) => other,
+            (this, Self::Empty) => this,
+            (Self::Complete, Self::Complete) => Self::Complete,
+            (Self::Complete | Self::Partial, Self::Partial | Self::Complete) => Self::Partial,
+        }
+    }
+
+    const fn supplies_negative_evidence(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 /// What the workspace's own sources say about which of their types implement `Default`.
 ///
 /// The `fn_value` family and its relatives reach for `Default::default()` whenever they cannot name
@@ -383,7 +406,7 @@ pub struct Defaults {
     cfg: CfgSet,
 
     /// Whether the indexed declarations are complete enough to supply negative evidence.
-    negative: bool,
+    completeness: Completeness,
 
     /// Lexical module nesting while visiting implementations.
     module_depth: usize,
@@ -403,7 +426,6 @@ fn merge_alias(into: &mut HashMap<String, Option<String>>, alias: String, error:
     match into.entry(alias) {
         Entry::Occupied(mut seen) => {
             if *seen.get() != error {
-                // #[gamma::skip(assign_value.default, reason = "`Option<String>::default()` is exactly `None`, so this replacement is identical")]
                 *seen.get_mut() = None;
             }
         }
@@ -429,7 +451,7 @@ impl Defaults {
         let mut index = Self {
             paths: DefaultPaths::of_in(file, cfg),
             cfg: cfg.clone(),
-            negative: true,
+            completeness: Completeness::Complete,
             ..Self::default()
         };
 
@@ -441,9 +463,10 @@ impl Defaults {
     ///
     /// A standalone file cannot prove that a type lacks an implementation written in another
     /// file, so convenience collection stays optimistic until a workspace-wide index is available.
-    pub(super) fn optimistic_of_in(file: &File, cfg: &CfgSet) -> Self {
+    #[must_use]
+    pub fn optimistic_of_in(file: &File, cfg: &CfgSet) -> Self {
         let mut index = Self::of_in(file, cfg);
-        index.negative = false;
+        index.completeness = Completeness::Partial;
         index
     }
 
@@ -459,7 +482,13 @@ impl Defaults {
             return false;
         };
 
-        self.lacks_error_default(&name)
+        self.lacks_default_name(&name)
+    }
+
+    /// Returns whether this complete package index defines `name` without `Default`.
+    #[must_use]
+    pub(crate) fn lacks_default_name(&self, name: &str) -> bool {
+        self.lacks_error_default(name)
     }
 
     /// Folds another index into this one.
@@ -470,11 +499,12 @@ impl Defaults {
     ///
     /// `defined` and `defaulted` are unions. A name defined in both inputs becomes ambiguous only
     /// when the inputs disagree about whether it implements `Default`; uniform positive and
-    /// negative collisions preserve their evidence.
+    /// negative collisions preserve their evidence. An empty accumulator adopts the other index's
+    /// completeness, while any merge involving a partial index remains partial.
     /// `result_error` cannot union, because its values are single names rather than membership, so
     /// a key two files disagree about is demoted to "unknown" instead — see [`merge_alias`].
     pub fn absorb(&mut self, other: Self) {
-        self.negative |= other.negative;
+        self.completeness = self.completeness.merge(other.completeness);
         let collisions = self.defined.intersection(&other.defined).cloned().collect::<Vec<_>>();
         for name in collisions {
             if self.ambiguous.contains(&name)
@@ -500,7 +530,7 @@ impl Defaults {
     /// is a name rather than a syntax node.
     #[must_use]
     pub fn lacks_error_default(&self, name: &str) -> bool {
-        self.negative && self.defined.contains(name) && !self.defaulted.contains(name)
+        self.completeness.supplies_negative_evidence() && self.defined.contains(name) && !self.defaulted.contains(name)
     }
 
     /// Returns whether the workspace declares a type with this unqualified name.
@@ -515,21 +545,41 @@ impl Defaults {
     /// standard `Default` derive or implementation. `false` means only that positive evidence is
     /// unavailable: qualified, absolute, generic, ambiguous, and unknown paths remain undecided
     /// rather than proving that the type lacks `Default`.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn has_default(&self, ty: &Type) -> bool {
-        unqualified_name_of(ty).is_some_and(|name| {
-            !self.ambiguous.contains(&name)
-                && !self.generic.contains(&name)
-                && (self.defaulted.contains(&name) || (!self.negative && self.defined.contains(&name)))
-        })
+        unqualified_name_of(ty).is_some_and(|name| self.has_default_name(&name))
     }
 
-    /// Returns whether a local type has an explicit standard `Default` implementation or derive.
-    ///
-    /// Unlike [`Self::has_default`], this admits a generic declaration. The caller must separately
-    /// prove that the concrete type arguments satisfy the bounds a derived implementation may add.
-    pub(crate) fn declares_default(&self, ty: &Type) -> bool {
-        unqualified_type_name(ty).is_some_and(|name| !self.ambiguous.contains(&name) && self.defaulted.contains(&name))
+    /// Returns positive evidence for one non-generic type name in this package.
+    pub(crate) fn has_default_name(&self, name: &str) -> bool {
+        !self.ambiguous.contains(name)
+            && !self.generic.contains(name)
+            && (self.defaulted.contains(name) || (!self.completeness.supplies_negative_evidence() && self.defined.contains(name)))
+    }
+
+    /// Returns whether a declaration in this package explicitly implements `Default`.
+    pub(crate) fn declares_default_name(&self, name: &str) -> bool {
+        self.completeness.supplies_negative_evidence()
+            && !self.ambiguous.contains(name)
+            && !self.generic.contains(name)
+            && self.defaulted.contains(name)
+    }
+
+    pub(crate) fn declares_generic_default_name(&self, name: &str) -> bool {
+        self.completeness.supplies_negative_evidence()
+            && !self.ambiguous.contains(name)
+            && self.generic.contains(name)
+            && self.defaulted.contains(name)
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.completeness.supplies_negative_evidence()
+    }
+
+    /// Prevents a partial package index from supplying negative declaration evidence.
+    pub fn mark_incomplete(&mut self) {
+        self.completeness = Completeness::Partial;
     }
 
     /// Returns the error type a `Result` alias fixed, given the alias's name.
@@ -696,17 +746,6 @@ fn unqualified_name_of(ty: &Type) -> Option<String> {
     }
 }
 
-fn unqualified_type_name(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-            path.path.segments.first().map(|segment| segment.ident.to_string())
-        }
-        Type::Paren(paren) => unqualified_type_name(&paren.elem),
-        Type::Group(group) => unqualified_type_name(&group.elem),
-        _ => None,
-    }
-}
-
 /// The name of a type's `index`th generic argument.
 fn payload_name(ty: &Type, index: usize) -> Option<String> {
     let Type::Path(path) = ty else {
@@ -734,6 +773,18 @@ mod tests {
     use syn::{parse_file, parse_quote};
 
     use super::*;
+
+    #[test]
+    fn unqualified_names_follow_parenthesized_and_grouped_types() {
+        assert_eq!(unqualified_name_of(&parse_quote!((Widget))), Some("Widget".to_owned()));
+        let grouped = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            elem: Box::new(parse_quote!(Widget)),
+        });
+        assert_eq!(unqualified_name_of(&grouped), Some("Widget".to_owned()));
+        assert_eq!(unqualified_name_of(&parse_quote!(_)), None);
+    }
 
     fn index(sources: &[&str]) -> Defaults {
         let mut defaults = Defaults::default();
@@ -969,6 +1020,37 @@ mod tests {
         let ty: Type = parse_quote!(Utf8Error);
 
         assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
+    fn an_incomplete_index_does_not_prove_same_named_default_declarations() {
+        let file = syn::parse_file("#[derive(Default)] struct Config;").expect("the defaults fixture parses");
+        let defaults = Defaults::optimistic_of_in(&file, &CfgSet::unconditional());
+
+        assert!(defaults.has_default_name("Config"));
+        assert!(!defaults.declares_default_name("Config"));
+    }
+
+    #[test]
+    fn merging_complete_and_partial_indexes_remains_partial_in_both_orders() {
+        let partial = || {
+            let file = syn::parse_file("struct Config;").expect("the partial defaults fixture parses");
+            Defaults::optimistic_of_in(&file, &CfgSet::unconditional())
+        };
+        let complete = || {
+            let file = syn::parse_file("struct Unrelated;").expect("the complete defaults fixture parses");
+            Defaults::of(&file)
+        };
+
+        let mut partial_first = partial();
+        partial_first.absorb(complete());
+        let mut complete_first = complete();
+        complete_first.absorb(partial());
+
+        for defaults in [&partial_first, &complete_first] {
+            assert!(!defaults.is_complete());
+            assert!(!defaults.lacks_error_default("Config"));
+        }
     }
 
     #[test]

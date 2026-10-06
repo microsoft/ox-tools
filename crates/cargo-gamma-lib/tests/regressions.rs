@@ -121,12 +121,14 @@ fn survivor(file: &str, line: usize) -> Mutant {
         original: "a > b".to_owned().into(),
         replacement: "a >= b".to_owned().into(),
         shape: Shape::Expr,
+        confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
         outcome: Outcome::Survived,
         suppression: None,
         expectation: None,
         test_timeout_multiplier: None,
         elapsed_ms: 0,
         killed_by: None,
+        killer: None,
         note: None,
     }
 }

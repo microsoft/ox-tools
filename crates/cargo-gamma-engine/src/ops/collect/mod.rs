@@ -8,6 +8,7 @@
 
 mod candidate;
 mod collector;
+mod confidence;
 mod defaults;
 mod definitions;
 mod shape;
@@ -16,6 +17,8 @@ mod traversal;
 
 #[doc(inline)]
 pub use candidate::Candidate;
+#[doc(inline)]
+pub use confidence::Confidence;
 #[doc(inline)]
 pub use defaults::Defaults;
 #[doc(inline)]

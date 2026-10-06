@@ -26,6 +26,68 @@ fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
     collect_with(&file, &selection, &CfgSet::unconditional(), &defaults)
 }
 
+#[test]
+fn nested_local_generic_collections_preserve_proven_defaults() {
+    let source = "#[derive(Default)] struct Vec<T>(T);
+        fn f() -> Vec<Vec<u8>> { original() }";
+    let found = candidates(source, "fn_value.empty_collection");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Proven);
+}
+
+#[test]
+fn incomplete_indexes_preserve_optimistic_local_generic_collections() {
+    let source = "#[derive(Default)] struct Vec<T>(T);
+        fn f() -> Vec<u8> { Vec(7) }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let defaults = Defaults::optimistic_of_in(&file.ast, &CfgSet::unconditional());
+    let found = collect_with(
+        &file,
+        &Selection::parse("fn_value.empty_collection").unwrap(),
+        &CfgSet::unconditional(),
+        &defaults,
+    );
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn incomplete_indexes_keep_local_generic_maps_optimistic() {
+    let source = "#[derive(Default)] struct HashMap<K, V>((K, V));
+        fn f() -> HashMap<u8, u8> { HashMap((7, 8)) }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let defaults = Defaults::optimistic_of_in(&file.ast, &CfgSet::unconditional());
+    let found = collect_with(
+        &file,
+        &Selection::parse("fn_value.empty_collection").unwrap(),
+        &CfgSet::unconditional(),
+        &defaults,
+    );
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn shadowed_nonzero_types_do_not_claim_standard_constructor_provenance() {
+    let found = candidates("struct NonZeroU8; fn f() -> NonZeroU8 { NonZeroU8 }", "fn_value.one,fn_value.two");
+
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+
+    let standard = candidates(
+        "fn f() -> core::num::NonZeroU8 { core::num::NonZeroU8::new(3).unwrap() }",
+        "fn_value.one,fn_value.two",
+    );
+    assert_eq!(standard.len(), 2, "{standard:?}");
+    assert!(standard.iter().all(|candidate| candidate.confidence == Confidence::Proven));
+}
+
 fn mutators(source: &str, ops: &str) -> Vec<&'static str> {
     candidates(source, ops).into_iter().map(|c| c.mutator).collect()
 }
@@ -252,12 +314,47 @@ fn occurrence_counts_sites_instead_of_replacements() {
 
     for candidate in &mut second {
         candidate.span = candidate.span.start + item.len() + 1..candidate.span.end + item.len() + 1;
+        candidate.identity_occurrence = None;
     }
 
     let mutants = into_definitions(&file, first.into_iter().chain(second).collect());
     let occurrences: Vec<u32> = mutants.iter().map(|mutant| mutant.occurrence).collect();
 
     assert_eq!(occurrences, vec![0, 0, 1, 1]);
+}
+
+#[test]
+fn reserved_occurrences_are_preloaded_before_manual_fallbacks() {
+    let item = "fn f() -> Result<i32, MyError> { Ok(1) }";
+    let source = format!("{item}\n{item}");
+    let file = SourceFile::parse("test.rs", source).unwrap();
+    let reserved = with_errors(item, &["MyError::Io", "MyError::Eof"]);
+    let mut manual = reserved.clone();
+    for candidate in &mut manual {
+        candidate.span = candidate.span.start + item.len() + 1..candidate.span.end + item.len() + 1;
+        candidate.identity_occurrence = None;
+    }
+
+    let mutants = into_definitions(&file, manual.into_iter().chain(reserved).collect());
+    let occurrences = mutants.iter().map(|mutant| mutant.occurrence).collect::<Vec<_>>();
+    let ids = mutants.iter().map(|mutant| &mutant.id).collect::<crate::HashSet<_>>();
+
+    assert_eq!(occurrences, vec![1, 1, 0, 0]);
+    assert_eq!(ids.len(), mutants.len());
+}
+
+#[test]
+fn reserved_occurrences_follow_source_order_through_nested_calls() {
+    let source = "fn f(n: u8) -> u8 { u8::from(n).max(n) }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let found = candidates(source, "expr.increment")
+        .into_iter()
+        .filter(|candidate| &source[candidate.span.clone()] == "n")
+        .collect();
+    let mutants = into_definitions(&file, found);
+    let occurrences = mutants.iter().map(|mutant| mutant.occurrence).collect::<Vec<_>>();
+
+    assert_eq!(occurrences, vec![0, 1]);
 }
 
 /// The cached per-span normalized text must produce exactly the identity a fresh, uncached
@@ -1108,6 +1205,1082 @@ fn zero_decrement_is_preserved_for_signed_and_unknown_contexts() {
         assert_eq!(
             found.iter().filter(|candidate| candidate.replacement == "-1").count(),
             1,
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn default_selection_keeps_proven_signed_zero_decrements_and_withholds_unknown_ones() {
+    let signed = SourceFile::parse("test.rs", "fn f() -> i32 { 0 }".to_owned()).unwrap();
+    let unknown = SourceFile::parse("test.rs", "fn f() { unknown(0); }".to_owned()).unwrap();
+    let selection = Selection::default_preset();
+
+    let signed = collect(&signed, &selection);
+    let unknown = collect(&unknown, &selection);
+
+    assert!(
+        signed
+            .iter()
+            .any(|candidate| candidate.mutator == "literal.int_decrement" && candidate.confidence == Confidence::Proven)
+    );
+    assert!(
+        unknown
+            .iter()
+            .all(|candidate| candidate.mutator != "literal.int_decrement" || candidate.replacement != "-1")
+    );
+}
+
+#[test]
+fn confidence_filtering_does_not_reassign_common_mutant_ids() {
+    let source = "fn f() { external(0); let n: i32 = 0; consume(n); }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let defaults = into_definitions(&file, collect(&file, &Selection::default_preset()));
+    let explicit = into_definitions(&file, collect(&file, &Selection::parse("literal.int_decrement").unwrap()));
+    let common = defaults
+        .iter()
+        .find(|mutant| mutant.mutator.as_ref() == "literal.int_decrement")
+        .expect("the proven decrement remains in the default population");
+    let explicit_common = explicit
+        .iter()
+        .find(|mutant| mutant.site.span == common.site.span)
+        .expect("the explicit population contains the common site");
+
+    assert_eq!(explicit.len(), 2, "{explicit:?}");
+    assert_eq!(common.occurrence, 1);
+    assert_eq!(common.id, explicit_common.id);
+}
+
+#[test]
+fn explicit_selection_restores_unknown_zero_decrements_as_optimistic() {
+    let found = candidates("fn f() { unknown(0); }", "literal.int_decrement");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn unresolved_default_return_values_stay_default_on_but_are_classified_as_optimistic() {
+    let file = SourceFile::parse("test.rs", "fn f() -> dependency::Value { original() }".to_owned()).unwrap();
+    let default_candidates = collect(&file, &Selection::default_preset());
+    let explicit_candidates = collect(&file, &Selection::parse("fn_value.default").unwrap());
+
+    assert_eq!(default_candidates.len(), 1, "{default_candidates:?}");
+    assert_eq!(default_candidates[0].confidence, Confidence::Optimistic);
+    assert_eq!(explicit_candidates.len(), 1, "{explicit_candidates:?}");
+    assert_eq!(explicit_candidates[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn foreign_type_does_not_borrow_same_named_local_default_evidence() {
+    let file = SourceFile::parse("test.rs", "struct Value;\nfn f() -> dependency::Value { original() }".to_owned()).unwrap();
+    let found = collect(&file, &Selection::parse("fn_value.default").unwrap());
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn ambiguous_numeric_use_is_optional_and_classified_as_optimistic() {
+    let source = "fn f(mut suggestions: Suggestions, normalized: Names) {
+        for (requested_name, best) in &mut suggestions {
+            consume((&normalized[requested_name], best));
+        }
+    }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let default_candidates = collect(&file, &Selection::default_preset());
+    let explicit_candidates = collect(&file, &Selection::parse("expr.increment,expr.decrement").unwrap());
+
+    assert!(
+        default_candidates
+            .iter()
+            .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement")),
+        "{default_candidates:?}"
+    );
+    assert_eq!(explicit_candidates.len(), 2, "{explicit_candidates:?}");
+    assert!(
+        explicit_candidates
+            .iter()
+            .all(|candidate| candidate.confidence == Confidence::Optimistic)
+    );
+}
+
+#[test]
+fn numeric_associated_calls_require_primitive_path_provenance() {
+    let source = "
+        mod custom { pub struct u32; impl u32 { fn from<T>(value: T) -> Self { original() } } }
+        fn f(value: Unknown) {
+            consume(custom::u32::from(value));
+            consume(std::primitive::u32::from(value));
+        }
+    ";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let default_candidates = collect(&file, &Selection::default_preset());
+    let explicit_candidates = collect(&file, &Selection::parse("expr.increment,expr.decrement").unwrap());
+
+    let numeric = |candidate: &&Candidate| matches!(candidate.mutator, "expr.increment" | "expr.decrement");
+    let default_numeric = default_candidates.iter().filter(numeric).collect::<Vec<_>>();
+    let explicit_numeric = explicit_candidates.iter().filter(numeric).collect::<Vec<_>>();
+
+    assert_eq!(default_numeric.len(), 2, "{default_numeric:?}");
+    assert!(
+        default_numeric.iter().all(|candidate| {
+            &source[candidate.span.clone()] == "std::primitive::u32::from(value)" && candidate.confidence == Confidence::Proven
+        }),
+        "{default_numeric:?}"
+    );
+    assert_eq!(explicit_numeric.len(), 4, "{explicit_numeric:?}");
+    assert!(
+        explicit_numeric.iter().all(|candidate| {
+            let original = &source[candidate.span.clone()];
+            candidate.confidence
+                == if original == "std::primitive::u32::from(value)" {
+                    Confidence::Proven
+                } else {
+                    Confidence::Optimistic
+                }
+        }),
+        "{explicit_numeric:?}"
+    );
+}
+
+#[test]
+fn numeric_associated_functions_and_nonzero_constants_are_optional() {
+    for source in [
+        "fn f() { consume(i64::cast_unsigned); }",
+        "fn f() { consume(std::num::NonZeroU32::MAX); }",
+        "use std::num::*; fn f() { consume(NonZeroU32::MAX); }",
+    ] {
+        let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+        let default_candidates = collect(&file, &Selection::default_preset());
+        let explicit_candidates = collect(&file, &Selection::parse("expr.increment,expr.decrement").unwrap());
+
+        assert!(
+            default_candidates
+                .iter()
+                .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement")),
+            "{source}: {default_candidates:?}"
+        );
+        assert_eq!(explicit_candidates.len(), 2, "{source}: {explicit_candidates:?}");
+        assert!(
+            explicit_candidates
+                .iter()
+                .all(|candidate| candidate.confidence == Confidence::Optimistic),
+            "{source}: {explicit_candidates:?}"
+        );
+    }
+}
+
+#[test]
+fn filter_removal_requires_positive_iterator_evidence_by_default() {
+    let source = "fn f(value: Unknown) -> Unknown { value.filter(|item| keep(item)) }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let default_candidates = collect(&file, &Selection::default_preset());
+    let explicit_candidates = collect(&file, &Selection::parse("iter.remove_filter").unwrap());
+
+    assert!(
+        default_candidates.iter().all(|candidate| candidate.mutator != "iter.remove_filter"),
+        "{default_candidates:?}"
+    );
+    assert_eq!(explicit_candidates.len(), 1, "{explicit_candidates:?}");
+    assert_eq!(explicit_candidates[0].confidence, Confidence::Optimistic);
+
+    let proven = SourceFile::parse(
+        "test.rs",
+        "fn f(value: impl Iterator<Item = u8>) -> impl Iterator<Item = u8> { value.filter(|item| *item > 0) }".to_owned(),
+    )
+    .unwrap();
+    let proven_candidates = collect(&proven, &Selection::default_preset());
+
+    assert!(
+        proven_candidates
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{proven_candidates:?}"
+    );
+}
+
+#[test]
+fn generic_standard_iterator_bounds_prove_filter_removal() {
+    for source in [
+        "fn f<T: std::iter::Iterator<Item = u8>>(value: T) { value.filter(keep); }",
+        "fn f<T>(value: T) where T: core::iter::Iterator<Item = u8> { value.filter(keep); }",
+        "mod std {} fn f(value: impl ::std::iter::Iterator<Item = u8>) { value.filter(keep); }",
+    ] {
+        let found = candidates(source, "@default");
+        assert!(
+            found
+                .iter()
+                .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_functions_do_not_inherit_function_iterator_bounds() {
+    let source = "
+        trait Custom {
+            fn filter(self, predicate: fn(u8) -> bool);
+        }
+        fn outer<T: std::iter::Iterator<Item = u8>>() {
+            fn inner<T: Custom>(value: T) {
+                value.filter(keep);
+            }
+        }
+    ";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn shadowed_and_wildcard_iterator_traits_remain_optimistic() {
+    for source in [
+        "trait Iterator: Sized { fn filter(self, predicate: fn(u8) -> bool) -> bool; }
+         fn f(value: impl Iterator) -> bool { value.filter(keep) }",
+        "use dependency::*; fn f(value: impl Iterator) { value.filter(keep); }",
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| candidate.mutator != "iter.remove_filter"),
+            "{source}"
+        );
+        let explicit = candidates(source, "iter.remove_filter");
+        assert_eq!(explicit.len(), 1, "{source}: {explicit:?}");
+        assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+
+        let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+        let defaults = Defaults::of(&file.ast);
+        let fused = check_stated_and_collect_with(&file, &Selection::default_preset(), &CfgSet::unconditional(), &defaults)
+            .expect("the iterator fixture has no stated-value fault");
+        assert!(fused.iter().all(|candidate| candidate.mutator != "iter.remove_filter"));
+    }
+}
+
+#[test]
+fn wildcard_imports_do_not_leak_into_sibling_modules() {
+    let source = "
+        mod noisy {
+            use dependency::*;
+        }
+        mod target {
+            fn f(value: impl Iterator<Item = u8>) {
+                value.filter(keep);
+            }
+        }
+    ";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn block_local_imports_do_not_leak_into_sibling_functions() {
+    let source = "
+        mod other { pub trait Iterator {} }
+        fn unrelated() { use crate::other::Iterator; }
+        fn target(value: impl Iterator<Item = u8>) {
+            value.filter(keep);
+        }
+    ";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn child_shadows_do_not_reinterpret_inherited_imports() {
+    let source = "
+        use std::vec::Vec;
+        fn target(values: Vec<u8>) {
+            mod std {}
+            values.iter().filter(keep);
+        }
+    ";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn body_import_shadows_do_not_reinterpret_parameter_types() {
+    let source = "
+        use std::vec::Vec;
+        mod other { pub struct Other; }
+        fn target(values: Vec<u8>) {
+            use crate::other::Other as Vec;
+            values.iter().filter(keep);
+        }
+    ";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn root_imports_do_not_override_child_module_shadows() {
+    let source = "
+        use std::vec::Vec;
+        mod child {
+            struct Vec<T>(T);
+            fn make() -> Vec<bool> {
+                Vec(true)
+            }
+        }
+    ";
+    let found = candidates(source, "fn_value");
+    let child = found
+        .iter()
+        .filter(|candidate| candidate.item_path.as_ref() == "child::make")
+        .collect::<Vec<_>>();
+
+    assert!(!child.is_empty(), "{found:?}");
+    assert!(
+        child.iter().all(|candidate| candidate.confidence == Confidence::Optimistic),
+        "{found:?}"
+    );
+    assert!(child.iter().all(|candidate| candidate.replacement != "Vec::new()"), "{found:?}");
+}
+
+#[test]
+fn unresolved_iterator_adapter_chains_remain_optimistic() {
+    let source = "fn f(value: Unknown) -> Unknown { value.filter(keep).filter(keep) }";
+    let default_candidates = candidates(source, "@default");
+    let explicit_candidates = candidates(source, "iter.remove_filter");
+
+    assert!(
+        default_candidates.iter().all(|candidate| candidate.mutator != "iter.remove_filter"),
+        "{default_candidates:?}"
+    );
+    assert_eq!(explicit_candidates.len(), 2, "{explicit_candidates:?}");
+    assert!(
+        explicit_candidates
+            .iter()
+            .all(|candidate| candidate.confidence == Confidence::Optimistic),
+        "{explicit_candidates:?}"
+    );
+
+    let proven = candidates(
+        "fn f(values: Vec<u8>, other: impl Iterator<Item = u8>) {
+            values.iter().rev().take(1).skip(1).chain(values.iter()).zip(values.iter()).cloned().copied().by_ref().filter(keep).filter(keep);
+            std::iter::empty::<u8>().filter(keep);
+            std::iter::once(1u8).filter(keep);
+            core::iter::empty::<u8>().filter(keep);
+            core::iter::once(1u8).filter(keep);
+            other.filter(keep);
+        }",
+        "@default",
+    );
+    assert_eq!(
+        proven.iter().filter(|candidate| candidate.mutator == "iter.remove_filter").count(),
+        7,
+        "{proven:?}"
+    );
+}
+
+#[test]
+fn primitive_arithmetic_expressions_are_proven_in_default_selection() {
+    let found = candidates(
+        "fn sink<T>(_: T) {} fn f(a: i32, b: i32, x: f32, y: f32) { sink(a * b); sink(x / y); }",
+        "@default",
+    );
+    let perturbations = found
+        .iter()
+        .filter(|candidate| matches!(candidate.mutator, "expr.increment" | "expr.decrement"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(perturbations.len(), 4, "{found:?}");
+    assert!(
+        perturbations.iter().all(|candidate| candidate.confidence == Confidence::Proven),
+        "{perturbations:?}"
+    );
+    assert!(
+        perturbations.iter().any(|candidate| candidate.replacement.contains("1.0")),
+        "{perturbations:?}"
+    );
+}
+
+#[test]
+fn primitive_methods_on_references_retain_numeric_evidence() {
+    let source = "fn f(value: &f64) { consume(value.sqrt()); }";
+    let found = candidates(source, "@default");
+    let perturbations = found
+        .iter()
+        .filter(|candidate| matches!(candidate.mutator, "expr.increment" | "expr.decrement"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(perturbations.len(), 2, "{found:?}");
+    assert!(
+        perturbations
+            .iter()
+            .all(|candidate| candidate.confidence == Confidence::Proven && candidate.replacement.contains("1.0")),
+        "{perturbations:?}"
+    );
+}
+
+#[test]
+fn numeric_confidence_requires_resolved_field_ownership() {
+    let source = "struct Record { count: usize } fn f(record: Record, mystery: Mystery) {
+            consume(usize::from(1u8));
+            consume(record.count);
+            consume(mystery.value);
+            let _ = mystery.value + 1;
+        }";
+    let found = candidates(source, "expr.increment,expr.decrement");
+    let original = |candidate: &&Candidate| &source[candidate.span.clone()];
+    let associated = found
+        .iter()
+        .filter(|candidate| original(candidate).contains("usize::from"))
+        .collect::<Vec<_>>();
+    let count = found
+        .iter()
+        .filter(|candidate| original(candidate) == "record.count")
+        .collect::<Vec<_>>();
+    let unknown = found
+        .iter()
+        .filter(|candidate| original(candidate) == "mystery.value")
+        .collect::<Vec<_>>();
+
+    assert!(associated.iter().all(|candidate| candidate.confidence == Confidence::Proven));
+    assert!(count.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+    assert!(unknown.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+}
+
+#[test]
+fn signed_aliases_prove_zero_decrements() {
+    let found = candidates(
+        "type Signed = i32; fn returned() -> Signed { 0 } fn local() { let value: Signed = 0; consume(value); }",
+        "@default",
+    );
+    let decrements = found
+        .iter()
+        .filter(|candidate| candidate.mutator == "literal.int_decrement" && candidate.replacement == "-1")
+        .collect::<Vec<_>>();
+
+    assert_eq!(decrements.len(), 2, "{found:?}");
+    assert!(decrements.iter().all(|candidate| candidate.confidence == Confidence::Proven));
+}
+
+#[test]
+fn wildcard_imports_do_not_prove_primitive_signedness() {
+    let source = "mod aliases; use aliases::*; fn f() -> i32 { 0 }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "literal.int_decrement"),
+    );
+    let explicit = candidates(source, "literal.int_decrement");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn local_generic_option_defaults_are_eligible() {
+    let source = "#[derive(Default)] struct Option<T>(T); fn f(value: Option<u8>) { consume(value); }";
+    let found = candidates(source, "parameter.default_shadow");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found[0].replacement,
+        "{ let value: Option<u8> = Default::default(); consume(value); }"
+    );
+    assert_eq!(found[0].confidence, Confidence::Proven);
+}
+
+#[test]
+fn imports_in_nested_modules_do_not_override_local_collection_declarations() {
+    let source = "#[derive(Default)] struct Vec<T>(T);
+        mod child { use std::vec::Vec; fn f() -> Vec<u8> { Vec::new() } }
+        fn f() -> Vec<u8> { original() }";
+    let found = candidates(source, "fn_value.empty_collection");
+    let root = found.last().expect("the root function keeps its local Default replacement");
+
+    assert_eq!(&source[root.span.clone()], "{ original() }");
+    assert_eq!(root.replacement, "Default::default()");
+    assert_eq!(root.confidence, Confidence::Proven);
+}
+
+#[test]
+fn explicit_imports_do_not_borrow_unrelated_package_default_evidence() {
+    let source = "mod local { struct Config; }
+        use other_package::Config;
+        fn f() -> Config { original() }";
+    let found = candidates(source, "fn_value.default");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn renamed_generic_imports_do_not_borrow_unrelated_package_evidence() {
+    let source = "mod unused { struct Value; }
+        mod selected { #[derive(Default)] pub struct Data<T>(pub T); }
+        use selected::Data as Value;
+        fn f() -> Value<bool> { original() }";
+    let found = candidates(source, "fn_value.default");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn typed_integer_ranges_preserve_iterator_evidence() {
+    for source in [
+        "fn f(range: core::ops::Range<u8>) -> usize { range.filter(|x| *x > 0).count() }",
+        "fn f() -> usize { (0u8..4).filter(|x| *x > 0).count() }",
+    ] {
+        let found = candidates(source, "@default");
+        assert!(
+            found
+                .iter()
+                .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn shadowed_or_unsupported_range_types_remain_optimistic() {
+    for source in [
+        "struct Range<T>(T); fn f(range: Range<u8>) -> usize { range.filter(keep).count() }",
+        "fn f(range: core::ops::Range<f32>) -> usize { range.filter(keep).count() }",
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| candidate.mutator != "iter.remove_filter"),
+            "{source}"
+        );
+        let explicit = candidates(source, "iter.remove_filter");
+        assert_eq!(explicit.len(), 1, "{source}: {explicit:?}");
+        assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+    }
+}
+
+#[test]
+fn named_array_lengths_remain_optimistically_defaultable() {
+    let source = "const LEN: usize = 2; fn f() -> [u8; LEN] { [1; LEN] }";
+    let found = candidates(source, "fn_value.default");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn renamed_self_imports_preserve_the_module_path() {
+    let found = candidates(
+        "use std::fmt::{self as formatting}; fn f() -> formatting::Result { original() }",
+        "fn_value",
+    );
+
+    assert!(
+        found.iter().any(|candidate| candidate.replacement == "Ok(Default::default())"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn imported_collection_spellings_use_optimistic_default() {
+    let found = candidates("use dependency::Thing as HashSet; fn f() -> HashSet<u8> { original() }", "fn_value");
+    let empty = found
+        .iter()
+        .find(|candidate| candidate.mutator == "fn_value.empty_collection")
+        .expect("the imported type keeps a potentially usable default constructor");
+
+    assert_eq!(empty.replacement, "Default::default()");
+    assert_eq!(empty.confidence, Confidence::Optimistic);
+    assert!(
+        found
+            .iter()
+            .filter(|candidate| candidate.mutator == "fn_value.one_element")
+            .all(|candidate| candidate.confidence == Confidence::Optimistic),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn wildcard_imports_do_not_prove_bare_collection_apis() {
+    let source = "use dependency::*; fn f(value: HashSet<u8>) { value.iter().filter(keep); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn shadowed_result_and_string_replacements_remain_optimistic() {
+    for source in [
+        "struct Result<T, E>(T, E); fn f() -> Result<u8, u8> { original() }",
+        "struct String; fn f() -> String { original() }",
+    ] {
+        let found = candidates(source, "fn_value");
+
+        assert!(!found.is_empty(), "{source}: {found:?}");
+        assert!(
+            found.iter().all(|candidate| candidate.confidence == Confidence::Optimistic),
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn cross_kind_collection_imports_remain_optimistic() {
+    let source = "use std::collections::HashMap as Vec; fn f() -> Vec<bool, bool> { original() }";
+    let found = candidates(source, "fn_value");
+    let one_element = found
+        .iter()
+        .find(|candidate| candidate.mutator == "fn_value.one_element")
+        .expect("the unresolved collection shape remains available explicitly");
+
+    assert_eq!(one_element.confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn same_named_dependency_collections_remain_optimistic() {
+    let source = "use dependency::HashSet; fn f(value: HashSet<u8>) -> HashSet<u8> {
+        value.iter().filter(keep); original()
+    }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter"),
+    );
+    let explicit = candidates(source, "iter.remove_filter,fn_value");
+    assert!(
+        explicit
+            .iter()
+            .filter(|candidate| matches!(candidate.mutator, "iter.remove_filter" | "fn_value.one_element"))
+            .all(|candidate| candidate.confidence == Confidence::Optimistic),
+        "{explicit:?}"
+    );
+}
+
+#[test]
+fn dependency_collection_aliases_keep_an_optimistic_default() {
+    let source = "type Alias<T> = dependency::HashSet<T>; fn f() -> Alias<u8> { original() }";
+    let found = candidates(source, "fn_value");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn bounded_payloads_prove_defaults_for_local_generic_collections() {
+    let source = "#[derive(Default)] struct Vec<T>(T);
+        fn f<T: Default>() -> Vec<T> { original() }";
+    let found = candidates(source, "fn_value.empty_collection");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Proven);
+}
+
+#[test]
+fn directly_qualified_dependency_collections_do_not_prove_iterator_methods() {
+    let source = "fn f(value: dependency::Vec<u8>) { value.iter().filter(keep); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn attributed_calls_do_not_offer_default_replacements() {
+    let source = "fn local() -> usize { 1 } fn f() -> usize { #[allow(unused)] local() }";
+    let found = candidates(source, "call.replace_with_default,call_result.default");
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn imported_collection_aliases_with_known_default_use_the_trait_constructor() {
+    let source = "
+        use rustc_hash::FxHashSet as HashSet;
+        fn f() -> HashSet<u8> { original() }
+    ";
+    let found = candidates(source, "fn_value.empty_collection");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Proven);
+}
+
+#[test]
+fn custom_typed_iterator_roots_remain_optimistic() {
+    let source = "fn f(value: Input) { value.iter().filter(keep); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn primitive_extension_methods_do_not_borrow_numeric_return_evidence() {
+    for source in [
+        "trait Count { fn count(&self) -> bool; }
+         impl Count for u8 { fn count(&self) -> bool { true } }
+         fn f(n: u8) { consume(n.count()); }",
+        "trait Power { fn pow(&self) -> bool; }
+         impl Power for f32 { fn pow(&self) -> bool { true } }
+         fn f(n: f32) { consume(n.pow()); }",
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement"))
+        );
+        let explicit = candidates(source, "expr.increment,expr.decrement");
+        assert_eq!(explicit.len(), 2, "{source}: {explicit:?}");
+        assert!(explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+    }
+}
+
+#[test]
+fn collection_extension_methods_do_not_borrow_numeric_return_evidence() {
+    let source = "trait Absolute { fn abs(&self) -> bool; }
+        impl Absolute for Vec<u8> { fn abs(&self) -> bool { true } }
+        fn f(values: Vec<u8>) { consume(values.abs()); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement"))
+    );
+    let explicit = candidates(source, "expr.increment,expr.decrement");
+    assert_eq!(explicit.len(), 2, "{explicit:?}");
+    assert!(explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+}
+
+#[test]
+fn custom_impl_iterator_traits_remain_optimistic() {
+    let source = "fn f(value: impl dependency::Iterator) { value.filter(keep); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn imported_collection_spellings_do_not_prove_iterator_roots() {
+    let source = "use dependency::Thing as Vec; fn f(value: Vec<u8>) { value.iter().filter(keep); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn renamed_standard_iterator_constructors_are_proven() {
+    let source = "use std::iter::once as singleton; fn f() { singleton(1).filter(keep); }";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn parenthesized_iterator_receivers_are_proven() {
+    let found = candidates("fn f() { (0..4).filter(keep); }", "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn unresolved_range_receivers_remain_optimistic() {
+    let source = "fn f(a: External, b: External) { (a..b).filter(keep); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| candidate.mutator != "iter.remove_filter")
+    );
+    let explicit = candidates(source, "iter.remove_filter");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn upper_bound_only_ranges_remain_optimistic() {
+    for source in ["fn f() { (..4).filter(keep); }", "fn f() { (..=4).filter(keep); }"] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| candidate.mutator != "iter.remove_filter"),
+            "{source}"
+        );
+        let explicit = candidates(source, "iter.remove_filter");
+        assert_eq!(explicit.len(), 1, "{source}: {explicit:?}");
+        assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+    }
+}
+
+#[test]
+fn standard_iterator_adapters_preserve_proven_receivers() {
+    for adapter in [
+        "scan(0, scan)",
+        "step_by(2)",
+        "take_while(keep)",
+        "skip_while(keep)",
+        "map_while(map)",
+        "cycle()",
+    ] {
+        let source = format!("fn f() {{ (0..4).{adapter}.filter(keep); }}");
+        let found = candidates(&source, "@default");
+        assert!(
+            found
+                .iter()
+                .any(|candidate| candidate.mutator == "iter.remove_filter" && candidate.confidence == Confidence::Proven),
+            "{adapter}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn overloaded_arithmetic_and_negation_remain_optimistic() {
+    for source in [
+        "fn f(value: Input, amount: i32) { consume(value + amount); }",
+        "fn f(value: Input) { consume(-value); }",
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement")),
+            "{source}"
+        );
+        let explicit = candidates(source, "expr.increment,expr.decrement");
+        assert!(!explicit.is_empty(), "{source}");
+        assert!(
+            explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic),
+            "{source}: {explicit:?}"
+        );
+    }
+}
+
+#[test]
+fn unresolved_fields_iterator_extrema_and_fallible_numeric_calls_remain_optimistic() {
+    for (source, target) in [
+        (
+            "struct Local { count: usize } fn f(external: dependency::Record) { consume(external.count); }",
+            "external.count",
+        ),
+        ("fn f(values: Vec<u8>) { consume(values.iter().max()); }", "values.iter().max()"),
+        ("fn f(value: u8) { consume(u32::try_from(value)); }", "u32::try_from(value)"),
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .filter(|candidate| &source[candidate.span.clone()] == target)
+                .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement")),
+            "{source}"
+        );
+        let explicit = candidates(source, "expr.increment,expr.decrement")
+            .into_iter()
+            .filter(|candidate| &source[candidate.span.clone()] == target)
+            .collect::<Vec<_>>();
+        assert!(!explicit.is_empty(), "{source}");
+        assert!(
+            explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic),
+            "{source}: {explicit:?}"
+        );
+    }
+}
+
+#[test]
+fn custom_collection_parameters_use_optimistic_default_construction() {
+    for ty in [
+        "std::collections::HashSet<u8, CustomBuildHasher>",
+        "std::collections::HashMap<u8, u8, CustomBuildHasher>",
+    ] {
+        let source = format!("fn f() -> {ty} {{ original() }}");
+        let found = candidates(&source, "fn_value.empty_collection");
+
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "Default::default()");
+        assert_eq!(found[0].confidence, Confidence::Optimistic);
+    }
+}
+
+#[test]
+fn floating_point_ranges_do_not_prove_iterator_adapters() {
+    for source in [
+        "fn f() { (0.0..1.0).filter(keep); }",
+        "fn f(start: f32, end: f32) { (start..end).filter(keep); }",
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| candidate.mutator != "iter.remove_filter"),
+            "{source}"
+        );
+        let explicit = candidates(source, "iter.remove_filter");
+        assert_eq!(explicit.len(), 1, "{source}: {explicit:?}");
+        assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+    }
+}
+
+#[test]
+fn unknown_array_elements_keep_an_explicit_optimistic_default() {
+    let source = "fn f() -> [dependency::Value; 1] { original() }";
+
+    let defaults = candidates(source, "@default");
+    assert_eq!(defaults.len(), 1, "{defaults:?}");
+    assert_eq!(defaults[0].mutator, "fn_value.default");
+    assert_eq!(defaults[0].confidence, Confidence::Optimistic);
+    let explicit = candidates(source, "fn_value.default");
+    assert_eq!(explicit.len(), 1, "{explicit:?}");
+    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn arrays_of_promotable_references_have_proven_defaults() {
+    for source in [
+        "fn f() -> [&'static str; 1] { original() }",
+        "fn f() -> [&'static [u8]; 1] { original() }",
+        "fn f() -> [[&'static str; 1]; 1] { original() }",
+    ] {
+        for selection in ["@default", "fn_value.default"] {
+            let found = candidates(source, selection);
+            assert_eq!(found.len(), 1, "{source} with {selection}: {found:?}");
+            assert_eq!(found[0].mutator, "fn_value.default");
+            assert_eq!(found[0].replacement, "Default::default()");
+            assert_eq!(found[0].confidence, Confidence::Proven);
+        }
+    }
+}
+
+#[test]
+fn shadowed_option_replacements_remain_optimistic() {
+    let source = "struct Option<T>(T); fn f() -> Option<u8> { Option(1) }";
+    let found = candidates(source, "fn_value");
+    let option_values = found
+        .iter()
+        .filter(|candidate| matches!(candidate.mutator, "fn_value.none" | "fn_value.some" | "fn_value.some_default"))
+        .collect::<Vec<_>>();
+
+    assert!(!option_values.is_empty(), "{found:?}");
+    assert!(
+        option_values.iter().all(|candidate| candidate.confidence == Confidence::Optimistic),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn incomplete_default_indexes_do_not_prove_local_default_implementations() {
+    let file = SourceFile::parse("test.rs", "struct Config; fn f() -> Config { original() }".to_owned()).unwrap();
+    let found = collect(&file, &Selection::parse("fn_value.default").unwrap());
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn custom_numeric_method_spellings_remain_optimistic() {
+    let source = "fn f(value: Input) { consume(value.len()); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement"))
+    );
+    let explicit = candidates(source, "expr.increment,expr.decrement");
+    assert_eq!(explicit.len(), 2, "{explicit:?}");
+    assert!(explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+}
+
+#[test]
+fn qualified_constants_do_not_borrow_local_numeric_evidence() {
+    let source = "const LIMIT: usize = 1; fn f() { consume(dependency::LIMIT); }";
+
+    assert!(
+        candidates(source, "@default")
+            .iter()
+            .all(|candidate| !matches!(candidate.mutator, "expr.increment" | "expr.decrement"))
+    );
+    assert!(candidates(source, "expr.increment,expr.decrement").is_empty());
+}
+
+#[test]
+fn signed_comparisons_and_assignments_prove_zero_decrements() {
+    for source in [
+        "fn f(n: i32) -> bool { n < 0 }",
+        "fn f(n: i32) -> bool { 0 < n }",
+        "fn f(a: i32, b: i32) -> bool { (a + b) < 0 }",
+        "fn f(mut n: i32) { n = 0; consume(n); }",
+    ] {
+        let found = candidates(source, "@default");
+        assert!(
+            found.iter().any(|candidate| {
+                candidate.mutator == "literal.int_decrement" && candidate.replacement == "-1" && candidate.confidence == Confidence::Proven
+            }),
             "{source}: {found:?}"
         );
     }
@@ -2634,6 +3807,26 @@ fn syntax_type_evidence_withholds_only_proven_incompatible_numeric_mutations() {
 }
 
 #[test]
+fn qualified_primitive_named_aliases_do_not_prove_signedness() {
+    for source in [
+        "mod m { pub type i32 = u32; } fn f() -> m::i32 { 0 }",
+        "use crate::types::i32; fn f() -> i32 { 0 }",
+    ] {
+        assert!(
+            candidates(source, "@default")
+                .iter()
+                .all(|candidate| candidate.mutator != "literal.int_decrement")
+        );
+        let explicit = candidates(source, "literal.int_decrement,fn_value");
+        assert!(
+            explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic),
+            "{source}: {explicit:?}"
+        );
+        assert!(explicit.iter().any(|candidate| candidate.mutator == "fn_value.minus_one"));
+    }
+}
+
+#[test]
 fn unsigned_zero_inference_does_not_cross_function_or_binding_scopes() {
     let source = r"
         struct Record { count: usize }
@@ -3190,17 +4383,73 @@ fn a_numeric_type_qualifier_proves_an_external_constant_is_numeric() {
         "use std::usize::MAX; fn f() { g(MAX); }",
         "use std::usize::MAX as LIMIT; fn f() { g(LIMIT); }",
     ] {
-        let found = candidates(source, "expr");
+        let found = candidates(source, "@default");
 
         assert!(
-            found.iter().any(|candidate| candidate.mutator == "expr.increment"),
+            found
+                .iter()
+                .any(|candidate| candidate.mutator == "expr.increment" && candidate.confidence == Confidence::Proven),
             "{source}: {found:?}"
         );
         assert!(
-            found.iter().any(|candidate| candidate.mutator == "expr.decrement"),
+            found
+                .iter()
+                .any(|candidate| candidate.mutator == "expr.decrement" && candidate.confidence == Confidence::Proven),
             "{source}: {found:?}"
         );
     }
+}
+
+#[test]
+fn dependency_modules_named_like_primitives_do_not_prove_constants() {
+    let source = "fn f() { consume(dependency::usize::MAX); }";
+
+    let defaults = candidates(source, "@default");
+    assert!(
+        defaults
+            .iter()
+            .all(|candidate| candidate.mutator != "expr.increment" && candidate.mutator != "expr.decrement"),
+        "{defaults:?}"
+    );
+    let explicit = candidates(source, "expr.increment,expr.decrement");
+    assert_eq!(explicit.len(), 2, "{explicit:?}");
+    assert!(explicit.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+}
+
+#[test]
+fn qualified_aliases_do_not_borrow_root_type_default_evidence() {
+    let source = "
+        struct Value;
+        mod definitions { pub mod aliases { pub type Value = bool; } }
+        use crate::definitions::aliases;
+        fn f() -> aliases::Value { original() }
+    ";
+    let found = candidates(source, "fn_value.default");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn cross_file_qualified_aliases_do_not_borrow_root_type_default_evidence() {
+    let defaults_file = syn::parse_file("struct Value;").expect("the defaults fixture parses");
+    let defaults = Defaults::of_in(&defaults_file, &CfgSet::unconditional());
+    let file = SourceFile::parse(
+        "model.rs",
+        "mod model { pub type Value = bool; } fn f() -> model::Value { original() }".to_owned(),
+    )
+    .expect("the candidate fixture parses");
+    let found = collect_with(
+        &file,
+        &Selection::parse("fn_value.default").expect("the selector resolves"),
+        &CfgSet::unconditional(),
+        &defaults,
+    );
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
 }
 
 #[test]
@@ -3389,6 +4638,18 @@ fn a_return_type_nested_deeper_than_the_recursion_bound_falls_back_to_default() 
     let found = candidates(source, "fn_value");
 
     assert!(found.iter().any(|c| c.replacement.contains("Default::default()")), "{found:?}");
+}
+
+#[test]
+fn deeply_nested_shadowed_strings_remain_optimistic() {
+    let source = "struct String; fn f() -> Option<Option<Option<String>>> { original() }";
+    let found = candidates(source, "fn_value");
+    let fallback = found
+        .iter()
+        .find(|candidate| candidate.replacement.contains("Default::default()"))
+        .expect("the depth limit emits a fallback");
+
+    assert_eq!(fallback.confidence, Confidence::Optimistic);
 }
 
 #[test]
@@ -3585,6 +4846,49 @@ fn the_standard_fmt_result_alias_gets_a_compiling_result_value() {
     assert!(
         found.iter().all(|candidate| candidate.replacement != "Default::default()"),
         "`Result` itself does not implement `Default`: {found:?}"
+    );
+}
+
+#[test]
+fn a_renamed_standard_fmt_result_gets_a_compiling_result_value() {
+    let found = candidates("use std::fmt::Result as FmtResult; fn fmt() -> FmtResult { Ok(()) }", "fn_value");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "fn_value.ok_default" && candidate.replacement == "Ok(Default::default())"),
+        "`std::fmt::Result` keeps its identity through an import rename: {found:?}"
+    );
+    assert!(
+        found.iter().all(|candidate| candidate.replacement != "Default::default()"),
+        "`Result` itself does not implement `Default`: {found:?}"
+    );
+}
+
+#[test]
+fn an_absolute_standard_type_ignores_a_shadowing_root_module() {
+    let source = "mod std { pub mod fmt { pub type Result = String; } } fn fmt() -> ::std::fmt::Result { Ok(()) }";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "fn_value.ok_default" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn an_absolute_standard_import_ignores_a_shadowing_root_module() {
+    let source =
+        "mod std { pub mod fmt { pub type Result = String; } } use ::std::fmt::Result as FmtResult; fn fmt() -> FmtResult { Ok(()) }";
+    let found = candidates(source, "@default");
+
+    assert!(
+        found
+            .iter()
+            .any(|candidate| candidate.mutator == "fn_value.ok_default" && candidate.confidence == Confidence::Proven),
+        "{found:?}"
     );
 }
 
@@ -3857,7 +5161,12 @@ fn a_stated_value_displaces_the_guessed_ones() {
             fn_values(source).iter().any(|(_, value)| value == guessed),
             "the premise is that `{guessed}` is guessed"
         );
+        let found = candidates(stated, "fn_value");
         assert_eq!(fn_values(stated), vec![("fn_value.stated", "h()".to_owned())], "for `{source}`");
+        assert!(
+            found.iter().all(|candidate| candidate.confidence == Confidence::Explicit),
+            "stated values are explicit for `{source}`: {found:?}"
+        );
     }
 }
 
@@ -4018,6 +5327,13 @@ fn a_stated_value_does_not_renumber_the_named_error_mutants() {
         "the errors follow the positively constructed guessed values"
     );
     assert_eq!(indices(&stated), indices(&plain));
+    assert!(
+        plain
+            .iter()
+            .chain(&stated)
+            .filter(|candidate| candidate.mutator == "fn_value.err_with")
+            .all(|candidate| candidate.confidence == Confidence::Explicit)
+    );
 }
 
 /// A stated mutant does not inherit the identity of the guess it displaced.

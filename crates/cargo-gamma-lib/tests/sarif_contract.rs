@@ -101,7 +101,7 @@ fn fingerprint_values_have_the_production_identity_shape() {
         .expect("the emitted SARIF log has a result array");
 
     for result in results {
-        let fingerprint = result["partialFingerprints"]["gammaMutantId/v5"]
+        let fingerprint = result["partialFingerprints"][format!("gammaMutantId/v{MUTANT_ID_VERSION}")]
             .as_str()
             .expect("each result has a mutant fingerprint");
 

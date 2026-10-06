@@ -620,7 +620,7 @@ mod tests {
             verdict_log: VerdictLog::default(),
         };
 
-        events.begin("Excluding", "Excluded", "unviable mutants (0 found)");
+        events.begin("Excluding", "Excluded", "unviable mutants");
         events.convergence_progress(10);
         events.complete("10 unviable mutants, leaving 20 viable mutants");
 

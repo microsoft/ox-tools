@@ -84,7 +84,6 @@ pub(super) fn measure_baseline(
     failed: Option<&mut Option<Baseline>>,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
-    // #[gamma::skip(all, reason = "worker width changes only which independent binary finishes first; results are restored to binary order before folding")]
     measure_within_reporting_retaining(
         Measurement {
             work,
@@ -123,7 +122,6 @@ fn measure_within_reporting(
     jobs: usize,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
-    // #[gamma::skip(all, reason = "worker width changes only scheduling of independent observations; the positional result and every reported aggregate are unchanged")]
     measure_within_reporting_retaining(
         Measurement {
             work,
@@ -328,7 +326,6 @@ where
         }
 
         // The workers hold the only remaining senders, so the drain ends when the last one finishes.
-        // #[gamma::skip(all, reason = "retaining the coordinator sender prevents channel closure, so the receiver waits forever; this resource mutant is suppressed rather than weakening synchronization")]
         drop(sender);
 
         for (index, took, observed) in receiver {

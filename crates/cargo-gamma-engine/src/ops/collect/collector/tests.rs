@@ -716,7 +716,14 @@ fn a_zero_width_site_offers_nothing() {
     let defaults = Defaults::default();
     let mut collector = Collector::new(&file, &selection, selection.errors(), &cfg, &defaults);
 
-    collector.emit_at("relational.eq_to_ne", 0..0, "!=", 0, crate::ops::collect::Shape::Expr);
+    collector.emit_at(
+        "relational.eq_to_ne",
+        0..0,
+        "!=",
+        0,
+        crate::ops::collect::Shape::Expr,
+        crate::ops::collect::Confidence::Proven,
+    );
 
     assert!(collector.finish().is_empty());
 }
@@ -1081,6 +1088,27 @@ fn a_cast_argument_is_perturbed_as_a_number() {
     let found = mutators(source, "expr.increment,expr.decrement", &CfgSet::unconditional());
 
     assert_eq!(found, vec!["expr.decrement", "expr.increment"], "{found:?}");
+}
+
+#[test]
+fn a_float_method_result_is_perturbed_as_a_number() {
+    let source = "fn f(value: f64) { consume(value.sqrt()); }\n";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let selection = Selection::parse("expr.increment,expr.decrement").unwrap();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::of_in(&file.ast, &cfg);
+    let found = collect_with(&file, &selection, &cfg, &defaults);
+
+    assert!(found.iter().any(|candidate| {
+        candidate.mutator == "expr.increment"
+            && candidate.replacement == "(value.sqrt()) + 1.0"
+            && candidate.confidence == crate::ops::collect::Confidence::Proven
+    }));
+    assert!(found.iter().any(|candidate| {
+        candidate.mutator == "expr.decrement"
+            && candidate.replacement == "(value.sqrt()) - 1.0"
+            && candidate.confidence == crate::ops::collect::Confidence::Proven
+    }));
 }
 
 /// Negation is a number; `!`/`*` are excluded elsewhere because they may not be.

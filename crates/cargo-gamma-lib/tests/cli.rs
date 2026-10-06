@@ -907,7 +907,7 @@ fn seed_record(dir: &TempDir, population: &[(String, String)]) {
     assert_eq!(file, killed_file, "the promotion fixture expects both mutants in one file");
 
     let record = serde_json::json!({
-        "version": 10,
+        "version": 12,
         "context": {
             "features": "f",
             "profile": "p",
@@ -952,7 +952,7 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
     let written = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the artifact should have been written");
     let hints: yaml_serde::Value = yaml_serde::from_str(&written).expect("the artifact is YAML");
 
-    assert_eq!(hints["version"].as_u64(), Some(3), "{written}");
+    assert_eq!(hints["version"].as_u64(), Some(4), "{written}");
     assert!(
         hints["tool"].as_str().is_some_and(|tool| tool.starts_with("cargo-gamma ")),
         "the artifact has to say what wrote it: {written}"
@@ -1074,7 +1074,7 @@ fn regenerating_an_unchanged_artifact_changes_no_bytes() {
 fn no_op_promotion_preserves_a_current_artifact_without_generalized_hints() {
     let dir = workspace(SUBJECT);
     let artifact = concat!(
-        "version: 3\n",
+        "version: 4\n",
         "tool: cargo-gamma older\n",
         "context:\n",
         "  repo_sha: old\n",

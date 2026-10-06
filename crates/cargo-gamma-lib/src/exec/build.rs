@@ -414,7 +414,7 @@ pub(super) struct Converger {
     #[cfg(test)]
     proof_roots: Vec<Option<Vec<String>>>,
 
-    /// Aggregate isolation work shared by every diagnostic context and convergence stage.
+    /// Aggregate isolation work shared by every diagnostic context in one Cargo invocation.
     isolation_budget: IsolationBudget,
 }
 
@@ -537,6 +537,7 @@ impl Converger {
         self.per_round.clear();
         // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.first_round = None;
+        self.isolation_budget = IsolationBudget::default();
     }
 
     fn verdict_state(&self) -> VerdictState {
@@ -857,6 +858,7 @@ impl Converger {
         let mut blamed = blame(&stdout, &work.root, &guards);
         retain_blamed(&mut blamed, plan, scope.mutants);
 
+        let census_before = self.census.len();
         for (ordinal, reason) in &blamed {
             let _ = self.withdrawn.insert(*ordinal);
             let _ = self.census.entry(*ordinal).or_insert_with(|| reason.clone());
@@ -870,9 +872,8 @@ impl Converger {
         self.history.push(build_round(elapsed, plan, blamed.keys().copied()));
         self.ordering.confirmed = self.ordering.confirmed.saturating_add(blamed.len());
 
-        for (ordinal, reason) in blamed {
-            let _ = self.withdrawn.insert(ordinal);
-            let _ = self.census.entry(ordinal).or_insert(reason);
+        if scope.publish_progress && self.census.len() > census_before {
+            events.convergence_progress(self.census.len());
         }
 
         Ok(())
@@ -997,6 +998,16 @@ impl Converger {
         Ok((instrumented.guards, instrumented.written))
     }
 
+    fn instrument_active_schema(&mut self, work: &Workspace, plan: &Plan, active: &HashSet<u32>) -> Result<Vec<Utf8PathBuf>> {
+        let instrumented = self.splices.instrument_active(work, plan, active)?;
+
+        self.withdrawn.extend(instrumented.unavailable.iter().copied());
+        self.abandoned.extend(instrumented.unavailable.iter().copied());
+        self.unavailable.extend(instrumented.unavailable);
+
+        Ok(instrumented.written)
+    }
+
     fn missing_guard_error(missing: &Mutant) -> Error {
         error!(
             "internal error: no guard was emitted for the mutant at {}:{}, so it could not \
@@ -1118,9 +1129,7 @@ impl Converger {
         // withdrew as one line when it is done, and a round-by-round commentary underneath that
         // would bury the sequence the whole arrangement exists to show.
         let workspace = self.whole_workspace;
-        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let roots = if workspace { None } else { Some(packages) };
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         let verb: &[&str] = if self.test_lib {
             &["test", "--no-run", "--lib", "--no-fail-fast"]
         } else if workspace {
@@ -1134,7 +1143,6 @@ impl Converger {
             plan,
             BuildScope {
                 roots,
-                // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
                 mutants: Some(packages),
                 publish_progress: true,
             },
@@ -1143,7 +1151,6 @@ impl Converger {
             events,
         )? {
             Convergence::Built(stdout) => {
-                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.remember_compiled(&stdout, &work.root);
                 Ok(None)
             }

@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-gamma-rt.svg)](https://crates.io/crates/cargo-gamma-rt)
 [![docs.rs](https://docs.rs/cargo-gamma-rt/badge.svg)](https://docs.rs/cargo-gamma-rt)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-gamma-rt)](https://crates.io/crates/cargo-gamma-rt)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml/badge.svg?event=pull_request)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -113,12 +113,11 @@ being driven by a mutation run must behave exactly as it did before, and the ord
 acquire the startup environment is different: the runtime emits [`ENVIRONMENT_ERROR_MARKER`][__link5]
 and exits, so the parent cannot mistake a mutant that never activated for a survivor.
 
-That distinction covers [`CENSUS_VAR`][__link6] as well as [`ACTIVE_VAR`][__link7]. An unset census variable is an
-ordinary process, but a census variable this process could not *read* is a startup failure, not
-an absent one: treating it as absence would run the mutant named by [`ACTIVE_VAR`][__link8], produce no
-census file, and report a baseline failure the run would read as a verdict about that mutant. A
-read interrupted by a signal is retried rather than counted as a failure, since an interruption
-is not evidence of anything.
+That distinction covers [`CENSUS_VAR`][__link6] as well as [`ACTIVE_VAR`][__link7]. With no active mutant it
+requests a baseline census; alongside a positive active ordinal it records whether that active
+guard was reached without changing mutant selection. A variable this process could not *read*
+is a startup failure, not an absent one. A read interrupted by a signal is retried rather than
+counted as a failure, since an interruption is not evidence of anything.
 
 Two further failure shapes exist because “captured, but wrong” is worse than either of the
 above:
@@ -130,13 +129,13 @@ above:
   outside a Miri execution, where that installation is expected. `NONE` would otherwise be
   ambiguous between “genuinely unmutated” and “asked too early to know”, and only the first may
   ever be reported as a passing mutant.
-* On a Unix with no immutable startup environment image, [`ACTIVE_VAR`][__link9] is read through
+* On a Unix with no immutable startup environment image, [`ACTIVE_VAR`][__link8] is read through
   `getenv` under the POSIX process-wide precondition that no native environment mutation runs
   concurrently. This capture happens before Rust `main`, so safe Rust has not had an opportunity
   to start a thread that violates the precondition; Rust environment mutation is unsafe for the
   same reason. A foreign native constructor that starts concurrent `setenv`, `putenv`,
   `unsetenv`, or equivalent mutation is outside this abstraction. The runtime still performs a
-  second independent read and rejects a disagreement through [`ENVIRONMENT_ERROR_MARKER`][__link10] and
+  second independent read and rejects a disagreement through [`ENVIRONMENT_ERROR_MARKER`][__link9] and
   immediate exit. That double-read is integrity detection for a visibly inconsistent result,
   not a proof of memory safety or proof that forbidden foreign mutation did not occur.
 
@@ -170,8 +169,8 @@ selection by launching a fresh process per mutant.
 
 ## Runtime entry points
 
-[`a`][__link11] is what the guards call, and the only runtime entry point instrumented source contains.
-[`active`][__link12] and [`any`][__link13] are there for the tool’s own diagnostics and for anyone inspecting a
+[`a`][__link10] is what the guards call, and the only runtime entry point instrumented source contains.
+[`active`][__link11] and [`any`][__link12] are there for the tool’s own diagnostics and for anyone inspecting a
 scratch tree by hand:
 
 ```rust
@@ -188,7 +187,7 @@ if any() {
 
 ## Making two iterators one type
 
-[`Either`][__link14] is the one other thing instrumented source mentions, and it exists because the guard
+[`Either`][__link13] is the one other thing instrumented source mentions, and it exists because the guard
 is an `if`. A function returning `impl Iterator<Item = T>` returns a single concrete type that
 its body picks, so `if a(n) { core::iter::empty() } else { ..the real body.. }` has arms of two
 different types and will not compile. Wrapping each arm in a variant makes them one type:
@@ -198,7 +197,7 @@ different types and will not compile. Wrapping each arm in a variant makes them 
   else { ::gamma_rt::Either::R({ ..the real body.. }) } }
 ```
 
-See [`Either`][__link15] for why this is not a `Box<dyn Iterator>`.
+See [`Either`][__link14] for why this is not a `Box<dyn Iterator>`.
 
 ## `no_std`, and what it does not buy
 
@@ -223,20 +222,19 @@ how nearly every `no_std` library is tested anyway.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-rt">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbhFwoyicofFob0JM_5SGotNcb-qKodur5pWUbrijzXi7ixeFhZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuMi4wbmNhcmdvX2dhbW1hX3J0
- [__link0]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=a
- [__link1]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=a
- [__link10]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
- [__link11]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=a
- [__link12]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=active
- [__link13]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=any
- [__link14]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=Either
- [__link15]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=Either
- [__link2]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link3]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=NONE
- [__link4]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=NONE
- [__link5]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
- [__link6]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=CENSUS_VAR
- [__link7]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link8]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link9]: https://docs.rs/cargo-gamma-rt/0.2.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQboc30_khWDIAb1hI-7Yvoldob0G-Y5y-3bOUbRyayOQZAf21hZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuMi4xbmNhcmdvX2dhbW1hX3J0
+ [__link0]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=a
+ [__link1]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=a
+ [__link10]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=a
+ [__link11]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=active
+ [__link12]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=any
+ [__link13]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=Either
+ [__link14]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=Either
+ [__link2]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link3]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=NONE
+ [__link4]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=NONE
+ [__link5]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
+ [__link6]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=CENSUS_VAR
+ [__link7]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link8]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link9]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
