@@ -234,8 +234,8 @@ directory. Reviewers read it for library unit tests run by `cargo test` and thei
 helpers. Benchmarks and wider integration tests are outside its scope. It
 puts determinism first: control inputs, isolate state and ordering, verify the
 intended result, and preserve the contract across supported configurations. It
-covers focused unit testing, mocked collaborators, deterministic and
-isolated fixtures, meaningful outcome assertions, test-only feature gates,
+covers focused unit testing, mocked collaborators, in-memory or committed
+immutable fixtures, meaningful outcome assertions, test-only feature gates,
 bounded test work, and scoped Miri exclusions.
 Wider integration tests require a design document, not ad hoc provisioned jobs.
 It also covers process-global instrumentation, platform capabilities, hermetic
