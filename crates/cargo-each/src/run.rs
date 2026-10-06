@@ -105,10 +105,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
 
     if args.dry_run {
         for inv in &plan.invocations {
-            match &inv.work_dir {
-                Some(dir) => println!("(cd {}) {}", dir.display(), shell_join(&inv.argv)),
-                None => println!("{}", shell_join(&inv.argv)),
-            }
+            println!("{}", display_invocation(inv));
         }
 
         return Ok(ExitCode::SUCCESS);
@@ -128,7 +125,7 @@ fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
     }
     if args.dry_run {
         for invocation in &plan.invocations {
-            println!("{}", shell_join(&invocation.argv));
+            println!("{}", display_invocation(invocation));
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -911,6 +908,17 @@ impl InvocationResult {
 
 /// Render an argv for display (`--dry-run`). Best-effort quoting for
 /// readability only — nothing consumes this as input.
+fn display_invocation(invocation: &Invocation) -> String {
+    match &invocation.work_dir {
+        Some(directory) => format!(
+            "(cd {}) {}",
+            display_arg(&directory.to_string_lossy()),
+            shell_join(&invocation.argv)
+        ),
+        None => shell_join(&invocation.argv),
+    }
+}
+
 fn shell_join(argv: &[String]) -> String {
     argv.iter().map(|argument| display_arg(argument)).collect::<Vec<_>>().join(" ")
 }
@@ -962,6 +970,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
+    use std::path::PathBuf;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
@@ -977,7 +986,7 @@ mod tests {
         SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
         add_infrastructure_failure, apply_filters, combine_captured_output, create_output_capture_with, display_duration,
-        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
+        display_invocation, effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
         record_emitted_failure, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with,
         shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group, wait_for_process,
@@ -2215,13 +2224,24 @@ mod tests {
                 "first\nsecond".to_owned(),
                 "carriage\rreturn".to_owned(),
                 "vertical\u{b}tab".to_owned(),
+                "bell\u{7}tone".to_owned(),
                 "quote\"slash\\".to_owned(),
                 String::new(),
             ]),
             "cargo plain \"two words\" \"tab\\tseparated\" \"first\\nsecond\" \"carriage\\rreturn\" \
-             \"vertical\\u{b}tab\" \"quote\\\"slash\\\\\" \"\""
+             \"vertical\\u{b}tab\" \"bell\\u{7}tone\" \"quote\\\"slash\\\\\" \"\""
         );
         assert_eq!(shell_join(&[]), "");
+    }
+
+    #[test]
+    fn dry_run_escapes_the_working_directory_and_argv_together() {
+        let invocation = Invocation {
+            label: None,
+            argv: vec!["echo".to_owned(), "value".to_owned()],
+            work_dir: Some(PathBuf::from("two words\n\"quoted\"")),
+        };
+        assert_eq!(display_invocation(&invocation), "(cd \"two words\\n\\\"quoted\\\"\") echo value");
     }
 
     #[test]
