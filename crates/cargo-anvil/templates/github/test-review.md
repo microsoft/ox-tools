@@ -8,7 +8,7 @@
 
 1. Read changed tests, setup/cleanup, and the exercised production path. Identify the contract and uncontrolled dependencies.
 2. Check input control, state isolation, synchronization, then assertions and supported feature/platform/release configurations.
-3. Keep real application decisions under test; replace external effects. For concurrency, verify invariants across explored schedules, not one fixed schedule.
+3. Test the smallest unit that owns the contract; mock its collaborators. Use pipeline tests only for integration contracts. For concurrency, verify invariants across explored schedules, not one fixed schedule.
 4. Report only evidenced defects: cite the source, name the wrong outcome or uncontrolled dependency, and recommend the smallest coverage-preserving fix. Use existing seams and repository policy; skip style nits and unrelated legacy cleanup.
 
 Passing CI, snapshots, stress reruns, or a closed bug do not prove determinism or a root-cause fix. Distinguish harness defects from product races; preserve security checks and meaningful assertions.
@@ -22,7 +22,7 @@ Use the applicable recommendation, not a fixed number of solutions.
 | Substring assertions instead of checking the result. | Prefer full `insta` snapshots or exact string/structured equality. Control inputs; normalize only incidental values. Use `starts_with` for prefix contracts, checking any meaningful remainder. Use `contains` only when containment itself is the contract. |
 | Negative tests that accept any error or generic error text. | Assert typed causes and fields after successful setup reaches the intended branch. Test exact error wording separately with deterministic inputs. |
 | Nonempty-findings/failing-exit assertions or collapsed assessment states. | Assert exact rule/file outcomes: skipped, unknown, pass, fail, suppressed fail. For suppression, check retained evidence and reported findings. Add a contrasting case when needed. |
-| Mocking reports, exit policy, quiet mode, redaction, or prerequisite-failure decisions. | Run the real pipeline with scripted external analysis/probes and captured output. |
+| Requiring a full pipeline for a utility test, or mocking the behavior being asserted. | Call the utility directly with deterministic mocked collaborators. Reports, probes, and policies can be mocked when they are dependencies, not the subject of the assertion. Use wider integration tests only to verify wiring or cross-component contracts. |
 | Spawning application CLI binaries, including startup/exit smoke tests. | Supply argv and capture output in-process; assert returned exit policy. Keep process termination in a thin entry point. |
 | Cargo/sysroot/proc-macro loading for local rule decisions. | Use small parsed or in-memory semantic fixtures. Select real-loader compatibility separately. Offline AI mode does not make Cargo loading offline or cheap. |
 | Live providers, tool installation, sign-in, browsers, or developer credentials in ordinary tests. | Script providers/transports and inject readiness/identity/host services. Put real integration or live quality evaluation in separately provisioned jobs. |
