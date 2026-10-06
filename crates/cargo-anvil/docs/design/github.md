@@ -236,6 +236,7 @@ intended result, and preserve the contract across supported configurations. It
 covers focused unit testing, mocked collaborators, deterministic and
 isolated fixtures, meaningful outcome assertions, test-only feature gates,
 separate validation budgets, Miri exclusions, and honest benchmark measurements.
+Wider integration tests require a design document, not ad hoc provisioned jobs.
 It also covers process-global instrumentation, platform capabilities, hermetic
 security fixtures, protocol setup, optimized-profile assumptions, typed negative
 assertions, bounded concurrency models, and coverage-preserving flake fixes.
