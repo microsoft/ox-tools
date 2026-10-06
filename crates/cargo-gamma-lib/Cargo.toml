@@ -111,6 +111,10 @@ name = "loom"
 required-features = ["loom"]
 
 [[test]]
+name = "project"
+required-features = ["internals"]
+
+[[test]]
 name = "regressions"
 required-features = ["internals"]
 

@@ -589,6 +589,9 @@ name = "cargo-gamma-attrs"
 version = "0.2.1"
 dependencies = [
  "cargo-gamma-attrs-impl",
+ "cargo_metadata",
+ "tempfile",
+ "toml_edit 0.25.13+spec-1.1.0",
 ]
 
 [[package]]
@@ -616,6 +619,7 @@ dependencies = [
  "serde",
  "strsim",
  "syn 3.0.4",
+ "tempfile",
  "walkdir",
 ]
 

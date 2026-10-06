@@ -1174,13 +1174,17 @@ mod tests {
         assert_eq!(reachable.len(), 1);
         assert_eq!(reachable[0].target, "linked");
 
-        fs::write(
-            root.join("Cargo.toml").as_std_path(),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )
-        .expect("fixture manifest");
-        fs::write(root.join("tests/linked.rs").as_std_path(), "#[test]\nfn linked() {}\n").expect("linked target");
-        fs::write(root.join("tests/independent.rs").as_std_path(), "#[test]\nfn independent() {}\n").expect("independent target");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+                ),
+                ("tests/linked.rs", "#[test]\nfn linked() {}\n"),
+                ("tests/independent.rs", "#[test]\nfn independent() {}\n"),
+            ],
+        );
         let cargo_target = root.join("cargo-target");
         let initial = built_test_targets(&root, &cargo_target, &["build", "--tests"]);
         let mut narrowed = vec!["build"];

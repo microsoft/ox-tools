@@ -11,7 +11,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::testing::{Sink, gamma_base, run};
+use cargo_gamma_lib::testing::{Sink, gamma_base, run, write_fixture, write_project};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -23,16 +23,7 @@ const EXIT_USAGE: i32 = 1;
 /// Builds a throwaway single-package workspace containing `source` as its library.
 fn workspace(source: &str) -> TempDir {
     let dir = TempDir::new().expect("could not create a temporary directory");
-    let root = dir.path();
-
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
-    )
-    .expect("could not write the manifest");
-
-    fs::create_dir_all(root.join("src")).expect("could not create src");
-    fs::write(root.join("src/lib.rs"), source).expect("could not write the library");
+    write_project(dir.path(), &[("src/lib.rs", source)]);
 
     dir
 }
@@ -44,14 +35,17 @@ fn workspace(source: &str) -> TempDir {
 fn runtime_stub(root: &std::path::Path) {
     let runtime = root.join("runtime-stub");
 
-    fs::create_dir_all(runtime.join("src")).expect("could not create the runtime stub");
-    fs::write(
-        runtime.join("Cargo.toml"),
-        "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
-         [features]\nembedding = []\n",
-    )
-    .expect("could not write the runtime stub manifest");
-    fs::write(runtime.join("src/lib.rs"), "").expect("could not write the runtime stub library");
+    write_fixture(
+        &runtime,
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [features]\nembedding = []\n",
+            ),
+            ("src/lib.rs", ""),
+        ],
+    );
 }
 
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
@@ -724,19 +718,20 @@ fn a_redirected_runtime_dependency_keeps_the_feature_gating_its_own_api() {
 
     runtime_stub(root);
 
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-         [dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
-    )
-    .expect("could not write the manifest");
-
-    fs::create_dir_all(root.join("src")).expect("could not create src");
-    fs::write(
-        root.join("src/lib.rs"),
-        "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
-    )
-    .expect("could not write the library");
+    write_project(
+        root,
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
+            ),
+            (
+                "src/lib.rs",
+                "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
+            ),
+        ],
+    );
 
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 
@@ -754,25 +749,25 @@ fn a_workspace_inherited_runtime_dependency_keeps_the_feature_gating_its_own_api
 
     runtime_stub(root);
 
-    fs::write(
-        root.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
-         [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
-    )
-    .expect("could not write the workspace manifest");
-
-    fs::create_dir_all(root.join("subject/src")).expect("could not create the member's src");
-    fs::write(
-        root.join("subject/Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-         [dependencies]\ngamma_rt = { workspace = true }\n",
-    )
-    .expect("could not write the member manifest");
-    fs::write(
-        root.join("subject/src/lib.rs"),
-        "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
-    )
-    .expect("could not write the member's library");
+    write_project(
+        root,
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
+                 [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
+            ),
+            (
+                "subject/Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\ngamma_rt = { workspace = true }\n",
+            ),
+            (
+                "subject/src/lib.rs",
+                "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
+            ),
+        ],
+    );
 
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 

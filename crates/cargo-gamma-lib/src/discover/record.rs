@@ -2627,8 +2627,7 @@ mod tests {
         let dir = workdir(prefix);
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
 
-        fs::create_dir_all(root.join("src")).expect("the source directory should be creatable");
-        fs::write(root.join("src/lib.rs"), body).expect("the source should be writable");
+        crate::testing::write_fixture(root.as_std_path(), &[("src/lib.rs", body)]);
 
         (dir, root)
     }
@@ -2738,21 +2737,28 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
 
         for package in ["a", "b"] {
-            fs::create_dir_all(root.join(format!("crates/{package}/src"))).expect("package source directory");
-            fs::write(
-                root.join(format!("crates/{package}/Cargo.toml")),
-                format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
-            )
-            .expect("package manifest");
-            fs::write(
-                root.join(format!("crates/{package}/src/lib.rs")),
-                format!("pub fn {package}() -> bool {{ true }}\n"),
-            )
-            .expect("package source");
+            crate::testing::write_fixture(
+                root.as_std_path(),
+                &[
+                    (
+                        &format!("crates/{package}/Cargo.toml"),
+                        &format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
+                    ),
+                    (
+                        &format!("crates/{package}/src/lib.rs"),
+                        &format!("pub fn {package}() -> bool {{ true }}\n"),
+                    ),
+                ],
+            );
         }
 
-        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n").expect("workspace manifest");
-        fs::write(root.join("Cargo.lock"), "# lock\n").expect("workspace lockfile");
+        crate::testing::write_fixture(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n"),
+                ("Cargo.lock", "# lock\n"),
+            ],
+        );
 
         (dir, root)
     }

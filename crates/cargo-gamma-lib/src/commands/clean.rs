@@ -55,7 +55,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("temporary path should be UTF-8");
 
-        fs::write(root.join("Cargo.toml"), "[workspace]\nresolver = \"3\"\n").expect("workspace manifest");
+        crate::testing::write_project(root.as_std_path(), &[("Cargo.toml", "[workspace]\nresolver = \"3\"\n")]);
 
         (directory, root)
     }

@@ -390,11 +390,9 @@ mod tests {
         let directory = TempDir::new().expect("a temporary directory");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is not UTF-8");
 
+        crate::testing::write_project(root.as_std_path(), files);
         for (relative, contents) in files {
             let path = root.join(relative);
-
-            fs::create_dir_all(path.parent().expect("a manifest has a directory").as_std_path()).expect("directories");
-            fs::write(path.as_std_path(), contents).expect("the manifest is written");
 
             if contents.contains("[package]") {
                 let source = path.parent().expect("a manifest has a directory").join("src");

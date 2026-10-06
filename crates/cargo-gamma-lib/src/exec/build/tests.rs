@@ -957,13 +957,16 @@ fn trivial_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let dir = crate::testing::workdir(prefix);
     let root = Utf8PathBuf::from_path_buf(dir.path().join("src")).expect("utf8");
 
-    fs::create_dir_all(root.join("src").as_std_path()).expect("src");
-    fs::write(
-        root.join("Cargo.toml").as_std_path(),
-        "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-    )
-    .expect("manifest");
-    fs::write(root.join("src/lib.rs").as_std_path(), "pub const A: i32 = 1;\n").expect("lib");
+    crate::testing::write_project(
+        root.as_std_path(),
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            ),
+            ("src/lib.rs", "pub const A: i32 = 1;\n"),
+        ],
+    );
 
     let target = Utf8PathBuf::from_path_buf(dir.path().join("target")).expect("utf8");
     let work = Workspace::adopt(root, target);
@@ -1212,28 +1215,24 @@ fn split_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let dir = crate::testing::workdir(prefix);
     let root = Utf8PathBuf::from_path_buf(dir.path().join("src")).expect("utf8");
 
-    fs::create_dir_all(root.join("good/src").as_std_path()).expect("good");
-    fs::create_dir_all(root.join("broken/src").as_std_path()).expect("broken");
-    fs::write(
-        root.join("Cargo.toml").as_std_path(),
-        "[workspace]\nmembers = [\"good\", \"broken\"]\nresolver = \"3\"\n",
-    )
-    .expect("workspace manifest");
+    crate::testing::write_project(
+        root.as_std_path(),
+        &[
+            ("Cargo.toml", "[workspace]\nmembers = [\"good\", \"broken\"]\nresolver = \"3\"\n"),
+            ("good/src/lib.rs", "pub const A: i32 = 1;\n"),
+            ("broken/src/lib.rs", "pub const B: i32 = \"gamma-broken-marker\";\n"),
+        ],
+    );
 
     for member in ["good", "broken"] {
-        fs::write(
-            root.join(member).join("Cargo.toml").as_std_path(),
-            format!("[package]\nname = \"{member}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
-        )
-        .expect("member manifest");
+        crate::testing::write_fixture(
+            root.join(member).as_std_path(),
+            &[(
+                "Cargo.toml",
+                &format!("[package]\nname = \"{member}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+            )],
+        );
     }
-
-    fs::write(root.join("good/src/lib.rs").as_std_path(), "pub const A: i32 = 1;\n").expect("good lib");
-    fs::write(
-        root.join("broken/src/lib.rs").as_std_path(),
-        "pub const B: i32 = \"gamma-broken-marker\";\n",
-    )
-    .expect("broken lib");
 
     let target = Utf8PathBuf::from_path_buf(dir.path().join("target")).expect("utf8");
     let work = Workspace::adopt(root, target);
@@ -1251,37 +1250,27 @@ fn unified_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let dir = crate::testing::workdir(prefix);
     let root = Utf8PathBuf::from_path_buf(dir.path().join("src")).expect("utf8");
 
-    fs::create_dir_all(root.join("app/src").as_std_path()).expect("app");
-    fs::create_dir_all(root.join("leaf/src").as_std_path()).expect("leaf");
-    fs::write(
-        root.join("Cargo.toml").as_std_path(),
-        "[workspace]\nmembers = [\"app\", \"leaf\"]\nresolver = \"3\"\n",
-    )
-    .expect("workspace manifest");
-
-    fs::write(
-        root.join("app/Cargo.toml").as_std_path(),
-        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
-         [dependencies]\nleaf = { path = \"../leaf\", features = [\"wide\"] }\n",
-    )
-    .expect("app manifest");
-    fs::write(
-        root.join("leaf/Cargo.toml").as_std_path(),
-        "[package]\nname = \"leaf\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[features]\nwide = []\n",
-    )
-    .expect("leaf manifest");
-
-    fs::write(
-        root.join("leaf/src/lib.rs").as_std_path(),
-        "#[cfg(feature = \"wide\")]\npub const WIDE: i32 = 1;\n\n\
-         pub fn value() -> i32 {\n    WIDE\n}\n",
-    )
-    .expect("leaf lib");
-    fs::write(
-        root.join("app/src/lib.rs").as_std_path(),
-        "pub fn value() -> i32 {\n    leaf::value()\n}\n",
-    )
-    .expect("app lib");
+    crate::testing::write_project(
+        root.as_std_path(),
+        &[
+            ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"leaf\"]\nresolver = \"3\"\n"),
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\nleaf = { path = \"../leaf\", features = [\"wide\"] }\n",
+            ),
+            (
+                "leaf/Cargo.toml",
+                "[package]\nname = \"leaf\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[features]\nwide = []\n",
+            ),
+            (
+                "leaf/src/lib.rs",
+                "#[cfg(feature = \"wide\")]\npub const WIDE: i32 = 1;\n\n\
+             pub fn value() -> i32 {\n    WIDE\n}\n",
+            ),
+            ("app/src/lib.rs", "pub fn value() -> i32 {\n    leaf::value()\n}\n"),
+        ],
+    );
 
     let target = Utf8PathBuf::from_path_buf(dir.path().join("target")).expect("utf8");
     let work = Workspace::adopt(root, target);
@@ -3996,31 +3985,29 @@ fn guarded_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let root = Utf8PathBuf::from_path_buf(dir.path().join("src")).expect("utf8");
     let runtime = root.join("gamma-rt");
 
-    fs::create_dir_all(root.join("src").as_std_path()).expect("src");
-    fs::create_dir_all(runtime.join("src").as_std_path()).expect("runtime src");
-
-    fs::write(
-        runtime.join("Cargo.toml").as_std_path(),
-        "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
-         [lib]\nname = \"gamma_rt\"\npath = \"src/lib.rs\"\n\n[workspace]\n",
-    )
-    .expect("runtime manifest");
+    crate::testing::write_project(
+        root.as_std_path(),
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\ngamma_rt = { path = \"gamma-rt\", package = \"cargo-gamma-rt\" }\n\n\
+             [workspace]\nexclude = [\"gamma-rt\"]\n",
+            ),
+            ("src/lib.rs", "pub const A: i32 = 1;\n"),
+            (
+                "gamma-rt/Cargo.toml",
+                "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
+             [lib]\nname = \"gamma_rt\"\npath = \"src/lib.rs\"\n\n[workspace]\n",
+            ),
+        ],
+    );
 
     // The tool's own runtime sources rather than stand-ins, so a change to the guard's signature
     // breaks this fixture rather than leaving it testing a shape nothing generates any more.
     for (name, source) in gamma_rt::embedded::SOURCES {
-        fs::write(runtime.join("src").join(name).as_std_path(), source).expect("runtime source");
+        crate::testing::write_fixture(runtime.join("src").as_std_path(), &[(name, source)]);
     }
-
-    fs::write(
-        root.join("Cargo.toml").as_std_path(),
-        "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
-         [dependencies]\ngamma_rt = { path = \"gamma-rt\", package = \"cargo-gamma-rt\" }\n\n\
-         [workspace]\nexclude = [\"gamma-rt\"]\n",
-    )
-    .expect("manifest");
-
-    fs::write(root.join("src/lib.rs").as_std_path(), "pub const A: i32 = 1;\n").expect("lib");
 
     let target = Utf8PathBuf::from_path_buf(dir.path().join("target")).expect("utf8");
     let work = Workspace::adopt(root, target);

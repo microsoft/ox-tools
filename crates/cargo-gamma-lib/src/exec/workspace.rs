@@ -2507,13 +2507,16 @@ mod tests {
     fn cargo_metadata_capture_is_nonempty_json_from_the_adopted_root() {
         let directory = crate::testing::workdir("workspace-metadata-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
-        fs::create_dir_all(root.join("src")).expect("src");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"metadata-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
-        )
-        .expect("manifest");
-        fs::write(root.join("src/lib.rs"), "").expect("lib");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"metadata-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
+                ),
+                ("src/lib.rs", ""),
+            ],
+        );
         let work = Workspace::adopt(root.clone(), root.join("target"));
 
         let metadata = work.capture_cargo_metadata().expect("cargo metadata");
@@ -2693,22 +2696,18 @@ mod tests {
     }
 
     fn initialize_git_build_fixture(source: &Utf8Path, target: &Utf8Path) -> String {
-        fs::create_dir_all(source.join("src")).expect("source");
-        fs::create_dir_all(source.join(".cargo")).expect("Cargo configuration");
-        fs::write(
-            source.join("Cargo.toml"),
-            "[package]\nname = \"g\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
-        )
-        .expect("manifest");
-        fs::write(
-            source.join(".cargo/config.toml"),
-            format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
-        )
-        .expect("target-directory configuration");
-        fs::write(source.join("src/lib.rs"), "pub fn present() {}\n").expect("library");
-        fs::write(
-            source.join("build.rs"),
-            r#"fn main() {
+        crate::testing::write_project(
+            source.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"g\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
+                ),
+                (".cargo/config.toml", &format!("[build]\ntarget-dir = '{}'\n", target.as_str())),
+                ("src/lib.rs", "pub fn present() {}\n"),
+                (
+                    "build.rs",
+                    r#"fn main() {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
@@ -2717,8 +2716,9 @@ mod tests {
     std::fs::write("observed-head", output.stdout).expect("head is recorded");
 }
 "#,
-        )
-        .expect("build script");
+                ),
+            ],
+        );
 
         let run_git = |arguments: &[&str]| {
             let output = Command::new("git")
@@ -2842,13 +2842,16 @@ mod tests {
         let directory = crate::testing::workdir("prepare-happy-");
         let source = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
 
-        fs::write(
-            source.join("Cargo.toml").as_std_path(),
-            "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-        )
-        .expect("a manifest");
-        fs::create_dir_all(source.join("src").as_std_path()).expect("src");
-        fs::write(source.join("src/lib.rs").as_std_path(), "pub const A: i32 = 1;\n").expect("lib");
+        crate::testing::write_project(
+            source.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", "pub const A: i32 = 1;\n"),
+            ],
+        );
 
         let config = Config::default();
         let mut events = crate::testing::Recorder::default();
@@ -4172,13 +4175,16 @@ mod tests {
         let directory = crate::testing::workdir("workspace-campaign-explicit-foreign-");
         let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
         let foreign = Utf8PathBuf::from_path_buf(directory.path().join("foreign")).expect("foreign path is UTF-8");
-        fs::create_dir_all(root.join("src")).expect("workspace source");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-        )
-        .expect("workspace manifest");
-        fs::write(root.join("src/lib.rs"), "").expect("workspace library");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", ""),
+            ],
+        );
         fs::create_dir_all(&foreign).expect("foreign cache");
         fs::write(foreign.join(CACHE_OWNER), physical(&foreign).as_str()).expect("foreign owner");
 
@@ -4193,13 +4199,16 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
         let target = root.join("target");
         let foreign = Utf8PathBuf::from_path_buf(directory.path().join("foreign")).expect("foreign path is UTF-8");
-        fs::create_dir_all(root.join("src")).expect("workspace source");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-        )
-        .expect("workspace manifest");
-        fs::write(root.join("src/lib.rs"), "").expect("workspace library");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", ""),
+            ],
+        );
         let base = campaign_base(&root, &target, None);
         fs::create_dir_all(&base).expect("campaign base");
         fs::write(base.join(CACHE_OWNER), physical(&foreign).as_str()).expect("foreign owner");
@@ -4213,15 +4222,17 @@ mod tests {
     fn metadata_fallback_uses_cargos_resolved_target_directory() {
         let directory = crate::testing::workdir("workspace-campaign-target-");
         let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
-        fs::create_dir_all(root.join("src")).expect("source directory");
-        fs::create_dir_all(root.join(".cargo")).expect("cargo configuration directory");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\n\n[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )
-        .expect("manifest");
-        fs::write(root.join("src/lib.rs"), "").expect("source");
-        fs::write(root.join(".cargo/config.toml"), "[build]\ntarget-dir = \"configured-target\"\n").expect("cargo configuration");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[workspace]\n\n[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+                ),
+                ("src/lib.rs", ""),
+                (".cargo/config.toml", "[build]\ntarget-dir = \"configured-target\"\n"),
+            ],
+        );
         let mut command = cargo_metadata::MetadataCommand::new();
         let metadata = command.current_dir(&root).no_deps().exec().expect("cargo metadata");
         let expected_target = physical(Utf8Path::new(metadata.target_directory.as_str()));
@@ -4431,24 +4442,21 @@ mod tests {
         let cache = Utf8PathBuf::from_path_buf(cache_directory.path().to_path_buf()).expect("utf8");
         let capture = source.join("captured-flags");
 
-        fs::create_dir_all(source.join(".cargo").as_std_path()).expect(".cargo");
-        fs::create_dir_all(source.join("src").as_std_path()).expect("src");
-        fs::write(
-            source.join("Cargo.toml").as_std_path(),
-            "[package]\nname = \"scratch-config-once\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
-        )
-        .expect("manifest");
-        fs::write(source.join("src/lib.rs").as_std_path(), "").expect("lib");
-        fs::write(
-            source.join("build.rs").as_std_path(),
-            "fn main() { std::fs::write(std::env::var(\"GAMMA_CAPTURE\").unwrap(), std::env::var(\"CARGO_ENCODED_RUSTFLAGS\").unwrap()).unwrap(); }\n",
-        )
-        .expect("build script");
-        fs::write(
-            source.join(".cargo/config.toml").as_std_path(),
-            "[build]\nrustflags = [\"--cfg\", \"gamma_once\"]\n",
-        )
-        .expect("config");
+        crate::testing::write_project(
+            source.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"scratch-config-once\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", ""),
+                (
+                    "build.rs",
+                    "fn main() { std::fs::write(std::env::var(\"GAMMA_CAPTURE\").unwrap(), std::env::var(\"CARGO_ENCODED_RUSTFLAGS\").unwrap()).unwrap(); }\n",
+                ),
+                (".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"gamma_once\"]\n"),
+            ],
+        );
         let mut events = crate::testing::Recorder::default();
         let work = crate::testing::with_cache_home_at(cache, || {
             Workspace::prepare(&source, &source.join("target"), &Config::default(), &mut events)

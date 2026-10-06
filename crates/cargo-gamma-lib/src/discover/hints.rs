@@ -1267,8 +1267,7 @@ mod tests {
         let dir = workdir(prefix);
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
 
-        fs::create_dir_all(root.join("src")).expect("the source directory should be creatable");
-        fs::write(root.join("src/lib.rs"), "fn add() {}").expect("the source should be writable");
+        crate::testing::write_fixture(root.as_std_path(), &[("src/lib.rs", "fn add() {}")]);
 
         (dir, root)
     }

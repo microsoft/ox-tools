@@ -1621,16 +1621,18 @@ mod tests {
 
     /// Lays out an empty single-package `subject` workspace in `dir` and returns its root.
     ///
-    /// Only the manifest and the `src` directory: what the source under test is varies per test,
-    /// so each caller writes its own `src/lib.rs`.
+    /// The manifest, offline Cargo configuration, and `src` directory are shared; each caller
+    /// writes its own `src/lib.rs` so deliberately missing or malformed sources remain testable.
     fn subject_root(dir: &tempfile::TempDir) -> Utf8PathBuf {
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         fs::create_dir(root.join("src")).expect("src");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-        )
-        .expect("manifest");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[(
+                "Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            )],
+        );
         root
     }
 
@@ -1974,21 +1976,27 @@ mod tests {
         let container = Utf8Path::from_path(dir.path()).expect("UTF-8 work directory");
         let root = container.join("workspace");
         let dependency = container.join("dependency");
-        fs::create_dir_all(root.join("src")).expect("workspace source");
-        fs::create_dir_all(dependency.join("src")).expect("dependency source");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
-             [dependencies]\ndependency = { path = \"../dependency\" }\n\n[workspace]\n",
-        )
-        .expect("workspace manifest");
-        fs::write(root.join("src/lib.rs"), "pub fn subject() {}\n").expect("workspace source");
-        fs::write(
-            dependency.join("Cargo.toml"),
-            "[package]\nname = \"dependency\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )
-        .expect("dependency manifest");
-        fs::write(dependency.join("src/lib.rs"), "pub fn dependency() {}\n").expect("dependency source");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+                 [dependencies]\ndependency = { path = \"../dependency\" }\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", "pub fn subject() {}\n"),
+            ],
+        );
+        crate::testing::write_fixture(
+            dependency.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"dependency\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+                ),
+                ("src/lib.rs", "pub fn dependency() {}\n"),
+            ],
+        );
         let select = crate::commands::SelectArgs {
             dir: root,
             ..crate::commands::SelectArgs::default()
@@ -2019,15 +2027,18 @@ mod tests {
 
     fn plan_at(root: Utf8PathBuf) -> Plan {
         let src = root.join("src");
-        fs::create_dir(&src).expect("src");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-        )
-        .expect("manifest");
         let source = "pub fn less(a: i32, b: i32) -> bool { a < b }\n";
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", source),
+            ],
+        );
         let absolute = src.join("lib.rs");
-        fs::write(&absolute, source).expect("source");
         let start = source.find("a < b").expect("span");
 
         let mut digests = crate::HashMap::default();

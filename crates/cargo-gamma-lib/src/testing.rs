@@ -39,6 +39,12 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::commands::Host;
 use crate::exec::Workspace;
 
+#[path = "../tests/support/project.rs"]
+mod project;
+
+#[doc(inline)]
+pub use project::{write_fixture, write_project};
+
 type PauseChannels = (mpsc::SyncSender<usize>, mpsc::Receiver<()>);
 
 /// One lazily initialized registry for a command boundary.

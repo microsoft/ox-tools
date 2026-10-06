@@ -915,12 +915,7 @@ mod tests {
         let directory = TempDir::new().expect("a temporary directory");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is not UTF-8");
 
-        for (relative, contents) in files {
-            let path = root.join(relative);
-
-            fs::create_dir_all(path.parent().expect("every fixture path has a parent").as_std_path()).expect("directories");
-            fs::write(path.as_std_path(), contents).expect("the fixture file is written");
-        }
+        crate::testing::write_fixture(root.as_std_path(), files);
 
         (directory, root)
     }

@@ -43,6 +43,7 @@ syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "e
 [dev-dependencies]
 bolero = { workspace = true }
 bolero-engine = { workspace = true, features = ["any"] }
+tempfile = { workspace = true }
 walkdir = { workspace = true }
 
 # >>> anvil-managed: anvil-lints

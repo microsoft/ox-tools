@@ -152,13 +152,16 @@ pub(crate) fn crate_dir(name: &str, source: &str) -> (tempfile::TempDir, Utf8Pat
     let dir = crate::testing::workdir(name);
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
 
-    std::fs::create_dir(root.join("src")).expect("src");
-    std::fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-    )
-    .expect("manifest");
-    std::fs::write(root.join("src/lib.rs"), source).expect("lib");
+    crate::testing::write_project(
+        root.as_std_path(),
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            ),
+            ("src/lib.rs", source),
+        ],
+    );
 
     (dir, root)
 }
