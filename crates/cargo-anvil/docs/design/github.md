@@ -239,8 +239,10 @@ justifies test-only APIs by the Pragmatic Rust Guidelines `M-MOCKABLE-SYSCALLS`
 and `M-TEST-UTIL`, takes precedence over the skill's general convention rule
 within its scope, and groups its rules into input and state control, exact
 outcome assertions, and test cost and placement, with one short section per
-rule. Both files use the normal owned-file update flow and are emitted only for
-the GitHub backend.
+rule. Doctests are treated as runnable documentation rather than coverage: they
+must run as shown, gate non-default features with hidden `cfg` lines, and leave
+behavioral coverage to unit and integration tests. Both files use the normal
+owned-file update flow and are emitted only for the GitHub backend.
 
 ## 3. Root workflows
 

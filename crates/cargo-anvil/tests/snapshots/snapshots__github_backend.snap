@@ -1137,19 +1137,26 @@ This guide is the repository's test policy. Within its scope it takes precedence
 
 Adding test-only APIs to achieve this is justified. Code that performs I/O or system calls, reads clocks, or uses randomness should be mockable ([M-MOCKABLE-SYSCALLS](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-MOCKABLE-SYSCALLS)), with the testing surface behind a test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)). When no existing seam controls a dependency, recommend adding one.
 
-Doctests compile against whatever features the `cargo test` invocation enables, so they must build both with all features and with default features. A doctest that uses a non-default test feature, such as a `test-util` seam, must gate its body with a hidden `cfg` so it runs only when that feature is enabled, without the gate appearing in rendered documentation:
+## Doctests
 
-````rust
-/// ```
-/// # #[cfg(feature = "test-util")]
-/// # {
-/// let clock = tick::Clock::new_frozen();
-/// // ...
-/// # }
-/// ```
-````
+Doctests are documentation, not the test suite of record. They are compiled and run so that every example is something a user can copy, paste, and run. Review them for that purpose:
 
-Doctests otherwise follow the same rules: no network access, processes, sleeps, fixture writes, or assertions on wall-clock or random values. When an example needs real I/O or time that it cannot control, mark it `no_run`.
+- **The example runs as shown.** Use `no_run` only when running it needs something the test environment must not use, such as a network service or real time. Do not use `ignore`, which skips compilation too.
+- **Behavior is covered by tests, not doctests.** An assertion in an example shows the reader the result; it is not coverage. When an example demonstrates behavior that no unit or integration test covers, request a test. Do not make the doctest more elaborate.
+- **The visible code is what a user would write.** Hide only setup the reader does not need and feature gates.
+- **Feature gates.** Doctests compile with the features of each `cargo test` invocation, so they must build with all features and with default features. An example that needs a non-default feature, such as a `test-util` seam, gates its body with a hidden `cfg` so it runs only when that feature is enabled and the gate stays out of rendered documentation:
+
+  ````rust
+  /// ```
+  /// # #[cfg(feature = "test-util")]
+  /// # {
+  /// let clock = tick::Clock::new_frozen();
+  /// // ...
+  /// # }
+  /// ```
+  ````
+
+- **Determinism when run.** No network access, processes, sleeps, fixture writes, or assertions on wall-clock or random values.
 
 ## Review sequence
 

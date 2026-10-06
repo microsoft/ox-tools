@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.13.0"
-catalog_checksum = "sha256:ea2de749788e5700be904cf93e30ba8e944211cf02b7bf04049afc9964992182"
+catalog_checksum = "sha256:28f741ac5fb9106f811dedd8808802a891262f298843e536192c1dd7ff282fa2"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -41,7 +41,7 @@ checksum = "sha256:049d9a7778bf9b99e22e1179bec212388369a0d366afbf88cac2ba47984d0
 
 [[file]]
 path = ".github/skills/code-review/test-review.md"
-checksum = "sha256:ae1967420fc8c01bb0b0238626bc42923e31ac72184398b598836c4c24a0dd90"
+checksum = "sha256:e4bfe141415443d690003ea252f19ec9dd55876d1ba8945dafa3a0cd35ea706e"
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
