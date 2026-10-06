@@ -13,14 +13,14 @@
 
 </div>
 
-`cargo-each`: run a command over a cargo-style selection of workspace
-members.
+`cargo-each`: run a command over Cargo workspace members or JSON Lines
+records.
 
-`cargo-each` resolves a package selection expressed with the same
-selectors as `cargo build`, optionally narrows it with package predicates,
-and runs a command over the result — once per member, once per matching
-Cargo target, or exactly once for the whole set. It replaces hand-rolled
-shell loops with one cargo-native, cross-platform command.
+`cargo-each` resolves either a package selection expressed with the same
+selectors as `cargo build` or a stream of JSON objects. It optionally
+narrows Cargo selections with package predicates and runs a command once per
+member, matching Cargo target, whole selected set, or JSON record. It
+replaces hand-rolled shell loops with one cross-platform command.
 
 `cargo-each` ships as an executable only; it is a cargo subcommand, not a
 library dependency.

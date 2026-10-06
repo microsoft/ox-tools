@@ -1283,16 +1283,36 @@ impl InvocationResult {
 /// Render an argv for display (`--dry-run`). Best-effort quoting for
 /// readability only — nothing consumes this as input.
 fn shell_join(argv: &[String]) -> String {
-    argv.iter()
-        .map(|a| {
-            if a.contains(char::is_whitespace) {
-                format!("\"{a}\"")
-            } else {
-                a.clone()
+    argv.iter().map(|argument| display_arg(argument)).collect::<Vec<_>>().join(" ")
+}
+
+fn display_arg(argument: &str) -> String {
+    let needs_quotes = argument.is_empty()
+        || argument
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control() || matches!(character, '"' | '\\'));
+    if !needs_quotes {
+        return argument.to_owned();
+    }
+
+    let mut rendered = String::with_capacity(argument.len() + 2);
+    rendered.push('"');
+    for character in argument.chars() {
+        match character {
+            '\n' => rendered.push_str("\\n"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            '"' => rendered.push_str("\\\""),
+            '\\' => rendered.push_str("\\\\"),
+            ' ' => rendered.push(' '),
+            character if character.is_whitespace() || character.is_control() => {
+                rendered.extend(character.escape_unicode());
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            character => rendered.push(character),
+        }
+    }
+    rendered.push('"');
+    rendered
 }
 
 /// Reduce a raw process exit code to the `u8` that [`ExitCode`] can carry.
@@ -3224,15 +3244,21 @@ mod tests {
     }
 
     #[test]
-    fn shell_join_only_quotes_arguments_containing_whitespace() {
+    fn shell_join_renders_each_invocation_on_one_unambiguous_line() {
         assert_eq!(
             shell_join(&[
                 "cargo".to_owned(),
                 "plain".to_owned(),
                 "two words".to_owned(),
                 "tab\tseparated".to_owned(),
+                "first\nsecond".to_owned(),
+                "carriage\rreturn".to_owned(),
+                "vertical\u{b}tab".to_owned(),
+                "quote\"slash\\".to_owned(),
+                String::new(),
             ]),
-            "cargo plain \"two words\" \"tab\tseparated\""
+            "cargo plain \"two words\" \"tab\\tseparated\" \"first\\nsecond\" \"carriage\\rreturn\" \
+             \"vertical\\u{b}tab\" \"quote\\\"slash\\\\\" \"\""
         );
         assert_eq!(shell_join(&[]), "");
     }

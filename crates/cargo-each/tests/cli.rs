@@ -1428,10 +1428,16 @@ fn workspace_rust_version_rejects_newer_members() {
 fn workspace_rust_version_is_empty_without_a_root_floor_and_rejects_an_invalid_floor() {
     let (_missing, missing_manifest) = rust_version_fixture(None, &[("alpha", Some("1.70"))]);
     each(&missing_manifest)
-        .args(["--workspace", "--once", "--dry-run", "--", "{workspace-rust-version}"])
+        .args([
+            "--workspace",
+            "--once",
+            "--dry-run",
+            "--",
+            "workspace-rust-version={workspace-rust-version}",
+        ])
         .assert()
         .success()
-        .stdout(predicate::eq("\n"))
+        .stdout(predicate::eq("workspace-rust-version=\n"))
         .stderr(predicate::str::is_empty());
 
     let (_invalid, invalid_manifest) = rust_version_fixture(Some("2.0"), &[("alpha", Some("1.70"))]);
@@ -1452,10 +1458,16 @@ fn workspace_rust_version_is_empty_without_a_root_floor_and_rejects_an_invalid_f
 fn absent_workspace_rust_version_is_empty_even_when_members_have_no_floor() {
     let (_tmp, manifest) = rust_version_fixture(None, &[("alpha", None)]);
     each(&manifest)
-        .args(["--workspace", "--once", "--dry-run", "--", "{workspace-rust-version}"])
+        .args([
+            "--workspace",
+            "--once",
+            "--dry-run",
+            "--",
+            "workspace-rust-version={workspace-rust-version}",
+        ])
         .assert()
         .success()
-        .stdout(predicate::eq("\n"))
+        .stdout(predicate::eq("workspace-rust-version=\n"))
         .stderr(predicate::str::is_empty());
 }
 
@@ -1544,6 +1556,23 @@ fn inline_json_records_preserve_order_duplicates_and_substitute_string_fields() 
         .assert()
         .success()
         .stdout(predicate::eq("echo alpha:one\necho beta:two\necho alpha:one\n"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn json_dry_run_escapes_control_characters_quotes_and_backslashes() {
+    json_each()
+        .args([
+            "--json-lines",
+            "{\"value\":\"first\\nsecond\\t\\\"quoted\\\"\\\\path\"}",
+            "--dry-run",
+            "--",
+            "echo",
+            "{json:value}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("echo \"first\\nsecond\\t\\\"quoted\\\"\\\\path\"\n"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]

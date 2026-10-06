@@ -260,7 +260,7 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--timeout <DURATION>` | Terminate an invocation's Windows job object or Unix process group when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Unix descendants can escape by starting a new session, so termination is best-effort for those escaped descendants. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
-| `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
+| `--dry-run` | Print the fully-substituted commands that *would* run, one physical line per invocation, without executing. Empty arguments, quotes, backslashes, and control or non-space whitespace characters are escaped for an unambiguous display. |
 
 ### 4.4 Placeholders
 
@@ -475,7 +475,8 @@ applicable:
 ```just
 set lazy
 
-workspace_rust_version := `cargo each --workspace --once --dry-run -- "{workspace-rust-version}"`
+workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
+workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
 
 install_msrv_command := if workspace_rust_version == "" {
     "# no root MSRV declared"
