@@ -13,14 +13,14 @@
 
 </div>
 
-`cargo-each`: run a command over a cargo-style selection of workspace
-members.
+`cargo-each`: run a command over Cargo workspace members or JSON Lines
+records.
 
-`cargo-each` resolves a package selection expressed with the same
-selectors as `cargo build`, optionally narrows it with package predicates,
-and runs a command over the result — once per member, once per matching
-Cargo target, or exactly once for the whole set. It replaces hand-rolled
-shell loops with one cargo-native, cross-platform command.
+`cargo-each` resolves either a package selection expressed with the same
+selectors as `cargo build` or a stream of JSON objects. It optionally
+narrows Cargo selections with package predicates and runs a command once per
+member, matching Cargo target, whole selected set, or JSON record. It
+replaces hand-rolled shell loops with one cross-platform command.
 
 `cargo-each` ships as an executable only; it is a cargo subcommand, not a
 library dependency.
@@ -34,11 +34,13 @@ cargo install cargo-each
 ## Usage
 
 ```text
-cargo each [SELECTION] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
+cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 ```
 
 Everything after `--` is the command template; `cargo-each` spawns it
 directly (argv, not a shell string) after substituting placeholders.
+Input is either a Cargo workspace selection or JSON Lines records; the two
+sources are deliberately mutually exclusive.
 
 ### Selection (mirrors `cargo build`)
 
@@ -80,15 +82,19 @@ can be double-quoted. Expression atoms:
   name order, substituting the per-package placeholders below.
 * `--once`: run the command exactly once when the set is non-empty (skip
   when empty), using the `{packages}` placeholder to inject the selection.
+* `--json-lines` / `--json-lines-file`: bypass Cargo selection and run once
+  per JSON object, substituting top-level string fields through
+  `{json:key}`.
 * `--each-target <KIND>`: run once per matching Cargo target, using
   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
   `--target-required-feature` further narrows targets.
 
 `--keep-going` runs every invocation and exits non-zero if any failed
-(default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package or
-per-target work. Omitting it runs exactly one invocation at a time; `auto`
-resolves once to the machine’s available parallelism. Detection failure is
-reported explicitly without falling back. `--timeout <DURATION>` terminates
+(default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package,
+per-target, or JSON-record work. Omitting it runs exactly one invocation at
+a time; `auto` resolves once to the machine’s available parallelism.
+Detection failure is reported explicitly without falling back.
+`--timeout <DURATION>` terminates
 each invocation’s Windows job object or Unix process group independently
 (`250ms`, `30s`, or `2m`). Unix descendants can escape a process group by
 starting a new session, so timeout cleanup is best-effort for those escaped
@@ -111,22 +117,35 @@ Substituted inside each command argument:
   valid only in `--once` mode and only as a standalone argument.
 * `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
   or root `[package].rust-version` in a single-package repository; valid in
-  every mode.
+  Cargo-backed per-package, per-target, and `--once` modes. Expands to an
+  empty string when the root declaration is absent.
+* `{json:key}` — the top-level string field named `key` in the current
+  record; valid only in JSON-record mode.
 
-Using a placeholder in the wrong mode is a usage error. Only the tokens
-above are interpreted; any other `{…}` sequence (a typo, or a literal brace
-an argument needs) passes through verbatim to the spawned command — there is
-no brace-escape, so this passthrough is part of the contract.
+Using a placeholder in the wrong mode is a usage error. Every `{json:…}`
+sequence is validated as a JSON placeholder. Other unrecognized `{…}`
+sequences (a typo, or a literal brace an argument needs) pass through
+verbatim to the spawned command — there is no brace-escape, so this
+passthrough is part of the contract.
 
 ## Behavior
 
 An empty resolved selection (via `--none`, or a filter that removes every
 member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
-Workspace Rust-version validation is lazy: it runs only when the command
-uses `{workspace-rust-version}` and the resolved plan has work, then requires
-every member’s resolved minimum to be present and no newer than the root
-floor. Placeholder mode validation still runs before an empty-plan no-op.
+Workspace Rust-version resolution is lazy: it runs only when the command
+uses `{workspace-rust-version}` and the resolved plan has work. An absent
+root declaration expands to an empty string. When a root floor exists,
+every member’s resolved minimum must be present and no newer than that
+floor; malformed or inconsistent declarations remain errors. Substitution
+is textual, so an empty value does not remove its surrounding argv element.
+Placeholder mode validation still runs before an empty-plan no-op.
+
+JSON-record mode requires one JSON object per nonempty input line and does
+not load Cargo metadata. Referenced `{json:key}` fields must exist and be
+strings. Invalid input is rejected before any command is spawned, records
+retain input order and duplicates, and an empty record set is a successful
+no-op.
 
 The effective worker count is the requested `--jobs` value capped by plan
 size. An effective count of one uses sequential
@@ -143,30 +162,28 @@ plan-contiguous waves capped by the effective worker count; each completed
 wave is emitted and dropped before the next wave starts, bounding retained
 temporary-file storage. Untimed effective-one execution uses an ordinary
 child, preserving terminal foreground behavior and Ctrl-C delivery; a
-post-spawn wait failure gets bounded child cleanup and reaper ownership.
+post-spawn wait failure makes one best-effort child-termination request.
 Timed and genuinely parallel commands use a job or process group. Without
 `--timeout`, cargo-each observes only the leader and does not kill background
 descendants. Every genuinely parallel invocation redirects stdout and
 stderr directly to separate unique temporary files.
 Child writers and parent readers are separately reopened so parent seeks
 cannot move descendant write positions. Cargo-each records each file’s
-current length when the leader completes (or after timeout cleanup), then
-reads exactly that finite snapshot in plan order without loading unbounded
-output into memory. Later writes by background or escaped descendants are
-outside the snapshot. RAII removes cargo-each’s directory entry, but a
-preserved descendant can keep the backing storage allocated and growing
-until its inherited writer closes. Capture create, reopen, length, seek, and
-read failures are infrastructure failures.
+current length when the leader completes (or immediately after the timeout
+termination request returns), then reads exactly that finite snapshot in
+plan order without loading unbounded output into memory. Later writes by
+background or escaped descendants are outside the snapshot. RAII removes
+cargo-each’s directory entry, but a preserved descendant can keep the
+backing storage allocated and growing until its inherited writer closes.
+Capture create, reopen, length, seek, and read failures are infrastructure
+failures.
 
-Timed-out group termination gets a bounded 250 ms reap grace. If the group
-still has not completed, its handle moves to a cargo-each-local polling
-reaper started before any command. The reaper checks every retained group
-without blocking on one child, remains the wait owner after the caller
-returns, and exits after all senders disconnect and retained groups are
-collected. Interrupted observations are retried; terminal observation
-errors are reported and removed. Reaper startup and handoff failures are
-explicit infrastructure failures; a failed handoff retains the group handle
-in a persistent fallback queue and starts an emergency polling reaper.
+At a timeout, cargo-each makes one termination request for the Windows job
+or Unix process group and returns without waiting for operating-system
+teardown to finish. A failed termination request is an infrastructure
+failure; otherwise the invocation is reported as timed out. On Unix, an
+uncollected timed-out leader may remain as a zombie until cargo-each exits,
+consuming one temporary process-table entry per timed-out invocation.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.
