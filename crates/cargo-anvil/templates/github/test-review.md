@@ -76,7 +76,7 @@ Markers: `fs::write`, `File::create`, `create_dir_all`.
 
 ### Shared mutable state
 
-Tests must not share mutable fixtures, caches, or output directories. Each test owns its mutable state; share only immutable inputs. When writing files is the behavior under test, give each test its own output directory.
+Tests must not share mutable fixtures, caches, or output directories. Each test owns its mutable state; share only immutable inputs. When writing files is the behavior under test, give each test its own output directory, such as a `tempfile::TempDir` that is removed when the test ends.
 
 ### Global state
 
@@ -112,13 +112,13 @@ Markers: `.is_err()`, `.unwrap_err().to_string()`.
 
 ### Values
 
-Boolean checks must not discard values or errors, or verify only that output is nonempty. For expected `Ok` or `Some`, use `.unwrap()` or `.expect()` and compare the value. For expected `None`, use `assert_eq!(actual, None)` or `let None = actual else { panic!("expected None") };`. Also assert relevant state changes and side effects.
+Boolean checks must not discard values or errors, or verify only that output is nonempty. For expected `Ok` or `Some`, use `.unwrap()` or `.expect()` and compare the value. For expected `None`, `assert!(actual.is_none())` is fine, since there is no value to compare. Also assert relevant state changes and side effects.
 
-Markers: `.is_ok()`, `.is_some()`, `.is_none()`, `assert!(!x.is_empty())`.
+Markers: `.is_ok()`, `.is_some()`, `assert!(!x.is_empty())`.
 
 ### Variants
 
-Do not branch on the actual result and adapt assertions to it. Assert one expected variant with `let Enum::A(x) = actual else { panic!("expected A") };`, then assert the payload. Split distinct expected outcomes into separate cases, and fail on unexpected variants.
+Do not branch on the actual result and adapt assertions to it. Assert one expected variant: when the test only checks the variant, use `assert!(matches!(actual, Enum::A(_)))`; when it uses the payload afterward, bind it with `let Enum::A(x) = actual else { panic!("expected A") };` and assert the payload. Split distinct expected outcomes into separate cases, and fail on unexpected variants.
 
 Markers: `match` or `if let` on the value under test, wildcard arms.
 
@@ -126,7 +126,7 @@ Markers: `match` or `if let` on the value under test, wildcard arms.
 
 Assert observable behavior that holds in both debug and release builds, not assumed stack layout, allocation counts, or call sites. Require such properties only when they are the explicit API contract; `black_box` does not guarantee them.
 
-Markers: allocation counts, `Backtrace`, `#[inline`, `black_box`.
+Markers: allocation counts, `Backtrace`, `#[inline]` or `#[inline(...)]`, `black_box`.
 
 ## Keep tests cheap and in place
 
