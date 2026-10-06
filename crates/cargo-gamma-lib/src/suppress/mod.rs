@@ -55,4 +55,5 @@ pub use scan::directives;
 pub(crate) use scan::directives_for;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

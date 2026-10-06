@@ -167,6 +167,7 @@ impl Killers {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::discover::{BinaryHint, FileBinaryHints, GENERALIZED_HINTS_VERSION, ItemHints, RankedHint, ReachCluster};

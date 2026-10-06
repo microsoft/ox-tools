@@ -1240,6 +1240,7 @@ const fn tier_of(outcome: Outcome) -> Option<Tier> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::record;
     use super::*;

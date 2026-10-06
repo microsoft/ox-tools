@@ -717,6 +717,7 @@ fn extend_build_arguments(work: &Workspace, args: &mut Vec<String>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod mutation_tests {
     use std::collections::VecDeque;
     use std::io::Cursor;

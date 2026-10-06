@@ -155,6 +155,7 @@ fn pause_has_expired(now: Instant, resume_at: Instant) -> bool {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::AtomicUsize;
 

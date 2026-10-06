@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Integration tests for the advisory provider against a local advisory database.
 //!
 //! Each test builds a miniature `RustSec` database — the same `crates/<name>/RUSTSEC-*.md`

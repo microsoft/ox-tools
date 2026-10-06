@@ -478,6 +478,7 @@ mod tests {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use super::{SourceFile, line_starts};
 

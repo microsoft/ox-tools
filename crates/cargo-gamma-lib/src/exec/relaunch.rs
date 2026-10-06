@@ -154,6 +154,7 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

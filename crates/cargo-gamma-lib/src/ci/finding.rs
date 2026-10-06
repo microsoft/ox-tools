@@ -66,6 +66,7 @@ pub(super) fn describe(mutant: &Mutant) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::testing::ci_fixture::{mutant, root};

@@ -202,6 +202,7 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::Arc;
 

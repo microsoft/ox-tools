@@ -3069,6 +3069,7 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::once;
     #[cfg(unix)]

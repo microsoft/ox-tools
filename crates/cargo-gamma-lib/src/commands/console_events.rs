@@ -290,6 +290,7 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use camino::Utf8PathBuf;
 

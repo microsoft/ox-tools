@@ -153,6 +153,7 @@ fn escape_csv(s: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::Arc;
 

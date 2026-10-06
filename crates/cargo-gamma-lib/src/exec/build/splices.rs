@@ -344,6 +344,7 @@ fn absent_from_plan(path: &Utf8PathBuf, current: &HashSet<&camino::Utf8Path>) ->
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

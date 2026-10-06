@@ -145,6 +145,7 @@ fn positive(text: &str, value: f64) -> Result<f64, String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

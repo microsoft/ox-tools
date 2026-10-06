@@ -2393,6 +2393,7 @@ fn term(name: Term, parts: &[&[u8]]) -> String {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;

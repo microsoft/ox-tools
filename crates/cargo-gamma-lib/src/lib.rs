@@ -136,6 +136,7 @@ mod estimate;
 mod exec;
 mod fix;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fixtures;
 mod html;
 mod merge;
@@ -184,6 +185,7 @@ macro_rules! expose_internals {
     ($($name:ident),+ $(,)?) => {
         #[cfg(any(test, feature = "internals"))]
         #[doc(hidden)]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         pub mod internals {
             $(
                 #[doc(hidden)]
@@ -208,6 +210,7 @@ expose_internals!(
 /// the integration tests would need their own copy of every fixture.
 #[cfg(any(test, feature = "internals"))]
 #[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod testing;
 
 #[doc(inline)]

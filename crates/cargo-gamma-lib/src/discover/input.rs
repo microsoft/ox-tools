@@ -46,6 +46,7 @@ fn text_with_limit(mut input: impl Read, limit: u64) -> io::Result<Option<String
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::Cursor;
 

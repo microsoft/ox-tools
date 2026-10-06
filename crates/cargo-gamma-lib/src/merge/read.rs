@@ -237,6 +237,7 @@ fn read_contents(input: &mut File, path: &Utf8Path, limit: u64) -> Result<(Strin
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use camino::Utf8PathBuf;
 

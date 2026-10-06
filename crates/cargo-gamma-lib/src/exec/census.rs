@@ -1435,6 +1435,7 @@ fn decode(bytes: &BoundedCensus) -> Option<Vec<u32>> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::{Read, Write as _};
 

@@ -40,6 +40,7 @@ pub mod text;
 pub use error::{Error, Parts};
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod unwind_contracts {
     use core::panic::{RefUnwindSafe, UnwindSafe};
 

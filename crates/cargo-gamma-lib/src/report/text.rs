@@ -189,6 +189,7 @@ pub(crate) fn bytes(count: u64) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -351,6 +351,7 @@ fn verify_or_revert_with_cargo<H: Host>(
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::fixtures::crate_dir;

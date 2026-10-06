@@ -22,6 +22,7 @@ pub(super) fn completions<H: Host>(host: &mut H, args: &CompletionsArgs) -> i32 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::Write;
 

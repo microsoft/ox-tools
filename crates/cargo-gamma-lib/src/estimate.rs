@@ -118,6 +118,7 @@ pub(crate) fn generalized_fallback_cost(fallback: Duration) -> Duration {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

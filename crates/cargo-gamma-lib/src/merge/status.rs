@@ -34,6 +34,7 @@ pub(super) fn scoring(status: &str) -> Option<Scoring> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

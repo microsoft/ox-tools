@@ -20,6 +20,7 @@ mod config;
 mod copy;
 mod events;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod faults;
 mod harness_filters;
 mod incremental_mode;

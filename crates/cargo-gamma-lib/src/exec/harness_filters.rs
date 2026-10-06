@@ -170,6 +170,7 @@ fn valid_test_threads(value: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::HarnessFilters;
 

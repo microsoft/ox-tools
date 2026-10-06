@@ -216,6 +216,7 @@ pub fn one_line(text: &str, width: usize) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use cargo_gamma_engine::model::MutationSite;
 

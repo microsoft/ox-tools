@@ -182,6 +182,7 @@ fn default_report_path(root: &Utf8Path, configured_artifact_dir: Option<&Utf8Pat
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     use super::*;
