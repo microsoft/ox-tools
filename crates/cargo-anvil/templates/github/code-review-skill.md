@@ -11,6 +11,18 @@ license: MIT
 This skill applies when reviewing pull requests. It does not apply to the coding
 agent when it writes code — see `AGENTS.md` for that.
 
+**Determinism is the primary focus when reviewing tests, test helpers, and
+benchmarks.** Start by tracing uncontrolled inputs, shared state, scheduling,
+and host dependencies; then check that assertions verify the intended result.
+Also read
+[Test review rules](test-review.md). Each prohibited practice there has
+recommended solutions; include the applicable solution in your finding rather
+than only asking the author to remove the practice. Prefer deterministic
+full-result assertions over substring checks.
+Review fixes for preserved behavioral coverage, not just a green run: retries,
+ignored cases, and broader assertions need evidence that they address the cause
+without hiding the defect.
+
 Every rule below exists because a review comment was filed, argued, and
 withdrawn. The cost of a wrong comment is not zero: the author has to reproduce
 your claim, disprove it, and write the rebuttal.

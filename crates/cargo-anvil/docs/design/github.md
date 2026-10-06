@@ -195,7 +195,8 @@ alongside the GitHub-gated files so the on-disk tree is complete.
 │   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
 ├── skills/
 │   ├── cargo-anvil-adoption/SKILL.md  owned   (post-generation cleanup workflow; all backends)
-│   └── code-review/SKILL.md           owned   (GitHub PR review guidance)
+│   ├── code-review/SKILL.md           owned   (GitHub PR review guidance)
+│   └── code-review/test-review.md     owned   (test review rules linked from the skill)
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -224,9 +225,24 @@ a rebuttal. The skill's central rule follows from that: comment on evidence you
 can see, and leave build, lint, and test outcomes to the pipeline anvil
 generated.
 
-The content is derived from an audit of withdrawn review comments across
-anvil-managed repositories; each rule corresponds to a class of finding that was
-filed and then disproved.
+The general review rules are derived from an audit of withdrawn review comments
+across anvil-managed repositories; each corresponds to a class of finding that
+was filed and then disproved.
+
+The skill also links to the separately owned `test-review.md` in the same
+directory. Reviewers read it for test, test-helper, and benchmark changes. It
+puts determinism first: control inputs, isolate state and ordering, verify the
+intended result, and preserve the contract across supported configurations. It
+covers in-process command testing, narrow real boundaries, deterministic and
+isolated fixtures, meaningful outcome assertions, test-only feature gates,
+separate validation budgets, Miri exclusions, and honest benchmark measurements.
+It also covers process-global instrumentation, platform capabilities, hermetic
+security fixtures, protocol setup, optimized-profile assumptions, typed negative
+assertions, bounded concurrency models, and coverage-preserving flake fixes.
+String assertions favor deterministic full-result snapshots or exact comparisons,
+with prefix checks only for prefix contracts. Every prohibited practice includes
+appropriate recommended solutions without a fixed count. Both files
+use the normal owned-file update flow and are emitted only for the GitHub backend.
 
 ## 3. Root workflows
 

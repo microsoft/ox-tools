@@ -259,6 +259,7 @@ mod tests {
             github::pr_root_workflow(),
             github::scheduled_root_workflow(),
             github::code_review_skill(),
+            github::test_review_rules(),
             ado::setup_step(),
             ado::impact_step(),
             ado::advisory_comments(),

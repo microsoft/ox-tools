@@ -2763,9 +2763,14 @@ mod tests {
             ".github/workflows/anvil-pr.yml",
             ".github/workflows/anvil-scheduled.yml",
             ".github/skills/code-review/SKILL.md",
+            ".github/skills/code-review/test-review.md",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after github update");
         }
+        let skill = fs::read_to_string(tmp.path().join(".github/skills/code-review/SKILL.md")).unwrap();
+        assert_eq!(skill, include_str!("../templates/github/code-review-skill.md"));
+        let rules = fs::read_to_string(tmp.path().join(".github/skills/code-review/test-review.md")).unwrap();
+        assert_eq!(rules, include_str!("../templates/github/test-review.md"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
