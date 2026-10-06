@@ -1146,44 +1146,129 @@ Adding test-only APIs to achieve this is justified. Code that performs I/O or sy
 
 Passing CI, stable snapshots, stress reruns, or a closed bug do not prove determinism or a root-cause fix. Distinguish harness defects from product races, and preserve security checks and meaningful assertions.
 
-Markers in the tables are search hints, not proof of a defect; check actual usage and imported aliases.
+Markers are search hints, not proof of a defect; check actual usage and imported aliases.
 
 ## Control inputs and state
 
-| Avoid | Use instead |
-| --- | --- |
-| Network services, host configuration, installed tools, sign-in, browsers, or developer credentials. Markers: `reqwest::`, `TcpStream::connect`, `UdpSocket::bind`. | Mock service and host dependencies; derive expectations from controlled inputs, not machine configuration. |
-| Spawning any process, including the crate's own binary or generated fake executables. Markers: `Command::new`, `.spawn()`, `.output()`, `CARGO_BIN_EXE_`, `assert_cmd`, `.success()`, `.failure()`, `.sh`, `.bat`. | Mock the process runner with scripted status, stdout, and stderr; test command construction, parsing, and policy in-process. For CLI behavior, call the library entry point that the binary wraps with explicit arguments, environment, working directory, and I/O. This applies to integration tests under `tests/` too. |
-| Unspecified collaborators silently succeeding or reaching the host. | Reject unexpected calls; script only the interactions the scenario needs. |
-| Wall-clock or random values, or sleeps used for ordering. Markers: `SystemTime::now`, `Instant::now`, `Utc::now`, `thread_rng`, `rand::rng`, `sleep`. | Inject a [tick](https://docs.rs/tick/latest/tick/) clock: `tick::Clock::new_frozen` (feature `test-util`) for fixed time, and `ClockControl` to advance time explicitly in timer tests. Seed or script randomness. Synchronize with channels, barriers, or notifications. |
-| Writing input fixtures to disk during test setup. Markers: `fs::write`, `File::create`, `create_dir_all`. | Prefer in-memory values, byte buffers, or injected readers. If a file fixture is required, commit it as source and read it unchanged (`include_str!`, `include_bytes!`, or a checked-in path). Do not generate fixture files at test runtime. |
-| Shared mutable fixtures, caches, or output directories. | Own mutable state per test; share only immutable inputs. When writing files is the behavior under test, give each test its own output directory. |
-| Global-state interference or first-use ordering hidden by atomics, save/restore, or partial locks. Markers: `static`, `AtomicUsize`, `thread_local!`, `set_hook`, `set_global_default`. | Inject owned state. Initialize unavoidable shared infrastructure deterministically before concurrent tests, and isolate observations per test. Thread-local state works only if all observed work stays on that thread. Resetting state afterward does not prevent concurrent interference; unavoidable global mutation needs a separate test design. |
-| Process environment or working-directory mutation, or host-dependent fixture paths. Markers: `set_var`, `remove_var`, `set_current_dir`, `current_dir`. | Pass environment and working directory as explicit inputs; use synthetic paths for mocked I/O or stable checked-in fixture paths. |
-| Permission changes, lock races, mandatory privileges, or host-dependent filesystem metadata. Markers: `set_permissions`, `symlink`. | Mock filesystem operations and metadata, or inject specific errors. Preserve production security checks instead of relaxing them for fixtures. |
+### Network and host dependencies
+
+Tests must not depend on network services, host configuration, installed tools, sign-in, browsers, or developer credentials. Mock service and host dependencies, and derive expectations from controlled inputs, not machine configuration.
+
+Markers: `reqwest::`, `TcpStream::connect`, `UdpSocket::bind`.
+
+### Processes
+
+Tests must not spawn any process, including the crate's own binary or generated fake executables. This applies to integration tests under `tests/` too. Mock the process runner with scripted status, stdout, and stderr, and test command construction, parsing, and policy in-process. For CLI behavior, call the library entry point that the binary wraps with explicit arguments, environment, working directory, and I/O.
+
+Markers: `Command::new`, `.spawn()`, `.output()`, `CARGO_BIN_EXE_`, `assert_cmd`, `.success()`, `.failure()`, `.sh`, `.bat`.
+
+### Unscripted collaborators
+
+Mocks must not silently succeed on unspecified calls or fall through to the host. Reject unexpected calls, and script only the interactions the scenario needs.
+
+### Time and randomness
+
+Tests must not assert on wall-clock or random values, or use sleeps for ordering. Inject a [tick](https://docs.rs/tick/latest/tick/) clock: use `tick::Clock::new_frozen` (feature `test-util`) for fixed time, and `ClockControl` to advance time explicitly in timer tests. Seed or script randomness. Synchronize with channels, barriers, or notifications.
+
+Markers: `SystemTime::now`, `Instant::now`, `Utc::now`, `thread_rng`, `rand::rng`, `sleep`.
+
+### Fixtures
+
+Tests must not write input fixtures to disk during setup. Prefer in-memory values, byte buffers, or injected readers. If a file fixture is required, commit it as source and read it unchanged (`include_str!`, `include_bytes!`, or a checked-in path).
+
+Markers: `fs::write`, `File::create`, `create_dir_all`.
+
+### Shared mutable state
+
+Tests must not share mutable fixtures, caches, or output directories. Each test owns its mutable state; share only immutable inputs. When writing files is the behavior under test, give each test its own output directory.
+
+### Global state
+
+Atomics, save/restore, or partial locks do not prevent global-state interference or first-use ordering between parallel tests. Inject owned state instead. Initialize unavoidable shared infrastructure deterministically before concurrent tests, and isolate observations per test. Thread-local state works only if all observed work stays on that thread. Resetting state afterward does not prevent concurrent interference; unavoidable global mutation needs a separate test design.
+
+Markers: `static`, `AtomicUsize`, `thread_local!`, `set_hook`, `set_global_default`.
+
+### Process environment and paths
+
+Tests must not mutate the process environment or working directory, or depend on host-specific fixture paths. Pass environment and working directory as explicit inputs; use synthetic paths for mocked I/O or stable checked-in fixture paths.
+
+Markers: `set_var`, `remove_var`, `set_current_dir`, `current_dir`.
+
+### Permissions and filesystem metadata
+
+Tests must not depend on permission changes, lock races, mandatory privileges, or host-specific filesystem metadata. Mock filesystem operations and metadata, or inject specific errors. Preserve production security checks instead of relaxing them for fixtures.
+
+Markers: `set_permissions`, `symlink`.
 
 ## Assert exact outcomes
 
-| Avoid | Use instead |
-| --- | --- |
-| Substring assertions instead of checking the whole result. Markers: `assert!(x.contains(...))`. | Prefer full `insta` snapshots or exact string or structured equality. Control inputs; normalize only incidental values. Use `starts_with` for prefix contracts and check any meaningful remainder. Use `contains` only when containment itself is the contract. |
-| Negative tests that accept any error or generic error text. Markers: `.is_err()`, `.unwrap_err().to_string()`. | Use `.unwrap_err()` or `.expect_err()` and assert the typed cause and its fields after setup reaches the intended branch. Test exact error wording separately with deterministic inputs. |
-| Boolean checks that discard values or errors, or verify only nonempty output. Markers: `.is_ok()`, `.is_some()`, `.is_none()`, `assert!(!x.is_empty())`. | For expected `Ok` or `Some`, use `.unwrap()` or `.expect()` and compare the value. For expected `None`, use `assert_eq!(actual, None)` or `let None = actual else { panic!("expected None") };`. Also assert relevant state changes and side effects. |
-| Branching on the actual result instead of asserting one expected variant. Markers: `match` or `if let` on the value under test, wildcard arms. | Use `let Enum::A(x) = actual else { panic!("expected A") };`, then assert the payload. Split distinct expected outcomes into separate cases; fail on unexpected variants instead of adapting assertions to them. |
-| Assertions tied to compiler implementation details. Markers: allocation counts, `Backtrace`, `#[inline`, `black_box`. | Assert observable behavior that holds in both debug and release builds, not assumed stack layout, allocation counts, or call sites. Require such properties only when they are the explicit API contract; `black_box` does not guarantee them. |
+### Strings
+
+Do not check part of a result with substring assertions. Prefer full `insta` snapshots or exact string or structured equality. Control inputs and normalize only incidental values. Use `starts_with` for prefix contracts and check any meaningful remainder. Use `contains` only when containment itself is the contract.
+
+Markers: `assert!(x.contains(...))`.
+
+### Errors
+
+Negative tests must not accept any error or generic error text. Use `.unwrap_err()` or `.expect_err()` and assert the typed cause and its fields after setup reaches the intended branch. Test exact error wording separately with deterministic inputs.
+
+Markers: `.is_err()`, `.unwrap_err().to_string()`.
+
+### Values
+
+Boolean checks must not discard values or errors, or verify only that output is nonempty. For expected `Ok` or `Some`, use `.unwrap()` or `.expect()` and compare the value. For expected `None`, use `assert_eq!(actual, None)` or `let None = actual else { panic!("expected None") };`. Also assert relevant state changes and side effects.
+
+Markers: `.is_ok()`, `.is_some()`, `.is_none()`, `assert!(!x.is_empty())`.
+
+### Variants
+
+Do not branch on the actual result and adapt assertions to it. Assert one expected variant with `let Enum::A(x) = actual else { panic!("expected A") };`, then assert the payload. Split distinct expected outcomes into separate cases, and fail on unexpected variants.
+
+Markers: `match` or `if let` on the value under test, wildcard arms.
+
+### Compiler implementation details
+
+Assert observable behavior that holds in both debug and release builds, not assumed stack layout, allocation counts, or call sites. Require such properties only when they are the explicit API contract; `black_box` does not guarantee them.
+
+Markers: allocation counts, `Backtrace`, `#[inline`, `black_box`.
 
 ## Keep tests cheap and in place
 
-| Avoid | Use instead |
-| --- | --- |
-| Tests embedded in demonstration examples under `<crate>/src/examples`. Markers: `#[test]`, `#[tokio::test]`, or `#[cfg(test)]` in `src/examples/`. | Keep examples focused on demonstration. Put regression tests in test modules or `tests/` targets that the CI `cargo test` gate runs; do not count example-embedded tests as coverage. |
-| Requiring a full pipeline to test a utility. | Call the utility directly with deterministic mocked collaborators. |
-| Mocking the behavior being asserted. | Mock only dependencies; run the real code under test. Reports, probes, and policies can be mocked when they are dependencies, not the subject. |
-| Test helpers exposed in default APIs. Markers: test-only `pub` items outside `#[cfg(test)]`, `default =` in `[features]`. | Keep private helpers in `#[cfg(test)]` modules. Gate exported helpers behind a non-default test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)) that workspace defaults do not enable. |
-| Slow or unbounded test work, or machine-speed assertions. Markers: `.elapsed()`, `timeout`, large iteration counts, `loom::model`. | Target under one second per test, excluding compilation. Reduce fixtures and work, and mock expensive dependencies. Bound loops and explored schedules while preserving the invariant, and state exploration limits. Assert work bounds, not wall-clock cutoffs; deadlines are only safety limits. |
-| Blanket Miri exclusions for one unsupported dependency. Markers: `cfg(not(miri))` on whole modules, `cfg_attr(miri, ignore)` without a reason. | Ignore only affected tests, each with a reason; keep unaffected tests enabled. |
-| Untuned stress workloads under Miri. Markers: `stress`, repeated loops, large iteration counts. | Exclude stress workloads with a reasoned `#[cfg_attr(miri, ignore = "...")]`, or reduce the Miri workload and measure its runtime. Keep a small invariant-focused Miri case; native speed does not predict interpreter cost. |
-| Retries, longer sleeps or timeouts, weaker assertions, ignored tests, or nonrecurrence presented as fixes. Markers: `retry`, `#[ignore]`. | Remove the evidenced uncontrolled dependency while preserving coverage. Keep unresolved product races under investigation. A temporary quarantine must name the lost coverage, an owner, and the restoration condition. |
+### Tests in examples
+
+Do not embed tests in demonstration examples under `<crate>/src/examples`. Keep examples focused on demonstration, and put regression tests in test modules or `tests/` targets that the CI `cargo test` gate runs. Example-embedded tests do not count as coverage.
+
+Markers: `#[test]`, `#[tokio::test]`, or `#[cfg(test)]` in `src/examples/`.
+
+### Test subject
+
+Do not require a full pipeline to test a utility; call the utility directly with deterministic mocked collaborators. Conversely, do not mock the behavior being asserted: mock only dependencies and run the real code under test. Reports, probes, and policies can be mocked when they are dependencies, not the subject.
+
+### Test helpers
+
+Test helpers must not be part of default APIs. Keep private helpers in `#[cfg(test)]` modules. Gate exported helpers behind a non-default test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)) that workspace defaults do not enable.
+
+Markers: test-only `pub` items outside `#[cfg(test)]`, `default =` in `[features]`.
+
+### Runtime
+
+Target under one second per test, excluding compilation. Reduce fixtures and work, and mock expensive dependencies. Bound loops and explored schedules while preserving the invariant, and state exploration limits. Assert work bounds, not machine speed or wall-clock cutoffs; deadlines are only safety limits.
+
+Markers: `.elapsed()`, `timeout`, large iteration counts, `loom::model`.
+
+### Miri
+
+Do not exclude whole modules from Miri because one dependency is unsupported. Ignore only affected tests, each with a reason, and keep unaffected tests enabled.
+
+Do not run untuned stress workloads under Miri. Exclude them with a reasoned `#[cfg_attr(miri, ignore = "...")]`, or reduce the Miri workload and measure its runtime. Keep a small invariant-focused Miri case; native speed does not predict interpreter cost.
+
+Markers: `cfg(not(miri))` on whole modules, `cfg_attr(miri, ignore)` without a reason, `stress`, large iteration counts.
+
+### Flaky test fixes
+
+Retries, longer sleeps or timeouts, weaker assertions, ignored tests, or nonrecurrence are not fixes. Remove the evidenced uncontrolled dependency while preserving coverage, and keep unresolved product races under investigation. A temporary quarantine must name the lost coverage, an owner, and the restoration condition.
+
+Markers: `retry`, `#[ignore]`.
 
 === .github/workflows/anvil-pr-impl.yml ===
 # Copyright (c) Microsoft Corporation.
