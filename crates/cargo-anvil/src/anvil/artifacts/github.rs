@@ -41,6 +41,7 @@ const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/sc
 /// Review guidance consumed by GitHub Copilot code review as an agent skill.
 const CODE_REVIEW_SKILL: &str = include_str!("../../../templates/github/code-review-skill.md");
 
+/// Test review rules linked from the code review skill.
 const TEST_REVIEW_RULES: &str = include_str!("../../../templates/github/test-review.md");
 
 /// `.github/actions/anvil-setup/action.yml`.
@@ -192,6 +193,13 @@ mod tests {
                 ".github/skills/code-review/test-review.md",
             ]
         );
+    }
+
+    /// Copilot loads the skill by the name in its front matter.
+    #[test]
+    fn code_review_skill_front_matter_names_the_skill() {
+        let front_matter: Vec<_> = CODE_REVIEW_SKILL.lines().take(2).collect();
+        assert_eq!(front_matter, ["---", "name: code-review"]);
     }
 
     #[test]

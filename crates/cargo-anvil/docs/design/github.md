@@ -229,21 +229,17 @@ The general review rules are derived from an audit of withdrawn review comments
 across anvil-managed repositories; each corresponds to a class of finding that
 was filed and then disproved.
 
-The skill also links to the separately owned `test-review.md` in the same
-directory. Reviewers read it for library unit tests run by `cargo test` and their
-helpers. Benchmarks and wider integration tests are outside its scope. It
-puts determinism first: control inputs, isolate state and ordering, verify the
-intended result, and preserve the contract across supported configurations. It
-covers focused unit testing, mocked collaborators, in-memory or committed
-immutable fixtures, meaningful outcome assertions, test-only feature gates,
-bounded test work, and scoped Miri exclusions.
-Wider integration tests require a design document, not ad hoc provisioned jobs.
-It also covers shared-state isolation, mocked host effects, optimized-profile
-invariants, typed negative assertions, and coverage-preserving flake fixes.
-String assertions favor deterministic full-result snapshots or exact comparisons,
-with prefix checks only for prefix contracts. Every prohibited practice includes
-appropriate recommended solutions without a fixed count. Both files
-use the normal owned-file update flow and are emitted only for the GitHub backend.
+The skill links to the separately owned `test-review.md` in the same directory.
+It covers every test target that `cargo test` runs, including integration tests
+under `tests/`, plus tests embedded in `src/examples`; benchmarks and
+provisioned end-to-end tests are out of scope. It makes determinism the primary
+review focus, because tests that control their inputs avoid real I/O, timers,
+and subprocesses and are therefore also fast. It justifies test-only APIs by
+the Pragmatic Rust Guidelines `M-MOCKABLE-SYSCALLS` and `M-TEST-UTIL`, takes
+precedence over the skill's general convention rule within its scope, and
+groups its rules into input and state control, exact outcome assertions, and
+test cost and placement. Both files use the normal owned-file update flow and
+are emitted only for the GitHub backend.
 
 ## 3. Root workflows
 
