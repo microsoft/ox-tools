@@ -78,7 +78,7 @@ pub struct ManagedRegionRefusal {
 }
 
 impl ManagedRegionRefusal {
-    fn new(reason: AppError, remedy: RefusalRemedy) -> Self {
+    pub(crate) fn new(reason: AppError, remedy: RefusalRemedy) -> Self {
         Self { reason, remedy }
     }
 }
@@ -144,13 +144,32 @@ pub fn plan_managed_region(
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
+    plan_region_with_splice(manifest, host_text, request, || {
+        splice(
+            request.host_relpath,
+            host_text,
+            request.region_id,
+            request.rendered_body,
+            request.syntax,
+            request.placement,
+            request.newline,
+        )
+    })
+}
+
+pub(crate) fn plan_region_with_splice(
+    manifest: &Manifest,
+    host_text: Option<&str>,
+    request: ManagedRegionRequest<'_>,
+    splice: impl FnOnce() -> Result<String, ManagedRegionRefusal>,
+) -> Result<PlanItem, ManagedRegionRefusal> {
     let ManagedRegionRequest {
         host_relpath,
         region_id,
         rendered_body,
         syntax,
         placement,
-        newline,
+        ..
     } = request;
     let template_checksum = checksum_str(rendered_body);
     // Case-insensitively, as the retirement path does. `push_region_at`
@@ -218,7 +237,7 @@ pub fn plan_managed_region(
             ));
         }
     }
-    let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline)?;
+    let spliced = splice()?;
     Ok(PlanItem::write_region(
         host_relpath,
         region_id,

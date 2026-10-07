@@ -205,6 +205,19 @@ user-only residue from any table other than the body's last table: placing it
 after the closing marker would change its membership. The engine does not
 automatically split arbitrary templates or repair unrelated invalid TOML.
 
+An opt-in `with_toml_array_region` registration manages entries rather than tables.
+It retains an ordinary `Artifact::Region` and stores its selector in catalog metadata.
+The selector
+locates an existing array through immutable TOML parser spans, or creates missing
+table/array scaffolding outside the sentinels. Introduction inserts first and
+adopts one identical unmanaged value per generated entry without taking its
+comments or other regions. The body includes trailing commas; replacing or
+retiring it cannot strand a separator between repository entries. Only the
+indented entry body is recorded under the ordinary `(host, id)` lock key.
+The selector contributes to compiled catalog identity, not to repository
+ownership. Planning, dry-run, edited-body refusal, manifest projection, and
+retirement use the same policies as ordinary regions.
+
 Every actual TOML write has a generic parse-before-write backstop. Only regions
 that will really retire are masked for that check; an edited retired region
 remains visible. Existing managed content is masked when locating unmanaged

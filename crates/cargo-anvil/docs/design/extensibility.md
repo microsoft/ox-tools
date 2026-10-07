@@ -151,6 +151,11 @@ pub struct RegionSpec {
     pub syntax: CommentSyntax,     // Hash / SlashSlash
 }
 
+pub struct TomlArrayRegionSpec {
+    pub region: RegionSpec,
+    pub path: Vec<String>,         // TOML key components, not a dotted string
+}
+
 impl Artifact {
     /// Derive a variant of this artifact with a new body, preserving every
     /// other field — path, gate, host, id, syntax. This is how a fork
@@ -174,6 +179,60 @@ catalog's artifact set, dispatching each to the existing generic driver (`plan_o
 `plan_managed_region`). The per-artifact decision logic, manifest interaction, and orphan
 detection are unchanged — only the *source of the list* changes from compiled-in calls to
 catalog data.
+
+#### TOML array-entry regions
+
+`CatalogBuilder::with_toml_array_region(TomlArrayRegionSpec { region, path })`
+appends an ordinary `Artifact::Region` with array-placement metadata in the
+catalog. The exhaustive `Artifact` enum and existing `RegionSpec` struct literals
+are unchanged. For
+example, `path: vec!["plugins".into(), "default".into()]` selects
+`plugins.default`; the region body is an unindented sequence of TOML array
+entries and comments, with a trailing comma after the last entry. The engine
+indents the body and hash sentinels by two spaces. It does not own the table,
+key, brackets, or other entries:
+
+```toml
+[plugins]
+default = [
+  # >>> anvil-managed: example-plugins
+  # Development guidance.
+  "market:development",
+  # <<< anvil-managed: example-plugins
+  # Repository guidance.
+  "user:other-plugin",
+]
+```
+
+Missing hosts, parent tables, or arrays are scaffolded once, outside ownership.
+Existing multiline, inline, empty, dotted-key, and quoted-key arrays are located
+using TOML parser source spans. New regions are inserted first, so a repository's
+last element need not gain a comma. One semantically identical unmanaged entry
+is adopted for each generated entry; its comments remain repository-owned.
+Other regions are never adoption candidates. Existing comments and unrelated
+settings retain their original bytes except for the missing scaffold and the
+array's opening line break.
+
+Malformed TOML, non-array selectors, malformed markers, regions outside the
+selected array, and markers splitting a parsed value are refused.
+An array enclosed by another managed region is also refused: its scaffold must
+be repository-owned before entry-level ownership can be introduced. Array bodies
+and the complete spliced host are parser-validated before writing. Ordinary
+edited-body protection remains unchanged. Identity and lock tracking are still
+`(host, id)` and the checksum of the rendered entry body; the compiled catalog
+checksum additionally includes the static selector, never repository bytes.
+Updates replace only the sentinel span; retirement uses ordinary region removal,
+leaving the array scaffold and other entries intact. Trailing commas keep both
+empty-array and last-entry retirement valid. No special CLI or downstream file
+merger is required.
+
+`Catalog::toml_array_path(&RegionSpec) -> Option<&[String]>` retrieves a selector
+by the ordinary region's host/id identity. `into_builder` and `replace_artifact`
+preserve it; replacement body/syntax validation reads the current ordinary
+region, not a duplicate body in metadata. `without_artifact` removes both the
+region and its selector. Duplicate registration conflicts with both ordinary
+and array-positioned regions; invalid selectors and entry bodies fail `build`.
+Catalogs without array-placement metadata retain their existing checksum.
 
 Because the on-disk format is fixed, **none of the engine internals (`region.rs`, `manifest.rs`,
 the templates) need to change to support forks.** `region.rs` keeps its hard-coded

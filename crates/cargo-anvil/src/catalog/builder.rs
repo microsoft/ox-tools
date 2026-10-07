@@ -15,6 +15,7 @@ use ohno::{AppError, bail};
 
 use crate::catalog::artifact::Artifact;
 use crate::catalog::meta::CliMeta;
+use crate::catalog::{HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
 use crate::checksum::checksum_str;
 
 /// The set of artifacts a tool emits, plus its CLI identity.
@@ -22,6 +23,7 @@ use crate::checksum::checksum_str;
 pub struct Catalog {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    toml_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
 }
 
 impl Catalog {
@@ -29,7 +31,11 @@ impl Catalog {
     /// ([`Catalog::anvil`], defined in the `anvil` module) and the builder go
     /// through this so the fields stay private to the reusable engine.
     pub(crate) fn from_parts(cli: CliMeta, artifacts: Vec<Artifact>) -> Self {
-        Self { cli, artifacts }
+        Self {
+            cli,
+            artifacts,
+            toml_array_paths: Vec::new(),
+        }
     }
 
     /// Start a new, empty catalog from a CLI identity.
@@ -38,6 +44,7 @@ impl Catalog {
         CatalogBuilder {
             cli,
             artifacts: Vec::new(),
+            toml_array_paths: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -48,6 +55,7 @@ impl Catalog {
         CatalogBuilder {
             cli: self.cli,
             artifacts: self.artifacts,
+            toml_array_paths: self.toml_array_paths,
             errors: Vec::new(),
         }
     }
@@ -64,6 +72,15 @@ impl Catalog {
         &self.artifacts
     }
 
+    /// The TOML array key components for this region identity, if opted in.
+    #[must_use]
+    pub fn toml_array_path(&self, region: &RegionSpec) -> Option<&[String]> {
+        self.toml_array_paths
+            .iter()
+            .find(|(host, id, _)| host == &region.host && id == &region.id)
+            .map(|(_, _, path)| path.as_slice())
+    }
+
     /// A `sha256:…` checksum over the whole catalog — every artifact's
     /// identity and rendered body, in canonical (sorted) order.
     ///
@@ -77,6 +94,11 @@ impl Catalog {
     #[must_use]
     pub fn checksum(&self) -> String {
         let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
+        entries.extend(
+            self.toml_array_paths
+                .iter()
+                .map(|(host, id, path)| format!("array-path\u{1f}{}\u{1f}{}\u{1f}{path:?}", host_repr(host), id.as_str())),
+        );
         entries.sort();
         checksum_str(&entries.join("\n"))
     }
@@ -135,6 +157,7 @@ fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
 pub struct CatalogBuilder {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    toml_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
     errors: Vec<String>,
 }
 
@@ -184,6 +207,26 @@ impl CatalogBuilder {
         self
     }
 
+    /// Append an ordinary region with opt-in TOML array placement.
+    ///
+    /// Duplicate host/id identities are rejected, including ordinary regions.
+    /// Replacement preserves the selector; removal removes it.
+    #[must_use]
+    pub fn with_toml_array_region(mut self, spec: TomlArrayRegionSpec) -> Self {
+        let placement = (spec.region.host.clone(), spec.region.id, spec.path);
+        let artifact = Artifact::region(spec.region);
+        if self.position_of(&artifact).is_some() {
+            self.errors.push(format!(
+                "with_toml_array_region: an artifact with identity {:?} already exists; use replace_artifact to override it",
+                artifact.key()
+            ));
+        } else {
+            self.toml_array_paths.push(placement);
+            self.artifacts.push(artifact);
+        }
+        self
+    }
+
     /// Override an existing artifact in place (preserving its position).
     /// Records an error if no artifact with that identity exists.
     #[must_use]
@@ -208,6 +251,10 @@ impl CatalogBuilder {
     pub fn without_artifact(mut self, artifact: Artifact) -> Self {
         match self.position_of(&artifact) {
             Some(index) => {
+                if let Artifact::Region(region) = &artifact {
+                    self.toml_array_paths
+                        .retain(|(host, id, _)| host != &region.host || id != &region.id);
+                }
                 self.artifacts.remove(index);
             }
             None => self
@@ -228,12 +275,27 @@ impl CatalogBuilder {
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let (_, _, path) = self
+                .toml_array_paths
+                .iter()
+                .find(|(host, id, _)| host == &region.host && id == &region.id)?;
+            let spec = TomlArrayRegionSpec {
+                region: region.clone(),
+                path: path.clone(),
+            };
+            crate::emit::toml_array_region::validate_spec(&spec)
+                .err()
+                .map(|refusal| format!("TOML array region '{}': {}", spec.region.id, refusal.reason))
+        }));
         if !errors.is_empty() {
             bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, errors.join("\n  - "));
         }
         Ok(Catalog {
             cli: self.cli,
             artifacts: self.artifacts,
+            toml_array_paths: self.toml_array_paths,
         })
     }
 }
@@ -263,8 +325,8 @@ fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::CommentSyntax;
     use crate::anvil::artifacts;
-    use crate::{CommentSyntax, HostSelector, RegionId, RegionSpec};
 
     #[test]
     fn subcommand_derives_bin_name() {
