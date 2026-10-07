@@ -17,7 +17,7 @@ use clap::{Args, Parser};
 #[derive(Parser, Debug)]
 #[command(name = "cargo", bin_name = "cargo")]
 pub(crate) enum CargoCli {
-    /// Run a command over a cargo-style selection of workspace members.
+    /// Run a command over Cargo workspace members or JSON records.
     Each(EachArgs),
 }
 
@@ -25,10 +25,10 @@ pub(crate) enum CargoCli {
 #[derive(Args, Debug, Clone)]
 #[command(
     version,
-    about = "Run a command over a cargo-style selection of workspace members",
-    long_about = "Resolve a cargo-style package selection (-p/--package, --workspace, --exclude), \
-                  optionally filter it with Boolean expressions over Cargo metadata, and run a command over the result \
-                  — once per member, once per matching Cargo target, or once for the whole set."
+    about = "Run a command over Cargo workspace members or JSON records",
+    long_about = "Resolve either a cargo-style package selection (-p/--package, --workspace, --exclude) \
+                  with optional Cargo metadata filters, or JSON Lines records, then run a command once per member, \
+                  matching Cargo target, whole selected set, or JSON record."
 )]
 #[expect(clippy::struct_excessive_bools, reason = "each bool is an independent clap CLI flag")]
 pub(crate) struct EachArgs {
@@ -54,6 +54,16 @@ pub(crate) struct EachArgs {
     /// Explicitly select zero members (a no-op that exits 0).
     #[arg(long)]
     pub(crate) none: bool,
+
+    /// Parse one JSON object per nonempty line and run the command once per
+    /// record. Repeatable. JSON mode bypasses Cargo workspace selection.
+    #[arg(long = "json-lines", value_name = "JSONL")]
+    pub(crate) json_lines: Vec<String>,
+
+    /// Read JSON Lines records from a UTF-8 file. Repeatable and may be
+    /// combined with --json-lines; inline values are processed before files.
+    #[arg(long = "json-lines-file", value_name = "PATH")]
+    pub(crate) json_lines_files: Vec<PathBuf>,
 
     // --- filtering ---
     /// Keep only members matching this Boolean expression. Repeatable;
@@ -94,7 +104,7 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
-    /// Run at most N per-package or per-target commands concurrently. Use
+    /// Run at most N per-package, per-target, or JSON-record commands concurrently. Use
     /// `auto` to detect available parallelism once. Defaults to 1. Buffered
     /// output is redirected to unique temporary files and emitted in plan order.
     /// Only an effective count above 1 disconnects child standard input for capture.

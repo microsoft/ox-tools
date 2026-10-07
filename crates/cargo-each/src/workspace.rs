@@ -149,18 +149,17 @@ impl Workspace {
         })
     }
 
-    /// Resolve and validate the workspace-wide Rust compatibility floor.
-    ///
-    /// This deliberately reads the root manifest only when the corresponding
-    /// placeholder is used. Ordinary selection and execution therefore do not
-    /// require a workspace Rust-version declaration.
+    /// Resolve and validate the workspace-wide Rust compatibility floor when
+    /// the root manifest declares one.
     ///
     /// # Errors
     ///
-    /// Returns [`EachError`] if the root declaration is absent or invalid, or
-    /// if any workspace member omits `rust-version` or requires a newer
-    /// compiler than the root floor.
-    pub(crate) fn workspace_rust_version(&self) -> Result<String, EachError> {
+    /// Returns [`EachError`] if the root manifest cannot be read or parsed, or,
+    /// when a root declaration exists, if it is invalid or any workspace
+    /// member omits `rust-version` or requires a newer compiler than the root
+    /// floor. Returns `None` without validating member floors when the root
+    /// declaration is absent.
+    pub(crate) fn workspace_rust_version_if_declared(&self) -> Result<Option<String>, EachError> {
         let path = self.root_manifest_path.display().to_string();
         let text = std::fs::read_to_string(&self.root_manifest_path)
             .map_err(|error| WorkspaceManifestReadError::caused_by(path.clone(), error))?;
@@ -176,12 +175,9 @@ impl Workspace {
             }
             _ => None,
         };
-        let floor = workspace_floor.or(package_floor).ok_or_else(|| {
-            WorkspaceRustVersionError::new(
-                "the root manifest must declare `[workspace.package].rust-version`, or `[package].rust-version` for a single-package repository"
-                    .to_owned(),
-            )
-        })?;
+        let Some(floor) = workspace_floor.or(package_floor) else {
+            return Ok(None);
+        };
         let Some(floor) = floor.as_str() else {
             return Err(WorkspaceRustVersionError::new("the root Rust version must be a string".to_owned()).into());
         };
@@ -214,7 +210,7 @@ impl Workspace {
             }
         }
 
-        Ok(floor.to_owned())
+        Ok(Some(floor.to_owned()))
     }
 }
 
@@ -386,16 +382,18 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
-    fn root_package_floor_requires_the_root_to_be_the_only_member() {
+    fn root_package_floor_applies_only_when_the_root_is_the_sole_member() {
         let temp = tempfile::tempdir().expect("create temporary workspace");
         let root = temp.path().join("Cargo.toml");
         fs::write(&root, "[package]\nname = \"root\"\nversion = \"0.1.0\"\nrust-version = \"1.80\"\n")
             .expect("write root package manifest");
         let nested = member("nested", temp.path().join("nested/Cargo.toml"), "1.70.0");
-        let error = workspace(root, vec![nested])
-            .workspace_rust_version()
-            .expect_err("a nested sole member cannot use the root package floor");
-        assert!(error.to_string().contains("[workspace.package].rust-version"));
+        assert_eq!(
+            workspace(root, vec![nested])
+                .workspace_rust_version_if_declared()
+                .expect("the root package floor is not a workspace floor"),
+            None
+        );
     }
 
     #[test]
@@ -408,10 +406,31 @@ mod tests {
         for version in ["2.0.0", "1.70.0-beta", "1.70.0+build"] {
             let invalid = member("invalid", temp.path().join("invalid/Cargo.toml"), version);
             let error = workspace(root.clone(), vec![invalid])
-                .workspace_rust_version()
+                .workspace_rust_version_if_declared()
                 .expect_err("a non-Rust member version must fail");
             assert!(error.to_string().contains("invalid Rust version"), "{version}: {error}");
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
+    fn optional_workspace_rust_version_distinguishes_absence_from_invalid_configuration() {
+        let temp = tempfile::tempdir().expect("create temporary workspace");
+        let root = temp.path().join("Cargo.toml");
+        fs::write(&root, "[workspace]\n").expect("write workspace manifest without a floor");
+        let workspace = workspace(root.clone(), Vec::new());
+
+        assert_eq!(
+            workspace
+                .workspace_rust_version_if_declared()
+                .expect("an absent declaration is not invalid"),
+            None
+        );
+        fs::write(&root, "[workspace]\n[workspace.package]\nrust-version = 180\n").expect("write invalid workspace floor");
+        let error = workspace
+            .workspace_rust_version_if_declared()
+            .expect_err("an invalid declaration must not become absence");
+        assert!(error.to_string().contains("must be a string"));
     }
 
     #[test]
@@ -420,21 +439,21 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temporary workspace");
         let missing = temp.path().join("missing.toml");
         let error = workspace(missing, Vec::new())
-            .workspace_rust_version()
+            .workspace_rust_version_if_declared()
             .expect_err("a missing root manifest must fail");
         assert!(error.to_string().contains("could not read workspace manifest"));
 
         let malformed = temp.path().join("malformed.toml");
         fs::write(&malformed, "[workspace").expect("write malformed root manifest");
         let error = workspace(malformed, Vec::new())
-            .workspace_rust_version()
+            .workspace_rust_version_if_declared()
             .expect_err("a malformed root manifest must fail");
         assert!(error.to_string().contains("could not parse workspace manifest"));
 
         let non_string = temp.path().join("non-string.toml");
         fs::write(&non_string, "[workspace]\n[workspace.package]\nrust-version = 180\n").expect("write non-string root floor");
         let error = workspace(non_string, Vec::new())
-            .workspace_rust_version()
+            .workspace_rust_version_if_declared()
             .expect_err("a non-string root floor must fail");
         assert!(error.to_string().contains("must be a string"));
     }

@@ -36,10 +36,12 @@ The same four chores, re-spelled per recipe, are the bulk of the PowerShell in
 `checks/`. Two recipes already carry a `TODO(anvil-runner)` noting that a helper
 "absorbs the skip/splat preamble" is wanted.
 
-`cargo-each` is that helper: one cargo-native tool that resolves a
-cargo-style package selection, optionally filters it by a metadata predicate,
-and runs a command over the result — once per package, once per matching Cargo
-target (with placeholder substitution), or exactly once for the whole set.
+`cargo-each` is that helper: one portable tool that either resolves a
+cargo-style package selection (optionally filtered by metadata) or reads JSON
+Lines records, then runs a command over the result with placeholder
+substitution. Cargo-backed execution runs once per package, once per matching
+target, or exactly once for the whole set; record-backed execution runs once
+per object.
 
 ## 2. Goals
 
@@ -52,7 +54,7 @@ target (with placeholder substitution), or exactly once for the whole set.
    supplied as ordinary `-p` flags or as one Cargo package spec per line in a
    `--package-file`, so callers do not need shell array expansion. cargo-each
    stays agnostic about who produced the file and what the selection means.
-3. **Three execution modes.** *per-package* (run the command once per member,
+3. **Four execution modes.** *per-package* (run the command once per member,
    substituting `{name}`/`{spec}`/`{version}`/`{manifest}`) covers per-manifest
    tools; *once* (run the command a single time when the set is non-empty)
    covers workspace-wide tools and single-invocation cargo commands, with a
@@ -60,7 +62,9 @@ target (with placeholder substitution), or exactly once for the whole set.
    *per-target* runs once for each Cargo target of requested kinds, preserving
    the package placeholders and adding `{target}`. The workspace-scoped
    `{workspace-rust-version}` placeholder exposes the root compatibility floor
-   to commands that provision or validate a shared toolchain.
+   to commands that provision or validate a shared toolchain. *JSON-record*
+   runs once per input object without loading Cargo metadata and expands
+   top-level string fields through `{json:key}`.
 4. **A small, general filter language** (`--filter` and `--exclude-filter`)
    with `not`, `and`, `or`, and parentheses over cargo metadata — target kinds,
    publication state, declared features and dependencies, and
@@ -68,9 +72,9 @@ target (with placeholder substitution), or exactly once for the whole set.
    recipes collapses to flags.
 5. **Bare names for free.** `{name}` yields the un-qualified package name, so
    `@version` stripping disappears from callers even though the input carries it.
-6. **Bounded execution.** Per-package and per-target commands may run with a
-   caller-selected concurrency limit and timeout. Defaults remain sequential and
-   unbounded for backward compatibility.
+6. **Bounded execution.** Per-package, per-target, and JSON-record commands may
+   run with a caller-selected concurrency limit and timeout. Defaults remain
+   sequential and unbounded for backward compatibility.
 7. **Works identically locally and in CI**, on any platform, with no shell
    dialect assumptions. **Open source**: ships from `ox-tools` to crates.io.
 
@@ -163,7 +167,7 @@ arbitrary-command + metadata-filter spine do not overlap.
 ## 4. CLI surface
 
 ```
-cargo each [SELECTION] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
+cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 ```
 
 Everything after `--` is the command template. `cargo-each` never interprets it
@@ -247,14 +251,16 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 |------|---------|
 | *(default)* | **per-package**: run `<COMMAND>` once per selected member, in name order, with placeholders substituted. |
 | `--once` | **once**: run `<COMMAND>` exactly once when the set is non-empty (skip when empty). Use `{packages}` to inject the selection. |
+| `--json-lines <JSONL>` | **JSON-record mode**: parse one JSON object per nonempty line in the provided value and run `<COMMAND>` once per record. Repeatable. Mutually exclusive with Cargo package selection, filters, target/once modes, `--chdir`, `--manifest-path`, and workspace Rust-version behavior. |
+| `--json-lines-file <PATH>` | Read JSON records from UTF-8 files instead of command-line values. Repeatable and may be combined with `--json-lines`; inline values are processed first, followed by files in argument order within each source. |
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
-| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package or per-target commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
+| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package, per-target, or JSON-record commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
 | `--timeout <DURATION>` | Terminate an invocation's Windows job object or Unix process group when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Unix descendants can escape by starting a new session, so termination is best-effort for those escaped descendants. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
-| `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
+| `--dry-run` | Print the fully-substituted commands that *would* run, one physical line per invocation, without executing. Empty arguments, `--chdir` paths, quotes, backslashes, and control or non-space whitespace characters are escaped for an unambiguous display. |
 
 ### 4.4 Placeholders
 
@@ -268,7 +274,8 @@ Substituted inside each `ARG` of the command template:
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
 | `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
-| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository. | all |
+| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository; empty when the root declaration is absent. | Cargo-backed per-package, per-target, once |
+| `{json:key}` | The top-level string field named `key` from the current JSON object. Missing or non-string referenced fields are errors. Inserted values are not rescanned for placeholder-shaped text. | JSON-record |
 
 Per-target mode accepts all per-package placeholders plus `{target}`. Using a
 per-package or per-target token in `--once` mode, `{target}` in per-package
@@ -279,17 +286,25 @@ placeholder is never scanned as another placeholder, so literal token-shaped
 path components in manifest paths and other replacement values are preserved.
 
 `{workspace-rust-version}` is workspace-scoped rather than tied to one selected
-member. Resolving it requires a root declaration. cargo-each also requires every
-workspace member to expose a resolved `rust_version` no newer than the root
-floor. Missing values, a member requiring a newer compiler, or a non-Rust
-semantic version is a configuration error. Lower member minima are valid. This
-matches the meaning of one compiler selected for a complete workspace; it is
-not a per-package toolchain matrix. The validation is lazy: commands that do
-not contain the placeholder do not require a workspace Rust version, and a
-resolved plan with no invocations does not resolve or validate the value even
-when the template contains the placeholder. Placeholder mode validation still
-runs before that no-op decision, so misuse remains an exit-2 usage error on an
-empty set.
+member. An absent root declaration expands to an empty string; without a root
+floor there is no member floor to compare or require. When a declaration
+exists, cargo-each requires every workspace member to expose a resolved
+`rust_version` no newer than the root floor. Missing values, a member requiring
+a newer compiler, or a non-Rust semantic version is a configuration error.
+Lower member minima are valid. This matches the meaning of one compiler
+selected for a complete workspace; it is not a per-package toolchain matrix.
+Resolution is lazy: commands that do not contain the placeholder do not read or
+validate the root value, and a resolved package plan with no invocations does
+not resolve it. Substitution is textual: the empty value does not remove its
+argv element or surrounding text, so callers gate commands that require a
+declared version.
+
+JSON-record mode does not load Cargo metadata or require a `Cargo.toml`. Each
+nonempty input line must be a JSON object. Objects may contain arbitrary JSON
+values, but every field referenced by `{json:key}` must exist and be a string.
+Records preserve source and line order, including duplicates. All records and
+placeholder references are validated before any child process is spawned.
+An empty record set is a successful no-op.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. No matching targets is a successful
@@ -307,6 +322,14 @@ no-op.
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.
+- **An absent workspace Rust version is an empty value.** A nonempty package
+  plan using `{workspace-rust-version}` substitutes `""` when the root manifest
+  has no declaration. Malformed TOML and invalid or inconsistent metadata still
+  fail before execution.
+- **JSON input is strict and shell-free.** Invalid JSON, non-object records,
+  malformed JSON placeholders, and missing or non-string referenced fields are
+  usage/configuration errors before execution. Record values become argv text
+  directly; they are never interpreted by a shell.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
@@ -437,12 +460,37 @@ Recipes whose only per-tier logic is the skip/splat preamble become one
 instead; choosing scoped versus unscoped input remains caller policy and is not
 encoded into cargo-each.
 
-The setup graph can use `{workspace-rust-version}` to install the single root
-MSRV fallback without parsing Cargo TOML in a shell:
+The setup graph can resolve the optional root value without parsing Cargo TOML
+in a shell, then use Just expressions to decide whether an MSRV-only command is
+applicable:
 
 ```just
-cargo each --workspace --once -- \
-    rustup toolchain install {workspace-rust-version} --profile minimal
+set lazy
+
+workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
+workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
+
+install_msrv_command := if workspace_rust_version == "" {
+    "# no root MSRV declared"
+} else {
+    "rustup toolchain install " + workspace_rust_version + " --profile minimal"
+}
+
+[private]
+install-msrv-if-declared:
+    {{ install_msrv_command }}
+```
+
+On a cold setup, a parent recipe first installs cargo-each and then invokes this
+private recipe in a child Just process. The child boundary ensures the lazy
+backtick is evaluated only after cargo-each is available.
+
+A caller can discover records separately and execute one command per JSON line
+without loading Cargo metadata:
+
+```text
+cargo each --json-lines '{"package":"alpha","test":"fuzz_one"}' -- \
+    cargo bolero test --package {json:package} {json:test}
 ```
 
 ## 7. Rejected alternatives

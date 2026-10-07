@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `cargo-each`: run a command over a cargo-style selection of workspace
-//! members.
+//! `cargo-each`: run a command over Cargo workspace members or JSON Lines
+//! records.
 //!
-//! `cargo-each` resolves a package selection expressed with the same
-//! selectors as `cargo build`, optionally narrows it with package predicates,
-//! and runs a command over the result — once per member, once per matching
-//! Cargo target, or exactly once for the whole set. It replaces hand-rolled
-//! shell loops with one cargo-native, cross-platform command.
+//! `cargo-each` resolves either a package selection expressed with the same
+//! selectors as `cargo build` or a stream of JSON objects. It optionally
+//! narrows Cargo selections with package predicates and runs a command once per
+//! member, matching Cargo target, whole selected set, or JSON record. It
+//! replaces hand-rolled shell loops with one cross-platform command.
 //!
 //! `cargo-each` ships as an executable only; it is a cargo subcommand, not a
 //! library dependency.
@@ -24,11 +24,13 @@
 //! # Usage
 //!
 //! ```text
-//! cargo each [SELECTION] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
+//! cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 //! ```
 //!
 //! Everything after `--` is the command template; `cargo-each` spawns it
 //! directly (argv, not a shell string) after substituting placeholders.
+//! Input is either a Cargo workspace selection or JSON Lines records; the two
+//! sources are deliberately mutually exclusive.
 //!
 //! ## Selection (mirrors `cargo build`)
 //!
@@ -70,15 +72,19 @@
 //!   name order, substituting the per-package placeholders below.
 //! - `--once`: run the command exactly once when the set is non-empty (skip
 //!   when empty), using the `{packages}` placeholder to inject the selection.
+//! - `--json-lines` / `--json-lines-file`: bypass Cargo selection and run once
+//!   per JSON object, substituting top-level string fields through
+//!   `{json:key}`.
 //! - `--each-target <KIND>`: run once per matching Cargo target, using
 //!   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
 //!   `--target-required-feature` further narrows targets.
 //!
 //! `--keep-going` runs every invocation and exits non-zero if any failed
-//! (default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package or
-//! per-target work. Omitting it runs exactly one invocation at a time; `auto`
-//! resolves once to the machine's available parallelism. Detection failure is
-//! reported explicitly without falling back. `--timeout <DURATION>` terminates
+//! (default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package,
+//! per-target, or JSON-record work. Omitting it runs exactly one invocation at
+//! a time; `auto` resolves once to the machine's available parallelism.
+//! Detection failure is reported explicitly without falling back.
+//! `--timeout <DURATION>` terminates
 //! each invocation's Windows job object or Unix process group independently
 //! (`250ms`, `30s`, or `2m`). Unix descendants can escape a process group by
 //! starting a new session, so timeout cleanup is best-effort for those escaped
@@ -101,22 +107,35 @@
 //!   valid only in `--once` mode and only as a standalone argument.
 //! - `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
 //!   or root `[package].rust-version` in a single-package repository; valid in
-//!   every mode.
+//!   Cargo-backed per-package, per-target, and `--once` modes. Expands to an
+//!   empty string when the root declaration is absent.
+//! - `{json:key}` — the top-level string field named `key` in the current
+//!   record; valid only in JSON-record mode.
 //!
-//! Using a placeholder in the wrong mode is a usage error. Only the tokens
-//! above are interpreted; any other `{…}` sequence (a typo, or a literal brace
-//! an argument needs) passes through verbatim to the spawned command — there is
-//! no brace-escape, so this passthrough is part of the contract.
+//! Using a placeholder in the wrong mode is a usage error. Every `{json:…}`
+//! sequence is validated as a JSON placeholder. Other unrecognized `{…}`
+//! sequences (a typo, or a literal brace an argument needs) pass through
+//! verbatim to the spawned command — there is no brace-escape, so this
+//! passthrough is part of the contract.
 //!
 //! # Behavior
 //!
 //! An empty resolved selection (via `--none`, or a filter that removes every
 //! member) is a **successful no-op**: `cargo-each` prints a one-line note and
 //! exits 0. This is what lets callers drop bespoke nothing-to-do guards.
-//! Workspace Rust-version validation is lazy: it runs only when the command
-//! uses `{workspace-rust-version}` and the resolved plan has work, then requires
-//! every member's resolved minimum to be present and no newer than the root
-//! floor. Placeholder mode validation still runs before an empty-plan no-op.
+//! Workspace Rust-version resolution is lazy: it runs only when the command
+//! uses `{workspace-rust-version}` and the resolved plan has work. An absent
+//! root declaration expands to an empty string. When a root floor exists,
+//! every member's resolved minimum must be present and no newer than that
+//! floor; malformed or inconsistent declarations remain errors. Substitution
+//! is textual, so an empty value does not remove its surrounding argv element.
+//! Placeholder mode validation still runs before an empty-plan no-op.
+//!
+//! JSON-record mode requires one JSON object per nonempty input line and does
+//! not load Cargo metadata. Referenced `{json:key}` fields must exist and be
+//! strings. Invalid input is rejected before any command is spawned, records
+//! retain input order and duplicates, and an empty record set is a successful
+//! no-op.
 //!
 //! The effective worker count is the requested `--jobs` value capped by plan
 //! size. An effective count of one uses sequential
@@ -191,6 +210,7 @@
 mod cli;
 mod error;
 mod filter;
+mod json_lines;
 mod plan;
 mod run;
 mod select;

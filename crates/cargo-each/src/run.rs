@@ -20,8 +20,9 @@ use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
-use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError};
+use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
 use crate::filter::Predicate;
+use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
 use crate::substitute::uses_workspace_rust_version;
@@ -44,6 +45,12 @@ const WORKSPACE_RUST_VERSION_CONTEXT: &str = "failed to resolve workspace Rust v
 const PLAN_BUILD_CONTEXT: &str = "failed to build command plan";
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
+    if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
+        return run_json(args);
+    }
+
+    let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
+
     let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
     let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
@@ -84,8 +91,10 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let workspace_rust_version = if uses_workspace_rust_version(&args.command) {
-        Some(workspace.workspace_rust_version().into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?)
+    let workspace_rust_version = if command_uses_workspace_rust_version {
+        workspace
+            .workspace_rust_version_if_declared()
+            .into_app_err(WORKSPACE_RUST_VERSION_CONTEXT)?
     } else {
         None
     };
@@ -96,16 +105,52 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
 
     if args.dry_run {
         for inv in &plan.invocations {
-            match &inv.work_dir {
-                Some(dir) => println!("(cd {}) {}", dir.display(), shell_join(&inv.argv)),
-                None => println!("{}", shell_join(&inv.argv)),
-            }
+            println!("{}", display_invocation(inv));
         }
 
         return Ok(ExitCode::SUCCESS);
     }
 
     execute(&plan, args.keep_going, args.jobs, args.timeout)
+}
+
+fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
+    validate_json_mode(args)?;
+    let records = json_lines::load(&args.json_lines, &args.json_lines_files).into_app_err("failed to read JSON Lines input")?;
+    let plan = Plan::build_json(&records, &args.command).into_app_err(PLAN_BUILD_CONTEXT)?;
+    drop(records);
+    if plan.invocations.is_empty() {
+        eprintln!("cargo each: JSON input resolved to no work; nothing to do");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.dry_run {
+        for invocation in &plan.invocations {
+            println!("{}", display_invocation(invocation));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    execute(&plan, args.keep_going, args.jobs, args.timeout)
+}
+
+fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
+    let conflicts = [
+        (!args.packages.is_empty(), "--package"),
+        (!args.package_files.is_empty(), "--package-file"),
+        (args.workspace, "--workspace"),
+        (!args.exclude.is_empty(), "--exclude"),
+        (args.none, "--none"),
+        (!args.filters.is_empty(), "--filter"),
+        (!args.exclude_filters.is_empty(), "--exclude-filter"),
+        (args.once, "--once"),
+        (!args.each_targets.is_empty(), "--each-target"),
+        (!args.target_required_feature.is_empty(), "--target-required-feature"),
+        (args.chdir, "--chdir"),
+        (args.manifest_path.is_some(), "--manifest-path"),
+    ];
+    if let Some((_, option)) = conflicts.into_iter().find(|(present, _)| *present) {
+        return Err(JsonInputConflictError::new(option.to_owned())).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
+    }
+    Ok(())
 }
 
 /// Assemble a [`Selection`] from direct and file-backed package specs.
@@ -216,7 +261,6 @@ fn execute_parallel_with(
     mut spawn: impl FnMut(usize, Invocation, Option<Duration>) -> io::Result<RunningWorker>,
     mut emit: impl FnMut(&Invocation, &mut BufferedOutcome) -> io::Result<()>,
 ) -> Result<ExitCode, AppError> {
-    let invocations = plan.invocations.clone();
     let mut workers = Vec::with_capacity(worker_count.get());
     let mut outcomes = Vec::with_capacity(worker_count.get());
     let mut stop_launching = false;
@@ -224,11 +268,11 @@ fn execute_parallel_with(
     let mut first_failure = None;
     let mut next_index = 0;
 
-    for wave in invocations.chunks(worker_count.get()) {
-        for invocation in wave.iter().cloned() {
+    for wave in plan.invocations.chunks(worker_count.get()) {
+        for invocation in wave {
             let index = next_index;
             next_index += 1;
-            match spawn(index, invocation, timeout) {
+            match spawn(index, invocation.clone(), timeout) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
                     outcomes.push(IndexedOutcome {
@@ -248,7 +292,7 @@ fn execute_parallel_with(
 
         outcomes.sort_by_key(|outcome| outcome.index);
         for indexed in &mut outcomes {
-            emit(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
+            emit(&plan.invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
             record_emitted_failure(
                 &indexed.outcome.result,
                 keep_going,
@@ -864,17 +908,48 @@ impl InvocationResult {
 
 /// Render an argv for display (`--dry-run`). Best-effort quoting for
 /// readability only — nothing consumes this as input.
+fn display_invocation(invocation: &Invocation) -> String {
+    match &invocation.work_dir {
+        Some(directory) => format!(
+            "(cd {}) {}",
+            display_arg(&directory.to_string_lossy()),
+            shell_join(&invocation.argv)
+        ),
+        None => shell_join(&invocation.argv),
+    }
+}
+
 fn shell_join(argv: &[String]) -> String {
-    argv.iter()
-        .map(|a| {
-            if a.contains(char::is_whitespace) {
-                format!("\"{a}\"")
-            } else {
-                a.clone()
+    argv.iter().map(|argument| display_arg(argument)).collect::<Vec<_>>().join(" ")
+}
+
+fn display_arg(argument: &str) -> String {
+    let needs_quotes = argument.is_empty()
+        || argument
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control() || matches!(character, '"' | '\\'));
+    if !needs_quotes {
+        return argument.to_owned();
+    }
+
+    let mut rendered = String::with_capacity(argument.len() + 2);
+    rendered.push('"');
+    for character in argument.chars() {
+        match character {
+            '\n' => rendered.push_str("\\n"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            '"' => rendered.push_str("\\\""),
+            '\\' => rendered.push_str("\\\\"),
+            ' ' => rendered.push(' '),
+            character if character.is_whitespace() || character.is_control() => {
+                rendered.extend(character.escape_unicode());
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            character => rendered.push(character),
+        }
+    }
+    rendered.push('"');
+    rendered
 }
 
 /// Reduce a raw process exit code to the `u8` that [`ExitCode`] can carry.
@@ -895,6 +970,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
+    use std::path::PathBuf;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
@@ -910,7 +986,7 @@ mod tests {
         SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
         add_infrastructure_failure, apply_filters, combine_captured_output, create_output_capture_with, display_duration,
-        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
+        display_invocation, effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
         record_emitted_failure, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with,
         shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group, wait_for_process,
@@ -2138,17 +2214,34 @@ mod tests {
     }
 
     #[test]
-    fn shell_join_only_quotes_arguments_containing_whitespace() {
+    fn shell_join_renders_each_invocation_on_one_unambiguous_line() {
         assert_eq!(
             shell_join(&[
                 "cargo".to_owned(),
                 "plain".to_owned(),
                 "two words".to_owned(),
                 "tab\tseparated".to_owned(),
+                "first\nsecond".to_owned(),
+                "carriage\rreturn".to_owned(),
+                "vertical\u{b}tab".to_owned(),
+                "bell\u{7}tone".to_owned(),
+                "quote\"slash\\".to_owned(),
+                String::new(),
             ]),
-            "cargo plain \"two words\" \"tab\tseparated\""
+            "cargo plain \"two words\" \"tab\\tseparated\" \"first\\nsecond\" \"carriage\\rreturn\" \
+             \"vertical\\u{b}tab\" \"bell\\u{7}tone\" \"quote\\\"slash\\\\\" \"\""
         );
         assert_eq!(shell_join(&[]), "");
+    }
+
+    #[test]
+    fn dry_run_escapes_the_working_directory_and_argv_together() {
+        let invocation = Invocation {
+            label: None,
+            argv: vec!["echo".to_owned(), "value".to_owned()],
+            work_dir: Some(PathBuf::from("two words\n\"quoted\"")),
+        };
+        assert_eq!(display_invocation(&invocation), "(cd \"two words\\n\\\"quoted\\\"\") echo value");
     }
 
     #[test]
