@@ -1785,7 +1785,7 @@ allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 
 # Aspirational: when clippy.wildcard_imports is re-enabled (currently
-# allowed in cargo-clippy-lints.toml due to upstream bug rust-clippy#15036),
+# allowed by the catalog's Cargo lint policy due to upstream bug rust-clippy#15036),
 # we want the stricter variant that warns on ALL wildcard imports
 # including prelude. Setting it now means flipping the lint level to
 # warn later is a one-line change with no tuning afterthought.
@@ -2710,11 +2710,13 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier. cargo-fmt is a rustup component. We invoke it via the
-# pinned nightly (see versions.just) because rustfmt.toml uses
-# unstable_features = true (imports_granularity, group_imports,
-# format_code_in_doc_comments). Floating nightly would mean
-# format-drift breaking cloud workflows on rustup updates — the same trap we
-# explicitly avoid for udeps/miri/careful/external-types.
+# pinned nightly (see versions.just) to support the default catalog's
+# unstable rustfmt options (imports_granularity, group_imports,
+# format_code_in_doc_comments). The recipe retains that pin even when a
+# repository's formatting configuration enables only stable options.
+# Floating nightly would mean format-drift breaking cloud workflows on
+# rustup updates — the same trap we explicitly avoid for
+# udeps/miri/careful/external-types.
 #
 # Iterate workspace members rather than every local path dependency that
 # `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
@@ -6101,8 +6103,8 @@ anvil-scheduled-test-validate-prereqs: \
 #     like-named crate is also a transitive dependency.
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
-# Those three values are only meaningful when the resolver succeeded, so every
-# caller captures its exit code and propagates it before reading `$include`:
+# These resolver outputs are only meaningful when the resolver succeeded, so
+# every caller captures its exit code and propagates it before reading `$include`:
 #
 #   $impactExit = $LASTEXITCODE
 #   if ($impactExit -ne 0) { exit $impactExit }
