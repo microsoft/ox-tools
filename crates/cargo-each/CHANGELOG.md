@@ -11,8 +11,11 @@
 - 🐛 Bug Fixes
 
   - harden command scheduling and process-boundary failure handling ([#208](https://github.com/microsoft/ox-tools/pull/208))
-  - improve duration validation and capture failure diagnostics ([#221](https://github.com/microsoft/ox-tools/pull/221))
   - simplify timeout cleanup ([#222](https://github.com/microsoft/ox-tools/pull/222))
+
+- 🔧 Maintenance
+
+  - make parallel output ordering tests deterministic and simplify internal failure plumbing ([#221](https://github.com/microsoft/ox-tools/pull/221))
 
 ## [0.3.0] - 2026-09-23
 
