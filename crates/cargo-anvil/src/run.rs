@@ -166,7 +166,7 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> Result<BTreeSet<(String, String)>, AppError> {
     let mut keys = BTreeSet::new();
     for artifact in catalog.artifacts() {
-        let Artifact::Region(spec) = artifact else {
+        let Some(spec) = artifact.region_spec() else {
             continue;
         };
         for host in region_host_paths(workspace, spec) {
@@ -216,7 +216,33 @@ fn build_plan(
                 }
             }
             Artifact::Region(spec) => {
-                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut composed, spec)?;
+                let Some(path) = catalog.toml_array_path(spec) else {
+                    push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut composed, spec)?;
+                    continue;
+                };
+                let spec = crate::catalog::TomlArrayRegionSpec {
+                    region: spec.clone(),
+                    path: path.to_vec(),
+                };
+                for host in region_host_paths(workspace, &spec.region) {
+                    let host = resolve_existing_case_insensitive(repo_root, host)?;
+                    let current = hosts.get_or_read(repo_root, &host)?;
+                    match crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &spec) {
+                        Ok(item) => {
+                            if let Some(spliced) = &item.spliced_host {
+                                hosts.set(&host, spliced.clone());
+                            }
+                            plan.push(item);
+                        }
+                        Err(refusal) => refuse_region(
+                            &mut plan,
+                            host,
+                            spec.region.id.as_str(),
+                            &refusal.reason.to_string(),
+                            refusal.remedy,
+                        ),
+                    }
+                }
             }
         }
     }

@@ -1101,7 +1101,7 @@ fn table_values(table: &Table) -> TableValues {
     values
 }
 
-fn canonical_value(value: &toml_edit::Value) -> String {
+pub(crate) fn canonical_value(value: &toml_edit::Value) -> String {
     use toml_edit::Value;
     match value {
         Value::String(value) => format!("{:?}", value.value()),
