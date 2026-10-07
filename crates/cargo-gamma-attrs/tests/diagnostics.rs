@@ -11,15 +11,14 @@
 //! fragment that distinguish the intended rejection. The consumers have no Cargo dependencies
 //! and build with an empty Cargo home; the already-built macro is copied into each fixture.
 
+use std::env;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
-use std::{env, fs};
 
-use cargo_metadata::{Message, TargetKind};
 use tempfile::TempDir;
 
+#[path = "../../cargo-gamma-lib/tests/support/macros.rs"]
+mod macros;
 #[path = "../../cargo-gamma-lib/tests/support/project.rs"]
 mod project;
 
@@ -27,60 +26,13 @@ fn cargo() -> OsString {
     env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-/// Asks Cargo for the real macro artifact instead of guessing hashes or compiler variants.
-fn macro_artifact() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-
-    BUILT
-        .get_or_init(|| {
-            let built = Command::new(cargo())
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .args([
-                    "build",
-                    "--offline",
-                    "--locked",
-                    "--lib",
-                    "--message-format=json",
-                    "--manifest-path",
-                ])
-                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-                .output()
-                .expect("Cargo must be runnable to locate the real macro library");
-            assert!(
-                built.status.success(),
-                "the macro library must be available before checking consumers:\n{}",
-                String::from_utf8_lossy(&built.stderr)
-            );
-
-            Message::parse_stream(built.stdout.as_slice())
-                .find_map(|message| match message.expect("Cargo artifact messages must be readable") {
-                    Message::CompilerArtifact(artifact)
-                        if artifact.target.name == "gamma" && artifact.target.kind.contains(&TargetKind::ProcMacro) =>
-                    {
-                        artifact
-                            .filenames
-                            .into_iter()
-                            .find(|path| path.as_str().ends_with(env::consts::DLL_SUFFIX))
-                            .map(PathBuf::from)
-                    }
-                    _ => None,
-                })
-                .expect("Cargo must report the compiled gamma proc-macro library")
-        })
-        .as_path()
-}
-
 /// Compiles embedded `source` in a standalone project using the actual macro entry points.
 fn compile_consumer(name: &str, source: &str) -> Output {
-    let artifact = macro_artifact();
     let directory = TempDir::new().expect("could not create a consumer project directory");
     let home = TempDir::new().expect("could not create an empty Cargo home");
     let manifest = format!("[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n");
     project::write_project(directory.path(), &[("Cargo.toml", &manifest), ("src/lib.rs", source)]);
-    let local_macro = directory
-        .path()
-        .join(artifact.file_name().expect("Cargo reports a file name for its proc-macro artifact"));
-    fs::copy(artifact, &local_macro).expect("the real macro library must be copyable into the consumer");
+    let local_macro = macros::copy_gamma_macro(directory.path());
 
     Command::new(cargo())
         .current_dir(directory.path())

@@ -10,13 +10,18 @@
 //! they are slower than the rest of the suite, but they are the only coverage that proves the
 //! encoding in `schema.rs` actually compiles and that a verdict means what it claims.
 
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 use camino::Utf8PathBuf;
 use cargo_gamma_lib::testing::{Sink, gamma_base, run, write_fixture, write_project};
 use tempfile::TempDir;
+
+#[path = "support/macros.rs"]
+mod macros;
 
 /// Exit code for a run in which every gate passed.
 const EXIT_OK: i32 = 0;
@@ -248,28 +253,17 @@ fn hold_resource(scope: &str, peer: &str) {
     fs::remove_file(".resource-owner").expect("could not release resource ownership");
 }
 "#;
-    // Expand the real attribute here so the fixture needs neither a registry cache nor repository paths.
-    let resource = |item: &str| {
-        cargo_gamma_attrs_impl::resource(
-            "\"exclusive\""
-                .parse()
-                .expect("the hard-coded resource name is a valid string literal"),
-            item.parse()
-                .expect("the hard-coded resource fixture item must be valid Rust tokens"),
-        )
-    };
-    let function = resource(
-        r#"
+    let function = r#"
+#[gamma::resource("exclusive")]
 #[test]
 fn function_scoped_resource() {
     hold_resource("function", "module");
     assert!(subject::accepts(1));
 }
-"#,
-    );
+"#;
     fs::write(root.join("tests/function.rs"), format!("{support}\n{function}")).expect("could not write the function-scoped resource test");
-    let module = resource(
-        r#"
+    let module = r#"
+#[gamma::resource("exclusive")]
 mod resource_tests {
     #[test]
     fn module_scoped_resource() {
@@ -277,11 +271,62 @@ mod resource_tests {
         assert!(subject::accepts(1));
     }
 }
-"#,
-    );
+"#;
     fs::write(root.join("tests/module.rs"), format!("{support}\n{module}")).expect("could not write the module-scoped resource test");
 
     dir
+}
+
+fn with_resource_workspace(test: &str, check: impl FnOnce(&Path)) {
+    const CHILD_ROOT: &str = "GAMMA_RESOURCE_MACRO_CHILD_ROOT";
+    if let Some(root) = env::var_os(CHILD_ROOT) {
+        check(Path::new(&root));
+        return;
+    }
+
+    let directory = resource_workspace();
+    let local_macro = macros::copy_gamma_macro(directory.path());
+    let external = format!("gamma={}", local_macro.display());
+    let mut configuration = toml_edit::DocumentMut::new();
+    configuration["build"]["rustflags"] = toml_edit::value(toml_edit::Array::from_iter(["--extern", external.as_str()]));
+    write_project(directory.path(), &[(".cargo/config.toml", &configuration.to_string())]);
+
+    let mut flags = if let Some(encoded) = env::var_os("CARGO_ENCODED_RUSTFLAGS") {
+        encoded
+    } else if let Some(plain) = env::var_os("RUSTFLAGS").or_else(|| env::var_os("CARGO_BUILD_RUSTFLAGS")) {
+        OsString::from(
+            plain
+                .to_str()
+                .expect("Cargo's plain rustflags variables must contain UTF-8")
+                .split(' ')
+                .map(str::trim)
+                .filter(|flag| !flag.is_empty())
+                .collect::<Vec<_>>()
+                .join("\u{1f}"),
+        )
+    } else {
+        OsString::new()
+    };
+    for flag in ["--extern", external.as_str()] {
+        if !flags.is_empty() {
+            flags.push("\u{1f}");
+        }
+        flags.push(flag);
+    }
+
+    // The parent owns the project while a child test uses its macro flags without mutating global environment.
+    let output = Command::new(env::current_exe().expect("the test harness has a current executable"))
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD_ROOT, directory.path())
+        .env("CARGO_ENCODED_RUSTFLAGS", flags)
+        .output()
+        .expect("the resource test must be runnable in an isolated child process");
+    assert!(
+        output.status.success(),
+        "the public resource macro test must pass:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Builds two workspace test targets, only one of which links the mutated package.
@@ -612,18 +657,18 @@ fn session(dir: &TempDir, args: &[&str]) -> (i32, String) {
 fn censused_session(dir: &TempDir, args: &[&str]) -> (i32, String) {
     let mut args = args.to_vec();
     args.push("--optimize-test-execution");
-    let (code, out, err) = session_on_with(Sink::default(), dir, &args, false);
+    let (code, out, err) = session_on_with(Sink::default(), dir.path(), &args, false);
 
     (code, format!("{out}{err}"))
 }
 
 /// Runs a session on a given host, keeping the two streams apart.
 fn session_on(host: Sink, dir: &TempDir, args: &[&str]) -> (i32, String, String) {
-    session_on_with(host, dir, args, true)
+    session_on_with(host, dir.path(), args, true)
 }
 
-fn session_on_with(mut host: Sink, dir: &TempDir, args: &[&str], whole_test_binaries: bool) -> (i32, String, String) {
-    let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
+fn session_on_with(mut host: Sink, root: &Path, args: &[&str], whole_test_binaries: bool) -> (i32, String, String) {
+    let path = Utf8PathBuf::from_path_buf(root.to_path_buf()).expect("path is not UTF-8");
     let mut command = vec!["cargo-gamma".to_owned(), "gamma".to_owned(), "run".to_owned()];
 
     if !args.contains(&"--jobs") {
@@ -733,7 +778,7 @@ mod tests {
     fs::remove_dir_all(scratch_base(&dir)).expect("the second campaign should not see the first run record");
     fs::write(dir.path().join("src/lib.rs"), second_source).expect("could not change the mutant identity");
 
-    let (second, out, err) = session_on_with(Sink::default(), &dir, &["--mutators", "relational", "--diag"], false);
+    let (second, out, err) = session_on_with(Sink::default(), dir.path(), &["--mutators", "relational", "--diag"], false);
     let second_output = format!("{out}{err}");
 
     assert_eq!(second, EXIT_OK, "{second_output}");
@@ -1052,43 +1097,48 @@ fn the_config_file_is_honoured_by_a_real_run() {
 #[test]
 fn resource_fixture_builds_without_a_registry_cache() {
     step_aside_if_nested!();
-    let dir = resource_workspace();
-    let cargo_home = TempDir::new().expect("could not create an empty Cargo home");
-    let built = Command::new(env!("CARGO"))
-        .current_dir(dir.path())
-        .env("CARGO_HOME", cargo_home.path())
-        .args(["test", "--offline", "--no-run", "--target-dir"])
-        .arg(dir.path().join("target"))
-        .output()
-        .expect("Cargo must be installed to build this test suite");
+    with_resource_workspace("resource_fixture_builds_without_a_registry_cache", |root| {
+        let cargo_home = TempDir::new().expect("could not create an empty Cargo home");
+        let built = Command::new(env!("CARGO"))
+            .current_dir(root)
+            .env("CARGO_HOME", cargo_home.path())
+            .args(["test", "--offline", "--no-run", "--target-dir"])
+            .arg(root.join("target"))
+            .output()
+            .expect("Cargo must be installed to build this test suite");
 
-    assert!(
-        built.status.success(),
-        "the resource fixture must build offline with an empty Cargo home:\n{}",
-        String::from_utf8_lossy(&built.stderr)
-    );
+        assert!(
+            built.status.success(),
+            "the resource fixture must build offline with an empty Cargo home:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+    });
 }
 
 #[test]
 fn resource_attributes_serialize_function_and_module_scopes_end_to_end() {
     step_aside_if_nested!();
-    let dir = resource_workspace();
-    let (code, output) = session(
-        &dir,
-        &[
-            "--mutators",
-            "relational",
-            "--jobs",
-            "4",
-            "--resource-concurrency",
-            "exclusive=1",
-            "--minimum-test-timeout",
-            "5",
-        ],
-    );
+    with_resource_workspace("resource_attributes_serialize_function_and_module_scopes_end_to_end", |root| {
+        let (code, out, err) = session_on_with(
+            Sink::default(),
+            root,
+            &[
+                "--mutators",
+                "relational",
+                "--jobs",
+                "4",
+                "--resource-concurrency",
+                "exclusive=1",
+                "--minimum-test-timeout",
+                "5",
+            ],
+            true,
+        );
+        let output = format!("{out}{err}");
 
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(!dir.path().join(".resource-overlap").exists(), "{output}");
+        assert_eq!(code, EXIT_OK, "{output}");
+        assert!(!root.join(".resource-overlap").exists(), "{output}");
+    });
 }
 
 #[test]

@@ -3582,11 +3582,19 @@ mod tests {
     }
 
     fn write(root: &Utf8Path, relative: &str, text: &str) {
-        if relative == "Cargo.toml" {
+        if matches!(relative, "Cargo.toml" | ".cargo/config" | ".cargo/config.toml") {
             crate::testing::write_project(root.as_std_path(), &[(relative, text)]);
         } else {
             crate::testing::write_fixture(root.as_std_path(), &[(relative, text)]);
         }
+    }
+
+    fn assert_offline_configuration(root: &Utf8Path) {
+        let document: toml_edit::DocumentMut = fs::read_to_string(root.join(".cargo/config.toml"))
+            .expect("the project fixture has a Cargo configuration")
+            .parse()
+            .expect("project fixtures contain valid Cargo configuration");
+        assert_eq!(document["net"]["offline"].as_bool(), Some(true));
     }
 
     /// The walk is the sole producer of the candidate file list, and a walk error is per entry: a
@@ -3657,12 +3665,12 @@ mod tests {
         let (_directory, root) = workspace();
         let target = root.join("configured-target");
 
-        fs::create_dir_all(root.join(".cargo")).expect("cargo configuration directory");
-        fs::write(
-            root.join(".cargo/config.toml"),
-            format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
-        )
-        .expect("cargo configuration");
+        write(
+            &root,
+            ".cargo/config.toml",
+            &format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
+        );
+        assert_offline_configuration(&root);
 
         let survey = survey(&root, SelectArgs::default());
 
@@ -4958,6 +4966,7 @@ mod tests {
         assert!(!plain.iter().any(|item| item.contains("custom_only")), "{plain:?}");
 
         write(&root, ".cargo/config.toml", "[build]\nrustflags = [\"--cfg\", \"gamma_probe\"]\n");
+        assert_offline_configuration(&root);
 
         let flagged = mutated_items(&root, &CargoOptions::default());
 

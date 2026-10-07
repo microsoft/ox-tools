@@ -17,7 +17,9 @@ pub fn write_fixture(root: &Path, files: &[(&str, &str)]) {
     for &(relative, contents) in files {
         let relative = Path::new(relative);
         assert!(
-            relative.is_relative() && !relative.components().any(|component| matches!(component, Component::ParentDir)),
+            !relative
+                .components()
+                .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir | Component::ParentDir)),
             "embedded fixture paths must stay inside their owned directory: {}",
             relative.display()
         );
