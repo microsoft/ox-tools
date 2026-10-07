@@ -117,7 +117,8 @@ selection. Each candidate records whether source-visible evidence proves the rep
 whether it is an unresolved optimistic guess, or whether the user explicitly supplied it. The
 classification is diagnostic evidence rather than an automatic filter. The ordinary default
 withholds only measured noisy optimistic site classes; a non-default selector that includes the
-applicable mutator admits them. It does not know about Cargo processes, test verdicts, timeouts,
+applicable mutator admits them. `explain` and `list mutators` expose which mutators apply this
+explicit-selection rule. The engine does not know about Cargo processes, test verdicts, timeouts,
 or reports.
 
 ### Scratch workspace and Cargo

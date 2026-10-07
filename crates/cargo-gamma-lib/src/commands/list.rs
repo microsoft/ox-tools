@@ -128,6 +128,7 @@ fn list_mutators<H: Host>(host: &mut H, select: &super::cli::SelectArgs, json: b
                     "description": mutator.description,
                     "default": mutator.default_on,
                     "enabled": selection.contains(mutator.name),
+                    "optimisticRequiresExplicitSelection": registry::optimistic_requires_explicit(mutator.name),
                     "aliases": mutator.aliases,
                 })
             })
@@ -142,8 +143,13 @@ fn list_mutators<H: Host>(host: &mut H, select: &super::cli::SelectArgs, json: b
 
     for mutator in registry::REGISTRY {
         let mark = if selection.contains(mutator.name) { "*" } else { " " };
+        let confidence = if registry::optimistic_requires_explicit(mutator.name) {
+            " [optimistic sites require explicit selection]"
+        } else {
+            ""
+        };
 
-        writeln!(stream, "{mark} {:width$}  {}", mutator.name, mutator.description)?;
+        writeln!(stream, "{mark} {:width$}  {}{confidence}", mutator.name, mutator.description)?;
     }
 
     writeln!(stream)?;
@@ -337,8 +343,12 @@ mod tests {
         let value: Value = serde_json::from_str(&text).expect("json");
 
         assert_eq!(code, EXIT_OK);
-        assert!(value.as_array().is_some_and(|entries| !entries.is_empty()), "{text}");
+        let entries = value.as_array().expect("a registry array");
+        assert!(!entries.is_empty(), "{text}");
         assert!(text.contains("\"enabled\""), "{text}");
+        let by_name = |name: &str| entries.iter().find(|entry| entry["name"] == name).expect("registered mutator");
+        assert_eq!(by_name("literal.int_decrement")["optimisticRequiresExplicitSelection"], true);
+        assert_eq!(by_name("fn_value.default")["optimisticRequiresExplicitSelection"], false);
     }
 
     /// `--json` is a contract for scripts, so the oracle has to be that the output *parses* and has
@@ -403,6 +413,21 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert!(host.out().contains("* = enabled by the current selection"), "{}", host.out());
         assert!(host.out().lines().any(|line| line.starts_with("* ")), "{}", host.out());
+        let width = registry::REGISTRY
+            .iter()
+            .map(|mutator| mutator.name.len())
+            .max()
+            .expect("registered mutators");
+        let expected = format!(
+            "* {:width$}  subtract one from an integer literal [optimistic sites require explicit selection]",
+            "literal.int_decrement"
+        );
+        let output = host.out();
+        let actual = output
+            .lines()
+            .find(|line| line.contains("literal.int_decrement"))
+            .expect("literal.int_decrement row");
+        assert_eq!(actual, expected);
     }
 
     /// The plain file listing is one path per line, so it can be piped into `xargs`.

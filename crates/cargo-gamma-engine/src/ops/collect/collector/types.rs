@@ -10,7 +10,7 @@ use syn::{GenericArgument, GenericParam, Generics, Path, PathArguments, ReturnTy
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
 use super::indexes::ABSOLUTE_ROOT;
 use super::predicates::payload;
-use super::values::{Kind, resolve_type, strip, type_argument_values, type_arguments, type_name};
+use super::values::{Kind, primitive_kind, resolve_type, strip, type_argument_values, type_arguments, type_name};
 use crate::ops::collect::Defaults;
 use crate::{HashMap, HashSet};
 
@@ -374,10 +374,7 @@ impl Types<'_> {
             _ => return false,
         };
 
-        let Ok(primitive) = syn::parse_str::<Type>(name) else {
-            return false;
-        };
-        resolve_type(&primitive) == expected
+        primitive_kind(name) == Some(expected)
     }
 
     pub(super) fn import_changes_name(&self, ty: &Type) -> bool {

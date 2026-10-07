@@ -912,10 +912,10 @@ A `Result<Option<bool>, E>` yields `Err(Default::default())`, `Ok(None)`, `Ok(So
 unbounded population.
 
 Where the tool cannot name a value of a type it falls back to `Default::default()` for a resolved
-workspace Default type, or as a conservative guess for an unresolved concrete type or alias. It
+package Default type, or as a conservative guess for an unresolved concrete type or alias. It
 withholds that guess for a bare type parameter, an
 unresolved associated type such as `D::Error` or `Self::Value`, an `impl Trait` that is not an
-iterator, a trait object, or a workspace type whose declarations establish no `Default`
+iterator, a trait object, or a package type whose declarations establish no `Default`
 implementation. A parameter declared `T: Default` keeps its mutant, because there the promise is
 explicit. Where you know a value the signature accepts, [state it](#stating-the-value-yourself) and
 the mutant comes back.

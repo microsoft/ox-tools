@@ -1013,13 +1013,17 @@ struct BreakdownDimensions {
 struct BreakdownAccumulator<'a> {
     buckets: crate::HashMap<&'a str, Breakdown>,
     killer_groups: crate::HashMap<KillerKey<'a>, crate::HashSet<&'a str>>,
+    // Full and legacy identities with the same test name may identify one test. Track both forms
+    // so their separate keys cannot falsely establish independent exclusive killers.
     killer_forms: crate::HashMap<&'a str, u8>,
 }
 
 impl<'a> BreakdownAccumulator<'a> {
     fn add(&mut self, mutant: &'a Mutant, group: &'a str) {
         if let Some(killer) = KillerKey::of(mutant) {
-            let form = if matches!(killer, KillerKey::Full { .. }) { 1 } else { 2 };
+            const FULL: u8 = 1;
+            const LEGACY: u8 = 2;
+            let form = if matches!(killer, KillerKey::Full { .. }) { FULL } else { LEGACY };
             *self.killer_forms.entry(killer.test()).or_default() |= form;
             let _ = self.killer_groups.entry(killer).or_default().insert(group);
         }
@@ -1052,10 +1056,11 @@ impl<'a> BreakdownAccumulator<'a> {
     }
 
     fn finish(mut self, redaction: Redaction) -> Vec<Breakdown> {
+        const MIXED: u8 = 3;
         for groups in self
             .killer_groups
             .iter()
-            .filter_map(|(killer, groups)| (groups.len() == 1 && self.killer_forms.get(killer.test()) != Some(&3)).then_some(groups))
+            .filter_map(|(killer, groups)| (groups.len() == 1 && self.killer_forms.get(killer.test()) != Some(&MIXED)).then_some(groups))
         {
             if let Some(group) = groups.iter().next()
                 && let Some(entry) = self.buckets.get_mut(group)

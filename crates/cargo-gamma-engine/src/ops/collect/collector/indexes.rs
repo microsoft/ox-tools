@@ -176,6 +176,7 @@ fn canonical_import(name: &str, imports: &HashMap<String, Option<Vec<String>>>) 
         if prefix.len() == 1 && prefix.first() == Some(first) {
             return Some(path);
         }
+        // #[gamma::skip(cond.always_false, reason = "disabling cycle detection makes cyclic import aliases alternate forever")]
         if !expanded.insert(first.clone()) {
             return None;
         }

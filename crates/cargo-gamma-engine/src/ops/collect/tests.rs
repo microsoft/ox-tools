@@ -1653,26 +1653,33 @@ fn numeric_confidence_requires_resolved_field_ownership() {
             consume(usize::from(1u8));
             consume(record.count);
             consume(mystery.value);
-            let _ = mystery.value + 1;
+            let _ = (&mystery).value + 1;
         }";
     let found = candidates(source, "expr.increment,expr.decrement");
     let original = |candidate: &&Candidate| &source[candidate.span.clone()];
-    let associated = found
-        .iter()
-        .filter(|candidate| original(candidate).contains("usize::from"))
-        .collect::<Vec<_>>();
-    let count = found
-        .iter()
-        .filter(|candidate| original(candidate) == "record.count")
-        .collect::<Vec<_>>();
-    let unknown = found
-        .iter()
-        .filter(|candidate| original(candidate) == "mystery.value")
-        .collect::<Vec<_>>();
+    let observed = |needle: &str| {
+        let mut values = found
+            .iter()
+            .filter(|candidate| original(candidate) == needle)
+            .map(|candidate| (candidate.span.clone(), candidate.mutator, candidate.confidence))
+            .collect::<Vec<_>>();
+        values.sort_by_key(|(span, mutator, _)| (span.start, span.end, *mutator));
+        values
+    };
+    let expected = |needle: &str, confidence| {
+        let mut values = source
+            .match_indices(needle)
+            .flat_map(|(start, matched)| {
+                ["expr.increment", "expr.decrement"].map(move |mutator| (start..start + matched.len(), mutator, confidence))
+            })
+            .collect::<Vec<_>>();
+        values.sort_by_key(|(span, mutator, _)| (span.start, span.end, *mutator));
+        values
+    };
 
-    assert!(associated.iter().all(|candidate| candidate.confidence == Confidence::Proven));
-    assert!(count.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
-    assert!(unknown.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+    assert_eq!(observed("usize::from(1u8)"), expected("usize::from(1u8)", Confidence::Proven));
+    assert_eq!(observed("record.count"), expected("record.count", Confidence::Optimistic));
+    assert_eq!(observed("mystery.value"), expected("mystery.value", Confidence::Optimistic));
 }
 
 #[test]

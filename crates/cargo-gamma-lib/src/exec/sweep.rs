@@ -169,7 +169,7 @@ fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
     )
 }
 
-/// One mutant's completed execution and the scheduling timestamps used for package telemetry.
+/// Whether a killing-test identity was observed or only guessed for scheduling.
 enum KillerAttribution {
     Observed(Killer),
     Guessed(Killer),
@@ -190,6 +190,7 @@ impl KillerAttribution {
     }
 }
 
+/// One mutant's completed execution and the scheduling timestamps used for package telemetry.
 struct Completed {
     position: usize,
     outcome: Outcome,
@@ -467,7 +468,7 @@ fn file_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<Bina
         if let Some(binary) = binaries
             .iter()
             .copied()
-            .find(|binary| BinaryIdentity::from_hint(&candidate.candidate).names(binary))
+            .find(|binary| binary.matches_target(&candidate.candidate.package, &candidate.candidate.target))
         {
             return Some(GeneralizedCandidate {
                 binary,
@@ -1917,16 +1918,17 @@ fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u
         .collect()
 }
 
-/// Tries tests found by an incomplete census without trusting their absence of a failure.
-///
-/// A failure is evidence that the mutant was killed. Every other result falls back to the whole
-/// binary, because an incomplete census cannot establish that no unmeasured test would fail.
+/// A probe's killing-test identity and whether execution observed it fail.
 #[derive(Debug, PartialEq, Eq)]
 struct ProbeKiller {
     identity: Killer,
     observed: bool,
 }
 
+/// Tries tests found by an incomplete census without trusting their absence of a failure.
+///
+/// A failure is evidence that the mutant was killed. Every other result falls back to the whole
+/// binary, because an incomplete census cannot establish that no unmeasured test would fail.
 fn probe_cases(
     work: &Workspace,
     ordinal: u32,

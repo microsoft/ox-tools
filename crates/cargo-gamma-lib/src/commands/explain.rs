@@ -30,6 +30,9 @@ pub(super) fn explain<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Resul
         writeln!(stream, "{}", mutator.name)?;
         writeln!(stream, "  {}", mutator.description)?;
         writeln!(stream, "  enabled by default: {}", if mutator.default_on { "yes" } else { "no" })?;
+        if registry::optimistic_requires_explicit(mutator.name) {
+            writeln!(stream, "  optimistic sites: require an explicit selector")?;
+        }
 
         if !mutator.aliases.is_empty() {
             writeln!(stream, "  also known as: {}", mutator.aliases.join(", "))?;
@@ -223,6 +226,24 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert!(text.contains("also known as: RV"), "{text}");
         assert!(text.contains("suppress with: // #[gamma::skip(fn_value.default)]"), "{text}");
+        assert!(!text.contains("optimistic sites"), "{text}");
+
+        let mut host = Sink::default();
+        let code = explain(&mut host, &args("literal.int_decrement", Utf8PathBuf::from("."))).expect("explain optimistic policy");
+
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(
+            host.out(),
+            concat!(
+                "literal.int_decrement\n",
+                "  subtract one from an integer literal\n",
+                "  enabled by default: yes\n",
+                "  optimistic sites: require an explicit selector\n",
+                "  also known as: CRP\n",
+                "  suppress with: // #[gamma::skip(literal.int_decrement)]\n",
+                "\n",
+            )
+        );
     }
 
     /// Piping into a consumer that exits early is successful consumption.

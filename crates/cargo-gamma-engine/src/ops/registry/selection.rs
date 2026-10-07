@@ -7,6 +7,15 @@ use crate::{HashSet, Result};
 /// The mutator that consumes caller-supplied error values.
 const ERR_WITH: &str = "fn_value.err_with";
 
+/// Returns whether optimistic sites for a mutator require an explicit selector.
+#[must_use]
+pub fn optimistic_requires_explicit(name: &str) -> bool {
+    matches!(
+        name,
+        "literal.int_decrement" | "expr.increment" | "expr.decrement" | "iter.remove_filter"
+    )
+}
+
 /// A resolved set of mutator names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selection {
@@ -207,6 +216,11 @@ mod tests {
 
     #[test]
     fn only_explicit_selection_admits_optimistic_candidates() {
+        assert!(optimistic_requires_explicit("literal.int_decrement"));
+        assert!(optimistic_requires_explicit("expr.increment"));
+        assert!(optimistic_requires_explicit("expr.decrement"));
+        assert!(optimistic_requires_explicit("iter.remove_filter"));
+        assert!(!optimistic_requires_explicit("fn_value.default"));
         assert!(!Selection::default_preset().includes_optimistic("literal.int_decrement"));
         assert!(!Selection::parse("@default").unwrap().includes_optimistic("literal.int_decrement"));
         assert!(

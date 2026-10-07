@@ -760,6 +760,16 @@ pub(super) enum Kind {
     Unknown,
 }
 
+pub(super) fn primitive_kind(name: &str) -> Option<Kind> {
+    match name {
+        "bool" => Some(Kind::Bool),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => Some(Kind::Signed),
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => Some(Kind::Unsigned),
+        "f32" | "f64" => Some(Kind::Float),
+        _ => None,
+    }
+}
+
 /// Classifies a return type syntactically.
 ///
 /// Only the last segment of a path is compared, because a standard type may be written bare, fully
@@ -827,11 +837,13 @@ pub(super) fn resolve_type(ty: &Type) -> Kind {
                 return if arity == 0 { Kind::NonZero } else { Kind::Unknown };
             }
 
+            if arity == 0
+                && let Some(kind) = primitive_kind(&name)
+            {
+                return kind;
+            }
+
             match (name.as_str(), arity) {
-                ("bool", 0) => Kind::Bool,
-                ("i8" | "i16" | "i32" | "i64" | "i128" | "isize", 0) => Kind::Signed,
-                ("u8" | "u16" | "u32" | "u64" | "u128" | "usize", 0) => Kind::Unsigned,
-                ("f32" | "f64", 0) => Kind::Float,
                 ("String", 0) => Kind::String,
                 ("Option", 1..) => Kind::Option,
                 ("Result", 1..) => Kind::Result,

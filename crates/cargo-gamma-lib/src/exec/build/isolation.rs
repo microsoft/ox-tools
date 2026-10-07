@@ -38,7 +38,7 @@ pub(super) const MAX_ISOLATION_CONTEXTS: usize = 64;
 ///
 /// This is derived from the two local bounds rather than chosen independently: every admitted
 /// context can spend its complete local allowance, so one context can never starve another. The
-/// context and local limits still impose a strict 2,048-launch ceiling on pathological input.
+/// context and local limits still impose a strict derived launch ceiling on pathological input.
 pub(super) const MAX_INVOCATION_ISOLATION_PROOFS: usize = MAX_ISOLATION_CONTEXTS * MAX_ISOLATION_PROOFS;
 
 const fn candidate_tier_admitted(candidates: usize) -> bool {

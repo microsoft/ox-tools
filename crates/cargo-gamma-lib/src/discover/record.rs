@@ -2684,7 +2684,8 @@ mod tests {
 
     #[test]
     fn version_eleven_records_are_ignored_after_killer_provenance_changed() {
-        let (_dir, root) = workspace("record-legacy-target-identity-", "");
+        let dir = workdir("record-legacy-target-identity-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
         let mut stored = serde_json::to_value(RunRecord::default()).expect("record JSON");
         stored["version"] = (VERSION - 1).into();
         fs::write(root.join(FILE), serde_json::to_vec(&stored).expect("record JSON")).expect("legacy record");

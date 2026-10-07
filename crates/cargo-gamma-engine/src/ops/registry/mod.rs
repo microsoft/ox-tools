@@ -23,4 +23,4 @@ pub use mutator::Mutator;
 #[doc(inline)]
 pub use preset::Preset;
 #[doc(inline)]
-pub use selection::Selection;
+pub use selection::{Selection, optimistic_requires_explicit};

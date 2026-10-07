@@ -126,6 +126,7 @@ pub(super) struct Collector<'a> {
 
     candidates: Vec<Candidate>,
     identity_sites: HashMap<(u128, Range<usize>), u32>,
+    candidate_identity_keys: Vec<u128>,
 
     /// Depth of nesting inside a context where mutation is not possible or not useful.
     ///
@@ -365,6 +366,7 @@ impl<'a> Collector<'a> {
             trait_impl: None,
             candidates: Vec::new(),
             identity_sites: HashMap::default(),
+            candidate_identity_keys: Vec::new(),
             inert_depth: 0,
             in_default_impl: false,
             impl_self_type: None,
@@ -425,9 +427,7 @@ impl<'a> Collector<'a> {
             *occurrence = occurrence.saturating_add(1);
             let _previous = reserved.insert((key, span), index);
         }
-        for candidate in &mut self.candidates {
-            let normalized = normalize_site_text(self.file.slice(&candidate.span));
-            let key = site_key(&candidate.item_path, candidate.mutator, &normalized);
+        for (candidate, key) in self.candidates.iter_mut().zip(self.candidate_identity_keys) {
             candidate.identity_occurrence = reserved.get(&(key, candidate.span.clone())).copied();
         }
         self.candidates
@@ -473,11 +473,9 @@ impl<'a> Collector<'a> {
         if !self.wants(mutator) {
             return;
         }
-        let optional_optimistic = matches!(
-            mutator,
-            "literal.int_decrement" | "expr.increment" | "expr.decrement" | "iter.remove_filter"
-        );
-        let included = confidence != Confidence::Optimistic || !optional_optimistic || self.selection.includes_optimistic(mutator);
+        let included = confidence != Confidence::Optimistic
+            || !crate::ops::registry::optimistic_requires_explicit(mutator)
+            || self.selection.includes_optimistic(mutator);
 
         self.emit_at_conditionally(
             mutator,
@@ -546,7 +544,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        self.reserve_identity_occurrence(mutator, range.clone());
+        let identity_key = self.reserve_identity_occurrence(mutator, range.clone());
         if !included {
             return;
         }
@@ -577,17 +575,19 @@ impl<'a> Collector<'a> {
             shape,
             confidence,
         });
+        self.candidate_identity_keys.push(identity_key);
 
         self.seen.entry(span_key).or_default().push(at);
     }
 
-    fn reserve_identity_occurrence(&mut self, mutator: &'static str, range: Range<usize>) {
+    fn reserve_identity_occurrence(&mut self, mutator: &'static str, range: Range<usize>) -> u128 {
         let item_path = self.scope.last().map_or_else(|| self.outermost.as_ref(), AsRef::as_ref);
         let normalized = normalize_site_text(self.file.slice(&range));
         let key = site_key(item_path, mutator, &normalized);
         let site = (key, range);
 
         let _reserved = self.identity_sites.entry(site).or_insert(0);
+        key
     }
 
     /// The replacement text of an already-emitted candidate, for the dedup scan.
