@@ -183,8 +183,19 @@ fn build_plan(
     backends: &[Backend],
     catalog: &Catalog,
 ) -> Result<Plan, AppError> {
-    let mut plan = Plan::default();
     let mut hosts = HostTextCache::default();
+    build_plan_with_hosts(repo_root, workspace, manifest, backends, catalog, &mut hosts)
+}
+
+fn build_plan_with_hosts(
+    repo_root: &Path,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    backends: &[Backend],
+    catalog: &Catalog,
+    hosts: &mut HostTextCache,
+) -> Result<Plan, AppError> {
+    let mut plan = Plan::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
     let mut composed = ComposedHosts {
@@ -202,7 +213,7 @@ fn build_plan(
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let _ = repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
+            let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, CommentSyntax::Hash)?;
         }
     }
 
@@ -217,7 +228,7 @@ fn build_plan(
             }
             Artifact::Region(spec) => {
                 let Some(path) = catalog.toml_array_path(spec) else {
-                    push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut composed, spec)?;
+                    push_region(repo_root, workspace, manifest, &mut plan, hosts, &mut composed, spec)?;
                     continue;
                 };
                 let spec = crate::catalog::TomlArrayRegionSpec {
@@ -247,7 +258,7 @@ fn build_plan(
         }
     }
 
-    plan_removals(repo_root, manifest, &mut plan, &mut hosts, &composed)?;
+    plan_removals(repo_root, manifest, &mut plan, hosts, &composed)?;
 
     Ok(plan)
 }
@@ -588,6 +599,19 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
              so anvil will not write this region rather than risk appending a second copy of it. Restore the \
              missing sentinel around the body anvil generated, or delete the stray one together with the \
              body it was meant to enclose."
+        }
+        RefusalRemedy::EnclosingOwnership => {
+            "Retire the existing ownership before managing these array entries, preserving any repository \
+             settings outside its sentinels. Retrying without changing that ownership cannot resolve this refusal."
+        }
+        RefusalRemedy::MisplacedArrayMarkers => {
+            "Keep both sentinels together around complete entries in the selected array. If the selector changed, \
+             restore the old selector and retire its region before registering the new selector, or explicitly \
+             reconcile the old marked entries with the new array. Do not delete only one sentinel."
+        }
+        RefusalRemedy::CommentedArrayEntry => {
+            "Move the repository comments outside the matching compound entry before adopting it. Anvil will \
+             not discard interior comments or silently duplicate the entry."
         }
     };
     plan.refusal(format!(
@@ -1181,6 +1205,79 @@ mod tests {
     use super::*;
     use crate::anvil::artifacts::region;
     use crate::{CliMeta, RegionId};
+
+    #[test]
+    fn toml_array_regions_compose_with_an_ordinary_region_in_the_production_plan() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let cfg = Artifact::region(RegionSpec {
+            host: HostSelector::Path("config.toml".to_owned()),
+            id: RegionId::new("cfg"),
+            body: "[plugins]\nmode = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        });
+        let entries = crate::catalog::TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned(), "default".to_owned()],
+        };
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(cfg)
+            .with_toml_array_region(entries.clone())
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.texts.insert("config.toml".to_owned(), None);
+        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(plan.items().len(), 2);
+        assert_eq!(plan.items()[0].decision, Decision::Write);
+        assert_eq!(plan.items()[1].decision, Decision::Write);
+        let expected = concat!(
+            "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n# <<< anvil-managed: cfg\n",
+            "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
+        );
+        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
+        assert_eq!(plan.items()[1].spliced_host.as_deref(), Some(expected));
+        let manifest = plan.projected_manifest(&Manifest::default());
+        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(
+            plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
+            [Decision::InSync, Decision::InSync]
+        );
+        let malformed = "plugins.default = [\n# >>> anvil-managed: other\n\"managed\",\n]\n";
+        hosts.set("config.toml", malformed.to_owned());
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(entries)
+            .build()
+            .unwrap();
+        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.items().len(), 1);
+        assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+        assert_eq!(plan.items()[0].spliced_host, None);
+        assert_eq!(hosts.cached("config.toml").as_deref(), Some(malformed));
+        assert_eq!(
+            plan.refusals(),
+            &[concat!(
+                "Refused to manage config.toml [entries]: opening sentinel without its matching close. ",
+                "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
+                "Without a matching pair of sentinels the boundary of the generated body cannot be established, ",
+                "so anvil will not write this region rather than risk appending a second copy of it. Restore the ",
+                "missing sentinel around the body anvil generated, or delete the stray one together with the ",
+                "body it was meant to enclose."
+            )
+            .to_owned()]
+        );
+    }
+
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -1275,6 +1372,41 @@ mod tests {
     /// unconditionally would run the parser's message straight into the remedy.
     mod refuse_region {
         use super::*;
+
+        #[test]
+        fn array_faults_have_actionable_diagnostics_and_no_write_plan() {
+            for (remedy, advice) in [
+                (
+                    RefusalRemedy::EnclosingOwnership,
+                    "Retire the existing ownership before managing these array entries, preserving any repository \
+                     settings outside its sentinels. Retrying without changing that ownership cannot resolve this refusal.",
+                ),
+                (
+                    RefusalRemedy::MisplacedArrayMarkers,
+                    "Keep both sentinels together around complete entries in the selected array. If the selector changed, \
+                     restore the old selector and retire its region before registering the new selector, or explicitly \
+                     reconcile the old marked entries with the new array. Do not delete only one sentinel.",
+                ),
+                (
+                    RefusalRemedy::CommentedArrayEntry,
+                    "Move the repository comments outside the matching compound entry before adopting it. Anvil will \
+                     not discard interior comments or silently duplicate the entry.",
+                ),
+            ] {
+                let mut plan = Plan::default();
+                super::super::refuse_region(&mut plan, "config.toml".to_owned(), "entries", "unsafe array adoption", remedy);
+                assert_eq!(
+                    plan.refusals(),
+                    &[format!(
+                        "Refused to manage config.toml [entries]: unsafe array adoption. This region was left unchanged; \
+                         other regions in the same file and other artifacts may still be updated. {advice}"
+                    )]
+                );
+                assert_eq!(plan.items().len(), 1);
+                assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+                assert_eq!(plan.items()[0].spliced_host, None);
+            }
+        }
 
         fn refusal_for(reason: &str) -> String {
             let mut plan = Plan::default();

@@ -205,18 +205,30 @@ default = [
 ```
 
 Missing hosts, parent tables, or arrays are scaffolded once, outside ownership.
+When the parent's last key belongs to another managed region, a missing array
+assignment is inserted after its closing sentinel, still inside the parent
+table. If that is impossible without changing table membership, planning refuses.
 Existing multiline, inline, empty, dotted-key, and quoted-key arrays are located
 using TOML parser source spans. New regions are inserted first, so a repository's
 last element need not gain a comma. One semantically identical unmanaged entry
 is adopted for each generated entry; its comments remain repository-owned.
+Matching compound entries with interior comments are refused until those
+comments are moved outside the entry. Parser token spans distinguish comments
+from `#` in string values and quoted keys.
 Other regions are never adoption candidates. Existing comments and unrelated
 settings retain their original bytes except for the missing scaffold and the
 array's opening line break.
 
 Malformed TOML, non-array selectors, malformed markers, regions outside the
 selected array, and markers splitting a parsed value are refused.
+Every sentinel in the host is validated before scaffolding or adoption, including
+unpaired or duplicated markers for other ids. Adoption refuses if a separator it
+would remove belongs to another region.
 An array enclosed by another managed region is also refused: its scaffold must
-be repository-owned before entry-level ownership can be introduced. Array bodies
+be repository-owned before entry-level ownership can be introduced. Retire the
+enclosing ownership first; another run alone cannot resolve this refusal. Paired
+but misplaced markers must enclose complete entries in the selected array, not
+be repaired by removing a single sentinel. Array bodies
 and the complete spliced host are parser-validated before writing. Ordinary
 edited-body protection remains unchanged. Identity and lock tracking are still
 `(host, id)` and the checksum of the rendered entry body; the compiled catalog
@@ -233,6 +245,14 @@ region, not a duplicate body in metadata. `without_artifact` removes both the
 region and its selector. Duplicate registration conflicts with both ordinary
 and array-positioned regions; invalid selectors and entry bodies fail `build`.
 Catalogs without array-placement metadata retain their existing checksum.
+Changing the selector while keeping `(host, id)` does not migrate an existing
+marked region: if its old location is outside the new array, planning refuses.
+Restore the old selector and retire the old region before registering the new
+selector, or explicitly reconcile the old marked entries with the new array.
+
+`TomlArrayRegionSpec` is an editable input record like `RegionSpec`, not a
+validated catalog. Its public fields support catalog authoring; `build` validates
+the current path and body, including bodies supplied through replacement.
 
 Because the on-disk format is fixed, **none of the engine internals (`region.rs`, `manifest.rs`,
 the templates) need to change to support forks.** `region.rs` keeps its hard-coded
