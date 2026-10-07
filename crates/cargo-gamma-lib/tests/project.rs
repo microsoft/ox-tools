@@ -5,22 +5,14 @@
 
 //! Guards the isolated, embedded project generator used throughout the gamma test suites.
 
-use std::ffi::OsString;
 use std::process::Command;
 use std::{env, fs};
 
 use cargo_gamma_lib::testing::{write_fixture, write_project};
 use tempfile::TempDir;
 
-fn inherited_rustflags() -> Option<(&'static str, &'static str, OsString)> {
-    [
-        ("CARGO_ENCODED_RUSTFLAGS", "\u{1f}"),
-        ("RUSTFLAGS", " "),
-        ("CARGO_BUILD_RUSTFLAGS", " "),
-    ]
-    .into_iter()
-    .find_map(|(name, separator)| env::var_os(name).map(|value| (name, separator, value)))
-}
+#[path = "support/rustflags.rs"]
+mod rustflags;
 
 fn builds_offline(directory: &TempDir) {
     let home = TempDir::new().expect("could not create an empty Cargo home");
@@ -31,32 +23,28 @@ fn builds_offline(directory: &TempDir) {
         .args(["test", "--offline", "--no-run", "--target-dir"])
         .arg(directory.path().join("target"));
 
-    if let Some((name, separator, mut inherited)) = inherited_rustflags() {
-        let configuration = if directory.path().join(".cargo/config").exists() {
-            ".cargo/config"
-        } else {
-            ".cargo/config.toml"
-        };
-        let document: toml_edit::DocumentMut = fs::read_to_string(directory.path().join(configuration))
-            .expect("write_project creates a Cargo configuration for each buildable fixture")
-            .parse()
-            .expect("write_project requires valid Cargo configuration");
-        if let Some(flags) = document.get("build").and_then(|build| build.get("rustflags")) {
-            let flags = flags
-                .as_array()
-                .expect("these embedded fixtures declare build.rustflags as an array");
-            // Global flags shadow configuration; retain the analysis runner's flags and add the fixture's flags.
-            for flag in flags {
-                if !inherited.is_empty() {
-                    inherited.push(separator);
-                }
-                inherited.push(
-                    flag.as_str()
-                        .expect("these embedded fixtures declare each rustflags entry as a string"),
-                );
-            }
-            command.env(name, inherited);
+    let configuration = if directory.path().join(".cargo/config").exists() {
+        ".cargo/config"
+    } else {
+        ".cargo/config.toml"
+    };
+    let document: toml_edit::DocumentMut = fs::read_to_string(directory.path().join(configuration))
+        .expect("write_project creates a Cargo configuration for each buildable fixture")
+        .parse()
+        .expect("write_project requires valid Cargo configuration");
+    if let Some(flags) = document.get("build").and_then(|build| build.get("rustflags")) {
+        let flags = flags
+            .as_array()
+            .expect("these embedded fixtures declare build.rustflags as an array");
+        let mut inherited = rustflags::inherited();
+        for flag in flags {
+            rustflags::append(
+                &mut inherited,
+                flag.as_str()
+                    .expect("these embedded fixtures declare each rustflags entry as a string"),
+            );
         }
+        command.env("CARGO_ENCODED_RUSTFLAGS", inherited);
     }
 
     let built = command.output().expect("Cargo must be installed to build this test suite");
@@ -119,12 +107,9 @@ fn local_package_graphs_and_custom_rustflags_still_build_offline() {
 fn configured_rustflags_and_inherited_analysis_flags_both_reach_the_compiler() {
     const CHILD: &str = "GAMMA_PROJECT_RUSTFLAGS_CHILD";
     if env::var_os(CHILD).is_none() {
-        let (name, separator, mut inherited) = inherited_rustflags().unwrap_or(("CARGO_ENCODED_RUSTFLAGS", "\u{1f}", OsString::new()));
+        let mut inherited = rustflags::inherited();
         for flag in ["--cfg", "inherited_fixture", "--check-cfg", "cfg(inherited_fixture)"] {
-            if !inherited.is_empty() {
-                inherited.push(separator);
-            }
-            inherited.push(flag);
+            rustflags::append(&mut inherited, flag);
         }
         let output = Command::new(env::current_exe().expect("the running test executable must be locatable for its child process"))
             .args([
@@ -133,7 +118,7 @@ fn configured_rustflags_and_inherited_analysis_flags_both_reach_the_compiler() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .env(name, inherited)
+            .env("CARGO_ENCODED_RUSTFLAGS", inherited)
             .output()
             .expect("the running test executable must be runnable as a child process");
         assert!(

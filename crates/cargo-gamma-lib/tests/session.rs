@@ -10,7 +10,6 @@
 //! they are slower than the rest of the suite, but they are the only coverage that proves the
 //! encoding in `schema.rs` actually compiles and that a verdict means what it claims.
 
-use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -22,6 +21,8 @@ use tempfile::TempDir;
 
 #[path = "support/macros.rs"]
 mod macros;
+#[path = "support/rustflags.rs"]
+mod rustflags;
 
 /// Exit code for a run in which every gate passed.
 const EXIT_OK: i32 = 0;
@@ -291,27 +292,9 @@ fn with_resource_workspace(test: &str, check: impl FnOnce(&Path)) {
     configuration["build"]["rustflags"] = toml_edit::value(toml_edit::Array::from_iter(["--extern", external.as_str()]));
     write_project(directory.path(), &[(".cargo/config.toml", &configuration.to_string())]);
 
-    let mut flags = if let Some(encoded) = env::var_os("CARGO_ENCODED_RUSTFLAGS") {
-        encoded
-    } else if let Some(plain) = env::var_os("RUSTFLAGS").or_else(|| env::var_os("CARGO_BUILD_RUSTFLAGS")) {
-        OsString::from(
-            plain
-                .to_str()
-                .expect("Cargo's plain rustflags variables must contain UTF-8")
-                .split(' ')
-                .map(str::trim)
-                .filter(|flag| !flag.is_empty())
-                .collect::<Vec<_>>()
-                .join("\u{1f}"),
-        )
-    } else {
-        OsString::new()
-    };
+    let mut flags = rustflags::inherited();
     for flag in ["--extern", external.as_str()] {
-        if !flags.is_empty() {
-            flags.push("\u{1f}");
-        }
-        flags.push(flag);
+        rustflags::append(&mut flags, flag);
     }
 
     // The parent owns the project while a child test uses its macro flags without mutating global environment.
