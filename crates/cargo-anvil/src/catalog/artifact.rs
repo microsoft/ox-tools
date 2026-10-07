@@ -105,6 +105,9 @@ pub struct RegionSpec {
 /// The table and array delimiters remain repository-owned. `region.body`
 /// contains array entries, including a trailing comma, and uses hash comments.
 /// Identity is still the region's host and id, not its array selector.
+///
+/// Like [`RegionSpec`], this is editable catalog input, not a validated
+/// catalog. [`super::CatalogBuilder::build`] validates its path and body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TomlArrayRegionSpec {
     /// Ordinary region identity, content, and comment syntax.

@@ -18,6 +18,10 @@ use crate::catalog::meta::CliMeta;
 use crate::catalog::{HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
 use crate::checksum::checksum_str;
 
+// U+001F (unit separator) cannot appear in paths/ids and is vanishingly
+// unlikely in bodies, so it disambiguates the joined fields.
+const SEP: char = '\u{1f}';
+
 /// The set of artifacts a tool emits, plus its CLI identity.
 #[derive(Debug, Clone)]
 pub struct Catalog {
@@ -97,7 +101,7 @@ impl Catalog {
         entries.extend(
             self.toml_array_paths
                 .iter()
-                .map(|(host, id, path)| format!("array-path\u{1f}{}\u{1f}{}\u{1f}{path:?}", host_repr(host), id.as_str())),
+                .map(|(host, id, path)| format!("array-path{SEP}{}{SEP}{}{SEP}{path:?}", host_repr(host), id.as_str())),
         );
         entries.sort();
         checksum_str(&entries.join("\n"))
@@ -108,9 +112,6 @@ impl Catalog {
 /// (including gate / syntax) followed by its rendered body. The leading
 /// fields make sorting these strings a canonical, order-independent ordering.
 fn canonical_repr(artifact: &Artifact) -> String {
-    // U+001F (unit separator) cannot appear in paths/ids and is vanishingly
-    // unlikely in bodies, so it disambiguates the joined fields.
-    const SEP: char = '\u{1f}';
     match artifact {
         Artifact::OwnedFile(spec) => {
             format!("file{SEP}{}{SEP}gate={}{SEP}{}", spec.path, gate_repr(spec.gate), spec.body)

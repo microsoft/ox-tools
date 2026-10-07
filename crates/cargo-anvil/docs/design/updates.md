@@ -217,6 +217,12 @@ indented entry body is recorded under the ordinary `(host, id)` lock key.
 The selector contributes to compiled catalog identity, not to repository
 ownership. Planning, dry-run, edited-body refusal, manifest projection, and
 retirement use the same policies as ordinary regions.
+All host sentinels are checked before adoption; malformed ownership or a
+separator owned by another region causes refusal. Compound entries containing
+interior comments are not adopted, so their comments cannot be lost.
+A selector change with the same `(host, id)` is not a migration: old markers
+outside the newly selected array are refused. Retire using the old selector
+before registering the new one, or explicitly reconcile the marked entries.
 
 Every actual TOML write has a generic parse-before-write backstop. Only regions
 that will really retire are masked for that check; an edited retired region

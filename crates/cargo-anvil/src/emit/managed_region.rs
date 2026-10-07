@@ -61,6 +61,12 @@ pub enum RefusalRemedy {
     /// The region's marker lines do not form a usable pair, so no boundary can
     /// be proven for whatever sits between them.
     MalformedMarkers,
+    /// An existing region owns the selected array or a separator needed for adoption.
+    EnclosingOwnership,
+    /// Paired markers are outside the selected array or split one of its values.
+    MisplacedArrayMarkers,
+    /// Adopting a compound value would discard repository-owned interior comments.
+    CommentedArrayEntry,
     /// The catalog no longer declares the region, so it was due for removal,
     /// but its body carries edits anvil did not write. Nothing was parsed and
     /// no table collided; the host's format is irrelevant, so this reaches
