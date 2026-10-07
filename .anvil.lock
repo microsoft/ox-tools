@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.13.0"
-catalog_checksum = "sha256:b1c579369984214d4431728120581d95dc4d12c7dba7125c33f32669fb9e6e90"
+catalog_checksum = "sha256:8e6f757d9ae8193d53bdc494ea5484c4a5881650aa38ab201b8136f1b7ad1515"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -41,7 +41,7 @@ checksum = "sha256:7c43a36153ec346427892dca414fe971da616f99827fb5241167b1cf58a97
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
-checksum = "sha256:e10f85f0fc5d91da5a3f59e3a56698bef12259b4698e0b1812b673e29f5a516b"
+checksum = "sha256:b2ab2cbdd2be4ded3a0e48e2f80a018de50fdf774b1811d0893facd1c6eaa149"
 
 [[file]]
 path = ".github/workflows/anvil-pr.yml"
@@ -161,7 +161,7 @@ checksum = "sha256:63489345e51ce8069d9d016128956cc7aefb75a6961e94f40bb435eae36bf
 
 [[file]]
 path = "justfiles/anvil/checks/pr-title.just"
-checksum = "sha256:28734aa77526ca5c53d89a32c3e20ae6b42d2032c73ab6a1dbc9831f25cb0f76"
+checksum = "sha256:1b7b3c02d21e49193e107d4bc000967ff002bba7895d93915fbc63230569abc5"
 
 [[file]]
 path = "justfiles/anvil/checks/readme-check.just"
