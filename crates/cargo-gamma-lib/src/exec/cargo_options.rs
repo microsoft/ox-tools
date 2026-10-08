@@ -175,6 +175,7 @@ impl BuildLimits {
 const MINIMUM_BUILD_BUDGET: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

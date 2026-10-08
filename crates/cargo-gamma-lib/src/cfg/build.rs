@@ -751,7 +751,6 @@ fn valued(args: &[String], flag: &str) -> Vec<String> {
     for argument in args {
         if expecting {
             found.push(argument.clone());
-            // #[gamma::skip(assign_value.default, reason = "`expecting` is bool, whose `Default::default()` is exactly false")]
             expecting = false;
 
             continue;
@@ -814,7 +813,6 @@ fn options(flags: &[String]) -> impl Iterator<Item = &str> {
 
     flags.iter().filter_map(move |flag| {
         if expecting {
-            // #[gamma::skip(assign_value.default, reason = "`expecting` is bool, whose `Default::default()` is exactly false")]
             expecting = false;
 
             return Some(flag.as_str());

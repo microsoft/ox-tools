@@ -8,7 +8,7 @@ use camino::Utf8Path;
 use compact_str::CompactString;
 
 use super::{MutantId, MutationSite};
-use crate::ops::collect::Shape;
+use crate::ops::collect::{Confidence, Shape};
 
 /// One source-level mutation, before Cargo/run policy and execution state are attached.
 #[derive(Debug, Clone)]
@@ -27,6 +27,7 @@ pub struct MutantDefinition {
     pub replacement_index: u32,
     pub replacement: CompactString,
     pub shape: Shape,
+    pub confidence: Confidence,
 }
 
 impl MutantDefinition {
@@ -91,6 +92,7 @@ mod tests {
             replacement_index: 0,
             replacement: "1 - 1".to_owned().into(),
             shape: Shape::Expr,
+            confidence: Confidence::Proven,
         }
     }
 

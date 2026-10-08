@@ -1886,6 +1886,7 @@ pub(super) fn tail(text: &str, count: usize) -> Cow<'_, str> {
 }
 
 #[cfg(all(test, not(loom), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use super::super::progress::{Progress, Watch};
     use super::first_failure;
@@ -1959,6 +1960,7 @@ mod fuzz {
 }
 
 #[cfg(all(test, not(loom), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

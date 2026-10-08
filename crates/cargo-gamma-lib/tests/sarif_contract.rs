@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! The complete SARIF 2.1.0 document, against a committed expected-output fixture (also called a
@@ -101,7 +103,7 @@ fn fingerprint_values_have_the_production_identity_shape() {
         .expect("the emitted SARIF log has a result array");
 
     for result in results {
-        let fingerprint = result["partialFingerprints"]["gammaMutantId/v5"]
+        let fingerprint = result["partialFingerprints"][format!("gammaMutantId/v{MUTANT_ID_VERSION}")]
             .as_str()
             .expect("each result has a mutant fingerprint");
 

@@ -255,31 +255,15 @@ pub(super) fn is_numeric_receiver(method: &str) -> bool {
     )
 }
 
-/// Returns whether a type's name says its associated functions produce a number.
+/// Returns whether adding or subtracting an unsuffixed unit is valid for the named type.
 ///
-/// Written out rather than derived, because these are the only names for which `usize::from(..)`
-/// and its kind can be read off the call site without resolving anything.
-pub(super) fn is_numeric_type(name: &str) -> bool {
+/// `NonZero*` types represent numbers but deliberately do not implement arithmetic with integer
+/// literals. They remain numeric for constructor and return-type inference, but are not evidence
+/// for `expr.increment` or `expr.decrement`.
+pub(super) fn supports_unit_arithmetic_type(name: &str) -> bool {
     matches!(
         name,
-        "u8" | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "usize"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "isize"
-            | "f32"
-            | "f64"
-            | "NonZeroU8"
-            | "NonZeroU16"
-            | "NonZeroU32"
-            | "NonZeroU64"
-            | "NonZeroUsize"
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "f32" | "f64"
     )
 }
 
@@ -301,6 +285,13 @@ pub(super) fn returns_numeric(method: &str) -> bool {
                 | "min"
                 | "max"
                 | "clamp"
+                | "mul_add"
+                | "sqrt"
+                | "floor"
+                | "ceil"
+                | "round"
+                | "trunc"
+                | "fract"
                 | "saturating_add"
                 | "saturating_sub"
                 | "saturating_mul"
@@ -318,6 +309,53 @@ pub(super) fn returns_numeric(method: &str) -> bool {
                 | "count_ones"
                 | "count_zeros"
         )
+}
+
+/// Returns whether a numeric primitive's inherent method fixes the result as numeric.
+pub(super) fn primitive_numeric_method(method: &str, receiver: Kind) -> bool {
+    match receiver {
+        Kind::Signed => matches!(
+            method,
+            "abs"
+                | "signum"
+                | "pow"
+                | "min"
+                | "max"
+                | "clamp"
+                | "saturating_add"
+                | "saturating_sub"
+                | "saturating_mul"
+                | "wrapping_add"
+                | "wrapping_sub"
+                | "wrapping_mul"
+                | "leading_zeros"
+                | "trailing_zeros"
+                | "count_ones"
+                | "count_zeros"
+        ),
+        Kind::Unsigned => matches!(
+            method,
+            "pow"
+                | "min"
+                | "max"
+                | "clamp"
+                | "saturating_add"
+                | "saturating_sub"
+                | "saturating_mul"
+                | "wrapping_add"
+                | "wrapping_sub"
+                | "wrapping_mul"
+                | "leading_zeros"
+                | "trailing_zeros"
+                | "count_ones"
+                | "count_zeros"
+        ),
+        Kind::Float => matches!(
+            method,
+            "abs" | "signum" | "min" | "max" | "clamp" | "mul_add" | "sqrt" | "floor" | "ceil" | "round" | "trunc" | "fract"
+        ),
+        _ => false,
+    }
 }
 
 /// Returns whether a method's name fixes its return type as floating point.
@@ -586,7 +624,7 @@ pub(super) fn is_numeric_binding(ty: &Type) -> bool {
     match ty {
         Type::Reference(reference) => is_numeric_binding(&reference.elem),
 
-        _ => matches!(resolve_type(ty), Kind::Signed | Kind::Unsigned | Kind::Float),
+        _ => primitive_type_name(ty).is_some_and(|name| supports_unit_arithmetic_type(&name)),
     }
 }
 
@@ -598,7 +636,33 @@ pub(super) fn is_unsigned_binding(ty: &Type) -> bool {
     match ty {
         Type::Reference(reference) => is_unsigned_binding(&reference.elem),
 
-        _ => matches!(resolve_type(ty), Kind::Unsigned),
+        _ => primitive_type_name(ty).is_some_and(|name| matches!(name.as_str(), "u8" | "u16" | "u32" | "u64" | "u128" | "usize")),
+    }
+}
+
+fn primitive_type_name(ty: &Type) -> Option<String> {
+    if let Type::Paren(paren) = ty {
+        return primitive_type_name(&paren.elem);
+    }
+    if let Type::Group(group) = ty {
+        return primitive_type_name(&group.elem);
+    }
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let segments = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        [name] => Some(name.clone()),
+        [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "primitive" => Some(name.clone()),
+        _ => None,
     }
 }
 
@@ -924,10 +988,49 @@ mod tests {
         assert!(!is_textual(&parse_quote!(1 + 2)));
         assert!(!is_textual(&parse_quote!(1.max(2))));
 
-        assert!(is_numeric_type("NonZeroUsize"));
-        assert!(!is_numeric_type("Duration"));
         assert!(returns_numeric("subsec_nanos"));
         assert!(!returns_numeric("checked_add"));
+        for method in [
+            "abs",
+            "signum",
+            "pow",
+            "min",
+            "max",
+            "clamp",
+            "saturating_add",
+            "saturating_sub",
+            "saturating_mul",
+            "wrapping_add",
+            "wrapping_sub",
+            "wrapping_mul",
+            "leading_zeros",
+            "trailing_zeros",
+            "count_ones",
+            "count_zeros",
+        ] {
+            assert!(primitive_numeric_method(method, Kind::Signed), "{method}");
+        }
+        for method in [
+            "pow",
+            "min",
+            "max",
+            "clamp",
+            "saturating_add",
+            "saturating_sub",
+            "saturating_mul",
+            "wrapping_add",
+            "wrapping_sub",
+            "wrapping_mul",
+        ] {
+            assert!(primitive_numeric_method(method, Kind::Unsigned), "{method}");
+        }
+        for method in [
+            "abs", "signum", "min", "max", "clamp", "mul_add", "sqrt", "floor", "ceil", "round", "trunc", "fract",
+        ] {
+            assert!(returns_numeric(method), "{method}");
+            assert!(primitive_numeric_method(method, Kind::Float), "{method}");
+        }
+        assert!(!primitive_numeric_method("abs", Kind::String));
         for method in ["as_secs_f32", "as_secs_f64", "elapsed_secs"] {
             assert!(returns_float(method), "{method}");
         }
@@ -938,6 +1041,13 @@ mod tests {
         assert!(!is_capacity_call("resize"));
         assert!(is_diagnostic_message("expect_err", 1));
         assert!(!is_diagnostic_message("expect_err", 2));
+        let grouped_unsigned = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            elem: Box::new(parse_quote!(u8)),
+        });
+        assert!(is_unsigned_binding(&grouped_unsigned));
+        assert!(!is_unsigned_binding(&parse_quote!(<u8 as Trait>::Assoc)));
 
         assert!(is_catch_all(&parse_quote!(_)));
         assert!(is_catch_all(&parse_quote!((other))));

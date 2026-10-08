@@ -371,6 +371,7 @@ pub fn session_notes<H: Host>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
 

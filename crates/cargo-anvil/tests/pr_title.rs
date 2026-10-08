@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Coverage for the `anvil-pr-title` recipe.
 //!
 //! Every case here carries `#[serial]`. Each one runs the recipe, which starts a

@@ -169,12 +169,33 @@ fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
     )
 }
 
+/// Whether a killing-test identity was observed or only guessed for scheduling.
+enum KillerAttribution {
+    Observed(Killer),
+    Guessed(Killer),
+}
+
+impl KillerAttribution {
+    const fn observed(&self) -> Option<&Killer> {
+        match self {
+            Self::Observed(killer) => Some(killer),
+            Self::Guessed(_) => None,
+        }
+    }
+
+    fn into_identity(self) -> Killer {
+        match self {
+            Self::Observed(killer) | Self::Guessed(killer) => killer,
+        }
+    }
+}
+
 /// One mutant's completed execution and the scheduling timestamps used for package telemetry.
 struct Completed {
     position: usize,
     outcome: Outcome,
     elapsed_ms: u64,
-    killer: Option<Killer>,
+    killer: Option<KillerAttribution>,
     note: Option<String>,
     first_started_ms: u64,
     settled_ms: u64,
@@ -249,7 +270,7 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
     // consume the complete fallback. Keep these fractions aligned with `generalized_fallback_cost`.
     if let Some(hint) = killers.hint(&mutant.id)
         && let Some(binaries) = reach.reachable(mutant)
-        && let Some(binary) = binaries.iter().find(|b| hint.names(&b.package, &b.target))
+        && let Some(binary) = binaries.iter().find(|binary| binary.matches_killer(hint))
     {
         return binary.baseline / EXACT_PROBE_COST_DIVISOR;
     }
@@ -289,7 +310,7 @@ fn mutant_work_with_hints(
 
     if let Some(hint) = killers.hint(&mutant.id)
         && let Some(binaries) = reach.reachable(mutant)
-        && let Some(binary) = binaries.iter().find(|binary| hint.names(&binary.package, &binary.target))
+        && let Some(binary) = binaries.iter().find(|binary| binary.matches_killer(hint))
     {
         let fallback = binaries
             .iter()
@@ -412,11 +433,7 @@ enum GeneralizedProbe {
 
 fn reached_work_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[Killer]) -> Option<GeneralizedCandidate<'a>> {
     for candidate in candidates {
-        if let Some(binary) = binaries
-            .iter()
-            .copied()
-            .find(|binary| candidate.names(&binary.package, &binary.target))
-        {
+        if let Some(binary) = binaries.iter().copied().find(|binary| binary.matches_killer(candidate)) {
             return Some(GeneralizedCandidate {
                 binary,
                 measured_ms: 0,
@@ -432,11 +449,7 @@ fn reached_work_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[Killer]
 
 fn item_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<Killer>]) -> Option<GeneralizedCandidate<'a>> {
     for candidate in candidates {
-        if let Some(binary) = binaries
-            .iter()
-            .copied()
-            .find(|binary| candidate.candidate.names(&binary.package, &binary.target))
-        {
+        if let Some(binary) = binaries.iter().copied().find(|binary| binary.matches_killer(&candidate.candidate)) {
             return Some(GeneralizedCandidate {
                 binary,
                 measured_ms: candidate.measured_ms,
@@ -455,7 +468,7 @@ fn file_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<Bina
         if let Some(binary) = binaries
             .iter()
             .copied()
-            .find(|binary| candidate.candidate.package == binary.package && candidate.candidate.target == binary.target)
+            .find(|binary| binary.matches_target(&candidate.candidate.package, &candidate.candidate.target))
         {
             return Some(GeneralizedCandidate {
                 binary,
@@ -1358,7 +1371,8 @@ pub(super) fn test_all(
                     let attempts = take_selection_trace();
 
                     let (outcome, killer, note) = match judged {
-                        Judgement::Reached(outcome, killer, note) => (outcome, killer, note),
+                        Judgement::Reached(outcome, killer, note) => (outcome, killer.map(KillerAttribution::Observed), note),
+                        Judgement::Guessed(killer) => (Outcome::Killed, Some(KillerAttribution::Guessed(killer)), None),
                         Judgement::Abandoned(reason) => {
                             let _sent = sender.send(SweepEvent::SelectionAttempts(attempts));
                             let _first = abandoned.set(reason);
@@ -1390,7 +1404,6 @@ pub(super) fn test_all(
         }
 
         // The workers hold the only remaining senders, so the drain ends when the last one finishes.
-        // #[gamma::skip(stmt.delete_call, reason = "the receiver waits for channel closure, so retaining the coordinator sender blocks collection forever")]
         core::mem::drop(sender);
 
         while let Some(event) = receive_sweep_event(&receiver, events, SWEEP_HEARTBEAT_INTERVAL) {
@@ -1500,7 +1513,7 @@ fn scheduled_resources(
             .flat_map(|hint| {
                 reachable
                     .iter()
-                    .filter(|binary| hint.names(&binary.package, &binary.target))
+                    .filter(|binary| binary.matches_killer(hint))
                     .flat_map(|binary| work.required_resources(binary, Only::One(&hint.test)))
             })
             .collect(),
@@ -1557,11 +1570,17 @@ fn publish_completed(plan: &mut Plan, killers: &mut Killers, events: &mut impl E
     };
     mutant.outcome = completed.outcome;
     mutant.elapsed_ms = completed.elapsed_ms;
-    mutant.killed_by = completed.killer.as_ref().map(|killer| killer.test.clone());
+    let observed = completed.killer.as_ref().and_then(KillerAttribution::observed);
+    mutant.killed_by = observed.map(|killer| killer.test.clone());
+    mutant.killer = observed.map(|killer| crate::model::KillerIdentity {
+        package: killer.package.clone(),
+        target: killer.target.clone(),
+        test: killer.test.clone(),
+    });
     mutant.note = completed.note;
 
     match completed.killer {
-        Some(killer) => killers.record(mutant.id.clone(), killer),
+        Some(killer) => killers.record(mutant.id.clone(), killer.into_identity()),
         None => killers.forget(&mutant.id),
     }
 
@@ -1615,6 +1634,9 @@ pub(super) struct Sweep<'run> {
 enum Judgement {
     /// The mutant was judged: an outcome, the test that caught it if one did, and any note.
     Reached(Outcome, Option<Killer>, Option<String>),
+
+    /// A grouped probe killed the mutant without identifying which selected test failed.
+    Guessed(Killer),
 
     /// The run could no longer be metered as asked, and no verdict from here on would mean anything.
     Abandoned(String),
@@ -1834,7 +1856,7 @@ fn probe_reserved(
             kind.hit(tally);
             Some(Killer {
                 package: hint.package.clone(),
-                target: hint.target.clone(),
+                target: binary.killer_target(),
                 test: named.unwrap_or_else(|| hint.test.clone()),
             })
         }
@@ -1875,7 +1897,7 @@ fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u
 
     all.iter()
         .filter(|hint| {
-            let Some(binary) = reachable.iter().copied().find(|binary| hint.names(&binary.package, &binary.target)) else {
+            let Some(binary) = reachable.iter().copied().find(|binary| binary.matches_killer(hint)) else {
                 return false;
             };
             let Some(total) = binary.tests else {
@@ -1888,15 +1910,19 @@ fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u
             if binary.baseline.is_zero() || measured.cmp(&binary.baseline).is_ge() {
                 return false;
             }
-            let selected = all
-                .iter()
-                .filter(|candidate| candidate.names(&binary.package, &binary.target))
-                .count();
+            let selected = all.iter().filter(|candidate| binary.matches_killer(candidate)).count();
 
             selected <= total / 2
         })
         .cloned()
         .collect()
+}
+
+/// A probe's killing-test identity and whether execution observed it fail.
+#[derive(Debug, PartialEq, Eq)]
+struct ProbeKiller {
+    identity: Killer,
+    observed: bool,
 }
 
 /// Tries tests found by an incomplete census without trusting their absence of a failure.
@@ -1911,7 +1937,7 @@ fn probe_cases(
     timeout_multiplier: Option<f64>,
     sweep: Sweep<'_>,
     tally: &Tally,
-) -> (Option<Killer>, Option<bool>, Duration) {
+) -> (Option<ProbeKiller>, Option<bool>, Duration) {
     let attempt = Attempt {
         active: Some(ordinal),
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
@@ -1935,16 +1961,20 @@ fn probe_cases(
     let killer = match verdict {
         Verdict::Failed(name) => {
             ProbeKind::Census.hit(tally);
-            Some(Killer {
-                package: binary.package.clone(),
-                target: binary.target.clone(),
-                test: name.unwrap_or_else(|| {
-                    names
-                        .first()
-                        .copied()
-                        .expect("an incomplete census hint always names at least one test")
-                        .to_owned()
-                }),
+            let observed = name.is_some() || names.len() == 1;
+            Some(ProbeKiller {
+                identity: Killer {
+                    package: binary.package.clone(),
+                    target: binary.killer_target(),
+                    test: name.unwrap_or_else(|| {
+                        names
+                            .first()
+                            .copied()
+                            .expect("an incomplete census hint always names at least one test")
+                            .to_owned()
+                    }),
+                },
+                observed,
             })
         }
         _inconclusive => None,
@@ -2044,7 +2074,7 @@ fn judge_ranked(
 
     if let Some(exact) = hint
         && let Some(binary) = reachable.first().copied()
-        && exact.names(&binary.package, &binary.target)
+        && binary.matches_killer(exact)
         && !census_excludes(sweep.census, binary, active)
         && !negative_excludes(negative, binary, timeout_multiplier, sweep)
     {
@@ -2077,11 +2107,7 @@ fn judge_ranked(
 
             match candidate {
                 Candidate::Exact(candidate_hint) => {
-                    let Some(binary) = reachable
-                        .iter()
-                        .copied()
-                        .find(|binary| candidate_hint.names(&binary.package, &binary.target))
-                    else {
+                    let Some(binary) = reachable.iter().copied().find(|binary| binary.matches_killer(candidate_hint)) else {
                         continue 'candidate;
                     };
 
@@ -2235,7 +2261,7 @@ fn judge_ranked(
             continue 'binary;
         }
 
-        if !exact_attempted && let Some(exact) = hint.filter(|hint| hint.names(&binary.package, &binary.target)) {
+        if !exact_attempted && let Some(exact) = hint.filter(|hint| binary.matches_killer(hint)) {
             let (killer, observation, elapsed) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact);
             trace_selection(
                 active,
@@ -2272,7 +2298,11 @@ fn judge_ranked(
             );
             if let Some(killer) = killer {
                 let _previous = tally.selected_tests.fetch_add(names.len(), Ordering::Relaxed);
-                return killed_by(killer);
+                return if killer.observed {
+                    killed_by(killer.identity)
+                } else {
+                    Judgement::Guessed(killer.identity)
+                };
             }
         }
 
@@ -2416,7 +2446,7 @@ fn terminal_judgement(binary: &TestBinary, verdict: Verdict) -> Option<Judgement
             Outcome::Killed,
             name.map(|test| Killer {
                 package: binary.package.clone(),
-                target: binary.target.clone(),
+                target: binary.killer_target(),
                 test,
             }),
             None,
@@ -2604,7 +2634,7 @@ impl BinaryIdentity {
     fn from_binary(binary: &TestBinary) -> Self {
         Self {
             package: binary.package.clone(),
-            target: binary.target.clone(),
+            target: binary.killer_target(),
         }
     }
 
@@ -2616,7 +2646,7 @@ impl BinaryIdentity {
     }
 
     fn names(&self, binary: &TestBinary) -> bool {
-        self.package == binary.package && self.target == binary.target
+        binary.matches_target(&self.package, &self.target)
     }
 
     fn from_hint(hint: &BinaryHint) -> Self {
@@ -3009,8 +3039,9 @@ impl FileLearning {
     }
 
     fn publish(&self, item_path: &str, judged: &Judgement) {
-        let Judgement::Reached(_outcome, Some(killer), _note) = judged else {
-            return;
+        let killer = match judged {
+            Judgement::Reached(_, Some(killer), _) | Judgement::Guessed(killer) => killer,
+            Judgement::Reached(..) | Judgement::Abandoned(_) => return,
         };
 
         let mut state = self.locked();
@@ -3069,6 +3100,7 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::once;
     #[cfg(unix)]
@@ -3154,7 +3186,8 @@ mod tests {
         );
         let killer = killer.expect("the grouped probe fails");
 
-        assert_eq!(killer.test, "tests::first");
+        assert_eq!(killer.identity.test, "tests::first");
+        assert!(!killer.observed);
         assert_eq!(observation, Some(true));
         assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
         assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
@@ -3235,12 +3268,14 @@ mod tests {
             original: "a > b".to_owned().into(),
             replacement: "a >= b".to_owned().into(),
             shape: Shape::Expr,
+            confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
             outcome: Outcome::Pending,
             suppression: None,
             expectation: None,
             test_timeout_multiplier: None,
             elapsed_ms: 0,
             killed_by: None,
+            killer: None,
             note: None,
         };
 
@@ -4058,6 +4093,7 @@ mod tests {
                     "the refusal has to travel"
                 );
             }
+            Judgement::Guessed(killer) => panic!("an unjudgeable mutant cannot have a guessed killer: {killer:?}"),
             Judgement::Abandoned(reason) => panic!("one refused spawn must not take the run with it: {reason}"),
         }
     }
@@ -4100,7 +4136,9 @@ mod tests {
 
         match judgement {
             Judgement::Abandoned(reason) => assert!(!reason.is_empty(), "a refusal has to say why"),
-            Judgement::Reached(..) => panic!("expected the mutant to be abandoned rather than judged unprotected"),
+            Judgement::Reached(..) | Judgement::Guessed(_) => {
+                panic!("expected the mutant to be abandoned rather than judged unprotected")
+            }
         }
     }
 
@@ -4815,6 +4853,9 @@ mod tests {
                 Judgement::Reached(outcome, killer, note) => {
                     panic!("{described}: expected a kill by `tests::other`, got {outcome:?} / {killer:?} / {note:?}")
                 }
+                Judgement::Guessed(killer) => {
+                    panic!("{described}: expected an observed kill by `tests::other`, got a guess for {killer:?}")
+                }
                 Judgement::Abandoned(reason) => panic!("{described}: the run was abandoned: {reason}"),
             }
         }
@@ -5088,7 +5129,7 @@ mod tests {
                 position: 0,
                 outcome: Outcome::Killed,
                 elapsed_ms: 23,
-                killer: Some(killer.clone()),
+                killer: Some(KillerAttribution::Observed(killer.clone())),
                 note: Some("detail".to_owned()),
                 first_started_ms: 0,
                 settled_ms: 23,
@@ -5098,6 +5139,14 @@ mod tests {
         assert_eq!(plan.mutants[0].outcome, Outcome::Killed);
         assert_eq!(plan.mutants[0].elapsed_ms, 23);
         assert_eq!(plan.mutants[0].killed_by.as_deref(), Some("tests::caught"));
+        assert_eq!(
+            plan.mutants[0].killer,
+            Some(crate::model::KillerIdentity {
+                package: "subject".to_owned(),
+                target: "lib".to_owned(),
+                test: "tests::caught".to_owned(),
+            })
+        );
         assert_eq!(plan.mutants[0].note.as_deref(), Some("detail"));
         assert_eq!(killers.hint(&plan.mutants[0].id), Some(&killer));
         assert_eq!(events.mutants, 1);
@@ -5120,6 +5169,7 @@ mod tests {
         assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
         assert_eq!(plan.mutants[0].elapsed_ms, 29);
         assert_eq!(plan.mutants[0].killed_by, None);
+        assert_eq!(plan.mutants[0].killer, None);
         assert_eq!(plan.mutants[0].note, None);
         assert!(killers.hint(&plan.mutants[0].id).is_none());
         assert_eq!(events.mutants, 2);
@@ -5132,7 +5182,7 @@ mod tests {
                 position: usize::MAX,
                 outcome: Outcome::Killed,
                 elapsed_ms: 0,
-                killer: Some(killer),
+                killer: Some(KillerAttribution::Observed(killer)),
                 note: None,
                 first_started_ms: 0,
                 settled_ms: 0,
@@ -5140,6 +5190,40 @@ mod tests {
             },
         );
         assert_eq!(events.mutants, 2, "an obsolete queue position publishes nothing");
+    }
+
+    #[test]
+    fn an_ambiguous_grouped_probe_persists_only_a_scheduling_hint() {
+        let mut plan = one_mutant_plan(Utf8PathBuf::from("/nowhere"));
+        let killer = Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::first".to_owned(),
+        };
+        let mut killers = Killers::default();
+        let mut events = crate::testing::Recorder::default();
+
+        publish_completed(
+            &mut plan,
+            &mut killers,
+            &mut events,
+            Completed {
+                position: 0,
+                outcome: Outcome::Killed,
+                elapsed_ms: 25,
+                killer: Some(KillerAttribution::Guessed(killer.clone())),
+                note: None,
+                first_started_ms: 0,
+                settled_ms: 25,
+                attempts: Vec::new(),
+            },
+        );
+
+        assert_eq!(plan.mutants[0].outcome, Outcome::Killed);
+        assert_eq!(plan.mutants[0].killed_by, None);
+        assert_eq!(plan.mutants[0].killer, None);
+        assert_eq!(killers.hint(&plan.mutants[0].id), Some(&killer));
+        assert_eq!(events.mutants, 1);
     }
 
     /// A mutant with a known killer hint has a lower estimated cost (one binary baseline).
@@ -5351,6 +5435,46 @@ mod tests {
         };
         advance_order(&mut state);
         assert_eq!(state.next_order, u64::MAX, "learning order saturates instead of wrapping");
+    }
+
+    #[test]
+    fn kind_qualified_binary_learning_matches_current_and_legacy_hints() {
+        let binary = TestBinary {
+            package: "subject".to_owned(),
+            target: "subject".to_owned(),
+            target_kind: "lib".to_owned(),
+            ..crate::testing::test_binary("unused")
+        };
+        let killer = Killer {
+            package: binary.package.clone(),
+            target: binary.killer_target(),
+            test: "tests::caught".to_owned(),
+        };
+        let current = BinaryIdentity::from_binary(&binary);
+        let published = BinaryIdentity::from_killer(&killer);
+
+        assert_eq!(current, published);
+        assert!(binary.matches_killer(&killer));
+        assert!(binary.matches_killer(&Killer {
+            package: binary.package.clone(),
+            target: binary.target.clone(),
+            test: killer.test.clone(),
+        }));
+        assert!(BinaryIdentity::from_hint(&published.hint()).names(&binary));
+        assert!(
+            BinaryIdentity::from_hint(&BinaryHint {
+                package: binary.package.clone(),
+                target: binary.target.clone(),
+            })
+            .names(&binary)
+        );
+
+        let other_kind = TestBinary {
+            target_kind: "bin".to_owned(),
+            ..binary
+        };
+        assert!(!other_kind.matches_killer(&killer));
+        assert!(!published.names(&other_kind));
     }
 
     #[test]

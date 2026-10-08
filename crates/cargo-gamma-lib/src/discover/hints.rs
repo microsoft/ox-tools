@@ -48,7 +48,7 @@ use crate::{HashMap, HashSet, Result};
 const FILE: &str = "gamma-hints.yaml";
 
 /// What the artifact format is; a file written by any other version is ignored rather than read.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// Producer prefix written into artifacts whose schema cargo-gamma owns.
 const TOOL_PREFIX: &str = "cargo-gamma ";
@@ -129,7 +129,7 @@ pub struct Hints {
 
     /// One entry per mutant with something to say about it, ordered by file and then by id.
     ///
-    /// This is the semantic form used in memory. The version-3 wire form groups these entries by
+    /// This is the semantic form used in memory. The version-4 wire form groups these entries by
     /// file and interns killers within each group.
     mutants: Vec<Hint>,
 
@@ -1240,6 +1240,7 @@ const fn tier_of(outcome: Outcome) -> Option<Tier> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::record;
     use super::*;
@@ -1351,7 +1352,7 @@ mod tests {
     #[test]
     fn an_alias_bearing_artifact_is_ignored_before_deserialization() {
         let (_dir, root) = workspace("hints-alias-");
-        let text = "version: 3\n\
+        let text = "version: 4\n\
                     tool: cargo-gamma test\n\
                     context: &context\n\
                       repo_sha: 0123456789abcdef0123456789abcdef01234567\n\
@@ -1816,7 +1817,7 @@ mod tests {
     fn unsupported_older_and_newer_versions_are_ignored() {
         let (_dir, root) = workspace("hints-unsupported-version-");
 
-        for version in [0, VERSION + 1] {
+        for version in [VERSION - 1, VERSION + 1] {
             fs::write(
                 path(&root),
                 serde_json::to_vec(&serde_json::json!({

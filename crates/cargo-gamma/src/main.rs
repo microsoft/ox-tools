@@ -110,7 +110,7 @@
 //!   days for large workspaces. `cargo-gamma` compiles every mutant into a single instrumented test binary and activates them
 //!   individually at runtime, turning multi-minute rebuilds into fast process launches. Finally, it remembers
 //!   what it learned while running to accelerate subsequent runs and CI workflows with check-in-ready hints.
-//! * **Thoroughness.** `cargo-gamma` tests over 100 mutator transforms across 23 families. It catches off-by-one
+//! * **Thoroughness.** `cargo-gamma` tests 144 mutator transforms across 31 families. It catches off-by-one
 //!   errors (`<` vs `<=`), inverted conditions, arithmetic typos (`+` vs `-`), dropped statements, match
 //!   guard errors, and literal tweaks.
 //! * **Seamless workflow.** Works with your standard `cargo test` suite or `cargo-nextest`, provides built-in
@@ -182,7 +182,9 @@
 //! is literal replacement and expression perturbation.
 //!
 //! The `@default` mutator selection enables the main catalog; additional low-yield mutators live in `@pedantic` and are
-//! not enabled by default.
+//! not enabled by default. Ordinary runs also skip a few forms that frequently fail to compile when the
+//! source does not reveal enough type information. A non-default selector that includes the mutator —
+//! its name, family, another preset, or `all` — includes those forms.
 //!
 //! ```bash
 //! cargo gamma run --mutators @control --file src/dispatch.rs
@@ -1316,7 +1318,7 @@
 //!   hiding it. A hint that is wrong produces a mutant that compiles, stays live, and is judged exactly
 //!   as if it had never been named.
 //!
-//! The version-3 YAML layout groups mutants by workspace-relative source file. Within each file,
+//! The version-4 YAML layout groups mutants by workspace-relative source file. Within each file,
 //! repeated killer identities are stored once in a table and mutants refer to them by index, so a
 //! large run does not repeat the same path, package, target, and test for every adjacent mutant.
 //! Groups and tables are sorted deterministically for stable reviewable diffs. Ordinary promotion

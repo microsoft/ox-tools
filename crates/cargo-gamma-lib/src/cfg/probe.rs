@@ -47,6 +47,7 @@ fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::RefCell;
 

@@ -689,6 +689,7 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
     })
 }
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::elements::{Location, Position};

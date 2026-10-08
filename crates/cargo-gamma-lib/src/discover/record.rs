@@ -18,7 +18,7 @@ use super::killers::Killers;
 use super::workspace_snapshot::WorkspaceSnapshot;
 use super::{Plan, input};
 use crate::cfg::Build;
-use crate::model::{Mutant, MutantId, Outcome, normalize_site_text};
+use crate::model::{MUTANT_ID_VERSION, Mutant, MutantId, Outcome, normalize_site_text};
 use crate::{HashMap, HashSet};
 
 /// What the cache format is; a file written by any other version is discarded rather than read.
@@ -35,7 +35,7 @@ use crate::{HashMap, HashSet};
 /// nothing. Discarding it instead would throw away the probes and the build order to defend a
 /// question they do not depend on. What moves this number is a change of *meaning* in what is
 /// already there, which no reader could detect for itself.
-const VERSION: u32 = 10;
+const VERSION: u32 = 12;
 
 /// The file name under the gamma scratch base.
 const FILE: &str = "last-gamma-run.json";
@@ -66,6 +66,8 @@ pub enum Trust {
 pub(crate) struct Settled {
     pub(crate) outcome: Outcome,
     pub(crate) compiler_reason: Option<String>,
+    pub(crate) killed_by: Option<String>,
+    pub(crate) killer: Option<Killer>,
 }
 
 /// One term of the build context, digested on its own so that a tier can name what it depends on.
@@ -439,9 +441,9 @@ pub struct RunRecord {
 
 /// The test that caught a mutant, and the binary it lives in.
 ///
-/// The binary is named by package and target rather than by path because a path is not stable
-/// across runs: the binaries a run judges live in a scratch tree that is rebuilt each time, so a
-/// recorded path would miss every time and the map would be permanently cold.
+/// The binary is named by package and a stable kind-qualified target rather than by path because a
+/// path is not stable across runs: the binaries a run judges live in a scratch tree that is rebuilt
+/// each time, so a recorded path would miss every time and the map would be permanently cold.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Killer {
@@ -459,12 +461,13 @@ impl Killer {
     /// Whether this names the given binary.
     #[must_use]
     pub fn names(&self, package: &str, target: &str) -> bool {
-        self.package == package && self.target == target
+        self.package == package
+            && (self.target == target || target.rsplit_once(':').is_some_and(|(_, target_name)| self.target == target_name))
     }
 }
 
 /// Schema version for generalized, score-neutral hint tiers.
-pub const GENERALIZED_HINTS_VERSION: u32 = 2;
+pub const GENERALIZED_HINTS_VERSION: u32 = 3;
 
 /// Durable generalized knowledge that can only affect execution order.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -706,15 +709,17 @@ impl GeneralizedHints {
             candidate.samples = 0;
         }
 
-        if self.version != 1 {
-            return self;
-        }
-
-        for candidate in self.items.iter_mut().flat_map(|item| &mut item.candidates) {
-            reset(candidate);
-        }
-        for candidate in self.binaries.iter_mut().flat_map(|file| &mut file.candidates) {
-            reset(candidate);
+        match self.version {
+            1 => {
+                for candidate in self.items.iter_mut().flat_map(|item| &mut item.candidates) {
+                    reset(candidate);
+                }
+                for candidate in self.binaries.iter_mut().flat_map(|file| &mut file.candidates) {
+                    reset(candidate);
+                }
+            }
+            2 => {}
+            _ => return self,
         }
         self.version = GENERALIZED_HINTS_VERSION;
         self
@@ -969,6 +974,10 @@ struct Entry {
     /// guess about where to look first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     killed_by: Option<String>,
+
+    /// Full identity of the test that did the killing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    killer: Option<Killer>,
 
     /// The workspace-relative file that declared `killed_by` before execution.
     ///
@@ -1261,7 +1270,6 @@ impl RunRecord {
     pub fn iter(&self) -> Entries<'_> {
         Entries {
             files: self.files.iter(),
-            // #[gamma::skip(option.none_to_some, reason = "slice::Iter::default() is an empty iterator, so both states make the first next() advance to the first file")]
             mutants: None,
         }
     }
@@ -1533,6 +1541,8 @@ impl RunRecord {
                     Settled {
                         outcome: entry.outcome,
                         compiler_reason: entry.compiler_reason.clone(),
+                        killed_by: entry.killed_by.clone(),
+                        killer: entry.killer.clone(),
                     },
                 );
             }
@@ -1580,7 +1590,6 @@ impl RunRecord {
 
     #[must_use]
     #[cfg(test)]
-    // #[gamma::skip(all, reason = "snapshot construction, Rust-file filtering, normalization, and deduplication are asserted by deterministic record round trips")]
     pub(crate) fn from_plan_snapshot(plan: &Plan, context: &ContextDigest, inputs: WorkspaceSnapshot, killers: &Killers) -> Option<Self> {
         Self::from_plan_snapshot_checked(plan, context, inputs, killers, true)
     }
@@ -1691,6 +1700,11 @@ impl RunRecord {
                 compiler_reason: (mutant.outcome == Outcome::CompileError).then(|| mutant.note.clone()).flatten(),
                 reusable: settled_verdict(mutant.outcome),
                 killed_by: mutant.killed_by.clone(),
+                killer: mutant.killer.as_ref().map(|killer| Killer {
+                    package: killer.package.clone(),
+                    target: killer.target.clone(),
+                    test: killer.test.clone(),
+                }),
                 killer_file,
                 elapsed_ms: mutant.elapsed_ms,
                 suppression: mutant.suppression.clone(),
@@ -2310,6 +2324,8 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         environment_parts.push(value.as_slice());
     }
 
+    let identity_version = MUTANT_ID_VERSION.to_le_bytes();
+
     Some(ContextDigest {
         features: term(Term::Features, &features),
         profile: term(Term::Profile, &[of.profile.unwrap_or_default().as_bytes()]),
@@ -2318,7 +2334,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         config: None,
         extra: term(Term::Extra, &of.extra.iter().map(String::as_bytes).collect::<Vec<&[u8]>>()),
         toolchain: term(Term::Toolchain, &[toolchain.as_bytes()]),
-        tool: term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes()]),
+        tool: term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version]),
         tests: term(Term::Tests, &test_parts),
         policy: term(Term::Policy, &policy_parts),
         environment: Some(term(Term::Environment, &environment_parts)),
@@ -2393,6 +2409,7 @@ fn term(name: Term, parts: &[&[u8]]) -> String {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -2408,6 +2425,7 @@ mod tests {
             compiler_reason: None,
             reusable: true,
             killed_by: None,
+            killer: None,
             killer_file: None,
             elapsed_ms: 0,
             suppression: None,
@@ -2443,6 +2461,47 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn killer_identity_round_trips_and_legacy_entries_remain_readable() {
+        let entry = Entry {
+            id: "a".to_owned().into(),
+            outcome: Outcome::Killed,
+            compiler_reason: None,
+            reusable: true,
+            killed_by: Some("tests::caught".to_owned()),
+            killer: Some(Killer {
+                package: "subject".to_owned(),
+                target: "test:shared".to_owned(),
+                test: "tests::caught".to_owned(),
+            }),
+            killer_file: None,
+            elapsed_ms: 7,
+            suppression: None,
+            site: None,
+        };
+        let mut value = serde_json::to_value(&entry).expect("record entry");
+        let round_trip: Entry = serde_json::from_value(value.clone()).expect("current record entry");
+
+        assert_eq!(round_trip.killer, entry.killer);
+        let killer = round_trip.killer.as_ref().expect("round-tripped killer");
+        assert!(killer.names("subject", "test:shared"));
+        assert!(!killer.names("subject", "lib:shared"));
+
+        let _killer = value.as_object_mut().expect("entry is an object").remove("killer");
+        let legacy: Entry = serde_json::from_value(value).expect("legacy record entry");
+
+        assert_eq!(legacy.killed_by.as_deref(), Some("tests::caught"));
+        assert_eq!(legacy.killer, None);
+
+        let legacy_killer = Killer {
+            package: "subject".to_owned(),
+            target: "shared".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        assert!(legacy_killer.names("subject", "test:shared"));
+    }
+
     use crate::testing::workdir;
 
     fn mutant(id: &str, file: &str, outcome: Outcome) -> Mutant {
@@ -2580,7 +2639,7 @@ mod tests {
     }
 
     #[test]
-    fn version_ten_records_accept_and_migrate_legacy_generalized_hints() {
+    fn current_records_accept_and_migrate_version_one_generalized_hints() {
         let (_dir, root) = workspace("record-legacy-generalized-", "");
         let mut stored = serde_json::to_value(RunRecord::default()).expect("record JSON");
         stored["version"] = VERSION.into();
@@ -2610,7 +2669,7 @@ mod tests {
         fs::write(root.join(FILE), serde_json::to_vec(&stored).expect("record JSON")).expect("legacy record");
 
         let loaded = RunRecord::load_for_update(&root, FILE)
-            .expect("legacy version-ten state remains readable")
+            .expect("current state remains readable")
             .expect("legacy state exists");
         let candidate = &loaded.generalized.items[0].candidates[0];
 
@@ -2620,6 +2679,63 @@ mod tests {
         assert_eq!(
             (candidate.hits, candidate.misses, candidate.measured_ms, candidate.samples),
             (0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn version_eleven_records_are_ignored_after_killer_provenance_changed() {
+        let dir = workdir("record-legacy-target-identity-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
+        let mut stored = serde_json::to_value(RunRecord::default()).expect("record JSON");
+        stored["version"] = (VERSION - 1).into();
+        fs::write(root.join(FILE), serde_json::to_vec(&stored).expect("record JSON")).expect("legacy record");
+
+        assert!(RunRecord::load_raw(&root).is_none());
+        assert!(matches!(
+            RunRecord::load_for_update(&root, FILE),
+            Err(UpdateLoadError::UnsupportedVersion { version: 11, .. })
+        ));
+    }
+
+    #[test]
+    fn version_two_generalized_hints_migrate_without_losing_observations() {
+        let hints: GeneralizedHints = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "items": [{
+                "file": "src/lib.rs",
+                "item": "subject::add",
+                "candidates": [{
+                    "candidate": {
+                        "package": "subject",
+                        "target": "lib",
+                        "test": "tests::legacy"
+                    },
+                    "seeds": 2,
+                    "hits": 4,
+                    "misses": 3,
+                    "measuredMs": 120,
+                    "samples": 7,
+                    "order": 2
+                }]
+            }],
+            "binaries": [],
+            "testSets": [],
+            "reach": []
+        }))
+        .expect("version two generalized hints");
+        let candidate = &hints.items[0].candidates[0];
+
+        assert_eq!(hints.version, GENERALIZED_HINTS_VERSION);
+        assert_eq!(candidate.candidate.target, "lib");
+        assert_eq!(
+            (
+                candidate.seeds,
+                candidate.hits,
+                candidate.misses,
+                candidate.measured_ms,
+                candidate.samples
+            ),
+            (2, 4, 3, 120, 7)
         );
     }
 
@@ -3865,14 +3981,20 @@ mod tests {
     #[test]
     fn the_tool_version_is_a_term_of_the_digest_rather_than_loose_bytes() {
         let spelled = [env!("CARGO_PKG_VERSION").to_owned()];
+        let current = context(&plain()).unwrap();
+        let identity_version = MUTANT_ID_VERSION.to_le_bytes();
 
         assert_ne!(
-            context(&plain()).unwrap(),
+            current,
             context(&Context {
                 extra: &spelled,
                 ..plain()
             })
             .unwrap()
+        );
+        assert_eq!(
+            current.term(Term::Tool),
+            term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version])
         );
     }
 

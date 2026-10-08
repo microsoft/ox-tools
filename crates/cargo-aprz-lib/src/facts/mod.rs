@@ -46,6 +46,7 @@ mod request_tracker;
 pub(crate) mod resilient_http;
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) mod test_logging;
 pub(crate) mod throttler;
 

@@ -16,9 +16,6 @@ use crate::parse::SourceFile;
 /// Turns candidates into source-level mutant definitions, assigning stable ids.
 #[must_use]
 pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<MutantDefinition> {
-    let mut occurrences: HashMap<u128, u32> = HashMap::default();
-    let mut site_occurrences: HashMap<(u128, core::ops::Range<usize>), u32> = HashMap::default();
-
     // One copy of the path for the whole file, rather than one per mutation.
     let path: Arc<Utf8Path> = Arc::from(Utf8Path::new(file.path.as_str()));
 
@@ -32,11 +29,8 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
     // offered at a site re-derives the same identity component from the same bytes otherwise, and a
     // site with several replacements pays for the normalization as many times as it has mutants.
     let mut sites: HashMap<core::ops::Range<usize>, (Arc<MutationSite>, CompactString)> = HashMap::default();
-
-    let mut definitions = Vec::with_capacity(candidates.len());
-
-    for candidate in candidates {
-        let (site, normalized) = sites.entry(candidate.span.clone()).or_insert_with(|| {
+    for candidate in &candidates {
+        let _site = sites.entry(candidate.span.clone()).or_insert_with(|| {
             let original = CompactString::new(file.slice(&candidate.span));
             let (line, column) = file.location(candidate.span.start);
             let end_line = file.location(candidate.span.end).0;
@@ -52,11 +46,39 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
                 normalized,
             )
         });
+    }
+
+    let mut occurrences: HashMap<u128, u32> = HashMap::default();
+    let mut site_occurrences: HashMap<(u128, core::ops::Range<usize>), u32> = HashMap::default();
+    for candidate in &candidates {
+        let Some(index) = candidate.identity_occurrence else {
+            continue;
+        };
+        let (_, normalized) = sites
+            .get(&candidate.span)
+            .expect("every candidate span was inserted into the site table above");
+        let key = site_key(&candidate.item_path, candidate.mutator, normalized);
+        let next = index.saturating_add(1);
+        occurrences
+            .entry(key)
+            .and_modify(|occurrence| *occurrence = (*occurrence).max(next))
+            .or_insert(next);
+        let _existing = site_occurrences.entry((key, candidate.span.clone())).or_insert(index);
+    }
+
+    let mut definitions = Vec::with_capacity(candidates.len());
+
+    for candidate in candidates {
+        let (site, normalized) = sites
+            .get(&candidate.span)
+            .expect("every candidate span was inserted into the site table above");
         let site = Arc::clone(site);
 
         let key = site_key(&candidate.item_path, candidate.mutator, normalized);
         let site_key = (key, candidate.span.clone());
-        let index = if let Some(index) = site_occurrences.get(&site_key) {
+        let index = if let Some(index) = candidate.identity_occurrence {
+            index
+        } else if let Some(index) = site_occurrences.get(&site_key) {
             *index
         } else {
             let occurrence = occurrences.entry(key).or_insert(0);
@@ -84,6 +106,7 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
             replacement_index: candidate.replacement_index,
             replacement: candidate.replacement,
             shape: candidate.shape,
+            confidence: candidate.confidence,
         });
     }
 

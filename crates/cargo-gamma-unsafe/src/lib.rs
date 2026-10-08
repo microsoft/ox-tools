@@ -36,6 +36,7 @@ pub mod interrupt;
 pub mod job;
 
 #[cfg(all(windows, test))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod native_faults;
 mod platform_error;
 mod situation;

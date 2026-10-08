@@ -46,6 +46,7 @@ pub use reportable_crate::ReportableCrate;
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod snapshot_tests {
     use std::io::Cursor;
     use std::sync::Arc;

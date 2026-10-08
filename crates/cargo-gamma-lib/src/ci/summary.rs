@@ -213,6 +213,7 @@ fn under_tested(mutants: &[Mutant], root: &Utf8Path) -> Vec<(String, usize)> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
     use std::process::Command;

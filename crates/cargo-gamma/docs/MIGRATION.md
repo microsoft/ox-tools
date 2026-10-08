@@ -22,6 +22,19 @@ Each subcommand now accepts only its relevant options. In particular,
 population and file selection options belong to `mutants` or `files`, while
 registry selection options belong to `mutators` or `presets`.
 
+## Default mutator selection
+
+Ordinary runs now skip uncertain zero decrements, uncertain expression
+increments or decrements, and filter removals whose receiver is not known to be
+an iterator. Mutations in clear signed, numeric, or iterator contexts remain
+enabled, and `literal.int_increment` still changes `0` to `1`.
+
+A non-default selector that includes `literal.int_decrement`,
+`expr.increment`, `expr.decrement`, or `iter.remove_filter` also includes the uncertain locations.
+This may be the mutator name, its family, another preset containing it, or
+`all`. Scripts that require the broadest possible candidate population should
+name the relevant selector instead of relying on the default population.
+
 ## Survivor selection
 
 `--only-survivors` is now a flag that reads the current artifact directory. Scripts that supplied

@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::config::Config;
 use super::memory::MemoryPolicy;
 use super::rustc_wrapper::RustcInvocation;
-use crate::discover::{Glob, Plan};
+use crate::discover::{Glob, Killer, Plan};
 use crate::model::{Mutant, Outcome};
 
 /// A test executable and the package that produced it.
@@ -32,6 +32,9 @@ pub struct TestBinary {
     /// `tests/` becomes a target of its own, so this is the finest granularity cargo offers for
     /// naming part of a suite — and the granularity `package` is too coarse for.
     pub target: String,
+
+    /// Cargo's target kind, used to distinguish same-named test harnesses.
+    pub(crate) target_kind: String,
 
     /// The directory holding the package's `Cargo.toml`, which is where cargo would run it.
     ///
@@ -93,6 +96,39 @@ pub struct TestBinary {
 }
 
 impl TestBinary {
+    /// Returns the stable, kind-qualified target identity used in killer records.
+    #[must_use]
+    pub fn killer_target(&self) -> String {
+        if self.target_kind.is_empty() {
+            self.target.clone()
+        } else {
+            format!("{}:{}", self.target_kind, self.target)
+        }
+    }
+
+    /// Returns whether a persisted killer identifies this binary.
+    pub(crate) fn matches_killer(&self, killer: &Killer) -> bool {
+        self.matches_target(&killer.package, &killer.target)
+    }
+
+    /// Returns whether package and stable target identity identify this binary.
+    pub(crate) fn matches_target(&self, package: &str, target: &str) -> bool {
+        if self.package != package {
+            return false;
+        }
+        if self.target == target {
+            return true;
+        }
+        if self.target_kind.is_empty() {
+            return false;
+        }
+
+        target
+            .strip_prefix(&self.target_kind)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .is_some_and(|name| name == self.target)
+    }
+
     /// Computes the timeout budget for this binary given an optional per-mutant multiplier override and a floor.
     ///
     /// An override rescales a calibrated budget; it cannot manufacture one, because on a run with
@@ -220,6 +256,14 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let target_kind = message
+                .get("target")
+                .and_then(|target| target.get("kind"))
+                .and_then(Value::as_array)
+                .and_then(|kinds| kinds.first())
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
             let target_source = message
                 .get("target")
                 .and_then(|target| target.get("src_path"))
@@ -238,6 +282,7 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                 package,
                 package_id,
                 target,
+                target_kind,
                 manifest_dir,
                 linked_sources: captures
                     .as_ref()
@@ -1042,6 +1087,7 @@ fn is_version(fragment: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1809,7 +1855,7 @@ mod tests {
     #[test]
     fn the_target_name_is_kept_from_cargo_json() {
         let stdout = concat!(
-            r#"{"reason":"compiler-artifact","profile":{"test":true},"target":{"name":"conformance_xsd"},"executable":"/tmp/c"}"#,
+            r#"{"reason":"compiler-artifact","profile":{"test":true},"target":{"name":"conformance_xsd","kind":["test"]},"executable":"/tmp/c"}"#,
             "\n"
         );
 
@@ -1817,6 +1863,8 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].target, "conformance_xsd");
+        assert_eq!(found[0].target_kind, "test");
+        assert_eq!(found[0].killer_target(), "test:conformance_xsd");
     }
 
     /// Cargo has always reported this, but an older or stubbed stream must not lose the binary.
@@ -1938,12 +1986,14 @@ mod tests {
                 original: "a + b".to_owned().into(),
                 replacement: "a - b".to_owned().into(),
                 shape: crate::ops::collect::Shape::Expr,
+                confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
                 outcome: Outcome::Pending,
                 suppression: None,
                 expectation: None,
                 test_timeout_multiplier: None,
                 elapsed_ms: 0,
                 killed_by: None,
+                killer: None,
                 note: None,
             })
             .collect();

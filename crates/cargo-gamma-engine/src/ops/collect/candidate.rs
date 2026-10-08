@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use compact_str::CompactString;
 
-use super::Shape;
+use super::{Confidence, Shape};
 
 /// One mutation opportunity, before it is given a run-wide ordinal.
 #[derive(Debug, Clone)]
@@ -27,6 +27,13 @@ pub struct Candidate {
     /// Index among the replacements this mutator offers at this site.
     pub replacement_index: u32,
 
+    /// Occurrence reserved for identity before confidence-based selection filters this site.
+    ///
+    /// `None` is accepted for callers that construct candidates manually; identity conversion then
+    /// derives the occurrence from the supplied candidate sequence.
+    #[doc(hidden)]
+    pub identity_occurrence: Option<u32>,
+
     /// Path of the enclosing item.
     ///
     /// Shared rather than owned: a file opens a few hundred scopes and emits tens of thousands of
@@ -41,4 +48,7 @@ pub struct Candidate {
 
     /// How the site must be guarded.
     pub shape: Shape,
+
+    /// How strongly source-visible evidence supports this replacement.
+    pub confidence: Confidence,
 }

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! One test per bug that has already been fixed once.
@@ -121,12 +123,14 @@ fn survivor(file: &str, line: usize) -> Mutant {
         original: "a > b".to_owned().into(),
         replacement: "a >= b".to_owned().into(),
         shape: Shape::Expr,
+        confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
         outcome: Outcome::Survived,
         suppression: None,
         expectation: None,
         test_timeout_multiplier: None,
         elapsed_ms: 0,
         killed_by: None,
+        killer: None,
         note: None,
     }
 }

@@ -1080,6 +1080,7 @@ fn validate_file_result(file: &FileResult, path: &str) -> SchemaResult<()> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::ops::Range;
     use std::borrow::Cow;

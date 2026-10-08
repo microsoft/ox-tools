@@ -319,7 +319,6 @@ pub fn suppress_error_dialogs() {
 pub fn start_suspended(command: &mut Command) {
     use std::os::windows::process::CommandExt as _;
 
-    // #[gamma::skip(all, reason = "changing the suspension flag can create a running or invalid child, after which assignment failure leaves no safe process handle to resume and the owner waits indefinitely")]
     let _ = command.creation_flags(CREATE_SUSPENDED);
 }
 

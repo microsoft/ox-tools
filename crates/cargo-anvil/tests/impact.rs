@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))] // miri can't sandbox the git/cargo/just subprocesses these tests drive.
 #![expect(clippy::unwrap_used, reason = "integration tests favor concise assertions over Result plumbing")]
 

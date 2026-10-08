@@ -402,6 +402,7 @@ fn reported_name(message: &serde_json::Value) -> Option<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};

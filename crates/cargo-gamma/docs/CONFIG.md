@@ -51,18 +51,18 @@ Knowledge outside a package, file, diff, feature, or mutator selection is preser
 `--replace` only to rebuild the artifact from the selected population intentionally.
 
 Candidate tests are executed again rather than trusted as verdicts, so a fresh checkout starts warm
-without carrying a score forward. Format version 3 groups mutants by workspace-relative source
+without carrying a score forward. Format version 4 groups mutants by workspace-relative source
 file and stores each repeated killer identity once in that file's killer table; mutant entries
 refer to the table by index. Its `context` contains only the full `repo_sha` at generation time and
 the UTC `generated_on` date. These fields describe artifact provenance and do not gate hints or
 claim that retained entries originated at that revision. No-op promotion preserves the date and
 bytes.
 
-The independently versioned generalized section is schema version 2. It separates seed
-observations from transfer hits and misses and interns repeated test and binary identities.
-Version 1 is migrated on read: seed counts are retained with a minimum of one,
-while hit, miss, measured-time, and sample counters are reset. Other generalized
-schema versions are unsupported.
+The independently versioned generalized section is schema version 3. It separates seed
+observations from transfer hits and misses, interns repeated test and binary identities, and
+stores kind-qualified target identities. Versions 1 and 2 are migrated on read. Version 1 seed
+counts are retained with a minimum of one while hit, miss, measured-time, and sample counters are
+reset; version 2 observations are preserved. Other generalized schema versions are unsupported.
 
 Runs read the artifact automatically and it needs no setting here. Malformed artifacts, unsupported
 versions, and artifacts whose producer is not cargo-gamma are ignored safely. An unsupported
@@ -142,6 +142,14 @@ recording about a mutator you have switched off. See [MUTATORS.md](MUTATORS.md) 
 `@pedantic` contains valid but commonly low-yield mutations that are not enabled by default. Select
 it alone for a focused run, or add it to the normal selection with
 `mutators = ["@default", "@pedantic"]`.
+
+A non-default selector can also include source locations that an ordinary run skips because their
+types are unclear and the generated mutation often does not compile. This currently applies to
+uncertain `literal.int_decrement`, `expr.increment`, and `expr.decrement` locations. Naming the
+mutator, its family, another preset that contains it, or `all` includes those locations. The same
+rule applies to `iter.remove_filter` when the source does not establish that the receiver is an
+iterator. See
+[MUTATORS.md](MUTATORS.md#choosing-what-to-run) for the exact behavior.
 
 Each `exclude-trait-impls` entry is an unqualified Rust identifier compared with the final written
 segment of an implementation's trait path.

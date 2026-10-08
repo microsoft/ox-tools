@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-gamma-process.svg)](https://crates.io/crates/cargo-gamma-process)
 [![docs.rs](https://docs.rs/cargo-gamma-process/badge.svg)](https://docs.rs/cargo-gamma-process)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-gamma-process)](https://crates.io/crates/cargo-gamma-process)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml/badge.svg?event=pull_request)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -81,19 +81,19 @@ installs explicit interruption handling through `cargo-gamma-unsafe`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-process">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbzJIscAd99o8bNjOMWNtQqzob7B-tkBhXsbcbeRzSwG3PJgJhZIGDc2NhcmdvLWdhbW1hLXByb2Nlc3NlMC4yLjBzY2FyZ29fZ2FtbWFfcHJvY2Vzcw
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbzJIscAd99o8bNjOMWNtQqzob7B-tkBhXsbcbeRzSwG3PJgJhZIGDc2NhcmdvLWdhbW1hLXByb2Nlc3NlMC4yLjFzY2FyZ29fZ2FtbWFfcHJvY2Vzcw
  [__link0]: https://crates.io/crates/cargo-gamma
- [__link1]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=MemoryRequest
- [__link10]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=SpawnFailure
- [__link11]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=PreparedCommand::backoff
- [__link12]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=ProcessTree::adopt
- [__link13]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=output
+ [__link1]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=MemoryRequest
+ [__link10]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=SpawnFailure
+ [__link11]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=PreparedCommand::backoff
+ [__link12]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=ProcessTree::adopt
+ [__link13]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=output
  [__link14]: https://doc.rust-lang.org/stable/std/?search=process::Command::output
- [__link2]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=prepare
- [__link3]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=ProcessTree::usage
- [__link4]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=containment
- [__link5]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=ProcessTree::sealed
+ [__link2]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=prepare
+ [__link3]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=ProcessTree::usage
+ [__link4]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=containment
+ [__link5]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=ProcessTree::sealed
  [__link6]: https://doc.rust-lang.org/stable/std/?search=process::Command
- [__link7]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=prepare
- [__link8]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=PreparedCommand
- [__link9]: https://docs.rs/cargo-gamma-process/0.2.0/cargo_gamma_process/?search=SpawnedCommand
+ [__link7]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=prepare
+ [__link8]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=PreparedCommand
+ [__link9]: https://docs.rs/cargo-gamma-process/0.2.1/cargo_gamma_process/?search=SpawnedCommand

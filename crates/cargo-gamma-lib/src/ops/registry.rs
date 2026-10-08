@@ -8,4 +8,6 @@
 //! is a decision taken in the wrong crate: adding a helper for the engine's own use would silently
 //! publish it here.
 
-pub use cargo_gamma_engine::ops::registry::{Mutator, PRESETS, Preset, REGISTRY, Selection, families, find, find_preset, resolve};
+pub use cargo_gamma_engine::ops::registry::{
+    Mutator, PRESETS, Preset, REGISTRY, Selection, families, find, find_preset, optimistic_requires_explicit, resolve,
+};

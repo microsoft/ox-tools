@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Integration tests for the hosting provider against a `wiremock` server.
 //!
 //! The provider normally talks to the GitHub and Codeberg REST APIs. Every test here

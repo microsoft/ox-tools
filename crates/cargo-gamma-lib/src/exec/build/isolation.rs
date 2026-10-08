@@ -28,21 +28,26 @@ pub(super) const MAX_ISOLATION_CANDIDATES: usize = 4_096;
 /// interaction fixture; elapsed-time measurements alone are too host-dependent.
 pub(super) const MAX_ISOLATION_PROOFS: usize = 32;
 
-/// A campaign may investigate at most this many independent Cargo failure contexts.
+/// One Cargo invocation may investigate at most this many independent failure contexts.
 ///
 /// Sixty-four admits a broad multi-crate failure wave while preventing contributor-controlled
 /// target multiplication from making proof work unbounded.
 pub(super) const MAX_ISOLATION_CONTEXTS: usize = 64;
 
-/// A campaign may launch at most this many isolation proof builds across all contexts.
+/// One Cargo invocation may launch at most this many isolation proof builds across all contexts.
 ///
-/// Two hundred fifty-six permits eight contexts to consume the full local budget, or many small
-/// contexts, while imposing a strict process-launch ceiling. Revise it only from deterministic
-/// campaign invocation counts, not a wall-clock sample.
-pub(super) const MAX_CAMPAIGN_ISOLATION_PROOFS: usize = 256;
+/// This is derived from the two local bounds rather than chosen independently: every admitted
+/// context can spend its complete local allowance, so one context can never starve another. The
+/// context and local limits still impose a strict derived launch ceiling on pathological input.
+pub(super) const MAX_INVOCATION_ISOLATION_PROOFS: usize = MAX_ISOLATION_CONTEXTS * MAX_ISOLATION_PROOFS;
 
 const fn candidate_tier_admitted(candidates: usize) -> bool {
     candidates <= MAX_ISOLATION_CANDIDATES
+}
+
+fn without_withdrawn(mut candidates: HashSet<u32>, withdrawn: &HashSet<u32>) -> HashSet<u32> {
+    candidates.retain(|ordinal| !withdrawn.contains(ordinal));
+    candidates
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,15 +74,11 @@ fn targeted_verb(kind: &str, target: &str) -> Vec<String> {
     let mut verb = vec!["check".to_owned(), "--keep-going".to_owned()];
     match kind {
         "lib" | "proc-macro" => verb.push("--lib".to_owned()),
-        "test" => {
-            verb.push("--test".to_owned());
+        "bin" | "test" | "example" | "bench" => {
+            verb.push(format!("--{kind}"));
             verb.push(target.to_owned());
         }
-        "bin" => {
-            verb.push("--bin".to_owned());
-            verb.push(target.to_owned());
-        }
-        _ => verb.push("--tests".to_owned()),
+        _ => {}
     }
     verb
 }
@@ -97,8 +98,8 @@ impl IsolationBudget {
         true
     }
 
-    fn proof(&mut self, local: usize) -> bool {
-        if local >= MAX_ISOLATION_PROOFS || self.proofs >= MAX_CAMPAIGN_ISOLATION_PROOFS {
+    pub(super) fn proof(&mut self, local: usize) -> bool {
+        if local >= MAX_ISOLATION_PROOFS || self.proofs >= MAX_INVOCATION_ISOLATION_PROOFS {
             return false;
         }
         self.proofs = self.proofs.saturating_add(1);
@@ -133,6 +134,7 @@ impl Proofs {
 
 pub(super) fn failure_contexts(stdout: &str, plan: &Plan, root: &Utf8Path, failed_verb: &[&str]) -> Vec<FailureContext> {
     let mut contexts: Vec<FailureContext> = Vec::new();
+    let mut positions: HashMap<(String, String, String, Vec<String>), usize> = HashMap::default();
     for line in stdout.lines() {
         let Some(message) = cargo_message(line) else {
             continue;
@@ -169,20 +171,21 @@ pub(super) fn failure_contexts(stdout: &str, plan: &Plan, root: &Utf8Path, faile
         } else {
             targeted_verb(&kind, target.name.as_ref())
         };
-        let position = contexts.iter().position(|context| {
-            context.package == package && context.target == target.name && context.kind == kind && context.proof_verb == proof_verb
-        });
-        let context = if let Some(position) = position {
+        let key = (package, target.name.to_string(), kind, proof_verb);
+        let context = if let Some(position) = positions.get(&key).copied() {
             &mut contexts[position]
         } else {
+            let position = contexts.len();
+            let (package, target, kind, proof_verb) = key.clone();
             contexts.push(FailureContext {
                 package,
-                target: target.name.to_string(),
+                target,
                 kind,
                 proof_verb,
                 files: HashSet::default(),
                 codes: HashSet::default(),
             });
+            let _previous = positions.insert(key, position);
             contexts
                 .last_mut()
                 .unwrap_or_else(|| unreachable!("the failure context was just appended"))
@@ -227,6 +230,68 @@ pub(super) fn push_isolation_tiers(tiers: &mut Vec<HashSet<u32>>, population: Ha
     }
 }
 
+fn has_admissible_tier(tiers: &[HashSet<u32>], withdrawn: &HashSet<u32>) -> bool {
+    tiers.iter().any(|tier| {
+        let eligible = tier.iter().filter(|ordinal| !withdrawn.contains(ordinal)).count();
+        eligible > 0 && candidate_tier_admitted(eligible)
+    })
+}
+
+fn isolation_population<'a>(plan: &'a Plan, withdrawn: &HashSet<u32>) -> HashMap<&'a str, Vec<&'a Mutant>> {
+    let mut by_package: HashMap<&str, Vec<&Mutant>> = HashMap::default();
+    for mutant in plan.mutants.iter().filter(|mutant| isolation_candidate(mutant, withdrawn, None)) {
+        by_package.entry(&mutant.package).or_default().push(mutant);
+    }
+    by_package
+}
+
+fn context_packages(context: &FailureContext, plan: &Plan) -> Vec<String> {
+    plan.reach
+        .get(&context.package)
+        .map_or_else(|| vec![context.package.clone()], |packages| packages.iter().cloned().collect())
+}
+
+fn context_dependencies(by_package: &HashMap<&str, Vec<&Mutant>>, packages: &[String]) -> HashSet<u32> {
+    packages
+        .iter()
+        .filter_map(|package| by_package.get(package.as_str()))
+        .flatten()
+        .map(|mutant| mutant.ordinal)
+        .collect()
+}
+
+fn prioritized_contexts(
+    contexts: Vec<FailureContext>,
+    plan: &Plan,
+    by_package: &HashMap<&str, Vec<&Mutant>>,
+) -> Vec<(FailureContext, Vec<String>, usize)> {
+    let mut prioritized = contexts
+        .into_iter()
+        .filter_map(|context| {
+            let packages = context_packages(&context, plan);
+            let dependencies = packages
+                .iter()
+                .filter_map(|package| by_package.get(package.as_str()))
+                .map(Vec::len)
+                .sum::<usize>();
+
+            (dependencies > 0).then_some((context, packages, dependencies))
+        })
+        .collect::<Vec<_>>();
+
+    prioritized.sort_by(
+        |(left, _left_packages, left_dependencies), (right, _right_packages, right_dependencies)| {
+            right_dependencies
+                .cmp(left_dependencies)
+                .then_with(|| left.package.cmp(&right.package))
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.proof_verb.cmp(&right.proof_verb))
+        },
+    );
+    prioritized
+}
+
 impl Converger {
     #[expect(
         clippy::too_many_arguments,
@@ -242,24 +307,37 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<Vec<Isolation>> {
-        let contexts = failure_contexts(stdout, plan, &work.root, failed_verb);
+        let by_package = isolation_population(plan, &self.withdrawn);
+        let contexts = prioritized_contexts(failure_contexts(stdout, plan, &work.root, failed_verb), plan, &by_package);
         let mut isolated = Vec::new();
 
-        for context in contexts {
-            let cone = plan
-                .reach
-                .get(&context.package)
-                .cloned()
-                .unwrap_or_else(|| HashSet::from_iter([context.package.clone()]));
-            let pending = |mutant: &&Mutant| isolation_candidate(mutant, &self.withdrawn, None) && cone.contains(mutant.package.as_ref());
-            let dependencies: HashSet<u32> = plan.mutants.iter().filter(pending).map(|mutant| mutant.ordinal).collect();
+        for (context, packages, _dependency_count) in contexts {
+            let dependencies = without_withdrawn(context_dependencies(&by_package, &packages), &self.withdrawn);
             if dependencies.is_empty() {
                 continue;
             }
 
-            if !self.isolation_budget.enter_context() {
+            let mut tiers = Vec::new();
+            let files = packages
+                .iter()
+                .filter_map(|package| by_package.get(package.as_str()))
+                .flatten()
+                .filter(|mutant| context.files.contains(mutant.file.as_ref()))
+                .map(|mutant| mutant.ordinal)
+                .collect();
+            push_isolation_tiers(&mut tiers, files, plan, &context.codes);
+            let package = by_package
+                .get(context.package.as_str())
+                .into_iter()
+                .flatten()
+                .map(|mutant| mutant.ordinal)
+                .collect();
+            push_isolation_tiers(&mut tiers, package, plan, &context.codes);
+            push_isolation_tiers(&mut tiers, dependencies.clone(), plan, &context.codes);
+
+            if has_admissible_tier(&tiers, &self.withdrawn) && !self.isolation_budget.enter_context() {
                 events.warn(&format!(
-                    "left {} unresolved after the campaign reached its {MAX_ISOLATION_CONTEXTS}-context isolation budget",
+                    "left {} unresolved after the Cargo invocation reached its {MAX_ISOLATION_CONTEXTS}-context isolation budget",
                     context.label()
                 ));
                 isolated.push(Isolation::Unresolved {
@@ -268,25 +346,6 @@ impl Converger {
                 });
                 continue;
             }
-
-            let mut tiers = Vec::new();
-            let files = plan
-                .mutants
-                .iter()
-                .filter(pending)
-                .filter(|mutant| context.files.contains(mutant.file.as_ref()))
-                .map(|mutant| mutant.ordinal)
-                .collect();
-            push_isolation_tiers(&mut tiers, files, plan, &context.codes);
-            let package = plan
-                .mutants
-                .iter()
-                .filter(pending)
-                .filter(|mutant| mutant.package.as_ref() == context.package)
-                .map(|mutant| mutant.ordinal)
-                .collect();
-            push_isolation_tiers(&mut tiers, package, plan, &context.codes);
-            push_isolation_tiers(&mut tiers, dependencies.clone(), plan, &context.codes);
 
             let scope = BuildScope {
                 roots,
@@ -300,6 +359,7 @@ impl Converger {
             let mut applicable = true;
 
             for eligible in tiers {
+                let eligible = without_withdrawn(eligible, &self.withdrawn);
                 if !candidate_tier_admitted(eligible.len()) {
                     events.warn(&format!(
                         "skipping an isolation tier of {} mutants for {} because the bounded limit is {MAX_ISOLATION_CANDIDATES}",
@@ -308,7 +368,12 @@ impl Converger {
                     ));
                     continue;
                 }
-                let complete_context = eligible == dependencies;
+                let current_dependencies = dependencies
+                    .iter()
+                    .copied()
+                    .filter(|ordinal| !self.withdrawn.contains(ordinal))
+                    .collect::<HashSet<_>>();
+                let complete_context = eligible == current_dependencies;
                 match self.isolate_candidates(work, plan, scope, &verb, limits, events, &eligible, &mut proofs)? {
                     IsolationAttempt::Resolved(result) => {
                         isolated.push(result);
@@ -321,14 +386,14 @@ impl Converger {
                     }
                     IsolationAttempt::NotReproduced | IsolationAttempt::Inconclusive => {}
                 }
-                if proofs.local >= MAX_ISOLATION_PROOFS || self.isolation_budget.proofs >= MAX_CAMPAIGN_ISOLATION_PROOFS {
+                if proofs.local >= MAX_ISOLATION_PROOFS || self.isolation_budget.proofs >= MAX_INVOCATION_ISOLATION_PROOFS {
                     break;
                 }
             }
 
             if applicable && !resolved {
                 events.warn(&format!(
-                    "left {} unresolved after {} local and {} campaign proof builds",
+                    "left {} unresolved after {} local and {} invocation proof builds",
                     context.label(),
                     proofs.local,
                     self.isolation_budget.proofs
@@ -462,7 +527,7 @@ impl Converger {
     ) -> Result<Option<Vec<u32>>> {
         let mut active = failing.to_vec();
         let mut granularity = 2;
-        while active.len() > 1 && proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_CAMPAIGN_ISOLATION_PROOFS {
+        while active.len() > 1 && proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS {
             let width = active.len().div_ceil(granularity);
             let chunks = active.chunks(width).map(<[_]>::to_vec).collect::<Vec<_>>();
             let mut reduced = false;
@@ -503,7 +568,7 @@ impl Converger {
             granularity = granularity.saturating_mul(2).min(active.len());
         }
         Ok(
-            (proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_CAMPAIGN_ISOLATION_PROOFS)
+            (proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS)
                 .then(|| active.iter().map(|mutant| mutant.ordinal).collect()),
         )
     }
@@ -602,15 +667,7 @@ impl Converger {
     ) -> Result<Option<bool>> {
         // A proof's active schema is exact: every unrelated pending mutant is restored to pristine
         // source, including mutants outside the current file/package/dependency tier.
-        let mut withdrawn = self.withdrawn.clone();
-        withdrawn.extend(
-            plan.mutants
-                .iter()
-                .filter(|mutant| mutant.ordinal > 0 && !active.contains(&mutant.ordinal))
-                .map(|mutant| mutant.ordinal),
-        );
-
-        let (_guards, written) = self.instrument_schema(work, plan, &withdrawn)?;
+        let written = self.instrument_active_schema(work, plan, active)?;
         let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
         if events.wants_isolation_evidence()
             && let Some(stdout) = outcome.stdout.as_deref()
@@ -631,6 +688,7 @@ impl Converger {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -676,8 +734,41 @@ mod tests {
         .to_string()
     }
 
+    fn context(package: &str, target: &str) -> FailureContext {
+        FailureContext {
+            package: package.to_owned(),
+            target: target.to_owned(),
+            kind: "lib".to_owned(),
+            proof_verb: vec!["check".to_owned(), "--lib".to_owned()],
+            files: HashSet::default(),
+            codes: HashSet::default(),
+        }
+    }
+
     #[test]
-    fn campaign_context_budget_accepts_the_limit_and_rejects_the_next() {
+    fn contexts_with_the_largest_unresolved_population_are_isolated_first() {
+        let root = Utf8Path::new("workspace");
+        let mut plan = plan(root, 6);
+        plan.mutants[0].package = "small".into();
+        for mutant in &mut plan.mutants[1..] {
+            mutant.package = "large".into();
+        }
+        plan.reach = HashMap::from_iter([
+            ("small".to_owned(), HashSet::from_iter(["small".to_owned()])),
+            ("large".to_owned(), HashSet::from_iter(["large".to_owned()])),
+        ]);
+
+        let by_package = isolation_population(&plan, &HashSet::default());
+        let prioritized = prioritized_contexts(vec![context("small", "small"), context("large", "large")], &plan, &by_package);
+
+        assert_eq!(prioritized[0].0.package, "large");
+        assert_eq!(prioritized[0].2, 5);
+        assert_eq!(prioritized[1].0.package, "small");
+        assert_eq!(prioritized[1].2, 1);
+    }
+
+    #[test]
+    fn invocation_context_budget_accepts_the_limit_and_rejects_the_next() {
         let mut budget = IsolationBudget::default();
         for _ in 0..MAX_ISOLATION_CONTEXTS {
             assert!(budget.enter_context());
@@ -686,24 +777,32 @@ mod tests {
     }
 
     #[test]
-    fn local_and_campaign_proof_limits_are_exact() {
+    fn every_admitted_context_receives_its_complete_local_proof_budget() {
         let mut local = IsolationBudget::default();
         for proof in 0..MAX_ISOLATION_PROOFS {
             assert!(local.proof(proof));
         }
         assert!(!local.proof(MAX_ISOLATION_PROOFS));
 
-        let mut campaign = IsolationBudget::default();
-        for _ in 0..MAX_CAMPAIGN_ISOLATION_PROOFS {
-            assert!(campaign.proof(0));
+        let mut invocation = IsolationBudget::default();
+        for _ in 0..MAX_ISOLATION_CONTEXTS {
+            assert!(invocation.enter_context());
+            for local in 0..MAX_ISOLATION_PROOFS {
+                assert!(invocation.proof(local));
+            }
         }
-        assert!(!campaign.proof(0));
+        assert_eq!(invocation.proof_count(), MAX_INVOCATION_ISOLATION_PROOFS);
+        assert!(!invocation.proof(0));
     }
 
     #[test]
     fn candidate_limit_accepts_the_boundary_and_rejects_the_next() {
         assert!(candidate_tier_admitted(MAX_ISOLATION_CANDIDATES));
         assert!(!candidate_tier_admitted(MAX_ISOLATION_CANDIDATES + 1));
+
+        let tier = (0..=u32::try_from(MAX_ISOLATION_CANDIDATES).expect("the limit fits u32")).collect();
+        let withdrawn = HashSet::from_iter([0]);
+        assert!(candidate_tier_admitted(without_withdrawn(tier, &withdrawn).len()));
     }
 
     #[test]
@@ -725,6 +824,7 @@ mod tests {
             })
             .to_string(),
             error_stream(),
+            error_stream(),
         ]
         .join("\n");
 
@@ -737,7 +837,8 @@ mod tests {
             ("proc-macro", vec!["check", "--keep-going", "--lib"]),
             ("test", vec!["check", "--keep-going", "--test", "subject"]),
             ("bin", vec!["check", "--keep-going", "--bin", "subject"]),
-            ("example", vec!["check", "--keep-going", "--tests"]),
+            ("example", vec!["check", "--keep-going", "--example", "subject"]),
+            ("bench", vec!["check", "--keep-going", "--bench", "subject"]),
         ] {
             assert_eq!(targeted_verb(kind, "subject"), expected);
         }
@@ -765,6 +866,54 @@ mod tests {
             .expect("budget exhaustion does not launch Cargo");
 
         assert!(matches!(isolated.as_slice(), [Isolation::Unresolved { ordinals, .. }] if ordinals == &[1]));
+    }
+
+    #[test]
+    fn withdrawn_contexts_do_not_consume_context_budget() {
+        let directory = crate::testing::workdir("isolation-withdrawn-context-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let plan = plan(&root, 1);
+        let mut converger = Converger::default();
+        converger.isolation_budget.contexts = MAX_ISOLATION_CONTEXTS;
+        let _inserted = converger.withdrawn.insert(1);
+
+        let isolated = converger
+            .isolate_scoped(
+                &work,
+                &plan,
+                &error_stream(),
+                &["check", "--lib"],
+                None,
+                BuildLimits::default(),
+                &mut crate::testing::Recorder::default(),
+            )
+            .expect("a withdrawn context does not launch Cargo");
+
+        assert!(isolated.is_empty(), "{isolated:?}");
+        assert_eq!(converger.isolation_budget.contexts, MAX_ISOLATION_CONTEXTS);
+    }
+
+    #[test]
+    fn oversized_contexts_do_not_consume_the_remaining_context_budget() {
+        let oversized_end = u32::try_from(MAX_ISOLATION_CANDIDATES + 1).expect("the limit fits u32");
+        let oversized = vec![(1..=oversized_end).collect::<HashSet<_>>()];
+        let small = vec![HashSet::from_iter([oversized_end + 1])];
+        let withdrawn = HashSet::default();
+        let mut budget = IsolationBudget {
+            contexts: MAX_ISOLATION_CONTEXTS - 1,
+            proofs: 0,
+        };
+
+        assert!(!has_admissible_tier(&oversized, &withdrawn));
+        assert!(has_admissible_tier(&small, &withdrawn));
+        if has_admissible_tier(&oversized, &withdrawn) {
+            assert!(budget.enter_context());
+        }
+        if has_admissible_tier(&small, &withdrawn) {
+            assert!(budget.enter_context());
+        }
+        assert_eq!(budget.contexts, MAX_ISOLATION_CONTEXTS);
     }
 
     #[test]

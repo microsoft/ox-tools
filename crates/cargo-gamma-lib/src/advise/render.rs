@@ -300,6 +300,7 @@ fn finding_heading(index: usize, finding: &Finding) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
 
