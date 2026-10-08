@@ -355,6 +355,26 @@ fn released_domain_tool_versions_are_pinned() {
 }
 
 #[test]
+fn ensure_target_dir_creates_a_missing_directory_and_is_idempotent() {
+    let generated = generated();
+    let root = generated.temp.path();
+    let target = root.join("target");
+    if target.exists() {
+        std::fs::remove_dir_all(&target).unwrap();
+    }
+
+    for _ in 0..2 {
+        let output = run_just(root, &["_ensure-target-dir"], &[("ANVIL_IMPACT", "off")]);
+        assert!(
+            output.status.success(),
+            "_ensure-target-dir failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(target.is_dir());
+    }
+}
+
+#[test]
 fn msrv_recipes_use_only_the_declared_root_version() {
     let generated = generated();
     assert!(generated.checks.contains("cargo '+{workspace-rust-version}' test"));

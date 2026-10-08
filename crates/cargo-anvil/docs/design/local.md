@@ -177,14 +177,19 @@ policy intentionally rather than introducing an Anvil-specific merger.
 
 For each affected package the recipe runs
 `cargo bolero list --profile release --package <name>` and redirects the
-combined stdout to a deterministic JSONL file under the system temporary
-directory. Pinned cargo-bolero 0.13.4 emits one
+combined stdout to `target/bolero-list-<just-pid>.jsonl`. The private
+`_ensure-target-dir` recipe runs after `anvil-impact` and creates `target/` only
+when it is still absent, so clean `ANVIL_IMPACT=off` checkouts work without
+shell-specific directory flags. The Just process ID isolates concurrent local
+runs. Pinned cargo-bolero 0.13.4 emits one
 `{"package":"…","test":"…"}` record per target on stdout; Cargo build output and
 diagnostics use stderr. A second direct invocation passes that file to
 `cargo each --json-lines-file`, which expands `{json:package}` and `{json:test}`
 into bounded `cargo bolero test --profile release --engine libfuzzer -T 60s`
 commands. `--keep-going` preserves aggregate failure behavior, and an empty file
-is cargo-each's successful no-op.
+is cargo-each's successful no-op. A successful run removes the JSONL file.
+Failed discovery or execution leaves the PID-scoped file in place for
+diagnostics; the next Just process uses a different name.
 
 ### Spell dictionary preparation
 

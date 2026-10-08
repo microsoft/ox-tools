@@ -706,8 +706,24 @@ mod tests {
             "bolero discovery must truncate and replace the JSONL handoff through shell redirection"
         );
         assert!(
+            checks.contains(r#"anvil_bolero_targets_file := "target" / ("bolero-list-" + just_pid() + ".jsonl")"#),
+            "bolero records must use a per-Just-process file under target"
+        );
+        assert!(
+            checks.contains("_ensure-target-dir: anvil-impact"),
+            "bolero must create target only after impact calculation has had a chance to create it"
+        );
+        assert!(
+            checks.contains(r##"if path_exists("target") { "# target directory already exists" } else { "mkdir target" }"##),
+            "the target-directory helper must remain portable across the configured command shells"
+        );
+        assert!(
             checks.contains("each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going"),
             "bolero execution must consume discovered records through cargo-each"
+        );
+        assert!(
+            checks.contains("rm {{ quote(anvil_bolero_targets_file) }}"),
+            "successful Bolero runs must remove their JSONL handoff file"
         );
         assert!(
             checks.contains("bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'"),
