@@ -464,6 +464,45 @@ mod tests {
     }
 
     #[test]
+    fn without_array_artifact_removes_only_its_selector_and_checksum_contribution() {
+        let array = |host: &str, id: &'static str| TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let removed = array("config.toml", "entries");
+        let same_host = array("config.toml", "other");
+        let same_id = array("other.toml", "entries");
+        let expected = Catalog::builder(CliMeta::new("tool"))
+            .with_toml_array_region(same_host.clone())
+            .with_toml_array_region(same_id.clone())
+            .build()
+            .unwrap();
+        let before = expected
+            .clone()
+            .into_builder()
+            .with_toml_array_region(removed.clone())
+            .build()
+            .unwrap();
+        let after = before
+            .clone()
+            .into_builder()
+            .without_artifact(Artifact::region(removed.region.clone()))
+            .build()
+            .unwrap();
+        assert_eq!(after.artifacts(), expected.artifacts());
+        assert_eq!(after.toml_array_path(&removed.region), None);
+        assert_eq!(after.toml_array_path(&same_host.region), Some(same_host.path.as_slice()));
+        assert_eq!(after.toml_array_path(&same_id.region), Some(same_id.path.as_slice()));
+        assert_eq!(after.checksum(), expected.checksum());
+        assert_ne!(after.checksum(), before.checksum());
+    }
+
+    #[test]
     fn multiple_errors_are_all_reported() {
         let err = Catalog::anvil()
             .into_builder()
