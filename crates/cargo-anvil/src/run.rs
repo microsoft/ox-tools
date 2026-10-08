@@ -957,8 +957,15 @@ impl ComposedHosts {
                 // replacement table. Also check the pre-write view: masking the
                 // orphan alone would otherwise hide array brackets or table
                 // bindings that the orphan still supplies. Only complete live
-                // ordinary regions matching their current templates can be
-                // rolled back for this validation; repository edits stay visible.
+                // ordinary regions matching their current templates *after* the
+                // orphan can be rolled back. A preceding region may supply the
+                // orphan's table context, even when its template is in sync.
+                // Keeping that prefix intact preserves selectors owned by the
+                // orphan; the first validation protects selectors in the suffix
+                // with the live regions still present. Repository edits stay visible.
+                let candidate = find_region(host_text, id, syntax)
+                    .expect("the preceding filter established paired region markers")
+                    .expect("the preceding filter established a present region");
                 let synchronized = self
                     .ordinary_regions
                     .get(host_relpath)
@@ -968,7 +975,10 @@ impl ComposedHosts {
                         find_region(host_text, spec.id.as_str(), syntax)
                             .ok()
                             .flatten()
-                            .is_some_and(|region| checksum_str(region.body_str()) == checksum_str(&spec.body))
+                            .is_some_and(|region| {
+                                region.start_line.start >= candidate.end_line.end
+                                    && checksum_str(region.body_str()) == checksum_str(&spec.body)
+                            })
                     })
                     .map(|spec| spec.id.as_str().to_owned())
                     .collect();
@@ -2005,6 +2015,85 @@ mod tests {
         );
         assert_eq!(hosts.cached("config.toml"), Some(text));
         assert_eq!(plan.projected_manifest(&manifest), manifest);
+    }
+
+    #[test]
+    fn toml_array_partial_apply_preserves_live_parent_selector_dependencies() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let parent_body = "[plugins]\nenabled = true\n";
+        let new_body = "[settings]\nmode = false\n";
+        for (old_body, established) in [
+            ("default = [\"user\"]\n[settings]\nmode = true\n", false),
+            (
+                "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n[settings]\nmode = true\n",
+                true,
+            ),
+        ] {
+            let text = format!(
+                "# >>> anvil-managed: parent\n{parent_body}# <<< anvil-managed: parent\n\n# >>> anvil-managed: old\n{old_body}# <<< anvil-managed: old\n\n# >>> anvil-managed: new\n{new_body}# <<< anvil-managed: new\n"
+            );
+            for (array_first, live_tracked) in [(false, false), (false, true), (true, false), (true, true)] {
+                let mut manifest = Manifest::default();
+                manifest.set_region("config.toml", "old", checksum_str(old_body));
+                if established {
+                    manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
+                }
+                if live_tracked {
+                    manifest.set_region("config.toml", "parent", checksum_str(parent_body));
+                    manifest.set_region("config.toml", "new", checksum_str(new_body));
+                }
+                let parent = Artifact::region(RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("parent"),
+                    body: parent_body.to_owned(),
+                    syntax: CommentSyntax::Hash,
+                });
+                let new = Artifact::region(RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("new"),
+                    body: new_body.to_owned(),
+                    syntax: CommentSyntax::Hash,
+                });
+                let entries = crate::catalog::TomlArrayRegionSpec {
+                    region: RegionSpec {
+                        host: HostSelector::Path("config.toml".to_owned()),
+                        id: RegionId::new("entries"),
+                        body: "\"managed\",\n".to_owned(),
+                        syntax: CommentSyntax::Hash,
+                    },
+                    path: vec!["plugins".to_owned(), "default".to_owned()],
+                };
+                let builder = Catalog::builder(CliMeta::new("anvil"));
+                let catalog = if array_first {
+                    builder.with_toml_array_region(entries).with_artifact(parent).with_artifact(new)
+                } else {
+                    builder.with_artifact(parent).with_artifact(new).with_toml_array_region(entries)
+                }
+                .build()
+                .unwrap();
+                let mut hosts = HostTextCache::default();
+                hosts.set("config.toml", text.clone());
+                let mut expected_manifest = manifest.clone();
+                expected_manifest.set_region("config.toml", "parent", checksum_str(parent_body));
+                expected_manifest.set_region("config.toml", "new", checksum_str(new_body));
+                for _ in 0..2 {
+                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                    assert_eq!(hosts.cached("config.toml"), Some(text.clone()));
+                    let expected = if array_first {
+                        [Decision::LeaveAlone, Decision::InSync, Decision::InSync, Decision::LeaveAlone]
+                    } else {
+                        [Decision::InSync, Decision::InSync, Decision::LeaveAlone, Decision::LeaveAlone]
+                    };
+                    assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), expected);
+                    assert_eq!(plan.projected_manifest(&manifest), expected_manifest);
+                    manifest = expected_manifest.clone();
+                }
+            }
+        }
     }
 
     #[test]

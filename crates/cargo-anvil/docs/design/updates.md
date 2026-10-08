@@ -161,9 +161,13 @@ wrote that replacement but not the retirement, the remaining duplicate table
 does not strand recovery. The retirement candidate participates in its own
 validation projection only after its markers and recorded body ownership pass.
 When the raw host is invalid, validation also reconstructs the pre-write view
-by masking only complete live ordinary regions matching their current templates.
-This preserves checks on array delimiters and source bindings supplied by the
-retiring region; masking the candidate alone cannot prove those safe to remove.
+by masking only complete live ordinary regions after the candidate that match
+their current templates. Earlier regions stay visible: they can supply the
+candidate's table context even when synchronized. The candidate-masked validation
+separately protects suffix selectors with all live regions present. Together these
+checks protect array delimiters and source bindings supplied by the retiring
+region; masking the candidate alone cannot prove those safe to remove. Recovery
+refuses if it requires rolling back an earlier region's table context.
 Edited or untracked orphans, malformed markers, and unrelated invalid repository
 content are not bypassed by this recovery.
 
