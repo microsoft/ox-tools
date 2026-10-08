@@ -137,11 +137,16 @@ plugins = [
 
 On first introduction:
 
-1. Parse the existing host and validate all hash sentinels. Empty ids, nested or
-   duplicate opening markers, and unmatched/mismatched markers refuse.
+1. Parse the existing host and validate all hash sentinels that are actual TOML
+   comment lines. Marker-looking multiline string data never establishes ownership.
+   Empty ids, nested or duplicate opening markers, and unmatched/mismatched markers refuse.
 2. Locate the selected array. Missing tables/array can be scaffolded outside
    ownership; an incompatible existing value cannot be converted to an array.
-   Scaffolding must not invade another region's ownership.
+   Scaffolding must not invade another region's ownership or replace existing bytes.
+   If serialization would reorder existing assignments, add the selected empty array
+   explicitly outside managed sentinels before retrying. Type conflicts instead require
+   correcting the catalog selector or the repository setting so the selected item is
+   an array and every parent is table-like.
 3. For each generated entry, remove at most one semantically equal unmanaged
    entry and its following separator. This is multiset adoption: repeated
    generated values adopt corresponding occurrences, not every duplicate.
@@ -173,9 +178,10 @@ content are not bypassed by this recovery.
 
 Semantic matching does not authorize deleting comments inside a matching
 compound value. Such a candidate refuses, as does a separator owned by another
-region. Comments outside adopted value spans are retained. Parser spans keep
-quoted strings, commas and `#` characters in data from being mistaken for
-structural punctuation.
+region. Comments outside adopted value spans are retained. TOML tokenization
+within the real entry's source span distinguishes comments from quoted keys and
+string data, including nested values and dotted inline-table keys. Implicit
+dotted-key table proxies are not treated as physical container spans.
 
 For an existing same-id region, both sentinels must lie within the selected array
 and the boundaries must not split a parsed value. Neither array delimiter may
