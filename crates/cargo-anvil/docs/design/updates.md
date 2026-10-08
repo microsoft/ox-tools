@@ -64,6 +64,14 @@ A region has a host, stable id, comment syntax and generated body. Hash syntax
 uses `# >>> anvil-managed: <id>` and `# <<< anvil-managed: <id>` on separate lines.
 Only the body is owned; surrounding text belongs to the repository.
 
+In TOML hosts, only actual full-line comment tokens establish sentinel boundaries.
+Marker-looking multiline string contents and quoted keys are data, including
+inside generated bodies. Lookup, replacement, relocation, residue insertion,
+adoption projections/protection, marker recovery and retirement all use those
+same original byte boundaries. Lexical recognition does not require semantic
+document validity, so duplicate-table intermediates can still be repaired.
+Non-TOML hosts retain their line-oriented comment-syntax behavior.
+
 | Body state | Result |
 |---|---|
 | Region absent | Introduce it if safe placement/adoption is possible |

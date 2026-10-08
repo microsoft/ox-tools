@@ -337,23 +337,44 @@ pub(crate) fn upsert_region_with_newline(
     placement: RegionPlacement,
     newline: &str,
 ) -> Result<String, AppError> {
+    Ok(upsert_located_region_with_newline(
+        text,
+        id,
+        new_body,
+        syntax,
+        placement,
+        newline,
+        find_region(text, id, syntax)?,
+    ))
+}
+
+/// Splice only the ownership boundary already established by the host's scanner.
+pub(crate) fn upsert_located_region_with_newline(
+    text: &str,
+    id: &str,
+    new_body: &str,
+    syntax: CommentSyntax,
+    placement: RegionPlacement,
+    newline: &str,
+    region: Option<Region<'_>>,
+) -> String {
     let rendered = render_region(id, new_body, syntax, newline);
 
-    if let Some(region) = find_region(text, id, syntax)? {
+    if let Some(region) = region {
         if placement == RegionPlacement::Start {
-            let without_region = remove_region(text, id, syntax)?;
-            return Ok(prepend_region(&without_region, &rendered, syntax, newline));
+            let without_region = remove_located_region(text, Some(region));
+            return prepend_region(&without_region, &rendered, syntax, newline);
         }
         // #[gamma::skip(literal.int_increment, reason = "changes only spare String capacity; emitted region text is identical")]
         let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
         out.push_str(&rendered);
         out.push_str(&text[region.end_line.end..]);
-        return Ok(out);
+        return out;
     }
 
     if placement == RegionPlacement::Start {
-        return Ok(prepend_region(text, &rendered, syntax, newline));
+        return prepend_region(text, &rendered, syntax, newline);
     }
 
     if let RegionPlacement::At(offset) = placement {
@@ -393,7 +414,7 @@ pub(crate) fn upsert_region_with_newline(
             out.push_str(newline);
         }
         out.push_str(after);
-        return Ok(out);
+        return out;
     }
 
     // No region present — append at the end with one blank line of separation
@@ -403,7 +424,7 @@ pub(crate) fn upsert_region_with_newline(
     out.push_str(text);
     separate_region(&mut out, newline);
     out.push_str(&rendered);
-    Ok(out)
+    out
 }
 
 /// The first non-header line, stopping before any managed sentinel or setting.
@@ -507,7 +528,11 @@ pub(crate) fn remove_toml_region(text: &str, id: &str, syntax: CommentSyntax) ->
 }
 
 pub(crate) fn remove_host_region(text: &str, id: &str, syntax: CommentSyntax, host: &str) -> Result<String, AppError> {
-    Ok(remove_located_region(text, find_host_region(text, id, syntax, host)?))
+    if host.to_ascii_lowercase().ends_with(".toml") {
+        remove_toml_region(text, id, syntax)
+    } else {
+        remove_region(text, id, syntax)
+    }
 }
 
 fn remove_located_region(text: &str, region: Option<Region<'_>>) -> String {
@@ -554,10 +579,27 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 ///
 /// Returns an error if the region is missing or malformed.
 pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyntax) -> Result<String, AppError> {
+    insert_after_located_region(text, id, extra, || find_region(text, id, syntax))
+}
+
+pub(crate) fn insert_after_host_region(text: &str, id: &str, extra: &str, syntax: CommentSyntax, host: &str) -> Result<String, AppError> {
+    if host.to_ascii_lowercase().ends_with(".toml") {
+        insert_after_located_region(text, id, extra, || find_toml_region(text, id, syntax))
+    } else {
+        insert_after_region(text, id, extra, syntax)
+    }
+}
+
+fn insert_after_located_region<'a>(
+    text: &'a str,
+    id: &str,
+    extra: &str,
+    locate: impl FnOnce() -> Result<Option<Region<'a>>, AppError>,
+) -> Result<String, AppError> {
     if extra.is_empty() {
         return Ok(text.to_owned());
     }
-    let Some(region) = find_region(text, id, syntax)? else {
+    let Some(region) = locate()? else {
         return Err(app_err!("region '{id}' is missing from the host it was just spliced into"));
     };
     let at = region.end_line.end;
@@ -647,7 +689,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         return TomlAdoption::Unchanged;
     };
 
-    let protected = managed_region_ranges(text, syntax);
+    let protected = toml_region_ranges(text, syntax);
     // Residue is re-emitted directly after the region's closing sentinel, so
     // TOML attributes it to the LAST table the body opens. Only that table's
     // hand-written extras can be relocated without changing what they
@@ -665,7 +707,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         ("anvil-workspace-lints", ["workspace", "lints"].as_slice()),
         ("anvil-lints", ["lints"].as_slice()),
     ] {
-        if matches!(find_region(text, legacy_id, syntax), Ok(Some(region)) if region.is_empty())
+        if matches!(find_toml_region(text, legacy_id, syntax), Ok(Some(region)) if region.is_empty())
             && candidates.iter().any(|table| table.path == parent)
         {
             return TomlAdoption::Unrelocatable {
@@ -776,7 +818,7 @@ fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> Strin
 }
 
 fn restore_legacy_lint_header(masked: &mut [u8], text: &str, id: &str, header: &str, syntax: CommentSyntax) {
-    let Ok(Some(region)) = find_region(text, id, syntax) else {
+    let Ok(Some(region)) = find_toml_region(text, id, syntax) else {
         return;
     };
     let start = if let Some(relative) = region.body_str().find(header) {
@@ -818,7 +860,7 @@ pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> O
     let Some(text) = current else {
         return Some(RegionPlacement::End);
     };
-    if matches!(find_region(text, region_id, CommentSyntax::Hash), Ok(Some(_))) {
+    if matches!(find_toml_region(text, region_id, CommentSyntax::Hash), Ok(Some(_))) {
         return Some(RegionPlacement::End);
     }
     let position = order
@@ -830,13 +872,13 @@ pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> O
         .split_first()
         .expect("position identifies a member of the selected lint-region order");
     for successor in successors {
-        if let Ok(Some(region)) = find_region(text, successor, CommentSyntax::Hash) {
+        if let Ok(Some(region)) = find_toml_region(text, successor, CommentSyntax::Hash) {
             return Some(RegionPlacement::At(region.start_line.start));
         }
     }
 
     let retiring = BTreeSet::from(["anvil-workspace-lints".to_owned(), "anvil-lints".to_owned()]);
-    let parseable = mask_retiring_managed_regions(text, CommentSyntax::Hash, &retiring);
+    let parseable = mask_retiring_toml_regions(text, CommentSyntax::Hash, &retiring);
     let before_profiles = headed_tables(&parseable).and_then(|tables| {
         tables
             .into_iter()
@@ -847,7 +889,7 @@ pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> O
     });
     let before_legacy = retiring
         .iter()
-        .filter_map(|id| find_region(text, id, CommentSyntax::Hash).ok().flatten())
+        .filter_map(|id| find_toml_region(text, id, CommentSyntax::Hash).ok().flatten())
         .map(|region| region.start_line.start)
         .min();
     Some(RegionPlacement::At(
@@ -1187,7 +1229,7 @@ fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) 
     let values = table_values(managed.as_table());
     let mut boundaries: Vec<_> = tables.iter().map(|table| table.header.start).collect();
     // #[gamma::skip(call_result.default, tag = "timeout", reason = "discarding table boundaries makes adoption rescan the remaining document and exceed the campaign budget")]
-    boundaries.extend(managed_region_ranges(text, syntax).iter().map(|range| range.start));
+    boundaries.extend(toml_region_ranges(text, syntax).iter().map(|range| range.start));
     boundaries.sort_unstable();
     let mut out = String::new();
     let mut cursor = 0;
@@ -1312,7 +1354,7 @@ fn boundary_after(boundaries: &[usize], start: usize, fallback: usize) -> usize 
 /// deleting is what keeps the spans it reports usable against the original
 /// text.
 fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
-    mask_regions(text, &managed_region_ranges(text, syntax))
+    mask_regions(text, &toml_region_ranges(text, syntax))
 }
 
 /// Blank the managed regions named in `retiring`, so what remains is the file
@@ -1326,6 +1368,7 @@ fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
 /// sibling that is staying, and two regions of the catalog declaring one table
 /// would compose into a duplicate header that neither could see.
 #[must_use]
+#[cfg(test)]
 pub fn mask_retiring_managed_regions(text: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> String {
     mask_retiring_ranges(text, retiring, || managed_region_ranges_with_ids(text, syntax))
 }
@@ -1379,14 +1422,14 @@ fn mask_regions(text: &str, ranges: &[ByteRange]) -> String {
 
 /// Byte ranges of the managed regions in `text`, from opening sentinel line to
 /// closing sentinel line inclusive.
-fn managed_region_ranges(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
-    managed_region_ranges_with_ids(text, syntax)
+fn toml_region_ranges(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
+    toml_region_ranges_with_ids(text, syntax)
         .into_iter()
         .map(|(_, range)| range)
         .collect()
 }
 
-/// As [`managed_region_ranges`], paired with each region's id.
+/// Lexical sentinel pairs, independent of the host format.
 fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {
     region_ranges_in_lines(text, syntax, iterate_lines(text))
 }
