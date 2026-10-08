@@ -150,6 +150,12 @@ On first introduction:
    entries and surrounding comments keep their source text.
 5. Parse and validate the result before accepting the splice.
 
+Array parsing and scaffolding use the same pending-retirement projection as
+ordinary-region validation. A temporary duplicate table from an accepted
+migration does not refuse a later array introduction, update or in-sync check.
+The projection preserves byte offsets; splices, marker checks and ownership
+checks still use the original text, including the retiring region until removal.
+
 Semantic matching does not authorize deleting comments inside a matching
 compound value. Such a candidate refuses, as does a separator owned by another
 region. Comments outside adopted value spans are retained. Parser spans keep

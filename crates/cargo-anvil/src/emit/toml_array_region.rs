@@ -90,8 +90,9 @@ fn render_body(body: &str, newline: &str) -> Result<String, ManagedRegionRefusal
 }
 
 /// Create only missing table/array scaffolding, leaving existing items intact.
-fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal> {
-    let normalized = text.replace("\r\n", "\n");
+fn scaffold(text: &str, path: &[String], retiring: &std::collections::BTreeSet<String>) -> Result<String, ManagedRegionRefusal> {
+    let projected = mask_retiring_managed_regions(text, CommentSyntax::Hash, retiring);
+    let normalized = projected.replace("\r\n", "\n");
     let mut document = normalized
         .parse::<DocumentMut>()
         .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
@@ -134,7 +135,8 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
     let after = source_offset(text, normalized.len() - suffix);
     let inserted = edited[prefix..edited.len() - suffix].replace('\n', text_newline(text));
     let scaffolded = format!("{}{inserted}{}", &text[..before], &text[after..]);
-    let document = Document::parse(&scaffolded).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let document = Document::parse(mask_retiring_managed_regions(&scaffolded, CommentSyntax::Hash, retiring))
+        .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let array = lookup(document.as_item(), path)
         .and_then(Item::as_array)
         .expect("the scaffold inserted or validated an array");
@@ -146,8 +148,8 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
     else {
         return Ok(scaffolded);
     };
-    // toml_edit inserts after the last key, ahead of its following closing
-    // sentinel. Move only the new assignment, not the existing table or comments.
+    // toml_edit inserts ahead of a following closing sentinel. Move the whole
+    // scaffold delta, including any new parent headers, but no existing bytes.
     let parent = lookup(document.as_item(), &path[..path.len() - 1]).expect("the scaffold created the parent table");
     if parent.as_inline_table().is_some() {
         return Err(refusal(
@@ -155,14 +157,14 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
             RefusalRemedy::EnclosingOwnership,
         ));
     }
-    let key = parent
-        .as_table_like()
-        .and_then(|table| table.get_key_value(path.last().expect("validated nonempty path")))
-        .expect("the scaffold inserted the selected key")
-        .0;
-    let key_start = key.span().expect("parsed keys retain source spans").start;
-    let start = scaffolded[..key_start].rfind('\n').map_or(0, |at| at + 1);
-    let end = scaffolded[span.end..].find('\n').map_or(scaffolded.len(), |at| span.end + at + 1);
+    let start = before;
+    let end = start + inserted.len();
+    if before != after || start < owner.body.start || end > owner.body.end {
+        return Err(refusal(
+            "the missing array cannot be scaffolded without changing existing managed content",
+            RefusalRemedy::EnclosingOwnership,
+        ));
+    }
     let separator = if scaffolded[..owner.end_line.end].ends_with('\n') {
         ""
     } else {
@@ -175,7 +177,8 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
         &scaffolded[start..end],
         &scaffolded[owner.end_line.end..]
     );
-    let moved_document = Document::parse(&moved).map_err(|error| refusal(error, RefusalRemedy::EnclosingOwnership))?;
+    let moved_document = Document::parse(mask_retiring_managed_regions(&moved, CommentSyntax::Hash, retiring))
+        .map_err(|error| refusal(error, RefusalRemedy::EnclosingOwnership))?;
     let moved_array = lookup(moved_document.as_item(), path).and_then(Item::as_array);
     let expected_start = owner.end_line.end - (end - start) + separator.len() + (span.start - start);
     if moved_array.and_then(Array::span).is_none_or(|span| span.start != expected_start) {
@@ -239,22 +242,37 @@ fn validated_regions(text: &str) -> Result<Vec<Region<'_>>, ManagedRegionRefusal
 }
 
 /// Plan through the ordinary checksum/edited-body policy with an array splice.
+#[cfg(test)]
 pub(crate) fn plan_toml_array_region(
     manifest: &Manifest,
     host_text: Option<&str>,
     host: &str,
     spec: &TomlArrayRegionSpec,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
+    plan_toml_array_region_with_retirements(manifest, host_text, host, spec, &std::collections::BTreeSet::new())
+}
+
+/// Parse the pending-retirement projection, but splice original bytes. Masking
+/// preserves offsets; ownership and marker validation still see the raw host.
+pub(crate) fn plan_toml_array_region_with_retirements(
+    manifest: &Manifest,
+    host_text: Option<&str>,
+    host: &str,
+    spec: &TomlArrayRegionSpec,
+    retiring: &std::collections::BTreeSet<String>,
+) -> Result<PlanItem, ManagedRegionRefusal> {
     validate_spec(spec)?;
     let original = host_text.unwrap_or("");
     let regions = validated_regions(original)?;
-    let document = Document::parse(original).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let document = Document::parse(mask_retiring_managed_regions(original, CommentSyntax::Hash, retiring))
+        .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let scaffolded;
     let (base, document, regions) = if lookup(document.as_item(), &spec.path).is_some() {
         (original, document, regions)
     } else {
-        scaffolded = scaffold(original, &spec.path)?;
-        let document = Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+        scaffolded = scaffold(original, &spec.path, retiring)?;
+        let document = Document::parse(mask_retiring_managed_regions(&scaffolded, CommentSyntax::Hash, retiring))
+            .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
         let regions = validated_regions(&scaffolded)?;
         (scaffolded.as_str(), document, regions)
     };
@@ -324,7 +342,8 @@ pub(crate) fn plan_toml_array_region(
             let rest = rest.strip_prefix(newline).unwrap_or(rest);
             format!("{}{newline}{rendered}{rest}", &adopted[..at])
         };
-        Document::parse(&spliced).map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
+        Document::parse(mask_retiring_managed_regions(&spliced, CommentSyntax::Hash, retiring))
+            .map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
         validated_regions(&spliced)?;
         Ok(spliced)
     })
@@ -558,6 +577,41 @@ mod tests {
 
     fn output(text: &str) -> String {
         plan(Some(text)).spliced_host.unwrap()
+    }
+
+    #[test]
+    fn pending_retirement_projection_preserves_original_bytes_and_scaffold_offsets() {
+        for newline in ["\n", "\r\n"] {
+            for prefix in ["# Repository comment: café\n", "plugins.default = [\"user\"]\n"] {
+                let old = "# >>> anvil-managed: old\n[settings]\nmode = \"café\"\n# <<< anvil-managed: old\n".replace('\n', newline);
+                let new = "# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n".replace('\n', newline);
+                let host = format!("{}{old}{new}", prefix.replace('\n', newline));
+                let retiring = std::collections::BTreeSet::from(["old".to_owned()]);
+                let item =
+                    plan_toml_array_region_with_retirements(&Manifest::default(), Some(&host), "config.toml", &spec(), &retiring).unwrap();
+                assert_eq!(item.decision, Decision::Write);
+                let spliced = item.spliced_host.unwrap();
+                assert!(spliced.contains(&old));
+                assert!(spliced.contains(&new), "{spliced:?}");
+                assert!(spliced.starts_with(&prefix.split('=').next().unwrap().replace('\n', newline)));
+                let retired = remove_region(&spliced, "old", CommentSyntax::Hash).unwrap();
+                let document = Document::parse(&retired).unwrap();
+                let array = document["plugins"]["default"].as_array().unwrap();
+                assert_eq!(
+                    array.iter().filter_map(Value::as_str).collect::<Vec<_>>(),
+                    if prefix.starts_with("plugins") {
+                        vec!["managed", "user"]
+                    } else {
+                        vec!["managed"]
+                    }
+                );
+                assert_eq!(document["settings"]["mode"].as_bool(), Some(false));
+                assert_eq!(
+                    find_region(&spliced, "old", CommentSyntax::Hash).unwrap().unwrap().body_str(),
+                    format!("[settings]{newline}mode = \"café\"{newline}")
+                );
+            }
+        }
     }
 
     #[test]
