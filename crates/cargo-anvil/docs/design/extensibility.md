@@ -192,6 +192,24 @@ entries and comments, with a trailing comma after the last entry. The engine
 indents the body and hash sentinels by two spaces. It does not own the table,
 key, brackets, or other entries:
 
+```rust
+use cargo_anvil::{Catalog, CliMeta, CommentSyntax, HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
+
+fn plugin_catalog() -> Result<Catalog, Box<dyn std::error::Error>> {
+    Ok(Catalog::builder(CliMeta::new("anvil"))
+        .with_toml_array_region(TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".into()),
+                id: RegionId::new("example-plugins"),
+                body: "# Development guidance.\n\"market:development\",\n".into(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".into(), "default".into()],
+        })
+        .build()?)
+}
+```
+
 ```toml
 [plugins]
 default = [
@@ -237,6 +255,13 @@ Updates replace only the sentinel span; retirement uses ordinary region removal,
 leaving the array scaffold and other entries intact. Trailing commas keep both
 empty-array and last-entry retirement valid. No special CLI or downstream file
 merger is required.
+
+Neighboring writes and retirements are validated against the accumulated host.
+If they remove a live selected array's delimiters or rebind its key to another
+table, that change is refused and its lock provenance is retained. This includes
+partial overlaps in either direction and a separate region owning the parent
+table header. Independent safe writes still proceed. Fully enclosing ownership
+can retire when no live array selector depends on it.
 
 `Catalog::toml_array_path(&RegionSpec) -> Option<&[String]>` retrieves a selector
 by the ordinary region's host/id identity. `into_builder` and `replace_artifact`
@@ -480,6 +505,7 @@ impl CatalogBuilder {
 
     // The three artifact verbs are uniform — all operate on the `Artifact` unit.
     pub fn with_artifact(self, artifact: Artifact) -> Self;     // add; errors if identity present
+    pub fn with_toml_array_region(self, spec: TomlArrayRegionSpec) -> Self;
     pub fn replace_artifact(self, artifact: Artifact) -> Self;  // override; errors if identity absent
     pub fn without_artifact(self, artifact: Artifact) -> Self;  // remove; errors if identity absent
 
@@ -536,8 +562,9 @@ from the catalog:
   namespace, a `myforge` lock and an `anvil` lock are the same format; the `tool` field is what
   keeps the two tools from clobbering each other's lock.
 - **`tool_version`** is the binding crate's version (`CliMeta.version`).
-- **`catalog_checksum`** is a `sha256` over the whole `Catalog` — every artifact's identity and
-  rendered body in canonical order. Two builds that share a `tool_version` but differ in any
+- **`catalog_checksum`** is a `sha256` over the whole `Catalog` — every artifact's identity,
+  rendered body, and static TOML array selector metadata in canonical order.
+  Selector-only changes also change the checksum. Two builds that share a `tool_version` but differ in any
   artifact (an extra owned file, an overridden region body, a swapped backend file) produce
   different checksums, which is what makes it useful during development. `--version` prints it.
 

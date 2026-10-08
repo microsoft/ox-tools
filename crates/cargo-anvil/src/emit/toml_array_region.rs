@@ -10,7 +10,9 @@ use crate::catalog::TomlArrayRegionSpec;
 use crate::emit::managed_region::{ManagedRegionRefusal, ManagedRegionRequest, RefusalRemedy, plan_region_with_splice};
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
-use crate::region::{CommentSyntax, Region, RegionPlacement, canonical_value, find_region, text_newline};
+use crate::region::{
+    CommentSyntax, Region, RegionPlacement, canonical_value, find_region, mask_retiring_managed_regions, remove_region, text_newline,
+};
 
 fn refusal(reason: impl std::fmt::Display, remedy: RefusalRemedy) -> ManagedRegionRefusal {
     ManagedRegionRefusal::new(app_err!("{reason}"), remedy)
@@ -245,26 +247,29 @@ pub(crate) fn plan_toml_array_region(
 ) -> Result<PlanItem, ManagedRegionRefusal> {
     validate_spec(spec)?;
     let original = host_text.unwrap_or("");
-    validated_regions(original)?;
+    let regions = validated_regions(original)?;
     let document = Document::parse(original).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let scaffolded;
-    let base = if lookup(document.as_item(), &spec.path).is_some() {
-        original
+    let (base, document, regions) = if lookup(document.as_item(), &spec.path).is_some() {
+        (original, document, regions)
     } else {
         scaffolded = scaffold(original, &spec.path)?;
-        &scaffolded
+        let document = Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+        let regions = validated_regions(&scaffolded)?;
+        (scaffolded.as_str(), document, regions)
     };
-    let document = Document::parse(base).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let array = lookup(document.as_item(), &spec.path)
         .and_then(Item::as_array)
         .ok_or_else(|| refusal("the selected TOML item is not an array", RefusalRemedy::HandWrittenTable))?;
     let span = array.span().expect("an immutable parsed array retains its source span");
-    for other in validated_regions(base)? {
+    for other in regions {
         let id = &other.id;
         if id == spec.region.id.as_str() {
             continue;
         }
-        if span.start >= other.body.start && span.start < other.body.end {
+        if (other.start_line.start <= span.start && span.start < other.end_line.end)
+            || (other.start_line.start < span.end && span.end <= other.end_line.end)
+        {
             return Err(refusal(
                 format!(
                     "the selected array belongs to managed region '{id}'; retire its enclosing ownership before managing array entries"
@@ -325,22 +330,105 @@ pub(crate) fn plan_toml_array_region(
     })
 }
 
+/// A neighboring region must not remove array delimiters or rebind an existing
+/// selector to a different source location, even when the result still parses.
+pub(crate) fn validate_neighbor_splice(
+    before: &str,
+    after: &str,
+    paths: &[Vec<String>],
+    id: &str,
+    syntax: CommentSyntax,
+    retiring: &std::collections::BTreeSet<String>,
+) -> Result<(), ManagedRegionRefusal> {
+    let masked_before = mask_retiring_managed_regions(before, syntax, retiring);
+    let original = if retiring.is_empty() {
+        None
+    } else {
+        // Earlier writes can temporarily duplicate a table whose independently
+        // validated retirement is still pending in this same pass. The projected
+        // document below must still parse; an invalid raw intermediate alone is
+        // not sufficient to refuse a migration.
+        Document::parse(before).ok()
+    };
+    let projected_original =
+        Document::parse(masked_before.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let masked_after = mask_retiring_managed_regions(after, syntax, retiring);
+    let updated = Document::parse(masked_after.as_str()).map_err(|error| refusal(error, RefusalRemedy::BetweenManagedRegions))?;
+    // A relocation is a removal followed by an insertion, not one replacement
+    // that claims every byte between the old and new region positions.
+    let intermediate = remove_region(before, id, syntax).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
+    let remove_offset = splice_offset_map(before, &intermediate);
+    let insert_offset = splice_offset_map(&intermediate, after);
+    for path in paths {
+        // A parseable intermediate can temporarily rebind a key too. Protect
+        // dependencies present in either the raw or retirement-projected host.
+        for document in original.iter().chain(std::iter::once(&projected_original)) {
+            let Some(array) = lookup(document.as_item(), path).and_then(Item::as_array) else {
+                continue;
+            };
+            let span = array.span().expect("parsed arrays retain source spans");
+            let map_offset = |offset| remove_offset(offset).and_then(&insert_offset);
+            let mapped = map_offset(span.start).zip(map_offset(span.end - 1));
+            let remaining = lookup(updated.as_item(), path).and_then(Item::as_array).and_then(Array::span);
+            if mapped
+                .zip(remaining)
+                .is_none_or(|((start, end), remaining)| remaining.start != start || remaining.end != end + 1)
+            {
+                return Err(refusal(
+                    format!("this change would remove or rebind the live TOML array selector {path:?}"),
+                    RefusalRemedy::ArrayDependency,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn splice_offset_map(before: &str, after: &str) -> impl Fn(usize) -> Option<usize> + use<> {
+    let prefix: usize = before
+        .chars()
+        .zip(after.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    let suffix: usize = before[prefix..]
+        .chars()
+        .rev()
+        .zip(after[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    let before_end = before.len() - suffix;
+    let after_end = after.len() - suffix;
+    move |offset| {
+        if offset < prefix {
+            Some(offset)
+        } else if offset >= before_end {
+            Some(after_end + offset - before_end)
+        } else {
+            None
+        }
+    }
+}
+
 /// Remove one matching unmanaged value for each generated entry, not comments
 /// or other regions. Array punctuation is bounded by parser-provided spans.
 fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, ManagedRegionRefusal> {
     let generated = body_array(body)?;
     let protected = validated_regions(text)?;
     let values: Vec<_> = array.iter().collect();
+    let canonical: Vec<_> = values.iter().map(|value| canonical_value(value)).collect();
     let mut removals = Vec::new();
     let mut used = std::collections::BTreeSet::new();
     for generated in &generated {
+        let generated = canonical_value(generated);
         let candidate = values.iter().enumerate().find(|(index, value)| {
             let span = value.span().expect("parsed array values retain source spans");
             !used.contains(index)
                 && !protected
                     .iter()
                     .any(|region| span.start < region.end_line.end && region.start_line.start < span.end)
-                && canonical_value(generated) == canonical_value(value)
+                && generated == canonical[*index]
         });
         if let Some((index, value)) = candidate {
             if has_interior_comments(text, value) {
@@ -372,10 +460,13 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
         }
     }
     removals.sort_by_key(|range| range.start);
-    let mut adopted = text.to_owned();
-    for range in removals.into_iter().rev() {
-        adopted.replace_range(range, "");
+    let mut adopted = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in removals {
+        adopted.push_str(&text[cursor..range.start]);
+        cursor = range.end;
     }
+    adopted.push_str(&text[cursor..]);
     Ok(adopted)
 }
 
@@ -443,7 +534,6 @@ mod tests {
     use crate::checksum::checksum_str;
     use crate::decision::Decision;
     use crate::plan::{Plan, Target};
-    use crate::region::remove_region;
 
     const BODY: &str = "# Guidance.\n\"managed\",\n";
     const REGION: &str = "  # >>> anvil-managed: entries\n  # Guidance.\n  \"managed\",\n  # <<< anvil-managed: entries\n";
@@ -696,6 +786,38 @@ mod tests {
             output(&format!("plugins.default = [\n{other}]\n")),
             format!("plugins.default = [\n{REGION}{other}]\n")
         );
+    }
+
+    #[test]
+    fn duplicate_adoption_preserves_generated_order_and_unmatched_host_values() {
+        let mut spec = spec();
+        spec.region.body = "\"x\",\n\"managed\",\n\"x\",\n".to_owned();
+        let item = plan_toml_array_region(
+            &Manifest::default(),
+            Some("plugins.default = [\"x\", 'managed', \"x\", \"x\", \"user\"]\n"),
+            "config.toml",
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(
+            item.spliced_host.unwrap(),
+            "plugins.default = [\n  # >>> anvil-managed: entries\n  \"x\",\n  \"managed\",\n  \"x\",\n  # <<< anvil-managed: entries\n   \"x\", \"user\"]\n"
+        );
+    }
+
+    #[test]
+    fn array_boundary_overlaps_are_refused_in_both_directions() {
+        for text in [
+            "# >>> anvil-managed: other\nplugins.default = [\n# <<< anvil-managed: other\n\"managed\",\n]\n",
+            "plugins.default = [\n\"managed\",\n# >>> anvil-managed: other\n]\n# <<< anvil-managed: other\n",
+        ] {
+            assert_eq!(
+                plan_toml_array_region(&Manifest::default(), Some(text), "config.toml", &spec())
+                    .unwrap_err()
+                    .remedy,
+                RefusalRemedy::EnclosingOwnership
+            );
+        }
     }
 
     #[test]

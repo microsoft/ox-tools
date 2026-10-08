@@ -86,15 +86,14 @@ impl Catalog {
     }
 
     /// A `sha256:…` checksum over the whole catalog — every artifact's
-    /// identity and rendered body, in canonical (sorted) order.
+    /// identity, rendered body, and static TOML array selector metadata, in
+    /// canonical (sorted) order.
     ///
     /// Deterministic and independent of any repository: it depends only on
     /// the artifact set, not on artifact insertion order and not on the
     /// [`CliMeta`] identity. Two builds that share a `tool_version` but
     /// differ in any artifact (an extra file, an overridden body, a swapped
-    /// backend file) produce different checksums. See
-    /// [`updates.md §1`](../../docs/design/updates.md) and
-    /// [`extensibility.md §5.1`](../../docs/design/extensibility.md).
+    /// backend file, or a changed array selector) produce different checksums.
     #[must_use]
     pub fn checksum(&self) -> String {
         let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
@@ -212,6 +211,11 @@ impl CatalogBuilder {
     ///
     /// Duplicate host/id identities are rejected, including ordinary regions.
     /// Replacement preserves the selector; removal removes it.
+    /// The path must contain at least one TOML key component (not a dotted
+    /// expression); quoted or empty TOML keys are supported as literal components.
+    /// The region must use hash comments and contain only TOML array entries
+    /// and comments, with a trailing comma after the last entry.
+    /// Invalid specifications are reported by [`Self::build`].
     #[must_use]
     pub fn with_toml_array_region(mut self, spec: TomlArrayRegionSpec) -> Self {
         let placement = (spec.region.host.clone(), spec.region.id, spec.path);
@@ -270,9 +274,11 @@ impl CatalogBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if any `with_artifact` / `replace_artifact` /
+    /// Returns an error if any `with_artifact` / `with_toml_array_region` / `replace_artifact` /
     /// `without_artifact` call violated its add/override/remove invariant, or
-    /// if an owned file under `justfiles/` is not a `.just` recipe.
+    /// if an owned file under `justfiles/` is not a `.just` recipe. TOML array
+    /// regions also fail validation for an empty selector path, non-hash syntax,
+    /// invalid TOML entry bodies, or a missing final comma on a nonempty body.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
