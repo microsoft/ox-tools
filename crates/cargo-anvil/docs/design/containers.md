@@ -2,7 +2,7 @@
 
 Container execution is an explicit alternate environment for the generated
 checks: `just anvil-container <command>...` ensures an image exists, then runs
-the command with the repository mounted. `anvil-container-shell` opens an
+the command with the repository mounted. `just anvil-container` opens an
 interactive shell. Native `just anvil-pr` does not route itself into a container.
 There is no repository container-settings file or second check implementation.
 
