@@ -1,702 +1,180 @@
-# cargo-anvil — Extensibility
+# Catalog extensibility
 
-> **Status:** implemented. `cargo-anvil` now exposes the extensibility surface described here so
-> *other* teams can ship their own cargo subcommand — with their own check catalog — while
-> reusing the same anvil engine (decision table, region splicing, manifest tracking, backend
-> resolution, dry-run, summary).
+A downstream distribution changes **policy**, not the ownership engine. It
+composes one catalog, chooses its CLI identity and invokes the shared runner.
+This lets an organization layer policy over Anvil without forking discovery,
+checksums, proposals, retirement or safety checks.
 
-This is a companion to the top-level [README.md](./README.md). It assumes familiarity with the
-core concepts defined there and in [checks.md](./checks.md), [local.md](./local.md), and
-[updates.md](./updates.md).
+The implementation surface is [catalog](../../src/catalog),
+[runner](../../src/run.rs) and the built-in
+[artifact registry](../../src/anvil/artifacts/mod.rs). The exact public signatures
+belong there; this document describes their composition contract.
 
-## 1. Scope and constraint
+## Distribution boundary
 
-A single repository is only ever managed by **one** anvil-family tool. We explicitly do **not**
-support two such tools writing to the same repo. That constraint is load-bearing for this design:
-it means there is no namespace to isolate, so the on-disk vocabulary never needs to vary per fork.
+The engine accepts rendered strings and artifact specifications. It does not
+discover plugins, execute extension callbacks while reconciling files, or read a
+repository-specific catalog configuration language. A distribution is a Rust
+program/library composing the catalog before calling the engine.
 
-Concretely, `anvil` is the name of the **engine and the on-disk format**, not of any particular
-front-end binary. Every tool built on the engine emits the *same* fixed namespace:
+A layered distribution should consume its parent library's catalog, apply its
+changes, and publish its own catalog for further consumers. Only the final
+distribution runs against a repository. Running several generators in sequence
+is not composition: `.anvil.lock` records one tool owner and the engine rejects
+a different subcommand unless explicitly switched with `--force`.
 
-- owned-file tree `justfiles/anvil/…`
-- sidecar manifest `.anvil.lock`
-- review-sibling suffix `.anvil-proposed`
-- managed-region sentinels `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`
-- region IDs such as `anvil-imports`, `anvil-workspace-rust-lints`,
-  `anvil-rust-lints`, and `anvil-lints`
-- recipe-name prefix `anvil-` (`anvil-pr`, `anvil-clippy`, …)
+The identity contains CLI name/help/version information, but is not merely
+branding. Its subcommand is the persistent lock owner. Tool version and catalog
+checksum are provenance; artifact checksums still decide whether content may be
+changed.
 
-That shared vocabulary is a feature: it signals "this content is managed by the anvil engine —
-don't hand-edit it," independent of which binary wrote it. A fork never rebrands any of it.
+## Artifact identity
 
-## 2. What a fork actually customizes
+| Artifact | Identity | Additional contract |
+|---|---|---|
+| `OwnedFileSpec` | Repository-relative path | Whole-file body; optional backend gate |
+| `RegionSpec` | Host selector and region id | Body plus comment syntax |
+| `TomlArrayRegionSpec` | The underlying region's host selector and id | Literal TOML key components selecting an array |
 
-Because the on-disk format is fixed, a downstream tool varies exactly two things, neither of
-which touches the engine vocabulary:
+A backend gate is available for owned files. It uses the closed `Backend` enum:
+extensions can add files for GitHub or ADO, not invent another backend name.
+Regions are not backend-gated.
 
-1. **CLI identity** — the cargo subcommand name (`cargo myforge`), `about` text, and `version`.
-   This is pure clap metadata with zero engine impact.
-2. **Catalog content** — the set of artifacts (owned files and managed regions, including the
-   gated cloud-workflow backend files) the tool
-   emits. This is the actual substance of extensibility.
+`HostSelector` expands at plan time:
 
-Everything else — the update algorithm, drift detection, opt-out semantics, backend
-autodetection, `--dry-run`, the summary — is inherited unchanged. So is the on-disk vocabulary in
-§1.
+- `Path` selects one repository-relative host.
+- `EachMemberManifest` selects discovered workspace members, and no hosts in a
+  non-workspace single crate.
+- `WorkspaceCargoToml` selects the root only when it has a `[workspace]` table.
+- `SingleCrateCargoToml` selects the root only when it does not.
 
-## 3. Goal: a trivial downstream binary
+Region ids may be distribution-specific; they are not a closed list of built-in
+names. Existing ids and paths are compatibility keys, however. Renaming one is
+an addition plus retirement, not an in-place override.
 
-The entire downstream binary should be one line:
+Runtime path resolution follows existing case-insensitive matches component by
+component and rejects ambiguity rather than selecting arbitrarily. Keep
+canonical repository-relative paths in catalogs. The runtime also enforces
+filesystem containment when applying changes.
 
-```rust
-// cargo-myforge/src/main.rs
-use std::process::ExitCode;
+## Building a catalog
 
-fn main() -> ExitCode {
-    cargo_anvil::run_app(myforge::catalog())
-}
+Start from `Catalog::anvil()` and convert it with `into_builder()`. Builder
+operations express different intentions:
+
+| Operation | Meaning |
+|---|---|
+| `with_artifact` | Add a new identity; an existing identity is an error |
+| `replace_artifact` | Replace an existing identity at its current emission position; a missing identity is an error |
+| `without_artifact` | Remove an existing identity; a missing identity is an error |
+| `with_toml_array_region` | Add a region with array-selector metadata |
+| `build` | Return a validated catalog or accumulated configuration errors |
+
+Prefer registry constructors and `with_body` to stringly typed identity
+reconstruction:
+
+```rust,ignore
+use cargo_anvil::{Catalog, artifacts};
+
+let catalog = Catalog::anvil()
+    .into_builder()
+    .replace_artifact(
+        artifacts::region::rustfmt().with_body("edition = \"2024\"\n"),
+    )
+    .build()?;
 ```
 
-…plus one function that *describes the catalog* by starting from anvil's and customizing it:
-
-```rust
-// cargo-myforge/src/lib.rs
-use cargo_anvil::Catalog;
-
-pub fn catalog() -> Catalog {
-    Catalog::anvil()
-        .into_builder()
-        .subcommand("myforge")                         // CLI identity only
-        .about("MyForge: unified Rust build scaffolding for the Foo org")
-        .version(env!("CARGO_PKG_VERSION"))
-        .with_artifact(Artifact::owned_file(           // append an owned file
-            "justfiles/anvil/extra.just",
-            include_str!("../templates/extra.just"),
-        ))
-        .with_artifact(myforge_codeowners_region())    // append a managed region
-        .replace_artifact(                             // swap the check recipes wholesale,
-            artifacts::justfile::checks()              // derived from the built-in
-                .with_body(include_str!("../templates/checks.just")),
-        )
-        .build()
-}
-```
-
-That is the whole contract: **one line in `main`, plus a `Catalog` value.** Note the new owned
-file still lives under `justfiles/anvil/` and any new region still uses `anvil-managed`
-sentinels — the fork extends the anvil namespace, it does not create its own.
-
-## 4. The shape of a catalog
-
-```rust
-pub struct Catalog {
-    /// CLI identity. Cosmetic only — drives clap, never the on-disk format.
-    cli: CliMeta,
-    /// Ordered, keyed set of artifacts to emit.
-    artifacts: Vec<Artifact>,
-}
-
-pub struct CliMeta {
-    /// Cargo subcommand token (the word after `cargo`). Defaults to `anvil`.
-    pub subcommand: String,
-    pub bin_name: String,   // defaults to `cargo-{subcommand}`
-    pub about: String,
-    pub version: String,
-}
-```
-
-`CliMeta` feeds clap only. The `subcommand` token is used solely to strip the leading word cargo
-injects (`cargo myforge` → argv `myforge …`) and to render `--help`. It is never interpolated
-into a path, a sentinel, or a recipe name.
-
-The catalog's content is an ordered set of **artifacts**. There are just two kinds:
-
-- **`OwnedFile`** — a fully tool-owned file. The justfile tree members live here, and so does
-  every cloud-workflow backend file (composite actions / step templates, workflows / stages, root
-  workflows / pipelines). An owned file may be **gated** on a backend (see §4.3) so it is emitted
-  only when that backend is selected. Identity: its repo-root-relative path.
-- **`ManagedRegion`** — a sentinel-delimited region spliced into a user-composed host file
-  (Justfile imports, `[workspace.lints]`, `deny.toml`, `rustfmt.toml`, `.delta.toml`,
-  spellcheck, per-member `[lints]`). Identity: `(host-selector, region_id)`.
-
-```rust
-pub enum Artifact {
-    OwnedFile(OwnedFileSpec),
-    Region(RegionSpec),
-}
-
-pub struct OwnedFileSpec {
-    pub path: &'static str,
-    pub body: String,
-    pub gate: Option<Backend>,     // None = always; Some(b) = only when b is selected (§4.3)
-}
-
-/// The cloud-workflow backends. A closed, engine-owned enum — downstream
-/// catalogs cannot add to it. Used only to select and gate (§4.3).
-pub enum Backend { GitHub, Ado }
-
-/// A managed-region identifier. A newtype, not a bare string, so it can't be
-/// confused with a file path, a recipe name, or any other string the API
-/// takes. It is the value placed after `anvil-managed:` in the sentinels.
-pub struct RegionId(&'static str);
-
-impl RegionId {
-    pub const fn new(id: &'static str) -> Self;
-}
-
-pub struct RegionSpec {
-    pub host: HostSelector,        // where the region goes (see §4.2)
-    pub id: RegionId,              // the sentinel id
-    pub body: String,              // rendered between the sentinels
-    pub syntax: CommentSyntax,     // Hash / SlashSlash
-}
-
-pub struct TomlArrayRegionSpec {
-    pub region: RegionSpec,
-    pub path: Vec<String>,         // TOML key components, not a dotted string
-}
-
-impl Artifact {
-    /// Derive a variant of this artifact with a new body, preserving every
-    /// other field — path, gate, host, id, syntax. This is how a fork
-    /// overrides a built-in (§4.1) without being able to alter its identity.
-    pub fn with_body(self, body: impl Into<String>) -> Artifact;
-}
-```
-
-`RegionId` is the only identifier newtype in the public surface. There is **no public
-`ArtifactKey`**: the engine identifies "which slot" internally (a path for owned files, a
-`(host, id)` pair for regions) for dedup and override, but a fork never constructs or names a key.
-Instead it references the built-in artifacts themselves (§4.1).
-
-The `RegionId` newtype lives at the catalog/API boundary; internally it derefs to `&str`, so
-`region.rs`'s `find_region` / `render_region` / `upsert_region` are unchanged. Anvil's built-in
-region ids are `const RegionId::new("anvil-…")` values.
-
-This is the key reframing: **`run.rs::build_plan` stops calling a fixed list of hand-named
-emitters** (`plan_mod_just`, `plan_tools_just`, `plan_cargo_lints`, …) and instead iterates the
-catalog's artifact set, dispatching each to the existing generic driver (`plan_owned_file` /
-`plan_managed_region`). The per-artifact decision logic, manifest interaction, and orphan
-detection are unchanged — only the *source of the list* changes from compiled-in calls to
-catalog data.
-
-#### TOML array-entry regions
-
-`CatalogBuilder::with_toml_array_region(TomlArrayRegionSpec { region, path })`
-appends an ordinary `Artifact::Region` with array-placement metadata in the
-catalog. The exhaustive `Artifact` enum and existing `RegionSpec` struct literals
-are unchanged. For
-example, `path: vec!["plugins".into(), "default".into()]` selects
-`plugins.default`; the region body is an unindented sequence of TOML array
-entries and comments, with a trailing comma after the last entry. The engine
-indents the body and hash sentinels by two spaces. It does not own the table,
-key, brackets, or other entries:
-
-```rust
-use cargo_anvil::{Catalog, CliMeta, CommentSyntax, HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
-
-fn plugin_catalog() -> Result<Catalog, Box<dyn std::error::Error>> {
-    Ok(Catalog::builder(CliMeta::new("anvil"))
-        .with_toml_array_region(TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".into()),
-                id: RegionId::new("example-plugins"),
-                body: "# Development guidance.\n\"market:development\",\n".into(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".into(), "default".into()],
-        })
-        .build()?)
-}
-```
-
-```toml
-[plugins]
-default = [
-  # >>> anvil-managed: example-plugins
-  # Development guidance.
-  "market:development",
-  # <<< anvil-managed: example-plugins
-  # Repository guidance.
-  "user:other-plugin",
-]
-```
-
-Missing hosts, parent tables, or arrays are scaffolded once, outside ownership.
-When the parent's last key belongs to another managed region, a missing array
-assignment is inserted after its closing sentinel, still inside the parent
-table. If that is impossible without changing table membership, planning refuses.
-Existing multiline, inline, empty, dotted-key, and quoted-key arrays are located
-using TOML parser source spans. New regions are inserted first, so a repository's
-last element need not gain a comma. One semantically identical unmanaged entry
-is adopted for each generated entry; its comments remain repository-owned.
-Matching compound entries with interior comments are refused until those
-comments are moved outside the entry. Parser token spans distinguish comments
-from `#` in string values and quoted keys.
-Other regions are never adoption candidates. Existing comments and unrelated
-settings retain their original bytes except for the missing scaffold and the
-array's opening line break.
-
-Malformed TOML, non-array selectors, malformed markers, regions outside the
-selected array, and markers splitting a parsed value are refused.
-Every sentinel in the host is validated before scaffolding or adoption, including
-unpaired or duplicated markers for other ids. Adoption refuses if a separator it
-would remove belongs to another region.
-An array enclosed by another managed region is also refused: its scaffold must
-be repository-owned before entry-level ownership can be introduced. Retire the
-enclosing ownership first; another run alone cannot resolve this refusal. Paired
-but misplaced markers must enclose complete entries in the selected array, not
-be repaired by removing a single sentinel. Array bodies
-and the complete spliced host are parser-validated before writing. Ordinary
-edited-body protection remains unchanged. Identity and lock tracking are still
-`(host, id)` and the checksum of the rendered entry body; the compiled catalog
-checksum additionally includes the static selector, never repository bytes.
-Updates replace only the sentinel span; retirement uses ordinary region removal,
-leaving the array scaffold and other entries intact. Trailing commas keep both
-empty-array and last-entry retirement valid. No special CLI or downstream file
-merger is required.
-
-Neighboring writes and retirements are validated against the accumulated host.
-If they remove a live selected array's delimiters or rebind its key to another
-table, that change is refused and its lock provenance is retained. This includes
-partial overlaps in either direction and a separate region owning the parent
-table header. Independent safe writes still proceed. Fully enclosing ownership
-can retire when no live array selector depends on it.
-
-`Catalog::toml_array_path(&RegionSpec) -> Option<&[String]>` retrieves a selector
-by the ordinary region's host/id identity. `into_builder` and `replace_artifact`
-preserve it; replacement body/syntax validation reads the current ordinary
-region, not a duplicate body in metadata. `without_artifact` removes both the
-region and its selector. Duplicate registration conflicts with both ordinary
-and array-positioned regions; invalid selectors and entry bodies fail `build`.
-Catalogs without array-placement metadata retain their existing checksum.
-Changing the selector while keeping `(host, id)` does not migrate an existing
-marked region: if its old location is outside the new array, planning refuses.
-Restore the old selector and retire the old region before registering the new
-selector, or explicitly reconcile the old marked entries with the new array.
-
-`TomlArrayRegionSpec` is an editable input record like `RegionSpec`, not a
-validated catalog. Its public fields support catalog authoring; `build` validates
-the current path and body, including bodies supplied through replacement.
-
-Because the on-disk format is fixed, **none of the engine internals (`region.rs`, `manifest.rs`,
-the templates) need to change to support forks.** `region.rs` keeps its hard-coded
-`anvil-managed` sentinel; the templates keep their literal `anvil-` recipe names; the manifest
-keeps `.anvil.lock`. The only refactor is data-driving the artifact list and threading
-`CliMeta` into clap.
-
-### 4.1 Built-in artifacts are public
-
-To override or drop a base artifact, a fork needs a handle to it. Rather than exposing *keys*
-(which split identity from content and let a fork pair a key with mismatched content), the engine
-exposes the **artifacts themselves**, content and identity together, in an `artifacts::` registry:
-
-```rust
-pub mod artifacts {
-    // Host-neutral agent guidance emitted for every backend selection.
-    pub mod instructions {
-        pub fn cargo_anvil() -> Artifact;      // .github/instructions/cargo-anvil.instructions.md
-        pub fn adoption_skill() -> Artifact;  // .github/skills/cargo-anvil-adoption/SKILL.md
-    }
-    // The `justfiles/anvil/` recipe tree — every member is an owned `.just` file.
-    pub mod justfile {
-        pub fn entry() -> Artifact;     // justfiles/anvil/mod.just (imports the siblings)
-        pub fn versions() -> Artifact;  // justfiles/anvil/versions.just
-        pub fn tools() -> Artifact;     // justfiles/anvil/tools.just
-        pub fn helpers() -> Artifact;   // justfiles/anvil/helpers.just (shared helper recipes)
-        pub fn impact() -> Artifact;    // justfiles/anvil/impact.just (the anvil-impact recipe + tier formatter)
-        pub fn runner() -> Artifact;    // justfiles/anvil/runner.just (native/container tier router)
-        pub fn check_files() -> Vec<Artifact>; // justfiles/anvil/checks/<check>.just (one per check)
-        pub fn group_files() -> Vec<Artifact>; // justfiles/anvil/groups/<group>.just (one per group)
-        pub fn tiers() -> Artifact;     // justfiles/anvil/tiers.just
-    }
-    // Managed regions spliced into user-composed host files.
-    pub mod region {
-        pub fn justfile_imports() -> Artifact;   // Justfile / anvil-imports
-        pub fn workspace_rust_lints() -> Artifact;
-        pub fn workspace_rustdoc_lints() -> Artifact;
-        pub fn workspace_clippy_lints() -> Artifact;
-        pub fn single_crate_rust_lints() -> Artifact;
-        pub fn single_crate_rustdoc_lints() -> Artifact;
-        pub fn single_crate_clippy_lints() -> Artifact;
-        pub fn member_lints() -> Artifact;       // <member>/Cargo.toml / anvil-lints
-        pub fn deny_advisories() -> Artifact;    // deny.toml / anvil-deny-advisories
-        pub fn deny_licenses() -> Artifact;      // deny.toml / anvil-deny-licenses
-        pub fn deny_bans() -> Artifact;          // deny.toml / anvil-deny-bans
-        pub fn deny_sources() -> Artifact;       // deny.toml / anvil-deny-sources
-        pub fn rustfmt() -> Artifact;            // rustfmt.toml / anvil-rustfmt
-        pub fn delta() -> Artifact;              // .delta.toml / anvil-delta
-        pub fn spellcheck() -> Artifact;         // spellcheck.toml / anvil-spellcheck
-        pub fn clippy() -> Artifact;             // clippy.toml / anvil-clippy
-        pub fn gitattributes() -> Artifact;      // .gitattributes / anvil-gitattributes
-    }
-    // Backend files are owned files gated on a backend (§4.3), grouped per backend.
-    pub mod github {
-        pub fn setup_action() -> Artifact;      // .github/actions/anvil-setup/action.yml
-        pub fn impact_action() -> Artifact;     // .github/actions/anvil-impact/action.yml
-        pub fn pr_root_workflow() -> Artifact;  // .github/workflows/anvil-pr.yml
-        // …shared group runner and status reporter actions, reusable workflows, scheduled workflows.
-    }
-    pub mod ado {
-        pub fn setup_step() -> Artifact;        // .pipelines/anvil/steps/setup.yml
-        pub fn job_wrapper() -> Artifact;       // .pipelines/anvil/steps/job.yml
-        pub fn advisory_comments() -> Artifact; // .pipelines/anvil/steps/advisory-comments.yml
-        // …per-group step templates, root pipelines.
-    }
-}
-```
-
-(They are functions rather than `const`s only because an `Artifact` carries an owned `String`
-body.) With the artifact in hand, the two operations are uniform and identity-safe:
-
-```rust
-// Override: derive from the built-in, so path + gate are preserved by construction.
-.replace_artifact(artifacts::github::setup_action().with_body(include_str!("../templates/our-setup.yml")))
-// Remove: pass the artifact; the engine reads its identity.
-.without_artifact(artifacts::ado::advisory_comments())
-```
-
-Because an override is *derived* from the real artifact via `with_body`, a fork cannot change a
-GitHub-gated file into an ADO-gated one, retarget it to a different path, or un-gate it — the
-class of "key paired with the wrong content" mistakes is gone structurally, with no validation
-rule needed. The raw `RegionId` sentinel values stay private to the engine; the built-in
-artifacts are the sanctioned handles. The previous `pub const *_REGION_ID` items collapse into
-this one organized namespace.
-
-### 4.2 Host selectors (workspace fan-out and `Cargo.toml` shape)
-
-Some regions are not anchored to one literal file. The crate-scope `[lints]` region is spliced
-into **every** workspace member's `Cargo.toml`, with the host set discovered at runtime from the
-workspace, not known when the catalog is authored. And the lint catalog's *placement* depends on
-whether the root `Cargo.toml` declares a `[workspace]` table. A single `(host, id)` key can't
-express either condition.
-
-The `host` of a `RegionSpec` is therefore a **selector**, not a literal path:
-
-```rust
-pub enum HostSelector {
-    /// A single literal repo-root-relative path (Justfile, deny.toml).
-    Path(String),
-    /// Every workspace member's manifest — expands to one `<member>/Cargo.toml`
-    /// host per member discovered at plan time. A non-workspace single crate has
-    /// no workspace members, so this expands to nothing there.
-    EachMemberManifest,
-    /// The root `Cargo.toml`, but only when it declares a `[workspace]` table.
-    WorkspaceCargoToml,
-    /// The root `Cargo.toml`, but only when it does NOT declare a `[workspace]`
-    /// table (a single-crate repo).
-    SingleCrateCargoToml,
-}
-```
-
-`build_plan` expands selectors against the discovered `Workspace`: `EachMemberManifest` fans out to
-one concrete `(member/Cargo.toml, id)` plan item per member, and the two `*CargoToml` selectors
-emit the root `(Cargo.toml, id)` item only when the workspace table is present (resp. absent).
-Everything downstream of expansion is unchanged — the manifest keys on the concrete expanded
-`(host, id)` pairs, so per-member orphan detection (a member is removed → its region entry is
-dropped) works exactly as it does now.
-
-This makes the fan-out and the workspace/single-crate conditioning first-class, reusable
-capabilities rather than special-cased engine logic. A fork that wants its own region in every
-crate's `Cargo.toml` just adds one artifact:
-
-```rust
-.with_artifact(Artifact::region(RegionSpec {
-    host: HostSelector::EachMemberManifest,
-    id: RegionId::new("myorg-metadata"), // free-form id; unique within the host
-    body: my_member_metadata_body(),
-    syntax: CommentSyntax::Hash,
-}))
-// …or, equivalently, the constructor sugar:
-.with_artifact(Artifact::member_region(RegionId::new("myorg-metadata"), my_member_metadata_body()))
-```
-
-and the engine replicates it across all members, tracks each in `.anvil.lock`, and reconciles
-drift per member — no per-fork engine changes.
-
-> Note anvil's own lint regions are modeled as seven separate artifacts under this scheme, with no
-> region-id-specific engine logic: three `WorkspaceCargoToml` regions carrying the Rust, rustdoc,
-> and Clippy `[workspace.lints.<namespace>]` tables; three `SingleCrateCargoToml` equivalents under
-> `[lints.<namespace>]`; and an `EachMemberManifest` member stub (`anvil-lints`). In a workspace the
-> workspace trio and member stub emit; in a single-crate repo only the single-crate trio does.
-> Which set applies is purely a property of the selectors on the built-in artifacts, transparent
-> to forks.
-
-> **On-disk casing.** Host paths and owned-file paths are canonical (`Justfile`, `Cargo.toml`), but
-> the engine resolves each against the repo case-insensitively and reuses whatever casing already
-> exists on disk (e.g. an adopter's lowercase `justfile`). A fork authors canonical paths and never
-> has to think about case variants — this is engine behavior, not per-catalog. An exact spelling
-> always wins. If a case-sensitive filesystem contains multiple non-exact spellings that fold to
-> the same canonical path, the run refuses that ambiguous lookup rather than letting directory
-> enumeration order choose which file cargo-anvil owns. A genuinely missing directory preserves
-> canonical casing for the path that will be created; permission and directory-enumeration errors
-> fail with path context rather than being mistaken for absence.
-
-### 4.3 Backends: a fixed set, overridable in parts
-
-There are exactly two cloud-workflow backends, `github` and `ado`, and **the set is closed**:
-`Backend` is an engine-owned enum that downstream catalogs cannot extend. A fork never *adds* a
-backend. What it can do — easily — is **override or drop the individual files** a backend emits.
-
-Backends are not a separate artifact kind. Each backend's files (composite actions / step
-templates, reusable workflows / stages, root workflows / pipelines, including per-group fan-out;
-see [github.md](./github.md) / [ado.md](./ado.md)) are ordinary `OwnedFile` artifacts whose
-`gate` is set to that backend:
-
-```rust
-OwnedFileSpec {
-    path: ".github/actions/anvil-setup/action.yml",
-    body: /* … */,
-    gate: Some(Backend::GitHub),   // emitted only when github is selected
-}
-```
-
-Selection is unchanged from [README.md §5.2](./README.md): the engine resolves a backend set from
-explicit `--backend` flags or autodetection over the *fixed* `{github, ado}`, and only emits an
-owned file whose `gate` is `None` or names a selected backend. Each built-in backend file is
-exposed as a public artifact (§4.1), and a fork manipulates them — and adds new ones — with the
-same uniform verbs used everywhere else:
-
-```rust
-// Override one built-in: derive from it, so path + gate are preserved.
-.replace_artifact(artifacts::github::setup_action().with_body(include_str!("../templates/our-setup.yml")))
-// Drop one built-in entirely.
-.without_artifact(artifacts::ado::advisory_comments())
-// Add a brand-new file gated on an existing backend.
-.with_artifact(Artifact::backend_file(
-    Backend::GitHub,
-    ".github/workflows/anvil-myorg-release.yml",
-    include_str!("../templates/release.yml"),
-))
-```
-
-`Artifact::backend_file(backend, path, body)` is the gated constructor used to **add** a new
-backend file. It takes the closed `Backend` enum, so a fork can gate only on `github` or `ado` —
-it can add files *to* an existing backend but cannot invent a backend. Adding is safe because
-`with_artifact` errors if the path already exists, so a new gated file can never silently shadow a
-built-in.
-
-Overriding a built-in is different from adding: prefer `artifacts::…().with_body(…)`, which keeps
-the original path and gate, over reconstructing the file by hand. (`backend_file` + `replace`
-would also work, but restating the path and backend invites the mismatch — wrong gate, wrong path
-— that deriving via `with_body` avoids by construction.)
-
-This gives fork authors fine-grained control — replace one action, drop one step, add one
-workflow — without the ability to invent backends, and end users keep the normal dirty-file
-ownership flow for one-off local edits.
-
-## 5. The engine API
-
-The public surface gains a small, thin layer; the existing modules (`decision`, `region`,
-`manifest`, `plan`, `workspace`, `emit::*`) stay as-is internally.
-
-```rust
-// Build / customize a catalog.
-impl Catalog {
-    pub fn anvil() -> Catalog;                       // the built-in base catalog
-    pub fn builder(cli: CliMeta) -> CatalogBuilder;   // start from empty
-    pub fn into_builder(self) -> CatalogBuilder;      // start from an existing catalog
-}
-
-impl CatalogBuilder {
-    pub fn subcommand(self, name: impl Into<String>) -> Self;
-    pub fn about(self, s: impl Into<String>) -> Self;
-    pub fn version(self, s: impl Into<String>) -> Self;
-
-    // The three artifact verbs are uniform — all operate on the `Artifact` unit.
-    pub fn with_artifact(self, artifact: Artifact) -> Self;     // add; errors if identity present
-    pub fn with_toml_array_region(self, spec: TomlArrayRegionSpec) -> Self;
-    pub fn replace_artifact(self, artifact: Artifact) -> Self;  // override; errors if identity absent
-    pub fn without_artifact(self, artifact: Artifact) -> Self;  // remove; errors if identity absent
-
-    pub fn build(self) -> Result<Catalog, AppError>;
-}
-
-// Constructors for fork-authored artifacts. Override an existing built-in by
-// deriving from `artifacts::…` via `with_body` instead of reconstructing it.
-impl Artifact {
-    pub fn owned_file(path: &'static str, body: impl Into<String>) -> Artifact;  // gate: None
-    pub fn backend_file(backend: Backend, path: &'static str, body: impl Into<String>) -> Artifact; // gate: Some
-    pub fn region(spec: RegionSpec) -> Artifact;
-    pub fn member_region(id: RegionId, body: impl Into<String>) -> Artifact; // EachMemberManifest + Hash sugar
-}
-
-// Drive the engine.
-impl Cli {
-    /// Parse argv against a catalog, stripping the `catalog.cli.subcommand`
-    /// token cargo injects, and rendering help/version/about from `CliMeta`.
-    pub fn parse_from_cargo_args(catalog: &Catalog, args: I) -> Result<Cli, clap::Error>;
-}
-
-pub fn run(catalog: &Catalog, cli: &Cli) -> Result<i32, AppError>;
-pub fn run_update(catalog: &Catalog, cli: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError>;
-
-/// One-call entry point: tracing init + parse + run + ExitCode mapping.
-/// This is the body of today's `main.rs`, generalized over a catalog.
-#[must_use]
-pub fn run_app(catalog: Catalog) -> ExitCode;
-```
-
-`run_app` is what makes the downstream `main` a single line. It owns exactly what
-`cargo-anvil`'s `main.rs` owns today (subscriber setup, `parse_from_cargo_args`, and the
-`Ok/Err → ExitCode` mapping), so all of that logic lives in one tested place rather than being
-copy-pasted into every fork. The internal `run` returns zero for an applied or clean run and carries
-the plan's nonzero dry-run status in `Ok`; `run_app` maps that successful status, separately from
-`AppError`, onto the process exit code.
-
-`cargo-anvil`'s own `main.rs` collapses to
-`fn main() -> ExitCode { cargo_anvil::run_app(Catalog::anvil()) }`, proving the seam by
-dogfooding it.
-
-### 5.1 Tool identity, catalog checksum, and the single-tool guard
-
-The lock file's provenance fields (see [updates.md §1](./updates.md#1-the-manifest)) come straight
-from the catalog:
-
-- **`tool`** is `Catalog`'s `CliMeta.subcommand` — the same token that names the cargo subcommand.
-  It is the identity the **single-tool guard** keys on: at startup the engine compares the loaded
-  lock's `tool` field against `catalog.cli.subcommand`, and refuses (writing nothing, even under
-  `--dry-run`) when they differ, unless `--force` is passed to switch ownership to this tool. This
-  is the runtime enforcement of the one-tool-per-repo constraint in §1 — the constraint that lets
-  the on-disk `anvil` namespace stay fixed across forks. Because every fork keeps that fixed
-  namespace, a `myforge` lock and an `anvil` lock are the same format; the `tool` field is what
-  keeps the two tools from clobbering each other's lock.
-- **`tool_version`** is the binding crate's version (`CliMeta.version`).
-- **`catalog_checksum`** is a `sha256` over the whole `Catalog` — every artifact's identity,
-  rendered body, and static TOML array selector metadata in canonical order.
-  Selector-only changes also change the checksum. Two builds that share a `tool_version` but differ in any
-  artifact (an extra owned file, an overridden region body, a swapped backend file) produce
-  different checksums, which is what makes it useful during development. `--version` prints it.
-
-`run_app` owns all of this: it computes `catalog_checksum` from the passed `Catalog`, folds it
-into the `--version` output, performs the single-tool guard check (honoring `--force`) before
-dispatching to `run`, and records the provenance fields on save. A fork inherits everything for
-free — the same reason its `main` is one line.
-
-For an extension chain (§7), `catalog_checksum` is taken over the *fully composed* catalog
-`forge3` builds, so it reflects every ancestor's contribution plus `forge3`'s own edits; and the
-guard's `tool` is `forge3`'s subcommand, since the composed binary is the single tool managing the
-repo.
-
-## 6. Artifact-level extensibility
-
-A fork appends, replaces, or drops artifacts — owned files (including the gated backend files,
-§4.3) and managed regions. That covers the common case: "anvil's catalog plus my org's extra
-`.just` file and a CODEOWNERS region, with our own GitHub setup action." The check/group/tier
-content inside the justfile tree is an opaque blob; a fork that needs different checks replaces
-the relevant `OwnedFile` (e.g. `checks.just`) wholesale rather than editing individual recipes.
-
-This is a modest, low-risk refactor: it data-drives the artifact list (§4) without disturbing the
-engine internals or the template format.
-
-### 6.1 Placement: `justfiles/` holds recipes only
-
-One placement rule is enforced rather than left to discovery, because violating
-it fails in a confusing place. `justfiles/anvil/` may contain `.just` recipes
-and nothing else: [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects
-any other owned file under that prefix, so a derived catalog fails loudly at
-construction instead of shipping a file whose absence is noticed only later.
-
-The reason is legibility rather than image identity. The image identity hashes
-every file under `justfiles/anvil/` recursively, and the build context admits
-the whole directory, so a non-recipe file placed there is copied into the image
-*and* covered by its tag — editing it renames the image and a rebuild follows.
-What the rule protects is the meaning of the directory: it is the recipe tree,
-`just` parses everything in it, and a catalog that hides an installer script
-there makes the tool set harder to reason about. Non-recipe assets belong in a
-tool-owned directory of their own, such as `.anvil/`.
-
-Containerized execution is itself an ordinary artifact group, customized with
-the same `replace_artifact` / `with_artifact` / `without_artifact` levers as
-anything else. The artifacts it exposes and the contract each one carries are
-specified in [containers.md](./containers.md#8-customization).
-
-The public engine contains no environment-specific image, registry, cloud, or
-credential-provider details.
-
-## 7. Multi-level catalogs (extension chains)
-
-Extension is transitive: a third tool can extend a second tool's catalog exactly as the second
-extends anvil's. There is no special "base" status — `Catalog::anvil()` is just the catalog the
-engine ships; any catalog is a valid starting point for the next.
-
-```rust
-// cargo-forge3/src/lib.rs
-pub fn catalog() -> Catalog {
-    forge2::catalog()                  // start from forge2's catalog, not anvil's
-        .into_builder()
-        .subcommand("forge3")
-        .replace_artifact(             // override a region forge2 introduced
-            forge2::artifacts::telemetry().with_body(forge3_telemetry_body()),
-        )
-        .without_artifact(forge2::artifacts::extra()) // drop one of forge2's files
-        .build()
-}
-```
-
-This works with no new mechanism, because:
-
-- **A catalog is a flat, provenance-free artifact set.** By the time `forge3` sees it, anvil's
-  and forge2's artifacts are indistinguishable entries with the same identity scheme. Overriding a
-  forge2 artifact is identical to overriding an anvil one — the engine never asks "who first added
-  this." `into_builder()` accepts any `Catalog`, whoever assembled it.
-- **The artifact API is engine-public, not anvil-specific.** `Artifact`, `with_body`, `RegionId`,
-  and `HostSelector` belong to the engine. Any catalog author can export its own artifacts —
-  `forge2::artifacts::telemetry()` — exactly as anvil exposes `artifacts::region::deny()`.
-
-For an intermediate tool to be a good extension base, it follows the same contract anvil does:
-
-1. **Expose its catalog** as `pub fn catalog() -> Catalog` so descendants can start from it.
-2. **Export its artifacts** (an `artifacts::` module of `fn … -> Artifact`) so descendants can
-   derive overrides via `with_body` and pass them to `without_artifact` — the same content-plus-
-   identity handles anvil ships, no separate key registry to maintain.
-3. **Use unique region ids.** The sentinel keyword stays the fixed engine namespace
-   (`anvil-managed`), but the id *after* it is free-form and only needs to be unique within a
-   host file. A per-tool id prefix (`forge2-telemetry`) keeps a chain's regions from colliding in
-   a shared host like `Cargo.toml`.
-
-Note this does **not** reintroduce "multiple tools per repo" (§1): a chain compiles to a *single*
-binary (`forge3`). The ancestors are build-time libraries, not separately-installed tools, and
-the on-disk namespace stays the fixed `anvil` format — so `forge3` reconciles the regions its
-ancestors defined seamlessly, as one tool managing one namespace.
-
-## 8. Verification
-
-- **Dogfooding.** `cargo-anvil` is `Catalog::anvil()` through `run_app`; its existing fixture,
-  snapshot, and schema tests (see [verification.md](../verification.md)) pin that the
-  base-catalog output is byte-identical to today. Because the on-disk format is fixed, those
-  snapshots do not need to change at all.
-- **A second-front-end fixture.** Add a tiny in-repo example catalog (`Catalog::anvil()` with
-  subcommand `demoforge` and one extra owned file) and a fixture test asserting: the subcommand
-  parses, the extra file is emitted under `justfiles/anvil/`, and the output is otherwise
-  identical to the base catalog — i.e. nothing in the on-disk vocabulary shifted.
-
-## 9. Non-goals
-
-- **Multiple anvil-family tools per repo.** Out of scope by deliberate constraint (§1). This is
-  what lets the on-disk vocabulary stay fixed, with no per-fork rebranding of paths or sentinels.
-- **Per-fork on-disk rebranding.** A fork cannot rename `.anvil.lock`, the `anvil-managed`
-  sentinels, `justfiles/anvil/`, or the `anvil-` recipe prefix. Those belong to the engine.
-- **Runtime plugins / dynamic loading.** A catalog is Rust code compiled into the downstream
-  binary, not a config file discovered at runtime. This keeps the "writes files, then exits"
-  stance ([README.md §3](./README.md)) and avoids a plugin ABI.
-- **Fork-authored backends.** The backend set is closed (`github`, `ado`); a fork cannot add a
-  backend (§4.3). It can override, drop, or add individual files gated on an *existing* backend,
-  but the `Backend` enum and backend selection/autodetection are engine-owned.
-- **Changing the update algorithm per fork.** The decision table, opt-out semantics, and orphan
-  handling are fixed engine behavior. Forks customize *what* is emitted, never *how* drift is
-  reconciled.
-
-## 10. Design decisions
-
-1. **Single crate.** The engine and the `Catalog` API live in the `cargo-anvil` crate; forks
-   depend on it as a library and provide their own thin binary. We do not split out an
-   `anvil-core`. Keeping everything in one crate avoids a premature library/binary boundary and
-   keeps the base tool and the extensibility seam evolving together.
-2. **Distinct verbs for add / override / remove, each loud on mismatch.** `with_artifact` is
-   append-only (errors if an artifact with that identity already exists); `replace_artifact`
-   overrides (errors if it does *not*); `without_artifact` removes (errors if absent). To change a
-   base-catalog artifact a fork must say so explicitly via `replace_artifact`, deriving the
-   replacement from the public built-in (`artifacts::…().with_body(…)`) so its identity and gate
-   are preserved by construction. This makes collisions loud rather than silently
-   last-write-wins, so a fork can never shadow a base artifact by accident.
+`with_body` preserves path, gate, host, id and syntax. The builder matches on
+identity; it does **not** independently prohibit a manually reconstructed
+replacement from changing its gate. Use the preserving API when the intention is
+only to replace content.
+
+Errors accumulate so a distribution author can correct multiple invalid changes
+at once. Among the enforced constraints, owned files anywhere below `justfiles/`
+must have a `.just` extension. Other executable helpers belong elsewhere;
+generated imports must remain valid when artifacts are removed.
+
+The builder is not a general semantic validator for every generated language.
+Catalog authors must ensure that referenced imports exist, group/setup
+dependencies agree, YAML callers match callee parameters, and bodies compose
+valid configuration. Built-in registry and rendering tests cover the default
+catalog, not arbitrary downstream combinations.
+
+## Managed TOML array entries
+
+Use `TomlArrayRegionSpec` when the catalog owns entries within a shared array
+rather than the array assignment. For example, a selector with components
+`["plugins", "default"]` addresses the `default` array under `plugins`; a component
+containing a dot is one literal key, not a dotted-path expression.
+
+Registration stores an ordinary `Artifact::Region` plus selector metadata. The
+array selector is **not** part of identity: an ordinary region and an array
+region cannot both claim the same host/id.
+
+`build()` requires:
+
+- a nonempty vector of path components (an empty literal key component is valid);
+- hash-comment syntax;
+- a body containing only valid TOML array entries and comments;
+- a trailing comma after the final value when the body has values.
+
+`into_builder` preserves selectors, same-identity replacement retains them, and
+removal drops them. Replacement bodies are revalidated against retained array
+metadata. Replacing a body is not a conversion back to ordinary table ownership.
+
+At runtime the engine locates the array with parser spans, optionally creates
+missing repository-owned scaffolding, adopts matching unmanaged entries, and
+applies normal strict region reconciliation. Neither semantic matching nor a
+valid TOML parse grants ownership of surrounding comments, delimiters or another
+region. [Updates](./updates.md#toml-array-entries) specifies the refusal cases and
+multiset adoption behavior.
+
+## Ordering and composition
+
+Catalog iteration order is significant to planning: later regions see earlier
+accepted splices. Replacement preserves that order. Catalog checksum order is a
+different concern: its canonical sorted records deliberately ignore insertion
+order so the fingerprint describes policy content rather than construction
+history. It includes artifact bodies, gates, syntax and array selectors, but not
+CLI identity or repository content.
+
+Ordinary region hosts generally append absent regions, with built-in placement
+rules for root-level TOML and migrations. A composed host instead needs an
+explicit semantic region order and one-time scaffold. Currently the engine
+consults the built-in composed-host registry for the container Dockerfile.
+`ComposedHost` is not a general downstream builder registration API.
+
+A downstream region targeting that Dockerfile must belong to the registered
+order; an unknown id there errors instead of being appended after the final
+instructions. Customize an existing container region's body or use the
+[repository-owned gaps](./containers.md#8-customization) rather than assuming
+arbitrary new ids can extend its sequence.
+
+Whole-table TOML regions must not claim the same table independently. Parser
+validation refuses incompatible composition; it does not merge two catalogs'
+competing policies. Split table ownership and preserve residue binding as
+described in [updates](./updates.md#adopting-a-hand-written-table).
+
+## Removal and customization responsibilities
+
+Removing an artifact changes the next run's live set. Pristine tracked owned
+files can be deleted; edited owned files are retained and untracked. Regions have
+stricter retirement rules: edited bodies retain tracking and refuse removal.
+Removing a backend also retires its unselected files.
+
+Dependencies between generated files remain the distribution author's
+responsibility. Removing a check file without updating its imports/groups
+breaks Just parsing or execution. The container import is optional specifically
+so removing its recipe artifact does not break unrelated recipes.
+
+Choose the layer that owns the policy:
+
+- Repository-specific nonconflicting settings belong outside sentinels.
+- A one-off owned-file customization uses the ordinary proposal workflow.
+- Shared organization policy belongs in a catalog replacement.
+- A new engine behavior or backend requires an engine change, not a catalog
+  trick that sidesteps its safety rules.
+
+Extensions inherit the same lock format, sentinel vocabulary, proposals,
+workspace discovery and CLI update semantics. They should retain those
+contracts rather than creating a second ownership scheme around the engine.
