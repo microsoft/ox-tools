@@ -6,8 +6,7 @@
 //! [`CliMeta`] is the one cosmetic thing a fork customizes besides its
 //! artifact set: the cargo subcommand token, the binary name, the `about`
 //! text, and the version. It feeds clap only — it is never interpolated
-//! into a path, a sentinel, or a recipe name. See
-//! [`extensibility.md §2`](../../docs/design/extensibility.md).
+//! into a path, a sentinel, or a recipe name.
 
 /// CLI identity. Cosmetic only — drives clap, never the on-disk format.
 #[derive(Debug, Clone, PartialEq, Eq)]
