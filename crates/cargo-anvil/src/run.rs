@@ -25,12 +25,12 @@ use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
-#[cfg(test)]
-use crate::region::upsert_region;
 use crate::region::{
     CommentSyntax, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, managed_region_ids,
-    remove_region, repair_markers,
+    repair_markers,
 };
+#[cfg(test)]
+use crate::region::{remove_region, upsert_region};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -501,7 +501,7 @@ fn push_region_at(
             if legacy_lint_region_id(spec.id.as_str()).is_some_and(|legacy_id| {
                 current
                     .as_deref()
-                    .is_some_and(|text| matches!(find_region(text, legacy_id, spec.syntax), Ok(Some(_))))
+                    .is_some_and(|text| matches!(crate::region::find_host_region(text, legacy_id, spec.syntax, &host), Ok(Some(_))))
             }) {
                 composed.states.insert(host.clone(), ComposedHostState::Unsafe(reason.clone()));
                 composed.reported.insert(host.clone());
@@ -837,7 +837,11 @@ fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
         return RegionPlacement::Start;
     }
     if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
-        && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
+        && let Some(old) = current.and_then(|text| {
+            crate::region::find_toml_region(text, "anvil-spellcheck", CommentSyntax::Hash)
+                .ok()
+                .flatten()
+        })
         && crate::region::ends_in_toml_table(old.body_str(), &["Hunspell", "quirks"])
     {
         // Install the replacement tables before retiring the combined block:
@@ -1119,7 +1123,7 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
     let Some(host_text) = host_text else {
         return DeltaRegionBody::Managed;
     };
-    let without_region = match remove_region(host_text, spec.id.as_str(), spec.syntax) {
+    let without_region = match crate::region::remove_toml_region(host_text, spec.id.as_str(), spec.syntax) {
         Ok(without_region) => without_region,
         Err(error) => return DeltaRegionBody::Malformed(format!("managed-region markers are malformed: {error}")),
     };
@@ -1551,6 +1555,70 @@ mod tests {
                     hosts.cached("config.toml").as_deref(),
                     Some("plugins.default=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n")
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn review_ordinary_toml_pipeline_preserves_data_and_ownership() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        for newline in ["\n", "\r\n"] {
+            for quote in ["'''", "\"\"\""] {
+                for fake in [
+                    "# >>> anvil-managed: r\nrepository data\n# <<< anvil-managed: r\n",
+                    "# >>> anvil-managed: orphan\n# >>> anvil-managed: r\nrepository data\n# <<< anvil-managed: r\n",
+                    "# <<< anvil-managed: r\nrepository data\n",
+                ] {
+                    let data = format!("\"# >>> anvil-managed: key\" = {quote}\n{fake}{quote}\n").replace('\n', newline);
+                    let body = "enabled = true\n";
+                    let catalog = Catalog::builder(CliMeta::new("anvil"))
+                        .with_artifact(Artifact::region(RegionSpec {
+                            host: HostSelector::Path("config.toml".to_owned()),
+                            id: RegionId::new("r"),
+                            body: body.to_owned(),
+                            syntax: CommentSyntax::Hash,
+                        }))
+                        .build()
+                        .unwrap();
+                    for recorded in [false, true] {
+                        for actual in [false, true] {
+                            let old_body = format!("enabled = false{newline}");
+                            let host = if actual {
+                                format!("{data}{newline}# >>> anvil-managed: r{newline}{old_body}# <<< anvil-managed: r{newline}")
+                            } else {
+                                data.clone()
+                            };
+                            let mut manifest = Manifest::default();
+                            if recorded || actual {
+                                manifest.set_region("config.toml", "r", checksum_str(&old_body));
+                            }
+                            let mut hosts = HostTextCache::default();
+                            hosts.set("config.toml", host);
+                            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                            assert_eq!(plan.refusals(), &[] as &[String]);
+                            assert_eq!(plan.items()[0].decision, Decision::Write);
+                            let expected = format!(
+                                "{data}{newline}# >>> anvil-managed: r{newline}enabled = true{newline}# <<< anvil-managed: r{newline}"
+                            );
+                            assert_eq!(hosts.cached("config.toml"), Some(expected.clone()));
+                            let document = expected.parse::<toml_edit::DocumentMut>().unwrap();
+                            assert_eq!(document["enabled"].as_bool(), Some(true));
+                            assert_eq!(
+                                document["# >>> anvil-managed: key"].as_str(),
+                                Some(fake.replace('\n', newline).as_str())
+                            );
+                            manifest.set_region("config.toml", "r", checksum_str(&format!("enabled = true{newline}")));
+                            let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                            assert_eq!(rerun.refusals(), &[] as &[String]);
+                            assert_eq!(rerun.items()[0].decision, Decision::InSync);
+                            assert_eq!(hosts.cached("config.toml"), Some(expected));
+                        }
+                    }
+                }
             }
         }
     }
