@@ -40,6 +40,7 @@ mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 sha2.workspace = true
 toml_edit = { workspace = true }
+toml_parser = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 

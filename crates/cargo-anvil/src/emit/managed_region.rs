@@ -28,8 +28,8 @@ use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
     CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region, legacy_lint_region_id,
-    lint_region_placement, managed_region_ids, mask_retiring_managed_regions, start_region_offset, text_newline,
-    upsert_region_with_newline,
+    lint_region_placement, mask_retiring_toml_regions as mask_retiring_managed_regions, start_region_offset, text_newline,
+    toml_region_ids as managed_region_ids, upsert_region_with_newline,
 };
 
 /// What the reader should do about a refused region.
@@ -69,6 +69,10 @@ pub enum RefusalRemedy {
     MisplacedArrayMarkers,
     /// Adopting a compound value would discard repository-owned interior comments.
     CommentedArrayEntry,
+    /// The selected item or one of its parents has an incompatible TOML type.
+    ArrayShape,
+    /// Creating a missing array would replace existing source bytes rather than insert.
+    ArrayScaffold,
     /// The catalog no longer declares the region, so it was due for removal,
     /// but its body carries edits anvil did not write. Nothing was parsed and
     /// no table collided; the host's format is irrelevant, so this reaches
@@ -189,9 +193,8 @@ pub(crate) fn plan_region_with_splice(
 
     let disk_region = match host_text {
         None => None,
-        Some(text) => {
-            find_region(text, region_id, syntax).map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?
-        }
+        Some(text) => crate::region::find_host_region(text, region_id, syntax, host_relpath)
+            .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?,
     };
     let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
     let needs_reposition = placement == RegionPlacement::Start
