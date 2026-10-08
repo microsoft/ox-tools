@@ -329,6 +329,13 @@ All actual writes and removals compose against one accumulating host text,
 so later operations preserve earlier changes. Refusing one region does not
 prevent independent regions or owned files from updating.
 
+For live TOML array selectors, neighboring writes and retirements must also
+preserve the selected source array's delimiters and table membership. Removing a
+parent header can rebind an array even when the resulting host parses; such a
+change is refused and its lock entry retained. Partial overlaps cannot retire
+repository-owned brackets. Enclosing regions can retire once no live selected
+array depends on them.
+
 ## 5. Retirement
 
 An item tracked by the lock but absent from the current catalog retires. Backend

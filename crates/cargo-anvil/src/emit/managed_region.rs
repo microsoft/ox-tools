@@ -63,6 +63,8 @@ pub enum RefusalRemedy {
     MalformedMarkers,
     /// An existing region owns the selected array or a separator needed for adoption.
     EnclosingOwnership,
+    /// A neighboring change would remove delimiters or change a live array's table membership.
+    ArrayDependency,
     /// Paired markers are outside the selected array or split one of its values.
     MisplacedArrayMarkers,
     /// Adopting a compound value would discard repository-owned interior comments.
