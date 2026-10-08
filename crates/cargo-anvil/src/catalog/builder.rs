@@ -122,6 +122,7 @@ fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
     match syntax {
         crate::region::CommentSyntax::Hash => "hash",
         crate::region::CommentSyntax::SlashSlash => "slashslash",
+        crate::region::CommentSyntax::Xml => "xml",
     }
 }
 
@@ -517,6 +518,18 @@ mod tests {
         assert!(region_repr.contains("path:Cargo.toml"));
         assert!(!region_repr.contains("single_crate_cargo_toml"));
         assert!(region_repr.contains("slashslash"));
+    }
+
+    #[test]
+    fn canonical_repr_tags_xml_region_syntax() {
+        let region = Artifact::region(RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("anvil-cloudbuild-projects"),
+            body: "<Project Include=\"src/demo\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        });
+
+        assert!(canonical_repr(&region).contains("xml"));
     }
 
     #[test]

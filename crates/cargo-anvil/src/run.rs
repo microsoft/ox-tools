@@ -28,8 +28,8 @@ use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
 use crate::region::{
-    CommentSyntax, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, managed_region_ids,
-    remove_region, repair_markers,
+    CommentSyntax, MarkerRepair, RegionPlacement, comment_syntax_for_region, find_region, legacy_lint_region_id, lint_region_placement,
+    managed_region_ids, remove_region, repair_markers,
 };
 use crate::workspace::{self, Workspace};
 
@@ -195,14 +195,15 @@ fn build_plan(
     // Extra complete pairs retain their bodies as unmanaged settings.
     //
     // Only regions on their way out are repaired here. A live one is repaired
-    // by `push_region_at` when it plans the region, with that region's own
-    // comment syntax rather than the `Hash` assumed below.
+    // by `push_region_at` when it plans the region, with that region's declared
+    // comment syntax.
     for key in manifest.regions.keys() {
         let host = resolve_existing_case_insensitive(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let _ = repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
+            let syntax = recorded_region_syntax(repo_root, &mut hosts, &host, &key.id)?;
+            let _ = repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, syntax)?;
         }
     }
 
@@ -1068,16 +1069,13 @@ fn plan_removals(
             }));
             continue;
         }
-        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, CommentSyntax::Hash, true)? {
+        let syntax = recorded_region_syntax(repo_root, hosts, &resolved_host, &key.id)?;
+        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true)? {
             // The lock entry survives with the region, so the next run still
             // knows it is anvil's to retire once the boundary is repaired.
             continue;
         }
         if let Some(host_text) = hosts.cached(&resolved_host) {
-            // CommentSyntax is currently always Hash for managed regions.
-            // When that assumption changes, the manifest will need to
-            // record the syntax used.
-            let syntax = CommentSyntax::Hash;
             let region = find_region(&host_text, &key.id, syntax)
                 .expect("repair_or_refuse above established that this host has well-formed region markers");
             let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
@@ -1100,6 +1098,7 @@ fn plan_removals(
                     hosts.set(&resolved_host, spliced.clone());
                     plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
                 }
+
                 RemovalDecision::OrphanedKept => {
                     // Named by the spelling on disk, not the one the lock
                     // recorded: this refusal says a file was left alone, so it has
@@ -1133,6 +1132,14 @@ fn plan_removals(
     }
 
     Ok(())
+}
+
+fn recorded_region_syntax(repo_root: &Path, hosts: &mut HostTextCache, host: &str, id: &str) -> Result<CommentSyntax, AppError> {
+    Ok(hosts
+        .get_or_read(repo_root, host)?
+        .as_deref()
+        .and_then(|text| comment_syntax_for_region(text, id))
+        .unwrap_or(CommentSyntax::Hash))
 }
 
 fn live_files(plan: &Plan) -> BTreeSet<String> {
@@ -1814,11 +1821,24 @@ mod tests {
     /// entirely -- see `unpaired_markers_are_refused_rather_than_unmanaged`.
     #[cfg_attr(miri, ignore = "uses filesystem")]
     #[test]
-    fn marker_recovery_preserves_content_and_settles_for_both_syntaxes() {
-        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
-            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
-            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
-            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+    fn marker_recovery_preserves_content_and_settles_for_all_syntaxes() {
+        for (syntax, open, close) in [
+            (
+                CommentSyntax::Hash,
+                "# >>> anvil-managed: repair\r\n",
+                "# <<< anvil-managed: repair\r\n",
+            ),
+            (
+                CommentSyntax::SlashSlash,
+                "// >>> anvil-managed: repair\r\n",
+                "// <<< anvil-managed: repair\r\n",
+            ),
+            (
+                CommentSyntax::Xml,
+                "<!-- >>> anvil-managed: repair -->\r\n",
+                "<!-- <<< anvil-managed: repair -->\r\n",
+            ),
+        ] {
             let catalog = Catalog::builder(CliMeta::new("anvil"))
                 .with_artifact(Artifact::region(RegionSpec {
                     host: HostSelector::Path("host.txt".to_owned()),
@@ -1841,8 +1861,8 @@ mod tests {
                 let region = find_region(&output, "repair", syntax).unwrap().unwrap();
                 assert_eq!(region.body_str(), "generated\r\n");
                 assert!(remove_region(&output, "repair", syntax).unwrap().contains("user"));
-                assert_eq!(output.matches(&open).count(), 1);
-                assert_eq!(output.matches(&close).count(), 1);
+                assert_eq!(output.matches(open).count(), 1);
+                assert_eq!(output.matches(close).count(), 1);
                 assert!(!output.replace("\r\n", "").contains('\n'));
                 assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
                 assert_eq!(fs::read_to_string(&path).unwrap(), output);
@@ -1862,10 +1882,23 @@ mod tests {
     #[test]
     fn unpaired_markers_are_refused_rather_than_unmanaged() {
         use crate::catalog::{CliMeta, RegionId};
-        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
-            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
-            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
-            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+        for (syntax, open, close) in [
+            (
+                CommentSyntax::Hash,
+                "# >>> anvil-managed: repair\r\n",
+                "# <<< anvil-managed: repair\r\n",
+            ),
+            (
+                CommentSyntax::SlashSlash,
+                "// >>> anvil-managed: repair\r\n",
+                "// <<< anvil-managed: repair\r\n",
+            ),
+            (
+                CommentSyntax::Xml,
+                "<!-- >>> anvil-managed: repair -->\r\n",
+                "<!-- <<< anvil-managed: repair -->\r\n",
+            ),
+        ] {
             let catalog = Catalog::builder(CliMeta::new("anvil"))
                 .with_artifact(Artifact::region(RegionSpec {
                     host: HostSelector::Path("host.txt".to_owned()),
@@ -1919,6 +1952,34 @@ mod tests {
                 assert_eq!(fs::read_to_string(&path).unwrap(), input);
             }
         }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn retired_xml_region_is_removed_with_surrounding_content_preserved() {
+        let tmp = empty_workspace();
+        let path = tmp.path().join("dirs.proj");
+        let host = "<Project>\n<!-- >>> anvil-managed: projects -->\n  <Project Include=\"generated.proj\" />\n<!-- <<< anvil-managed: projects -->\n  <Target Name=\"User\" />\n</Project>\n";
+        write(&path, host);
+
+        let live = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("dirs.proj".to_owned()),
+                id: RegionId::new("projects"),
+                body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+                syntax: CommentSyntax::Xml,
+            }))
+            .build()
+            .unwrap();
+        run_update(&live, &local_only(), tmp.path()).unwrap();
+
+        let retired = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        let outcome = run_update(&retired, &local_only(), tmp.path()).unwrap();
+        assert!(outcome.plan.refusals().is_empty());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "<Project>\n  <Target Name=\"User\" />\n</Project>\n"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem")]
