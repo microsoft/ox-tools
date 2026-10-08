@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Integration tests for the crates.io database dump provider.
 //!
 //! Every test serves a synthetic dump (see `support::dump`) from a `wiremock` server, so the whole

@@ -108,6 +108,7 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

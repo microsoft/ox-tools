@@ -498,6 +498,7 @@ const fn after_comparison(_path: &Utf8Path) {}
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::process::Command;
     use std::sync::{Arc, Barrier, Mutex};

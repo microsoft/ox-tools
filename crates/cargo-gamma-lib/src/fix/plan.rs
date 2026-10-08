@@ -200,6 +200,7 @@ fn civil_from_days(days: i64) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::once;
 

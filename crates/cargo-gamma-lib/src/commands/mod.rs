@@ -78,6 +78,7 @@ impl Display for InvalidMutantId {
 impl core::error::Error for InvalidMutantId {}
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::CanonicalMutantId;
 

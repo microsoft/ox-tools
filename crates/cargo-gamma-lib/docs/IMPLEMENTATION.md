@@ -37,7 +37,11 @@ source generations discovery used, so an edit between snapshot capture and
 scanning cannot acquire completed evidence. The same pre-execution survey
 indexes test declarations; completed killed outcomes persist the unambiguous
 workspace-relative file that declared their killer instead of trying to recover
-that identity after execution.
+that identity after execution. Mutant results and completed records also retain
+the killer's package, kind-qualified target, and test name so diagnostic
+exclusivity does not collapse equal test names from different binaries. Legacy records that carry
+only the test name remain readable, and resumed discovery preserves that name in diagnostics
+without inventing a package or target identity.
 
 State-only commands validate an explicit cache against Cargo's resolved
 workspace root and reject foreign or unowned caches rather than adopting their
@@ -73,19 +77,33 @@ Schema convergence first checks normal libraries, binaries, and test targets
 for every package with pending mutations. Compiler diagnostics are decoded
 with package and target context; unattributed failures use bounded,
 target-specific proof checks over the failing package's dependency cone. `build/isolation.rs`
-owns diagnostic contexts, tier construction, campaign-wide context/proof budgets, exact active
-schemas, memoized proof verdicts, and interaction minimization. `build.rs` snapshots all
+owns diagnostic contexts, tier construction, invocation-wide context/proof budgets, exact active
+schemas, package-root and target selection, memoized proof verdicts, and interaction minimization. A context is charged to the
+invocation budget only after tier construction finds a nonempty tier within the candidate bound.
+`build.rs` snapshots all
 verdict-bearing state before either narrow-to-wide fallback and restores it before retrying.
 `build/splices.rs` dirties symmetric-difference files and maintains the live guard index
-incrementally. Cargo convergence evidence is decoded only when an `Events` consumer opts in.
+incrementally. Proof rounds pass their usually small active ordinal set directly to the splicer
+and omit the full guard snapshot needed by normal convergence rounds. Diagnostic contexts are
+deduplicated by identity and ranked from package-indexed eligible mutants; only admitted
+contexts materialize their dependency sets. Cargo convergence evidence is decoded only when an
+`Events` consumer opts in.
+Each Cargo invocation admits at most 64 diagnostic contexts and 32 proofs per
+context, for a derived ceiling of 2,048 proofs. Contexts with larger dependency
+cones run first so diagnostic order cannot strand most of the population.
 Compiled-source dep-info from these checks is retained alongside the final
 test-binary build so a mutated package without a test harness is reported
 uncovered rather than `notbuilt`.
 
+Diagnostic bundles accumulate mutator, confidence, and package breakdowns in one population
+walk. Each dimension retains its own killer-exclusivity groups before deterministic ranking,
+redaction, and truncation. Exclusive-killer counts use only identities observed from the harness
+or proven by a single-test selection; ambiguous grouped-probe guesses remain scheduling hints.
+
 ## Hint artifacts
 
-Checked-in hints use grouped YAML schema version 3 and independently versioned
-generalized schema version 2. Generations validate forbidden YAML references
+Checked-in hints use grouped YAML schema version 4 and independently versioned
+generalized schema version 3. Generations validate forbidden YAML references
 before deserializing the strict typed schema. Automatic reuse decodes the strict
 envelope, recognizes an unsupported generalized section without decoding its
 contents, and keeps otherwise reusable exact hints.
@@ -104,9 +122,10 @@ Unsupported generalized versions remain fail-open for automatic scheduling
 and fail-closed for incremental promotion, which cannot safely round-trip
 unknown fields. Ordinary promotion leaves the original artifact bytes untouched
 rather than pretending the unsupported section can be promoted. Generalized
-version 1 is the supported migration case:
-decoding upgrades it to version 2, preserves seed counts with a minimum of one,
-and resets hit, miss, measured-time, and sample counters.
+versions 1 and 2 are supported migration cases: decoding upgrades them to
+version 3. Version 1 preserves seed counts with a minimum of one and resets
+hit, miss, measured-time, and sample counters; version 2 preserves its
+observations.
 Each generalized tier atomically reserves from a campaign-wide eight-attempt
 budget immediately before launching a hinted subprocess. A first hit makes the
 tier productive and removes that bound; concurrent zero-hit workers cannot

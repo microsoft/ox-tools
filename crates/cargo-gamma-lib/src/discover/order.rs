@@ -59,6 +59,7 @@ pub(crate) fn stages(packages: &[String], reach: &HashMap<String, HashSet<String
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

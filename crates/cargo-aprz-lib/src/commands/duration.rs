@@ -223,6 +223,7 @@ impl Visitor<'_> for DurationVisitor {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use serde::{Deserialize, Serialize};
 

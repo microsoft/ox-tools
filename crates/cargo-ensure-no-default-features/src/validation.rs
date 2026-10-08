@@ -102,6 +102,7 @@ pub fn validate_dependencies(content: &str, exceptions: &[String]) -> Result<Val
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

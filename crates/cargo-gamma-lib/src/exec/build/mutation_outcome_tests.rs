@@ -39,12 +39,14 @@ fn mutant(ordinal: u32, package: &str, item: &str) -> Mutant {
         original: CompactString::new("true"),
         replacement: CompactString::new("false"),
         shape: Shape::Expr,
+        confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
         outcome: Outcome::Pending,
         suppression: None,
         expectation: None,
         test_timeout_multiplier: None,
         elapsed_ms: 0,
         killed_by: None,
+        killer: None,
         note: None,
     }
 }
@@ -58,10 +60,19 @@ fn converger_state_updates_are_exact_and_repeatable() {
     converger.rounds = 9;
     converger.per_round.extend([3, 2, 1]);
     converger.first_round = Some(Duration::from_secs(2));
+    for _ in 0..isolation::MAX_INVOCATION_ISOLATION_PROOFS {
+        assert!(converger.isolation_budget.proof(0));
+    }
+    assert!(!converger.isolation_budget.proof(0));
     converger.begin_convergence();
     assert_eq!(converger.rounds, 0);
     assert!(converger.per_round.is_empty());
     assert_eq!(converger.first_round, None);
+    assert_eq!(
+        converger.isolation_budget.proof_count(),
+        0,
+        "an earlier Cargo command must not consume a later command's proof budget"
+    );
 
     let preflight = Preflight::narrow(vec!["dropped".to_owned()], "discovery".to_owned());
     assert!(!preflight.whole_workspace);

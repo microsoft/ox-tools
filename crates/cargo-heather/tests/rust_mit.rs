@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Fixture-driven integration tests for `.rs` files against an MIT-style
 //! single-line license header. Each test inlines its `INPUT` and
 //! `EXPECTED` content as raw string literals.

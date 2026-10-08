@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Exercises every exported attribute macro from an external consuming crate.
 //!
 //! A doctest inside this crate proves an expansion compiles; it does not prove the annotated item

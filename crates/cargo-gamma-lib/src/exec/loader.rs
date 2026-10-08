@@ -163,6 +163,7 @@ fn append_toolchain_libraries(libraries: &mut Vec<Utf8PathBuf>, printed: &str) {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

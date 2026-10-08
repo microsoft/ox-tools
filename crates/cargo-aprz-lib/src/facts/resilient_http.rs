@@ -178,6 +178,7 @@ where
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use chrono::{TimeZone as _, Utc};
     use seatbelt::RecoveryKind;

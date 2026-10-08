@@ -140,7 +140,8 @@ diff-scoped against the PR base; `scheduled-exhaustive` runs the
 full-workspace mutants recipe:
 
 ```just
-anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
+anvil-pr-fast: anvil-fmt anvil-clippy anvil-check-all-targets anvil-cargo-sort \
+               anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
@@ -453,17 +454,17 @@ enforced by their matching prerequisite validation.
 
 ### 3.6 Nightly pinning
 
-A handful of catalog checks need nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
+A handful of catalog checks use nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
 `check-external-types`. We **pin** the nightly snapshots used by these checks rather than
 floating bare `+nightly`. Pinning eliminates "rustup update on Tuesday broke main on
 Wednesday" — every cloud-workflow run uses the same nightly until we deliberately bump the pin.
 
-`fmt` is on nightly because the catalog's `rustfmt.toml` opts into `unstable_features`
+`fmt` is on nightly because the default catalog's `rustfmt.toml` opts into `unstable_features`
 to get import grouping (`imports_granularity = "Module"`, `group_imports =
-"StdExternalCrate"`) and `format_code_in_doc_comments`. Those are the high-value
-opinions every surveyed Microsoft Rust repo reaches for; the stable rustfmt option set
-doesn't include them. Pinning is what makes nightly fmt sustainable — formatting
-churn happens on a pin bump, not on every `rustup update`.
+"StdExternalCrate"`) and `format_code_in_doc_comments`. The stable rustfmt option set
+doesn't include these settings. The recipe retains the pinned nightly even when a
+repository's formatting configuration enables only stable options. Pinning keeps
+formatting churn tied to deliberate pin bumps, not every `rustup update`.
 
 The pins live in `justfiles/anvil/versions.just` as plain just variables:
 
@@ -517,7 +518,7 @@ a CI shell and threading the result between jobs as environment variables.
 |------------------------------|-------------------------------------------------------------------------|
 | `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the composite of the base commit sha **and** the effective `.delta.toml` identity (`baseline.key` stores `<base-sha> <config-hash>`) — the expensive throwaway-worktree snapshot is retaken when the base moves *or* the cargo-delta config changes, so the baseline is never diffed against a current snapshot captured under different rules. |
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
-| `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth; `{}` when nothing changed). |
+| `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth). An unchanged tree yields an empty impact set, which cargo-delta reports either as a report with empty tiers or by printing nothing at all, in which case the recipe stores `{}`. A bare `{}` is therefore not a reliable "nothing changed" signal: the dirty-tree and baseline-without-a-workspace paths also write `{}` as a synthetic placeholder while widening every tier to `--workspace`. Read the `include_<tier>.txt` files for the scope actually selected. |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
 | `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid a redundant metadata process. |
 

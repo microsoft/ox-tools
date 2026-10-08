@@ -2763,6 +2763,7 @@ mod tests {
             ".github/workflows/anvil-pr.yml",
             ".github/workflows/anvil-scheduled.yml",
             ".github/skills/code-review/SKILL.md",
+            ".github/skills/code-review/test-review.md",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after github update");
         }

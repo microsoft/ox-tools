@@ -316,7 +316,6 @@ fn unattributed_isolation_expands_only_through_the_failing_packages_dependency_c
         ..Converger::default()
     };
     let failed_roots = vec!["app".to_owned(), "feature-enabler".to_owned()];
-
     let isolated = converger
         .isolate_scoped(
             &work,
@@ -336,6 +335,28 @@ fn unattributed_isolation_expands_only_through_the_failing_packages_dependency_c
             .iter()
             .all(|roots| roots.as_deref() == Some(failed_roots.as_slice())),
         "every proof must preserve the failed invocation's package roots"
+    );
+
+    let mut workspace_converger = Converger {
+        subset_oracle: Some(dependency_mutant_fails),
+        ..Converger::default()
+    };
+    let workspace_isolated = workspace_converger
+        .isolate_scoped(
+            &work,
+            &plan,
+            &stdout,
+            &["check", "--lib"],
+            None,
+            BuildLimits::default(),
+            &mut crate::testing::Recorder::default(),
+        )
+        .expect("the workspace proof builds ran");
+
+    assert!(matches!(workspace_isolated.as_slice(), [Isolation::Blamed(ordinals)] if ordinals == &[2]));
+    assert!(
+        workspace_converger.proof_roots.iter().all(Option::is_none),
+        "workspace proofs must preserve whole-workspace selection"
     );
 }
 
@@ -2572,12 +2593,14 @@ fn mutant() -> Mutant {
         original: "true".to_owned().into(),
         replacement: "false".to_owned().into(),
         shape: Shape::Expr,
+        confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
         outcome: Outcome::Pending,
         suppression: None,
         expectation: None,
         test_timeout_multiplier: None,
         elapsed_ms: 0,
         killed_by: None,
+        killer: None,
         note: None,
     }
 }
@@ -4289,18 +4312,18 @@ fn a_hint_the_compiler_disagrees_with_leaves_its_mutant_live_and_judged() {
 fn a_hint_the_compiler_agrees_with_is_settled_by_the_compiler() {
     let (_dir, work) = guarded_workspace("build-probe-right-");
     let mut plan = probe_plan(&work, 5, 1);
+    let mut events = crate::testing::Recorder::default();
 
     let build = Converger::guided(hinted(&plan, 0..5))
-        .finish(
-            &work,
-            &mut plan,
-            None,
-            BuildLimits::default(),
-            &mut crate::testing::Recorder::default(),
-        )
+        .finish(&work, &mut plan, None, BuildLimits::default(), &mut events)
         .expect("the build converges");
 
     assert_eq!(build.ordering.confirmed, 5, "every hinted mutant was refused by the compiler");
+    assert_eq!(
+        events.convergence,
+        [5],
+        "compiler-confirmed hints must update the visible unviability count"
+    );
 
     for mutant in plan.mutants.iter().take(5) {
         assert_eq!(mutant.outcome, Outcome::CompileError, "{mutant:?}");

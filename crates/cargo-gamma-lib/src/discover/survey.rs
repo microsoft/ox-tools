@@ -198,8 +198,9 @@ pub struct Survey {
     diff: Option<Diff>,
     shard: Option<(u32, u32)>,
     only_mutants: Option<HashSet<MutantId>>,
-    settled: HashMap<MutantId, (Outcome, Option<String>)>,
+    settled: HashMap<MutantId, super::Settled>,
     exclude_trait_impls: Vec<String>,
+    complete_defaults: bool,
 }
 
 /// What scanning some part of the workspace yielded.
@@ -462,6 +463,8 @@ impl Survey {
             by_package.entry(file.package.clone()).or_default().push(position);
         }
 
+        let complete_defaults = args.files.is_empty() && args.exclude_files.is_empty() && args.in_diff.is_none();
+
         Ok(Self {
             root,
             target,
@@ -481,6 +484,7 @@ impl Survey {
             only_mutants: None,
             settled: HashMap::default(),
             exclude_trait_impls: args.exclude_trait_impls.clone(),
+            complete_defaults,
             source_dirs: sorted(source_dirs),
             external_inputs: external_inputs.roots,
             untracked_build_script_inputs: external_inputs.has_build_scripts,
@@ -506,7 +510,6 @@ impl Survey {
         for directory in &self.source_dirs {
             match walk_rust_files(directory) {
                 Ok(found) => files.extend(found),
-                // #[gamma::skip(assign_value.default, reason = "bool::default() is exactly false")]
                 Err(_failure) => complete = false,
             }
         }
@@ -535,14 +538,24 @@ impl Survey {
     /// report written out could not be fed to the next iteration because it no longer describes the
     /// whole population.
     pub fn settle(&mut self, settled: HashMap<MutantId, Outcome>) {
-        self.settled = settled.into_iter().map(|(id, outcome)| (id, (outcome, None))).collect();
+        self.settled = settled
+            .into_iter()
+            .map(|(id, outcome)| {
+                (
+                    id,
+                    super::Settled {
+                        outcome,
+                        compiler_reason: None,
+                        killed_by: None,
+                        killer: None,
+                    },
+                )
+            })
+            .collect();
     }
 
     pub(crate) fn settle_recorded(&mut self, settled: HashMap<MutantId, super::Settled>) {
-        self.settled = settled
-            .into_iter()
-            .map(|(id, settled)| (id, (settled.outcome, settled.compiler_reason)))
-            .collect();
+        self.settled = settled;
     }
 
     /// Restricts discovery to the exact mutant identities named by an earlier report.
@@ -593,6 +606,10 @@ impl Survey {
     /// # Errors
     ///
     /// Returns an error if a file cannot be read or parsed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "scanning keeps selection, discovery, and stable ordinal assignment in one transaction"
+    )]
     pub fn scan(&self, package: Option<&str>, selection: &Selection, ordinals: &mut u32) -> Result<Scanned> {
         let files: Vec<&TargetFile> = package.map_or_else(
             || self.files.iter().collect(),
@@ -635,7 +652,15 @@ impl Survey {
             skipped,
             digests,
             sources,
-        } = scan(&files, &declaration_files, &roots, selection, &self.cfgs, &self.exclude_trait_impls)?;
+        } = scan(
+            &files,
+            &declaration_files,
+            &roots,
+            selection,
+            &self.cfgs,
+            &self.exclude_trait_impls,
+            self.complete_defaults,
+        )?;
 
         // Within a file the diff still has the last word: a changed line usually sits among many
         // that were not touched, and mutating those would report on code the change never went
@@ -663,9 +688,19 @@ impl Survey {
         // #[gamma::skip(cond.always_true, reason = "iterating an empty settled map leaves every mutant unchanged, exactly like taking this fast path")]
         if !self.settled.is_empty() {
             for mutant in &mut mutants {
-                if let Some((outcome, compiler_reason)) = self.settled.get(&mutant.id) {
-                    mutant.outcome = *outcome;
-                    mutant.note.clone_from(compiler_reason);
+                if let Some(settled) = self.settled.get(&mutant.id) {
+                    mutant.outcome = settled.outcome;
+                    mutant.note.clone_from(&settled.compiler_reason);
+                    mutant.killed_by = settled
+                        .killer
+                        .as_ref()
+                        .map(|killer| killer.test.clone())
+                        .or_else(|| settled.killed_by.clone());
+                    mutant.killer = settled.killer.as_ref().map(|killer| crate::model::KillerIdentity {
+                        package: killer.package.clone(),
+                        target: killer.target.clone(),
+                        test: killer.test.clone(),
+                    });
                     settled_out = settled_out.saturating_add(1);
                 }
             }
@@ -977,6 +1012,7 @@ fn scan(
     selection: &Selection,
     cfgs: &Cfgs,
     exclude_trait_impls: &[String],
+    complete_defaults: bool,
 ) -> Result<Scan> {
     // #[gamma::skip(all, reason = "the worker count is a positive resource bound; changing it either preserves results while changing scheduling or violates that bound")]
     let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len().max(1));
@@ -987,6 +1023,7 @@ fn scan(
         // #[gamma::skip(all, reason = "the barrier party count must exactly equal the number of spawned workers or discovery deadlocks")]
         barrier: Barrier::new(workers),
         defaults: OnceLock::new(),
+        complete_defaults,
     };
 
     let mut collected: Vec<(usize, Parsed)> = thread::scope(|scope| {
@@ -1251,8 +1288,8 @@ struct Shared {
     /// The next file index to claim, so work is taken one file at a time rather than in blocks.
     next: AtomicUsize,
 
-    /// Each worker's index of what the files it parsed declare, merged by the leader.
-    partials: Mutex<Vec<collect::Defaults>>,
+    /// Each worker's package indexes of what the files it parsed declare, merged by the leader.
+    partials: Mutex<Vec<HashMap<String, collect::Defaults>>>,
 
     /// Files stepped over, each with the index that orders it and the diagnostic that names it.
     skipped: Mutex<Vec<(usize, String)>>,
@@ -1261,8 +1298,9 @@ struct Shared {
     /// others declare.
     barrier: Barrier,
 
-    /// The merged index, set once by the leader and read by all of them.
-    defaults: OnceLock<collect::Defaults>,
+    /// The merged package indexes, set once by the leader and read by all of them.
+    defaults: OnceLock<HashMap<String, collect::Defaults>>,
+    complete_defaults: bool,
 }
 
 /// What one file yielded when it was parsed.
@@ -1288,10 +1326,11 @@ fn work(
         skipped,
         barrier,
         defaults,
+        complete_defaults,
     } = shared;
 
     let mut mine: Vec<(usize, SourceFile)> = Vec::new();
-    let mut index = collect::Defaults::default();
+    let mut indexes: HashMap<String, collect::Defaults> = HashMap::default();
     let mut failure: Option<(usize, Error)> = None;
 
     // Phase one is guarded because the two waits below are not optional. `Barrier` has a fixed party
@@ -1316,7 +1355,12 @@ fn work(
                     // Report paths relative to the workspace root; that is what a user can act on
                     // and what a suppression or an expectation is keyed by.
                     source.set_path(file.path.clone());
-                    index.absorb(collect::Defaults::of_in(source.ast(), cfgs.for_package(&file.package)));
+                    let defaults = if *complete_defaults {
+                        collect::Defaults::of_in(source.ast(), cfgs.for_package(&file.package))
+                    } else {
+                        collect::Defaults::optimistic_of_in(source.ast(), cfgs.for_package(&file.package))
+                    };
+                    indexes.entry(file.package.clone()).or_default().absorb(defaults);
                     mine.push((at, source));
                 }
 
@@ -1337,17 +1381,28 @@ fn work(
     }))
     .err();
 
-    partials.lock().unwrap_or_else(PoisonError::into_inner).push(mem::take(&mut index));
+    partials
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(mem::take(&mut indexes));
 
     // Guarded for the same reason, and more urgently: the leader has one more wait to reach, and it
     // is the only thread that can release the others.
     // #[gamma::skip(cond.always_true, reason = "if every released worker enters, the mutex drain still lets exactly one consume all partials and OnceLock still accepts exactly one merged value")]
     let merged = if barrier.wait().is_leader() {
         catch_unwind(AssertUnwindSafe(|| {
-            let mut merged = collect::Defaults::default();
+            let mut merged: HashMap<String, collect::Defaults> = HashMap::default();
 
             for partial in partials.lock().unwrap_or_else(PoisonError::into_inner).drain(..) {
-                merged.absorb(partial);
+                for (package, index) in partial {
+                    merged.entry(package).or_default().absorb(index);
+                }
+            }
+
+            for (at, _message) in skipped.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+                if let Some(index) = files.get(*at).and_then(|file| merged.get_mut(&file.package)) {
+                    index.mark_incomplete();
+                }
             }
 
             let _first = defaults.set(merged);
@@ -1380,6 +1435,10 @@ fn work(
 
     for (at, source) in &mine {
         let Some(file) = files.get(*at) else { continue };
+
+        let defaults = defaults
+            .get(&file.package)
+            .expect("phase one indexes the package of every source retained in this worker");
 
         match mutate(file, source, selection, cfgs, defaults, exclude_trait_impls) {
             Ok(one) => parsed.push((*at, one)),
@@ -1619,7 +1678,6 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
                 if low_link[node] == index_of[node].expect("just indexed above, on the way in") {
                     loop {
                         let member = stack.pop().expect("root of this component pushed before this loop started");
-                        // #[gamma::skip(assign_value.default, reason = "bool's Default::default() is exactly false")]
                         on_stack[member] = false;
                         comp_of[member] = next_component;
 
@@ -3812,7 +3870,7 @@ mod tests {
     }
 
     #[test]
-    fn a_qualified_cross_file_default_remains_an_optimistic_candidate() {
+    fn a_qualified_cross_file_default_remains_eligible_without_path_resolved_evidence() {
         let (_directory, root) = workspace();
 
         write(
@@ -3836,6 +3894,120 @@ mod tests {
 
         assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
         assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+    }
+
+    #[test]
+    fn a_qualified_cross_file_alias_does_not_borrow_root_type_evidence() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "pub struct Value;\nmod model;\npub fn value() -> model::Value { false }\n",
+        );
+        write(&root, "core/src/model.rs", "pub type Value = bool;\n");
+
+        let survey = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(None, &Selection::parse("fn_value.default").expect("selection"), &mut ordinals)
+            .expect("scan");
+
+        assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
+        assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+    }
+
+    #[test]
+    fn a_file_filter_preserves_local_generic_collection_eligibility() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "#[derive(Default)] struct Vec<T>(T);\npub fn values() -> Vec<u8> { Vec(7) }\n",
+        );
+
+        let survey = survey(
+            &root,
+            SelectArgs {
+                files: vec!["core/src/lib.rs".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(
+                None,
+                &Selection::parse("fn_value.empty_collection").expect("selection"),
+                &mut ordinals,
+            )
+            .expect("scan");
+
+        assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
+        assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+    }
+
+    #[test]
+    fn a_skipped_file_disables_negative_default_evidence_for_its_package() {
+        let (_directory, root) = workspace();
+        let deep = format!(
+            "impl Default for crate::Config {{ fn default() -> Self {{ crate::Config }} }}\n{}",
+            too_deep_source()
+        );
+
+        write(&root, "core/src/deep.rs", &deep);
+        write(
+            &root,
+            "core/src/lib.rs",
+            "mod deep;\npub struct Config;\npub fn config() -> Config { Config }\n",
+        );
+
+        let survey = survey(&root, SelectArgs::default());
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(None, &Selection::parse("fn_value.default").expect("selection"), &mut ordinals)
+            .expect("scan");
+
+        assert_eq!(scanned.skipped.len(), 1, "{:?}", scanned.skipped);
+        assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
+        assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+    }
+
+    #[test]
+    fn same_named_types_in_different_packages_keep_separate_default_evidence() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "pub struct Config;\npub fn config() -> Config { Config }\n",
+        );
+        write(
+            &root,
+            "app/src/main.rs",
+            "#[derive(Default)] struct Config;\nfn config() -> Config { Config }\nfn main() {}\n",
+        );
+
+        let survey = survey(&root, SelectArgs::default());
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(None, &Selection::parse("fn_value.default").expect("selection"), &mut ordinals)
+            .expect("scan");
+
+        let defaults: Vec<&Mutant> = scanned
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.mutator.as_ref() == "fn_value.default")
+            .collect();
+
+        assert_eq!(defaults.len(), 1, "{:?}", scanned.mutants);
+        assert_eq!(&*defaults[0].package, "app");
     }
 
     /// A file walked once per target still appears once, and test-only modules never appear.
@@ -4542,6 +4714,8 @@ mod tests {
             crate::discover::Settled {
                 outcome: Outcome::CompileError,
                 compiler_reason: Some("rustc E0308: mismatched types".to_owned()),
+                killed_by: None,
+                killer: None,
             },
         )]));
 
@@ -4555,6 +4729,90 @@ mod tests {
 
         assert_eq!(reused.outcome, Outcome::CompileError);
         assert_eq!(reused.note.as_deref(), Some("rustc E0308: mismatched types"));
+    }
+
+    #[test]
+    fn a_reused_kill_keeps_its_full_killer_identity() {
+        let (_directory, root) = workspace();
+        let mut plan = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let selection = Selection::parse("all").expect("every mutator resolves");
+        let mut ordinals = 0;
+        let first = plan.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let id = first.mutants.first().expect("the fixture yields a mutant").id.clone();
+        let killer = crate::discover::Killer {
+            package: "core".to_owned(),
+            target: "integration".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        plan.settle_recorded(HashMap::from_iter([(
+            id.clone(),
+            crate::discover::Settled {
+                outcome: Outcome::Killed,
+                compiler_reason: None,
+                killed_by: Some(killer.test.clone()),
+                killer: Some(killer.clone()),
+            },
+        )]));
+
+        let mut ordinals = 0;
+        let second = plan.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let reused = second
+            .mutants
+            .iter()
+            .find(|mutant| mutant.id == id)
+            .expect("settled mutant remains");
+
+        assert_eq!(reused.killed_by.as_deref(), Some(killer.test.as_str()));
+        assert_eq!(
+            reused.killer,
+            Some(crate::model::KillerIdentity {
+                package: killer.package,
+                target: killer.target,
+                test: killer.test,
+            })
+        );
+    }
+
+    #[test]
+    fn a_reused_legacy_kill_keeps_its_test_name() {
+        let (_directory, root) = workspace();
+        let mut plan = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let selection = Selection::parse("all").expect("every mutator resolves");
+        let mut ordinals = 0;
+        let first = plan.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let id = first.mutants.first().expect("the fixture yields a mutant").id.clone();
+        plan.settle_recorded(HashMap::from_iter([(
+            id.clone(),
+            crate::discover::Settled {
+                outcome: Outcome::Killed,
+                compiler_reason: None,
+                killed_by: Some("tests::legacy".to_owned()),
+                killer: None,
+            },
+        )]));
+
+        let mut ordinals = 0;
+        let second = plan.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let reused = second
+            .mutants
+            .iter()
+            .find(|mutant| mutant.id == id)
+            .expect("settled mutant remains");
+
+        assert_eq!(reused.killed_by.as_deref(), Some("tests::legacy"));
+        assert_eq!(reused.killer, None);
     }
 
     /// Only the mutants the report actually settled are carried; the rest are work again, and the

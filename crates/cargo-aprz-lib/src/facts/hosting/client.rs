@@ -223,6 +223,7 @@ fn extract_rate_limit_from_headers(headers: &HeaderMap) -> Option<RateLimitInfo>
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -695,6 +695,7 @@ impl Read for ChannelReader {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::ErrorKind;
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -442,11 +442,13 @@ anvil-impact: _anvil-impact-snapshot
     $deltaArgs = @()
     if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
 
-    # Full impact JSON -- the durable source of truth. cargo-delta prints
-    # nothing when no files changed between baseline and current (it "quits"
-    # early), so default to an empty object so impact.json always exists --
-    # the freshness check above keys on its presence, and a missing file
-    # would force a recompute on every invocation.
+    # Full impact JSON -- the durable source of truth. When no files changed
+    # between baseline and current the impact set is empty, which cargo-delta
+    # reports either as a report with empty tiers or by printing nothing at
+    # all (it "quits" early). Store an empty object for that blank output so
+    # impact.json always exists -- the freshness check above keys on its
+    # presence, and a missing file would force a recompute on every
+    # invocation.
     $impactOut = (& cargo {{_anvil_stable_toolchain_args}} delta @deltaArgs impact --baseline $baselineJson --current $currentJson --format json | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta impact failed'; exit 1 }
     if ([string]::IsNullOrWhiteSpace($impactOut)) { $impactOut = '{}' }

@@ -290,6 +290,7 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use camino::Utf8PathBuf;
 
@@ -620,7 +621,7 @@ mod tests {
             verdict_log: VerdictLog::default(),
         };
 
-        events.begin("Excluding", "Excluded", "unviable mutants (0 found)");
+        events.begin("Excluding", "Excluded", "unviable mutants");
         events.convergence_progress(10);
         events.complete("10 unviable mutants, leaving 20 viable mutants");
 

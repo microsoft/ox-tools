@@ -373,6 +373,7 @@ pub fn from_extra(args: &FeatureArgs, extra: &[String]) -> FeatureArgs {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 

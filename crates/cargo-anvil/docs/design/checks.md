@@ -56,6 +56,7 @@ flowchart LR
 
     pr_fast --> fmt[fmt]:::check
     pr_fast --> clippy[clippy]:::check
+    pr_fast --> check_all_targets[check-all-targets]:::check
     pr_fast --> cargo_sort[cargo-sort]:::check
     pr_fast --> license_headers[license-headers]:::check
     pr_fast --> ensure_no_cyclic_deps[ensure-no-cyclic-deps]:::check
@@ -161,7 +162,8 @@ recipes locally.
 ## 2. Checks by group
 
 The cell format is `cargo invocation (short rationale)`. "Source" cites the surveyed repo
-that provided the strongest version of the check.
+that provided the strongest version of the check, or `none` for a check Anvil introduced
+itself.
 
 Invocations shown without a pinned nightly or MSRV use the selected stable
 compiler. Caller-provided `RUSTUP_TOOLCHAIN` remains a native rustup input and
@@ -178,6 +180,7 @@ while paired prerequisite validation remains read-only.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
+| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --package '{spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; an unscoped run selects every workspace member. | none |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
@@ -185,12 +188,42 @@ while paired prerequisite validation remains read-only.
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps`. Local `--open` adds Cargo's `--open`; cloud workflows retain the non-interactive default. | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each publishable crate that does not opt out through `[package.metadata.ox-gen-readme]`; generation and checking share one crate-selection path, library or proc-macro rustdoc is preferred, and binary rustdoc is used for bin-only crates | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
-| `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted types (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `perf`, `revert`) are a deliberate subset of Conventional Commits, not the complete grammar. The title must occupy a single line, so trailing content after the description is rejected. A rejected title reports the accepted title formats and the case-insensitive type names, so the author can correct the title from the check output alone. Skipped only outside a pull request context, where `PR_TITLE` is unset or empty (local runs and cloud builds that are not pull request builds); an invalid title or failure to retrieve a known PR's title fails loudly. GitHub supplies the event title directly. ADO resolves it through the REST API because `System.PullRequest.Title` does not exist. | oxidizer-github |
+| `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted types (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `perf`, `revert`) are a deliberate subset of Conventional Commits, not the complete grammar. The title must occupy a single line, so trailing content after the description is rejected. A rejected title reports the accepted title formats and the case-insensitive type names, so the author can correct the title from the check output alone. Skipped only outside a pull request context, where `PR_TITLE` is unset or empty (local runs and cloud builds that are not pull request builds); an invalid title or failure to retrieve a known PR's title fails loudly. Both GitHub and ADO resolve the current title through their REST APIs; ADO requires this because `System.PullRequest.Title` does not exist, while GitHub does so because workflow reruns retain their original event payload. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+
+#### Package-isolated all-target compilation
+
+Cargo unifies dependency features across packages selected in one invocation.
+A workspace build can therefore pass because another selected package enables
+an optional dependency or feature that a package forgot to declare for its own
+tests or examples. Disabling defaults in a batched workspace invocation does
+not remove that blind spot.
+
+The fast tier checks affected packages one at a time, first with default
+features and then with defaults disabled. Both configurations reuse Cargo's
+normal build cache.
+`--all-targets` includes unit and integration tests, examples, and benchmarks,
+so test-only dependency omissions are checked as well as the library and binaries.
+For example, a module enabled by `cfg(test)` may reference an optional dependency
+that must also be declared as a dev-dependency. A target that only makes sense
+with a package feature enabled -- a test, benchmark, example, or binary alike --
+must declare `required-features` or gate the feature-specific scenario behind
+`cfg(feature = "...")`. Cargo still skips targets whose declared feature
+requirements are not enabled, so declaring them is also the supported way to opt
+a target out of the defaults-disabled pass. `[lib]` has no such escape hatch, so
+a library that does not build without its default features always fails here.
+
+This is a compile-time guardrail, not a complete feature matrix or a test runner.
+It complements all-features linting and batched coverage without instrumenting,
+linking, or executing every package's test binaries. Dependency defaults and
+explicitly requested dependency features still apply. Cold runs must compile
+their dependency graph; a warm-cache duration is not a cold-build cost estimate.
+`--keep-going` reports all failing packages within a configuration. A failed
+configuration stops the check before the next configuration runs.
 
 ### `pr-slow` umbrella
 
@@ -205,7 +238,7 @@ matrix overhead.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config LCOV reports scoped to the same affected packages, so instrumented but unselected dependencies do not contaminate downstream coverage totals. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. On Windows, an `llvm-cov export` that exceeds the process command-line limit (OS error 206) is retried from cargo-llvm-cov's diagnostic through an LLVM response file. Other report failures remain failures. Per-config reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
+| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config LCOV reports scoped to the same affected packages, so instrumented but unselected dependencies do not contaminate downstream coverage totals. For explicit `--package` selections, packages declaring `min-lines-percent = 0` run through plain `cargo nextest`, without coverage measurement or gating. Unscoped `--workspace` runs, including scheduled runs, still run those packages through `llvm-cov nextest`; the zero threshold disables gating, not instrumentation. Crate-level `coverage(off)` exclusions still exclude their test code from coverage. Neither path skips tests. On Windows, an `llvm-cov export` that exceeds the process command-line limit (OS error 206) is retried from cargo-llvm-cov's diagnostic through an LLVM response file. Other report failures remain failures. Per-config reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
 | `doc-test`   | Exactly two cargo-test runs over affected packages with at least one Cargo metadata target marked `doctest = true`: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). Capability discovery is locked, intersects `packages` with `workspace_members`, and is projected into the shared impact cache while impact metadata is already available; consuming checks therefore launch no additional metadata process. Unscoped, widened, and legacy-cache paths fall back to one locked metadata query. The capability flag includes explicit library crate types and proc macros while excluding bin-only packages, which make Cargo error when they are the complete selection. An empty doctest-capable subset is a successful no-op. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
 
@@ -370,7 +403,7 @@ What that means concretely:
 - **Run only in PR** -- checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
-  `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
+  `ensure-no-default-features`, `check-all-targets`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
   `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
@@ -425,7 +458,7 @@ Bucket assignments per check:
 | Bucket    | Checks                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------|
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
-| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
+| affected  | `clippy`*, `check-all-targets`, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
 | unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
 

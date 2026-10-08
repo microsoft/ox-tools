@@ -244,6 +244,7 @@ pub(crate) fn wrapper_path() -> Option<Utf8PathBuf> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::env;
 

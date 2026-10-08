@@ -5,7 +5,8 @@ coverage:
   status:
     project:
       default:
-        target: 100
+        # Lowest production-only project coverage in the CI matrix (Windows).
+        target: 98.7
         threshold: "0"
         base: auto
 ignore:

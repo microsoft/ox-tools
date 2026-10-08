@@ -112,13 +112,11 @@ pub fn containment() -> Result<(), PlatformError> {
     #[cfg(windows)]
     {
         // A job object needs no delegation and no privilege, and one is created for every child.
-        // #[gamma::skip(result.ok_to_err, reason = "this compile-time branch is observable only in a Windows build; Linux mutation runs cannot execute it")]
         Ok(())
     }
 
     #[cfg(not(any(target_os = "linux", windows)))]
     {
-        // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "this compile-time branch exists only on non-Linux, non-Windows targets and cannot be executed by the Linux mutation run")]
         Err(PlatformError::new_static(
             Situation::Unsupported,
             "this platform offers no unprivileged boundary a test subtree cannot leave, so \

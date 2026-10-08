@@ -139,6 +139,7 @@ impl Expression {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io;
     use std::panic::{AssertUnwindSafe, catch_unwind};

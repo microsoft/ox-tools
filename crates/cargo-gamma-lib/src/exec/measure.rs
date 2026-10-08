@@ -243,7 +243,7 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
         killers.hint(&mutant.id).is_some_and(|hint| {
             reach
                 .reachable(mutant)
-                .is_some_and(|reachable| reachable.iter().any(|binary| hint.names(&binary.package, &binary.target)))
+                .is_some_and(|reachable| reachable.iter().any(|binary| binary.matches_killer(hint)))
         })
     };
 
@@ -1244,7 +1244,7 @@ fn finish_population(events: &mut impl Events, mutants: usize) {
 }
 
 fn begin_schema_build(events: &mut impl Events) {
-    events.begin("Excluding", "Excluded", "unviable mutants (0 found)");
+    events.begin("Excluding", "Excluded", "unviable mutants");
 }
 
 fn finish_schema_build(events: &mut impl Events, unviable: usize, viable: usize, not_built: usize) {
@@ -1933,7 +1933,7 @@ mod tests {
             [
                 ("Mutating".to_owned(), "12 target packages".to_owned()),
                 (String::new(), ", 3 mutants".to_owned()),
-                ("Excluding".to_owned(), "unviable mutants (0 found)".to_owned()),
+                ("Excluding".to_owned(), "unviable mutants".to_owned()),
                 (String::new(), "1 unviable mutant, leaving 2 viable mutants".to_owned()),
             ]
         );

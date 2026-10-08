@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! End-to-end integration tests for the `cargo-heather` binary.
 //!
 //! These tests build the real binary via `assert_cmd` and exercise the

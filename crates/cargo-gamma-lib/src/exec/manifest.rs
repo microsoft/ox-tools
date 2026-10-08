@@ -737,6 +737,7 @@ fn append_flag(flags: &mut Item) -> bool {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

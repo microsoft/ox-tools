@@ -207,6 +207,7 @@ const fn default_jobs(available: usize) -> usize {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

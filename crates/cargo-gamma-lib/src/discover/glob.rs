@@ -194,6 +194,7 @@ fn tokenize(pattern: &str) -> Vec<Token> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

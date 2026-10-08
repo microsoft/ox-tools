@@ -580,6 +580,7 @@ const fn label(outcome: Outcome) -> &'static str {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use camino::Utf8PathBuf;
 

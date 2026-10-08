@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))] // miri can't sandbox the git/cargo/just subprocesses these tests drive.
 #![expect(clippy::unwrap_used, reason = "integration tests favor concise assertions over Result plumbing")]
 
@@ -496,12 +498,9 @@ fn impact_empty_output_when_head_equals_base() {
     if !tools_available() {
         return;
     }
-    // A clean checkout whose HEAD is exactly the base ref: cargo-delta sees no
-    // committed diff and emits no impact JSON. The recipe must still write a
-    // durable, EMPTY impact set -- `{}` to impact.json and the `--skip`
-    // sentinel for every tier -- and treat an unchanged repeat run as a cache
-    // hit. (The shared `workspace()` fixture always advances HEAD past the
-    // base, so this empty-output path is otherwise never exercised.)
+    // A clean checkout whose HEAD equals the base ref must persist an empty
+    // impact set, regardless of cargo-delta's JSON representation. Every tier
+    // must project to --skip, and an unchanged repeat run must reuse the cache.
     let tmp = workspace_at_base();
     let root = tmp.path();
     let impact_dir = root.join("target/anvil/impact");
@@ -509,10 +508,15 @@ fn impact_empty_output_when_head_equals_base() {
     let first = run_impact(root);
     // HEAD == base with a clean tree scopes by impact (empty), never widens.
     assert!(!first.contains("widening"), "a clean HEAD==base tree must not widen:\n{first}");
-    assert_eq!(
-        fs::read_to_string(impact_dir.join("impact.json")).unwrap().trim(),
-        "{}",
-        "an empty diff must persist an empty impact object so impact.json always exists"
+    let report = fs::read_to_string(impact_dir.join("impact.json")).unwrap();
+    // Accept either representation cargo-delta uses for an empty set, but
+    // require a JSON *object*: a run that leaked warnings or log output into
+    // the file would satisfy a bare non-empty check.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&report).unwrap_or_else(|e| panic!("impact.json must hold valid JSON, got {report:?}: {e}"));
+    assert!(
+        parsed.is_object(),
+        "an empty diff must still persist an impact report object, got: {report}"
     );
     for tier in ["modified", "affected", "required"] {
         assert_eq!(
@@ -531,6 +535,87 @@ fn impact_empty_output_when_head_equals_base() {
     assert!(
         noop.contains("cache hit"),
         "an unchanged rerun must report an impact cache hit:\n{noop}"
+    );
+}
+
+/// cargo-delta reports an empty impact set either as a structured report with
+/// empty tiers or by printing nothing at all. The real-tool test above accepts
+/// both representations, so it does not pin the blank-stdout branch -- the one
+/// that synthesizes `{}` in `impact.just`. A cargo-delta revision that switched
+/// to always emitting a structured empty report would silently stop covering
+/// that branch, so drive it here from a fixture that forwards every call to the
+/// real cargo except `delta ... impact`, which exits 0 with no stdout.
+#[test]
+#[serial]
+fn impact_blank_delta_output_persists_empty_object() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace_at_base();
+    let root = tmp.path();
+    let impact_dir = root.join("target/anvil/impact");
+
+    // `$PSScriptRoot` is the shim directory, so filtering it out of
+    // `Get-Command -All` resolves the same cargo the recipe would have found
+    // without the shim on PATH (including any `+toolchain` argument it passes).
+    let shim = ShimBin::new(&[(
+        "cargo.ps1",
+        r"if (($args -contains 'delta') -and ($args -contains 'impact')) {
+    if ($env:ANVIL_TEST_LOG) { Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ') }
+    exit 0
+}
+$real = Get-Command cargo -All |
+    Where-Object { $_.Source -and $_.Source -notlike (Join-Path $PSScriptRoot '*') } |
+    Select-Object -First 1
+if (-not $real) { [Console]::Error.WriteLine('cargo shim: no real cargo on PATH'); exit 98 }
+& $real.Source @args
+exit $LASTEXITCODE
+",
+    )]);
+
+    let run = || {
+        let out = just_cmd(root, &["anvil-impact"])
+            .env("PATH", &shim.path)
+            .env("ANVIL_TEST_LOG", &shim.log)
+            .output()
+            .unwrap();
+        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "just anvil-impact failed:\n{combined}");
+        combined
+    };
+
+    let first = run();
+    assert!(!first.contains("widening"), "a clean HEAD==base tree must not widen:\n{first}");
+    assert_eq!(
+        shim.log_lines().len(),
+        1,
+        "the fixture must have served exactly one `cargo delta impact` call: {:?}",
+        shim.log_lines()
+    );
+    assert_eq!(
+        fs::read_to_string(impact_dir.join("impact.json")).unwrap().trim(),
+        "{}",
+        "blank cargo-delta output must persist the empty-object placeholder"
+    );
+    for tier in ["modified", "affected", "required"] {
+        assert_eq!(
+            fs::read_to_string(impact_dir.join(format!("include_{tier}.txt"))).unwrap().trim(),
+            "--skip",
+            "the empty-object placeholder must project tier '{tier}' to the --skip sentinel"
+        );
+    }
+
+    // Unchanged repeat run: the cache answers without re-invoking cargo-delta.
+    let noop = run();
+    assert!(
+        noop.contains("cache hit"),
+        "an unchanged rerun must report an impact cache hit:\n{noop}"
+    );
+    assert_eq!(
+        shim.log_lines().len(),
+        1,
+        "a cache hit must not recompute impact, but cargo-delta ran again: {:?}",
+        shim.log_lines()
     );
 }
 

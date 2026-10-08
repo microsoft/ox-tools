@@ -195,7 +195,8 @@ alongside the GitHub-gated files so the on-disk tree is complete.
 │   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
 ├── skills/
 │   ├── cargo-anvil-adoption/SKILL.md  owned   (post-generation cleanup workflow; all backends)
-│   └── code-review/SKILL.md           owned   (GitHub PR review guidance)
+│   ├── code-review/SKILL.md           owned   (GitHub PR review guidance)
+│   └── code-review/test-review.md     owned   (test review rules linked from the skill)
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -224,9 +225,24 @@ a rebuttal. The skill's central rule follows from that: comment on evidence you
 can see, and leave build, lint, and test outcomes to the pipeline anvil
 generated.
 
-The content is derived from an audit of withdrawn review comments across
-anvil-managed repositories; each rule corresponds to a class of finding that was
-filed and then disproved.
+The general review rules are derived from an audit of withdrawn review comments
+across anvil-managed repositories; each corresponds to a class of finding that
+was filed and then disproved.
+
+The skill links to the separately owned `test-review.md` in the same directory.
+It covers every test target that `cargo test` runs, including integration tests
+under `tests/`, plus tests in Cargo example targets under `examples/`;
+benchmarks and provisioned end-to-end tests are out of scope. It makes
+determinism the primary review focus, because tests that control their inputs
+avoid real I/O, timers, and subprocesses and are therefore also fast. It
+justifies test-only APIs by the Pragmatic Rust Guidelines `M-MOCKABLE-SYSCALLS`
+and `M-TEST-UTIL`, takes precedence over the skill's general convention rule
+within its scope, and groups its rules into input and state control, exact
+outcome assertions, and test cost and placement, with one short section per
+rule. Doctests are treated as runnable documentation rather than coverage: they
+must run as shown, gate non-default features with hidden `cfg` lines, and leave
+behavioral coverage to unit and integration tests. Both files use the normal
+owned-file update flow and are emitted only for the GitHub backend.
 
 ## 3. Root workflows
 
@@ -380,8 +396,9 @@ jobs:
       - name: Resolve current PR title
         id: pr_title
         if: github.event_name == 'pull_request'
-        uses: actions/github-script
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
+          retries: 3
           script: |
             const { data: pullRequest } = await github.rest.pulls.get({
               owner: context.repo.owner,
@@ -643,6 +660,10 @@ created. The lookup is skipped for `merge_group`, where an empty `PR_TITLE`
 preserves the recipe's non-PR no-op, and API failures fail the matrix leg rather
 than silently skipping validation. Resolving per leg avoids a separate metadata
 job and its runner startup for one inexpensive API request.
+
+The lookup uses the action's bounded exponential-backoff support with three
+retries. Its default non-retryable status list keeps permission and not-found
+responses immediately fatal while tolerating transient API failures.
 
 The workflow also sets `BASE_REF` on the `pr-mutants` group step. These values
 are environment variables rather than action inputs because only the recipes
@@ -1192,11 +1213,14 @@ Conditions explained:
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
 `pull-requests: write` on the `validation` job that calls
 `anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
-of its jobs inherit that caller ceiling. The live-title step uses read access;
-only the guarded sticky-comment steps use write access. Merge-group executions
-share this caller but cannot reach either pull-request-only path. Fork PRs can
-read their current title, but cannot reach the comment steps regardless of
-whether an administrator has enabled write tokens for fork workflows.
+of its jobs inherit that caller ceiling. `pr-fast` requires at least
+`pull-requests: read` on `pull_request` runs for the live-title lookup; a missing
+permission fails the required group rather than silently skipping title
+validation. The guarded sticky-comment steps additionally require write access.
+Merge-group executions share this caller but cannot reach either
+pull-request-only path. Fork PRs can read their current title, but cannot reach
+the comment steps regardless of whether an administrator has enabled write
+tokens for fork workflows.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains

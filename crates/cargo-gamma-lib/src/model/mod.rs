@@ -16,7 +16,7 @@ pub use identity::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION, MutantId, SiteIndex, mu
 #[doc(inline)]
 pub use interner::Interner;
 #[doc(inline)]
-pub use mutant::{Expectation, Mutant, one_line};
+pub use mutant::{Expectation, KillerIdentity, Mutant, one_line};
 #[doc(inline)]
 pub use outcome::Outcome;
 #[doc(inline)]

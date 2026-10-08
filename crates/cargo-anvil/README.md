@@ -176,33 +176,35 @@ above compose these recipes into the default policy:
 
 * **Source and package hygiene:** [`rustfmt`][__link1]
   (`fmt`), [`Clippy`][__link2] (`clippy`),
-  [`cargo-sort`][__link3], license headers with
-  [`cargo-heather`][__link4],
-  [`cargo-ensure-no-cyclic-deps`][__link5],
-  and [`cargo-ensure-no-default-features`][__link6].
+  package-isolated target checks with
+  [`cargo-each`][__link3] (`check-all-targets`),
+  [`cargo-sort`][__link4], license headers with
+  [`cargo-heather`][__link5],
+  [`cargo-ensure-no-cyclic-deps`][__link6],
+  and [`cargo-ensure-no-default-features`][__link7].
 * **Documentation and repository policy:** Cargo documentation
   (`doc-build`), documentation tests (`doc-test`), generated README checks
-  with [`cargo-doc2readme`][__link7],
-  [`cargo-spellcheck`][__link8], and
-  [Conventional Commits][__link9] pull-request
+  with [`cargo-doc2readme`][__link8],
+  [`cargo-spellcheck`][__link9], and
+  [Conventional Commits][__link10] pull-request
   titles.
-* **Dependencies and public API:** [`cargo-deny`][__link10],
-  [`cargo-audit`][__link11],
-  [`cargo-aprz`][__link12],
-  [`cargo-udeps`][__link13],
-  [`cargo-semver-checks`][__link14], and
-  [`cargo-check-external-types`][__link15].
+* **Dependencies and public API:** [`cargo-deny`][__link11],
+  [`cargo-audit`][__link12],
+  [`cargo-aprz`][__link13],
+  [`cargo-udeps`][__link14],
+  [`cargo-semver-checks`][__link15], and
+  [`cargo-check-external-types`][__link16].
 * **Tests and coverage:** tests under the declared MSRV, coverage with
-  [`cargo-llvm-cov`][__link16] and
-  [`cargo-coverage-gate`][__link17],
+  [`cargo-llvm-cov`][__link17] and
+  [`cargo-coverage-gate`][__link18],
   documentation tests, and example compilation or optional execution.
-* **Runtime analysis:** [`Miri`][__link18],
-  [`cargo-careful`][__link19],
-  [`Loom`][__link20], and
-  [`Bolero`][__link21].
+* **Runtime analysis:** [`Miri`][__link19],
+  [`cargo-careful`][__link20],
+  [`Loom`][__link21], and
+  [`Bolero`][__link22].
 * **Broader validation:** diff-scoped and full
-  [`cargo-mutants`][__link22] runs,
-  [`cargo-hack`][__link23] feature-powerset
+  [`cargo-mutants`][__link23] runs,
+  [`cargo-hack`][__link24] feature-powerset
   checks, and benchmark compilation.
 
 `docs/design/checks.md` records the exact commands, impact scope, feature
@@ -249,7 +251,7 @@ dictionary format expected by cargo-spellcheck.
 
 #### Coverage
 
-[`cargo-coverage-gate`][__link24]
+[`cargo-coverage-gate`][__link25]
 metadata controls workspace and package thresholds, target-specific policy,
 and intentional exclusions. Coverage enforcement is local to the generated
 check; a hosted coverage service is optional reporting rather than the
@@ -361,9 +363,9 @@ customization.
 ### Building another tool on the engine
 
 The crate also exposes the catalog engine used by `cargo-anvil`. A
-downstream tool can start from [`Catalog::anvil`][__link25], add, replace, or remove
-[`Artifact`][__link26] values, select its own CLI identity, and pass the result to
-[`run_app`][__link27]:
+downstream tool can start from [`Catalog::anvil`][__link26], add, replace, or remove
+[`Artifact`][__link27] values, select its own CLI identity, and pass the result to
+[`run_app`][__link28]:
 
 ```rust
 use std::process::ExitCode;
@@ -400,32 +402,33 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbBALu36V1VAYbFUDdfp-8dCobobFjKbRep8AbYNMPgi_aMhFhZIGDa2NhcmdvLWFudmlsZjAuMTMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbcTEnTcXGBR8b8HCcaHW-17wbcqtabVxu0F8bRsUJJTz--cNhZIGDa2NhcmdvLWFudmlsZjAuMTMuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
- [__link10]: https://embarkstudios.github.io/cargo-deny/
- [__link11]: https://crates.io/crates/cargo-audit
- [__link12]: https://crates.io/crates/cargo-aprz
- [__link13]: https://crates.io/crates/cargo-udeps
- [__link14]: https://crates.io/crates/cargo-semver-checks
- [__link15]: https://crates.io/crates/cargo-check-external-types
- [__link16]: https://crates.io/crates/cargo-llvm-cov
- [__link17]: https://crates.io/crates/cargo-coverage-gate
- [__link18]: https://github.com/rust-lang/miri
- [__link19]: https://crates.io/crates/cargo-careful
+ [__link10]: https://www.conventionalcommits.org/
+ [__link11]: https://embarkstudios.github.io/cargo-deny/
+ [__link12]: https://crates.io/crates/cargo-audit
+ [__link13]: https://crates.io/crates/cargo-aprz
+ [__link14]: https://crates.io/crates/cargo-udeps
+ [__link15]: https://crates.io/crates/cargo-semver-checks
+ [__link16]: https://crates.io/crates/cargo-check-external-types
+ [__link17]: https://crates.io/crates/cargo-llvm-cov
+ [__link18]: https://crates.io/crates/cargo-coverage-gate
+ [__link19]: https://github.com/rust-lang/miri
  [__link2]: https://doc.rust-lang.org/clippy/
- [__link20]: https://crates.io/crates/loom
- [__link21]: https://crates.io/crates/bolero
- [__link22]: https://mutants.rs/
- [__link23]: https://crates.io/crates/cargo-hack
- [__link24]: https://crates.io/crates/cargo-coverage-gate
- [__link25]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/?search=Catalog::anvil
- [__link26]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/?search=Artifact
- [__link27]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/fn.run_app.html
- [__link3]: https://crates.io/crates/cargo-sort
- [__link4]: https://crates.io/crates/cargo-heather
- [__link5]: https://crates.io/crates/cargo-ensure-no-cyclic-deps
- [__link6]: https://crates.io/crates/cargo-ensure-no-default-features
- [__link7]: https://crates.io/crates/cargo-doc2readme
- [__link8]: https://crates.io/crates/cargo-spellcheck
- [__link9]: https://www.conventionalcommits.org/
+ [__link20]: https://crates.io/crates/cargo-careful
+ [__link21]: https://crates.io/crates/loom
+ [__link22]: https://crates.io/crates/bolero
+ [__link23]: https://mutants.rs/
+ [__link24]: https://crates.io/crates/cargo-hack
+ [__link25]: https://crates.io/crates/cargo-coverage-gate
+ [__link26]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/fn.run_app.html
+ [__link3]: https://crates.io/crates/cargo-each
+ [__link4]: https://crates.io/crates/cargo-sort
+ [__link5]: https://crates.io/crates/cargo-heather
+ [__link6]: https://crates.io/crates/cargo-ensure-no-cyclic-deps
+ [__link7]: https://crates.io/crates/cargo-ensure-no-default-features
+ [__link8]: https://crates.io/crates/cargo-doc2readme
+ [__link9]: https://crates.io/crates/cargo-spellcheck

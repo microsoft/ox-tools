@@ -289,6 +289,7 @@ pub(super) fn first_failure(output: &str) -> Option<&str> {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use super::first_failure;
     use crate::testing::{spliced, token};
@@ -328,6 +329,7 @@ mod fuzz {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

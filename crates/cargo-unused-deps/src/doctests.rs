@@ -306,6 +306,7 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::ffi::OsString;
     use std::fs;

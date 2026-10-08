@@ -553,6 +553,7 @@ fn uncovered(summary: Summary) -> Option<Finding> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::testing::advise_fixture::{binary, find, mutant, timing};

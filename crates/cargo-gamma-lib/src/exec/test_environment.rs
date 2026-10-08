@@ -354,6 +354,7 @@ fn insert(map: &mut BTreeMap<OsString, OsString>, name: impl Into<OsString>, val
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

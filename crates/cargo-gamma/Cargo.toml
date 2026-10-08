@@ -20,6 +20,13 @@ exclude = ["docs/TODO.md"]
 [package.metadata.docs.rs]
 all-features = true
 
+# The terminal adapter and entry point already exclude themselves from coverage.
+# Excluding test code leaves no coverage records for this crate.
+# Anvil runs tests through plain nextest for explicit package selections;
+# unscoped workspace runs still use llvm-cov nextest with test code excluded.
+[package.metadata.coverage-gate]
+min-lines-percent = 0.0
+
 [dependencies]
 cargo-gamma-lib = { workspace = true }
 rallocator = { workspace = true }
