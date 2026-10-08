@@ -5,6 +5,9 @@
 
 This is the crate's top-level design document.
 
+The provisioned real-toolchain acceptance boundary is specified in
+[System tests](design/system-tests.md).
+
 ## Purpose
 
 This crate coordinates cargo-gamma campaigns: configuration, discovery,

@@ -6,7 +6,10 @@
 //! Kept under `tests/` so `cargo-llvm-cov`'s default report exclusions apply.
 
 use std::fs;
-use std::path::{Component, Path};
+use std::path::Path;
+
+#[path = "project_inputs.rs"]
+mod inputs;
 
 const SUBJECT_MANIFEST: &str = "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\n[workspace]\n";
 
@@ -17,9 +20,7 @@ pub fn write_fixture(root: &Path, files: &[(&str, &str)]) {
     for &(relative, contents) in files {
         let relative = Path::new(relative);
         assert!(
-            !relative
-                .components()
-                .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir | Component::ParentDir)),
+            inputs::safe_relative_path(relative),
             "embedded fixture paths must stay inside their owned directory: {}",
             relative.display()
         );
@@ -48,14 +49,12 @@ pub fn write_project(root: &Path, files: &[(&str, &str)]) {
         ".cargo/config.toml"
     };
     let path = root.join(configuration);
-    let mut document = if path.exists() {
-        fs::read_to_string(&path)
-            .unwrap_or_else(|cause| panic!("could not read embedded Cargo configuration {}: {cause}", path.display()))
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap_or_else(|cause| panic!("project configuration must be valid TOML; use write_fixture for malformed inputs: {cause}"))
+    let text = if path.exists() {
+        fs::read_to_string(&path).unwrap_or_else(|cause| panic!("could not read embedded Cargo configuration {}: {cause}", path.display()))
     } else {
-        toml_edit::DocumentMut::new()
+        String::new()
     };
-    document["net"]["offline"] = toml_edit::value(true);
+    let document = inputs::offline_configuration(&text)
+        .unwrap_or_else(|cause| panic!("project configuration must be valid TOML; use write_fixture for malformed inputs: {cause}"));
     write_fixture(root, &[(configuration, &document.to_string())]);
 }

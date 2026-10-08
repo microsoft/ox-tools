@@ -351,9 +351,9 @@ mod tests {
     fn read_failures_name_the_missing_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = Utf8Path::from_path(directory.path()).unwrap().join("does-not-exist/source.rs");
-        let error = SourceFile::read(path).unwrap_err();
+        let error = SourceFile::read(&path).unwrap_err();
 
-        assert!(error.to_string().contains("could not read"));
+        assert!(error.to_string().starts_with(&format!("could not read `{path}`")));
     }
 
     #[test]
