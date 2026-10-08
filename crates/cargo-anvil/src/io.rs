@@ -235,6 +235,9 @@ mod tests {
         let error = select_directory_entry(entries, dir, "Justfile").unwrap_err();
 
         assert!(error.to_string().contains("failed to enumerate directory catalog"), "{error}");
+        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "entry denied");
     }
 
     #[test]
@@ -245,6 +248,9 @@ mod tests {
         ];
         let error = select_directory_entry(entries, Path::new("catalog"), "Justfile").unwrap_err();
         assert!(error.to_string().contains("failed to enumerate directory catalog"), "{error}");
+        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "entry denied");
         assert_eq!(
             select_directory_entry(
                 [Ok("justfile".to_owned()), Ok("Justfile".to_owned())],

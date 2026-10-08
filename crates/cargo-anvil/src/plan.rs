@@ -13,9 +13,6 @@
 //! - **Summarizes** for `--dry-run`: prints counts and outstanding items,
 //!   without touching disk. Returns a non-zero exit code if anything is
 //!   out of date.
-//!
-//! See [`updates.md §7`](../../docs/design/updates.md) for the proposed-file
-//! protocol.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -289,8 +286,7 @@ impl Plan {
     ///
     /// When `previous_manifest` is provided, `Write` items are split
     /// into "Will create" (no prior manifest entry) and "Will update"
-    /// (existing entry getting refreshed) per
-    /// [`updates.md §9`](../../docs/design/updates.md). The stale-entries
+    /// (existing entry getting refreshed). The stale-entries
     /// section enumerates manifest entries that were present before
     /// this run but are no longer in the plan; these are purged on
     /// non-dry-run application (see [`Plan::apply`]).
