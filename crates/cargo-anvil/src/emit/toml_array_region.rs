@@ -609,6 +609,17 @@ mod tests {
     }
 
     #[test]
+    fn review_actual_comment_markers_cannot_split_a_nested_array_value() {
+        let mut spec = spec();
+        spec.path = vec!["items".to_owned()];
+        spec.region.body = "[1],\n".to_owned();
+        let host = "items = [[\n# >>> anvil-managed: entries\n1,\n# <<< anvil-managed: entries\n]]\n";
+        let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::MisplacedArrayMarkers);
+        assert_eq!(error.reason.to_string(), "the region splits a TOML array value");
+    }
+
+    #[test]
     fn review_dotted_inline_proxy_adoption_uses_real_container() {
         for (body, entry) in [
             ("{ a.b = 1 },\n", "{ a.b = 1 }"),
@@ -624,6 +635,10 @@ mod tests {
             let item = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec).unwrap();
             assert_eq!(item.decision, Decision::Write);
             let output = item.spliced_host.as_ref().unwrap();
+            assert_eq!(
+                output,
+                &format!("items = [\n  # >>> anvil-managed: entries\n  {entry},\n  # <<< anvil-managed: entries\n]\n")
+            );
             let document = Document::parse(&output).unwrap();
             assert_eq!(document["items"].as_array().unwrap().len(), 1);
             assert_eq!(
