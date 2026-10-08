@@ -163,14 +163,19 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 /// Computed before anything is planned, because the validity check each region
 /// runs has to know which of the regions already in its host are on their way
 /// out — and removals are not planned until every region has been visited.
-fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> Result<BTreeSet<(String, String)>, AppError> {
+fn live_region_keys(
+    repo_root: &Path,
+    workspace: &Workspace,
+    catalog: &Catalog,
+    hosts: &HostTextCache,
+) -> Result<BTreeSet<(String, String)>, AppError> {
     let mut keys = BTreeSet::new();
     for artifact in catalog.artifacts() {
         let Some(spec) = artifact.region_spec() else {
             continue;
         };
         for host in region_host_paths(workspace, spec) {
-            keys.insert((resolve_existing_case_insensitive(repo_root, host)?, spec.id.as_str().to_owned()));
+            keys.insert((hosts.resolve_host(repo_root, host)?, spec.id.as_str().to_owned()));
         }
     }
     Ok(keys)
@@ -199,7 +204,7 @@ fn build_plan_with_hosts(
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
     let mut composed = ComposedHosts {
-        live: live_region_keys(repo_root, workspace, catalog)?,
+        live: live_region_keys(repo_root, workspace, catalog, hosts)?,
         ..ComposedHosts::default()
     };
     for artifact in catalog.artifacts() {
@@ -207,7 +212,7 @@ fn build_plan_with_hosts(
             && let Some(path) = catalog.toml_array_path(spec)
         {
             for host in region_host_paths(workspace, spec) {
-                let host = resolve_existing_case_insensitive(repo_root, host)?;
+                let host = hosts.resolve_host(repo_root, host)?;
                 composed.array_paths.entry(host).or_default().push(path.to_vec());
             }
         }
@@ -219,7 +224,7 @@ fn build_plan_with_hosts(
     // by `push_region_at` when it plans the region, with that region's own
     // comment syntax rather than the `Hash` assumed below.
     for key in manifest.regions.keys() {
-        let host = resolve_existing_case_insensitive(repo_root, &key.host)?;
+        let host = hosts.resolve_host(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
@@ -246,9 +251,16 @@ fn build_plan_with_hosts(
                     path: path.to_vec(),
                 };
                 for host in region_host_paths(workspace, &spec.region) {
-                    let host = resolve_existing_case_insensitive(repo_root, host)?;
+                    let host = hosts.resolve_host(repo_root, host)?;
                     let current = hosts.get_or_read(repo_root, &host)?;
-                    match crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &spec) {
+                    let retiring = composed.pending_retirements.get(&host).cloned().unwrap_or_default();
+                    match crate::emit::toml_array_region::plan_toml_array_region_with_retirements(
+                        manifest,
+                        current.as_deref(),
+                        &host,
+                        &spec,
+                        &retiring,
+                    ) {
                         Ok(item) => {
                             if let Some(spliced) = &item.spliced_host {
                                 if composed.pending_retirements.get(&host).is_some_and(|retiring| !retiring.is_empty())
@@ -298,6 +310,15 @@ struct HostTextCache {
 }
 
 impl HostTextCache {
+    /// Cached hosts already carry their resolved spelling. Reuse it instead of
+    /// consulting the filesystem again, including for fully in-memory plans.
+    fn resolve_host(&self, repo_root: &Path, host: &str) -> Result<String, AppError> {
+        if self.texts.contains_key(host) {
+            return Ok(host.to_owned());
+        }
+        resolve_existing_case_insensitive(repo_root, host)
+    }
+
     /// The current in-memory text for `host`, reading from disk on first
     /// access. `None` means the host file does not (yet) exist on disk and
     /// no in-memory write has created it.
@@ -402,7 +423,7 @@ fn push_region_at(
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
-    let host = resolve_existing_case_insensitive(repo_root, host)?;
+    let host = hosts.resolve_host(repo_root, host)?;
     if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
         return Ok(());
     }
@@ -1148,7 +1169,7 @@ fn plan_removals(
         // No `resolved_host != key.host` guard: the `continue` above has
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
-        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host)?;
+        let resolved_host = hosts.resolve_host(repo_root, &key.host)?;
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
         // owned-file loop above keeps. A lock entry naming a region the catalog
@@ -1547,52 +1568,152 @@ mod tests {
                 "# >>> anvil-managed: anvil-spellcheck-root\n# new root comment\n# <<< anvil-managed: anvil-spellcheck-root\n\nplugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n",
             ),
         ] {
-            let text = format!("plugins.default = [\"user\"]\n\n# >>> anvil-managed: {id}\n{old}# <<< anvil-managed: {id}\n");
-            let mut manifest = Manifest::default();
-            manifest.set_region("spellcheck.toml", id, checksum_str(old));
-            let entries = crate::catalog::TomlArrayRegionSpec {
-                region: RegionSpec {
-                    host: HostSelector::Path("spellcheck.toml".to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "\"managed\",\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                },
-                path: vec!["plugins".to_owned(), "default".to_owned()],
-            };
-            let next_id = if id == "old" {
-                RegionId::new("new")
-            } else {
-                RegionId::new("anvil-spellcheck-root")
-            };
-            let catalog = Catalog::builder(CliMeta::new("anvil"))
-                .with_toml_array_region(entries)
-                .with_artifact(Artifact::region(RegionSpec {
-                    host: HostSelector::Path("spellcheck.toml".to_owned()),
-                    id: next_id,
-                    body: body.to_owned(),
-                    syntax: CommentSyntax::Hash,
-                }))
+            for array_first in [true, false] {
+                for prior_body in [None, Some("\"previous\",\n"), Some("\"managed\",\n")] {
+                    let mut text = format!("plugins.default = [\"user\"]\n\n# >>> anvil-managed: {id}\n{old}# <<< anvil-managed: {id}\n");
+                    let mut manifest = Manifest::default();
+                    manifest.set_region("spellcheck.toml", id, checksum_str(old));
+                    let entries = crate::catalog::TomlArrayRegionSpec {
+                        region: RegionSpec {
+                            host: HostSelector::Path("spellcheck.toml".to_owned()),
+                            id: RegionId::new("entries"),
+                            body: "\"managed\",\n".to_owned(),
+                            syntax: CommentSyntax::Hash,
+                        },
+                        path: vec!["plugins".to_owned(), "default".to_owned()],
+                    };
+                    let array_decision = if let Some(prior_body) = prior_body {
+                        let mut prior = entries.clone();
+                        prior.region.body = prior_body.to_owned();
+                        let item =
+                            crate::emit::toml_array_region::plan_toml_array_region(&manifest, Some(&text), "spellcheck.toml", &prior)
+                                .unwrap();
+                        assert_eq!(item.decision, Decision::Write);
+                        manifest.set_region("spellcheck.toml", "entries", item.rendered_checksum.unwrap());
+                        text = item.spliced_host.unwrap();
+                        if prior_body == entries.region.body {
+                            Decision::InSync
+                        } else {
+                            Decision::Write
+                        }
+                    } else {
+                        Decision::Write
+                    };
+                    let next_id = if id == "old" {
+                        RegionId::new("new")
+                    } else {
+                        RegionId::new("anvil-spellcheck-root")
+                    };
+                    let ordinary = Artifact::region(RegionSpec {
+                        host: HostSelector::Path("spellcheck.toml".to_owned()),
+                        id: next_id,
+                        body: body.to_owned(),
+                        syntax: CommentSyntax::Hash,
+                    });
+                    let builder = Catalog::builder(CliMeta::new("anvil"));
+                    let catalog = if array_first {
+                        builder.with_toml_array_region(entries).with_artifact(ordinary)
+                    } else {
+                        builder.with_artifact(ordinary).with_toml_array_region(entries)
+                    }
+                    .build()
+                    .unwrap();
+                    let mut hosts = HostTextCache::default();
+                    hosts.set("spellcheck.toml", text);
+                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                    assert_eq!(plan.refusals(), &[] as &[String]);
+                    let mut decisions = if array_first {
+                        vec![array_decision, Decision::Write]
+                    } else {
+                        vec![Decision::Write, array_decision]
+                    };
+                    if id == "old" {
+                        decisions.push(Decision::Remove);
+                    }
+                    assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), decisions);
+                    assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
+                    let manifest = plan.projected_manifest(&manifest);
+                    let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                    assert_eq!(rerun.refusals(), &[] as &[String]);
+                    assert_eq!(
+                        rerun.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
+                        [Decision::InSync, Decision::InSync]
+                    );
+                    assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn toml_array_migration_keeps_edited_and_untracked_orphans() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let text = "plugins.default = [\"user\"]\n\n# >>> anvil-managed: old\n[settings]\nmode = true\n# <<< anvil-managed: old\n";
+        let entries = crate::catalog::TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned(), "default".to_owned()],
+        };
+        let ordinary = Artifact::region(RegionSpec {
+            host: HostSelector::Path("config.toml".to_owned()),
+            id: RegionId::new("new"),
+            body: "[settings]\nmode = false\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        });
+        for tracked in [false, true] {
+            for array_first in [true, false] {
+                let mut manifest = Manifest::default();
+                if tracked {
+                    manifest.set_region("config.toml", "old", checksum_str("[settings]\nmode = \"previous\"\n"));
+                }
+                let builder = Catalog::builder(CliMeta::new("anvil"));
+                let catalog = if array_first {
+                    builder.with_toml_array_region(entries.clone()).with_artifact(ordinary.clone())
+                } else {
+                    builder.with_artifact(ordinary.clone()).with_toml_array_region(entries.clone())
+                }
                 .build()
                 .unwrap();
-            let mut hosts = HostTextCache::default();
-            hosts.set("spellcheck.toml", text);
-            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-            assert_eq!(plan.refusals(), &[] as &[String]);
-            let decisions = if id == "old" {
-                vec![Decision::Write, Decision::Write, Decision::Remove]
-            } else {
-                vec![Decision::Write, Decision::Write]
-            };
-            assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), decisions);
-            assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
-            let manifest = plan.projected_manifest(&manifest);
-            let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-            assert_eq!(rerun.refusals(), &[] as &[String]);
-            assert_eq!(
-                rerun.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-                [Decision::InSync, Decision::InSync]
-            );
-            assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
+                let mut hosts = HostTextCache::default();
+                hosts.set("config.toml", text.to_owned());
+                let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                assert!(!plan.refusals().is_empty());
+                for item in plan.items() {
+                    let Target::Region { id, .. } = &item.target else {
+                        panic!("expected a region")
+                    };
+                    assert_eq!(item.decision, if id == "entries" { Decision::Write } else { Decision::LeaveAlone });
+                }
+                let final_text = hosts.cached("config.toml").unwrap();
+                assert_eq!(
+                    find_region(&final_text, "old", CommentSyntax::Hash).unwrap().unwrap().body_str(),
+                    "[settings]\nmode = true\n"
+                );
+                assert!(find_region(&final_text, "new", CommentSyntax::Hash).unwrap().is_none());
+                let document = toml_edit::Document::parse(&final_text).unwrap();
+                assert_eq!(document["settings"]["mode"].as_bool(), Some(true));
+                assert_eq!(
+                    document["plugins"]["default"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(toml_edit::Value::as_str)
+                        .collect::<Vec<_>>(),
+                    ["managed", "user"]
+                );
+                assert_eq!(
+                    plan.projected_manifest(&manifest).region_checksum("config.toml", "old"),
+                    manifest.region_checksum("config.toml", "old")
+                );
+            }
         }
     }
 
