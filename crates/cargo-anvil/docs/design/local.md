@@ -72,10 +72,11 @@ owns GitHub credential discovery.
 
 Scripts remain only where the domain tool has no equivalent interface:
 README comparison, spell dictionary generation, Miri profile environment,
-cargo-careful cache repair, mutation-diff preparation, Bolero target discovery,
-and container orchestration. PR-title policy is a Just regex and the MSRV path
-uses cargo-each's optional workspace-version contract. The remaining scripts are
-not shared Anvil runners and do not own generic package iteration.
+cargo-careful cache repair, mutation-diff preparation, and container
+orchestration. Bolero discovery uses a JSONL file consumed by cargo-each;
+PR-title policy is a Just regex and the MSRV path uses cargo-each's optional
+workspace-version contract. The remaining scripts are not shared Anvil runners
+and do not own generic package iteration.
 
 ### Groups and tiers
 
@@ -174,19 +175,16 @@ policy intentionally rather than introducing an Anvil-specific merger.
 
 ### Bolero
 
-The recipe does more than package iteration. For each affected package it runs
-`cargo bolero list --profile release --package <name>`, parses one JSON object
-per discovered fuzz target, normalizes the target identity, and then runs every
-target through `cargo bolero test --profile release --engine libfuzzer -T 60s`.
-It aggregates failures so one target does not hide later targets.
-
-Cargo-each cannot express that today because Bolero fuzz targets are discovered
-by cargo-bolero, not Cargo metadata. A general cargo-each extension could add
-two-phase discovery fan-out: run a discovery command per selected package,
-interpret newline-delimited JSON records, then expand JSON-field placeholders
-in a bounded follow-up command. Such a feature must stay generic and should not
-encode Bolero field aliases or Anvil policy. The narrower alternative is a
-cargo-bolero command that runs every listed target itself.
+For each affected package the recipe runs
+`cargo bolero list --profile release --package <name>` and redirects the
+combined stdout to a deterministic JSONL file under the system temporary
+directory. Pinned cargo-bolero 0.13.4 emits one
+`{"package":"…","test":"…"}` record per target on stdout; Cargo build output and
+diagnostics use stderr. A second direct invocation passes that file to
+`cargo each --json-lines-file`, which expands `{json:package}` and `{json:test}`
+into bounded `cargo bolero test --profile release --engine libfuzzer -T 60s`
+commands. `--keep-going` preserves aggregate failure behavior, and an empty file
+is cargo-each's successful no-op.
 
 ### Spell dictionary preparation
 

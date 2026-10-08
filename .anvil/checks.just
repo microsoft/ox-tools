@@ -220,45 +220,13 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 # not ship a long-form fuzz tier (the failure surface is too
 # repo-specific to standardize).
 
+anvil_bolero_temp_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TMPDIR", env("TEMP", env("TMP", "/tmp")))))
+anvil_bolero_targets_file := anvil_bolero_temp_dir / ("anvil-bolero-" + sha256(justfile_directory()) + ".jsonl")
+
 # Run Bolero tests for affected workspace packages.
-[script("pwsh", "-NoProfile")]
 anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    if (-not $IsLinux) {
-        Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
-        exit 0
-    }
-    $targets = [System.Collections.Generic.List[object]]::new()
-    $targetsJson = & cargo '+{{ rust_nightly }}' each {{ anvil_affected_selection }} -- cargo '+{{ rust_nightly }}' bolero list --profile release --package '{name}'
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-bolero: target discovery failed'
-        exit $LASTEXITCODE
-    }
-    try {
-        foreach ($targetJson in ($targetsJson | Where-Object { $_ -match '^\{' })) {
-            $targets.Add(($targetJson | ConvertFrom-Json))
-        }
-    } catch {
-        Write-Error "anvil-bolero: could not parse target discovery output: $_"
-        exit 1
-    }
-    if ($targets.Count -eq 0) {
-        Write-Host 'anvil-bolero: no fuzz targets in affected packages; skipping'
-        exit 0
-    }
-    $failed = $false
-    foreach ($t in $targets) {
-        $packageName = if ($t.package) { $t.package } else { $t.package_name }
-        $testName = if ($t.test) { $t.test } elseif ($t.test_name) { $t.test_name } else { $t.target }
-        if (-not $packageName -or -not $testName) {
-            Write-Error "anvil-bolero: target discovery returned an unsupported object: $($t | ConvertTo-Json -Compress)"
-            exit 1
-        }
-        Write-Host "anvil-bolero: ${packageName}::${testName}"
-        & cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package $packageName $testName
-        if ($LASTEXITCODE -ne 0) { $failed = $true }
-    }
-    if ($failed) { exit 1 }
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 

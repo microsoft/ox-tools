@@ -690,7 +690,6 @@ mod tests {
     fn checks_fail_closed_and_preserve_opted_out_tests() {
         let checks = all_check_bodies();
         for needle in [
-            "anvil-bolero: target discovery failed",
             "${prefix}: cargo metadata failed",
             "coverage-gate {{ anvil_explicit_package_args }} run",
             "could not resolve the cargo-careful executable",
@@ -703,8 +702,20 @@ mod tests {
             "bolero discovery must use the execution profile through cargo-each"
         );
         assert!(
-            checks.contains("bolero test --profile release --engine libfuzzer"),
+            checks.contains("> {{ quote(anvil_bolero_targets_file) }}"),
+            "bolero discovery must truncate and replace the JSONL handoff through shell redirection"
+        );
+        assert!(
+            checks.contains("each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going"),
+            "bolero execution must consume discovered records through cargo-each"
+        );
+        assert!(
+            checks.contains("bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'"),
             "bolero execution must use the profile option accepted by the pinned cargo-bolero"
+        );
+        assert!(
+            !checks.contains("[script(\"pwsh\", \"-NoProfile\")]\nanvil-bolero:"),
+            "bolero must not require a PowerShell recipe"
         );
         assert!(
             !checks.contains("bolero list @bareArgs"),
