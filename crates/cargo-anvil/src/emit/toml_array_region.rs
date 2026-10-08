@@ -43,6 +43,15 @@ fn body_array(body: &str) -> Result<Array, ManagedRegionRefusal> {
     let mut document = source
         .parse::<DocumentMut>()
         .map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
+    if toml_comment_lines(&source).into_iter().any(|line| {
+        let comment = source[line.start..line.end].trim();
+        comment.starts_with("# >>> anvil-managed:") || comment.starts_with("# <<< anvil-managed:")
+    }) {
+        return Err(refusal(
+            "TOML array-entry bodies must not contain managed-region sentinel comments",
+            RefusalRemedy::InvalidGeneratedToml,
+        ));
+    }
     let array = document["entries"]
         .as_array()
         .ok_or_else(|| refusal("the region must contain only array entries", RefusalRemedy::InvalidGeneratedToml))?;
@@ -585,6 +594,92 @@ mod tests {
     }
 
     #[test]
+    fn review_catalog_rejects_generated_ownership_comments() {
+        for (host, region_id, path) in [
+            ("config.toml", "entries", vec!["plugins".to_owned(), "default".to_owned()]),
+            ("settings.conf", "catalog-entries", vec!["items".to_owned()]),
+        ] {
+            let mut original = spec();
+            original.region.host = HostSelector::Path(host.to_owned());
+            original.region.id = RegionId::new(region_id);
+            original.path = path;
+            let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+                .with_toml_array_region(original.clone())
+                .build()
+                .unwrap();
+            for id in [region_id, "foreign"] {
+                for body in [
+                    format!("# >>> anvil-managed: {id}\n\"managed\",\n"),
+                    format!("\"managed\",\n# <<< anvil-managed: {id}\n"),
+                    format!("# >>> anvil-managed: {id}\n\"managed\",\n# <<< anvil-managed: {id}\n"),
+                    format!("# >>> anvil-managed: {id}\n\"managed\",\n# <<< anvil-managed: other\n"),
+                    format!("\"one\",\n\t# >>> anvil-managed: {id}\n2,\n"),
+                    format!("# <<< anvil-managed: {id}\n"),
+                ] {
+                    for newline in ["\n", "\r\n"] {
+                        let mut invalid = original.clone();
+                        invalid.region.body = body.replace('\n', newline);
+                        let expected = format!(
+                            "invalid catalog for 'anvil':\n  - TOML array region '{region_id}': \
+                             TOML array-entry bodies must not contain managed-region sentinel comments"
+                        );
+                        let error = Catalog::builder(Catalog::anvil().cli().clone())
+                            .with_toml_array_region(invalid.clone())
+                            .build()
+                            .unwrap_err();
+                        assert_eq!(error.to_string(), expected);
+                        let error = catalog
+                            .clone()
+                            .into_builder()
+                            .replace_artifact(Artifact::region(invalid.region.clone()))
+                            .build()
+                            .unwrap_err();
+                        assert_eq!(error.to_string(), expected);
+                        let error = plan_toml_array_region(&Manifest::default(), None, host, &invalid).unwrap_err();
+                        assert_eq!(error.remedy, RefusalRemedy::InvalidGeneratedToml);
+                        assert_eq!(
+                            error.reason.to_string(),
+                            "TOML array-entry bodies must not contain managed-region sentinel comments"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn review_catalog_accepts_marker_data_and_non_boundary_comments() {
+        for quote in ["\"\"\"", "'''"] {
+            for newline in ["\n", "\r\n"] {
+                let body = format!(
+                    "# Guidance.\n{quote}\n# >>> anvil-managed: entries\n# <<< anvil-managed: foreign\n{quote},\n\
+                     {{ \"# >>> anvil-managed: entries\" = '# <<< anvil-managed: entries' }},\n\
+                     \"last\", # >>> anvil-managed: inline-comment\n"
+                );
+                let mut valid = spec();
+                valid.region.body = body.replace('\n', newline);
+                let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+                    .with_toml_array_region(valid.clone())
+                    .build()
+                    .unwrap();
+                assert_eq!(catalog.toml_array_path(&valid.region), Some(valid.path.as_slice()));
+                let expected = format!(
+                    "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  # Guidance.\n  {quote}\n\
+                     # >>> anvil-managed: entries\n# <<< anvil-managed: foreign\n{quote},\n\
+                     \x20\x20{{ \"# >>> anvil-managed: entries\" = '# <<< anvil-managed: entries' }},\n\
+                     \x20\x20\"last\", # >>> anvil-managed: inline-comment\n  # <<< anvil-managed: entries\n]\n\n"
+                )
+                .replace('\n', newline);
+                let item = plan_toml_array_region(&Manifest::default(), Some(newline), "config.toml", &valid).unwrap();
+                assert_eq!(item.spliced_host.as_deref(), Some(expected.as_str()));
+                let item = plan_toml_array_region(&Manifest::default(), Some(&expected), "config.toml", &valid).unwrap();
+                assert_eq!(item.decision, Decision::InSync);
+                assert_eq!(item.spliced_host, None);
+            }
+        }
+    }
+
+    #[test]
     fn review_scaffold_never_replaces_repository_or_retirement_bytes() {
         for newline in ["\n", "\r\n"] {
             for old in ["", "# >>> anvil-managed: old\nobsolete = \"café\"\n# <<< anvil-managed: old\n"] {
@@ -668,17 +763,20 @@ mod tests {
     fn pending_retirement_projection_preserves_original_bytes_and_scaffold_offsets() {
         for newline in ["\n", "\r\n"] {
             for prefix in ["# Repository comment: café\n", "plugins.default = [\"user\"]\n"] {
-                let old = "# >>> anvil-managed: old\n[settings]\nmode = \"café\"\n# <<< anvil-managed: old\n".replace('\n', newline);
-                let new = "# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n".replace('\n', newline);
-                let host = format!("{}{old}{new}", prefix.replace('\n', newline));
+                let old = "# >>> anvil-managed: old\n[settings]\nmode = \"café\"\n# <<< anvil-managed: old\n";
+                let new = "# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n";
+                let host = format!("{prefix}{old}{new}").replace('\n', newline);
                 let retiring = std::collections::BTreeSet::from(["old".to_owned()]);
                 let item =
                     plan_toml_array_region_with_retirements(&Manifest::default(), Some(&host), "config.toml", &spec(), &retiring).unwrap();
                 assert_eq!(item.decision, Decision::Write);
                 let spliced = item.spliced_host.unwrap();
-                assert!(spliced.contains(&old));
-                assert!(spliced.contains(&new), "{spliced:?}");
-                assert!(spliced.starts_with(&prefix.split('=').next().unwrap().replace('\n', newline)));
+                let expected = if prefix.starts_with("plugins") {
+                    format!("plugins.default = [\n{REGION}\"user\"]\n{old}{new}").replace('\n', newline)
+                } else {
+                    format!("{prefix}{old}{new}\n[plugins]\ndefault = [\n{REGION}]\n").replace('\n', newline)
+                };
+                assert_eq!(spliced, expected);
                 let retired = remove_region(&spliced, "old", CommentSyntax::Hash).unwrap();
                 let document = Document::parse(&retired).unwrap();
                 let array = document["plugins"]["default"].as_array().unwrap();
@@ -1298,7 +1396,7 @@ mod tests {
             plan_toml_array_region(&Manifest::default(), None, "config.toml", &invalid)
                 .unwrap_err()
                 .remedy,
-            RefusalRemedy::MalformedMarkers
+            RefusalRemedy::InvalidGeneratedToml
         );
     }
 

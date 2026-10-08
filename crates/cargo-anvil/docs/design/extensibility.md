@@ -116,7 +116,13 @@ region cannot both claim the same host/id.
 - a nonempty vector of path components (an empty literal key component is valid);
 - hash-comment syntax;
 - a body containing only valid TOML array entries and comments;
+- no actual full-line managed-region sentinel comments in the body: they would
+  introduce nested or malformed ownership when the engine wraps the entries;
 - a trailing comma after the final value when the body has values.
+
+Marker-looking string values, multiline string data, and quoted keys remain
+valid entries. Invalid generated ownership comments fail catalog construction
+and direct planning as invalid generated TOML, not malformed repository markers.
 
 `into_builder` preserves selectors, same-identity replacement retains them, and
 removal drops them. Replacement bodies are revalidated against retained array
