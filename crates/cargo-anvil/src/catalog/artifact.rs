@@ -9,8 +9,7 @@
 //! catalog's artifacts and dispatches each to the generic owned-file /
 //! managed-region drivers in [`crate::emit`].
 //!
-//! See [`extensibility.md §4`](../../docs/design/extensibility.md) for the
-//! design rationale. The on-disk vocabulary (`anvil-managed` sentinels,
+//! The on-disk vocabulary (`anvil-managed` sentinels,
 //! `justfiles/anvil/`, `.anvil.lock`) is fixed engine format — an artifact
 //! never parameterizes it.
 

@@ -8,8 +8,6 @@
 //! from it via [`Catalog::into_builder`] (or from empty via
 //! [`Catalog::builder`]) and customizes the identity and artifacts through
 //! the three uniform verbs, then calls [`CatalogBuilder::build`].
-//!
-//! See [`extensibility.md §4, §5`](../../docs/design/extensibility.md).
 
 use ohno::{AppError, bail};
 
