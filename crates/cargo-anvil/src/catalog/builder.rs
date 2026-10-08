@@ -213,6 +213,8 @@ impl CatalogBuilder {
     /// expression); quoted or empty TOML keys are supported as literal components.
     /// The region must use hash comments and contain only TOML array entries
     /// and comments, with a trailing comma after the last entry.
+    /// Actual full-line managed-region sentinel comments are not valid body content;
+    /// marker-looking string values and quoted keys remain valid entries.
     /// Invalid specifications are reported by [`Self::build`].
     #[must_use]
     pub fn with_toml_array_region(mut self, spec: TomlArrayRegionSpec) -> Self {
@@ -276,7 +278,8 @@ impl CatalogBuilder {
     /// `without_artifact` call violated its add/override/remove invariant, or
     /// if an owned file under `justfiles/` is not a `.just` recipe. TOML array
     /// regions also fail validation for an empty selector path, non-hash syntax,
-    /// invalid TOML entry bodies, or a missing final comma on a nonempty body.
+    /// invalid TOML entry bodies, generated ownership sentinel comments, or a
+    /// missing final comma on a nonempty body.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
