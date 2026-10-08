@@ -892,12 +892,11 @@ anvil-mutants-full: anvil-mutants-full-validate-prereqs
 #
 # Validates that $env:PR_TITLE matches the accepted title syntax when it
 # holds a value; no-op when unset or empty. Cloud workflows inject PR_TITLE
-# explicitly: GH Actions from ${{ github.event.pull_request.title }}; ADO
-# resolves it via the REST API in steps/group.yml (ADO has no PR-title
-# predefined variable) and publishes an empty value only outside PR builds,
-# failing closed when a known PR's title cannot be retrieved. Local runs have
-# no reliable way to recover the PR title, so an unset or empty value defers
-# the check rather than failing it.
+# explicitly: both GH Actions and ADO resolve the current title via their REST
+# APIs, fail closed when a known PR's title cannot be retrieved, and publish an
+# empty value only outside PR builds. Local runs have no reliable way to recover
+# the PR title, so an unset or empty value defers the check rather than failing
+# it.
 # It does NOT tolerate a non-empty-but-wrong value: a misconfigured cloud
 # variable (e.g. an unexpanded pipeline macro) is a real error and fails
 # the check loudly rather than silently passing.
@@ -4749,6 +4748,23 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
+      # Workflow reruns retain their original event payload. Resolve the title
+      # from the API so a rerun after a title correction validates the current
+      # value. A lookup failure fails closed; merge-group runs skip this step
+      # and leave PR_TITLE empty so the recipe preserves its non-PR no-op.
+      - name: Resolve current PR title
+        id: pr_title
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          retries: 3
+          script: |
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            core.setOutput("title", pullRequest.title);
       - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-fast
@@ -4756,7 +4772,7 @@ jobs:
           impact_mode: consume
         env:
           BASE_REF: ${{ inputs.base_ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_TITLE: ${{ steps.pr_title.outputs.title }}
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov / doc-test / examples.
