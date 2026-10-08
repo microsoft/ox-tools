@@ -904,7 +904,7 @@ struct ComposedHosts {
     live: BTreeSet<(String, String)>,
     /// Live selector dependencies, including array regions that refuse this pass.
     array_paths: HashMap<String, Vec<Vec<String>>>,
-    /// Ordinary templates used to reconstruct a partial apply's pre-write view.
+    /// Ordinary templates used to reconstruct the pre-write view after an interrupted update.
     ordinary_regions: HashMap<String, Vec<RegionSpec>>,
     /// Safe retirements discovered for neighboring writes or in-sync regions.
     pending_retirements: HashMap<String, BTreeSet<String>>,

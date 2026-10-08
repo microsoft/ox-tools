@@ -461,7 +461,7 @@ fn splice_offset_map(before: &str, after: &str) -> impl Fn(usize) -> Option<usiz
     }
 }
 
-/// Adopt a matching multiset of unmanaged entries.
+/// Adopt matching unmanaged entries with their repetition counts.
 ///
 /// Remove one matching unmanaged value for each generated entry, not comments
 /// or other regions. Array punctuation is bounded by parser-provided spans.
