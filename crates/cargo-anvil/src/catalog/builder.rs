@@ -503,6 +503,30 @@ mod tests {
     }
 
     #[test]
+    fn without_owned_file_preserves_array_selector_and_checksum_contribution() {
+        let array = TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let expected = Catalog::builder(CliMeta::new("tool"))
+            .with_toml_array_region(array.clone())
+            .build()
+            .unwrap();
+        let removed = Artifact::owned_file("removed.txt", "managed");
+        let before = expected.clone().into_builder().with_artifact(removed.clone()).build().unwrap();
+        let after = before.clone().into_builder().without_artifact(removed).build().unwrap();
+        assert_eq!(after.artifacts(), expected.artifacts());
+        assert_eq!(after.toml_array_path(&array.region), Some(array.path.as_slice()));
+        assert_eq!(after.checksum(), expected.checksum());
+        assert_ne!(after.checksum(), before.checksum());
+    }
+
+    #[test]
     fn multiple_errors_are_all_reported() {
         let err = Catalog::anvil()
             .into_builder()
