@@ -1441,6 +1441,66 @@ mod tests {
     }
 
     #[test]
+    fn review_insertion_only_scaffold_preserves_other_live_selectors_with_retirement() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let old = "[legacy]\nsetting = true\n";
+        let host = format!("# >>> anvil-managed: old\n{old}# <<< anvil-managed: old\n");
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("new"),
+                body: "other = [\"user\"]\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"managed\",\n".to_owned(),
+                    syntax: CommentSyntax::Hash,
+                },
+                path: vec!["legacy".to_owned(), "other".to_owned()],
+            })
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "old", checksum_str(old));
+        let mut hosts = HostTextCache::default();
+        hosts.set("config.toml", host);
+        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.items()[1].decision, Decision::LeaveAlone);
+        assert_eq!(plan.items()[1].spliced_host, None);
+        assert_eq!(plan.refusals(), &[concat!(
+            "Refused to manage config.toml [entries]: this change would remove or rebind the live TOML array selector [\"legacy\", \"other\"]. ",
+            "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
+            "Preserve the selected array's table headers, key, and brackets outside the changing region, ",
+            "or retire its array-entry ownership first. This dependent change was not applied."
+        ).to_owned(), concat!(
+            "Refused to manage config.toml [old]: this change would remove or rebind the live TOML array selector [\"legacy\", \"other\"]. ",
+            "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
+            "Preserve the selected array's table headers, key, and brackets outside the changing region, ",
+            "or retire its array-entry ownership first. This dependent change was not applied."
+        ).to_owned()]);
+        assert_eq!(
+            hosts.cached("config.toml").as_deref(),
+            Some(concat!(
+                "# >>> anvil-managed: old\n[legacy]\nsetting = true\n# <<< anvil-managed: old\n\n",
+                "# >>> anvil-managed: new\nother = [\"user\"]\n# <<< anvil-managed: new\n"
+            ))
+        );
+        let projected = plan.projected_manifest(&manifest);
+        assert_eq!(projected.region_checksum("config.toml", "entries"), None);
+        assert_eq!(
+            projected.region_checksum("config.toml", "old"),
+            manifest.region_checksum("config.toml", "old")
+        );
+    }
+
+    #[test]
     fn review_scalar_array_shapes_have_exact_diagnostics_and_recovery() {
         let root = Path::new("__anvil_in_memory_repository__");
         let workspace = Workspace {
