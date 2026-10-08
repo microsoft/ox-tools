@@ -71,10 +71,11 @@ evaluation. `cargo-delta` owns Git analysis and impact artifacts. `cargo-aprz`
 owns GitHub credential discovery.
 
 Scripts remain only where the domain tool has no equivalent interface:
-PR-title policy, README comparison, spell dictionary generation, Miri profile
-environment, cargo-careful cache repair, mutation-diff preparation, Bolero
-target discovery, and container orchestration. They are not shared Anvil
-runners and do not own generic package iteration.
+README comparison, spell dictionary generation, Miri profile environment,
+cargo-careful cache repair, mutation-diff preparation, Bolero target discovery,
+and container orchestration. PR-title policy is a Just regex and the MSRV path
+uses cargo-each's optional workspace-version contract. The remaining scripts are
+not shared Anvil runners and do not own generic package iteration.
 
 ### Groups and tiers
 
@@ -94,8 +95,8 @@ anvil-scheduled-exhaustive
 
 `anvil-pr-slow` is a local convenience umbrella. `anvil`, `anvil-pr`,
 `anvil-scheduled`, and `anvil-full` are the tier entry points. Scheduled groups
-execute through `_anvil-unscoped` so `ANVIL_IMPACT=off` is inherited while the
-child dependency graph is evaluated.
+execute through `_anvil-unscoped`, which starts a child Just process with the
+internal impact override set to `off` while its dependency graph is evaluated.
 
 ## 3. Setup and toolchain policy
 
@@ -119,7 +120,9 @@ stable-toolchain, and cargo-each bootstrap setup.
 available to the caller, then resolves `{workspace-rust-version}` for the
 stable fallback. `RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes
 precedence. Pinned nightly toolchains and components are direct `rustup`
-invocations.
+invocations. An absent root declaration is an empty optional value: dedicated
+MSRV recipes are cargo-each `--none` no-ops, while ordinary stable commands use
+Cargo's default toolchain selection.
 
 ## 4. Impact scoping
 

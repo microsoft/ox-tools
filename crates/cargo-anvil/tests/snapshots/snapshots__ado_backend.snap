@@ -1083,18 +1083,20 @@ _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutant
 }
 
 # Scheduled groups execute a private group recipe in a child Just process so
-# ANVIL_IMPACT=off is visible while that child's dependency graph is evaluated.
+# the internal full-workspace override is visible while that child's dependency
+# graph is evaluated.
 [private]
-[script("pwsh", "-NoProfile")]
 _anvil-unscoped name:
-    $env:ANVIL_IMPACT = 'off'
-    & '{{ replace(just_executable(), "'", "''") }}' --justfile '{{ replace(justfile(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}
 
 # cargo-delta owns Git inspection, merge-base snapshots, cache invalidation, and
 # package projection. ANVIL_IMPACT=consume reads package files produced by an
-# earlier job; ANVIL_IMPACT=off selects the complete workspace.
-anvil_impact_mode := if env("ANVIL_IMPACT", "") == "" {
+# earlier job; ANVIL_IMPACT=off selects the complete workspace. Child Just
+# processes use the override rather than shell-specific environment mutation.
+anvil_impact_override := ""
+anvil_impact_mode := if anvil_impact_override != "" {
+    anvil_impact_override
+} else if env("ANVIL_IMPACT", "") == "" {
     ""
 } else if env("ANVIL_IMPACT") == "consume" {
     "consume"
@@ -1149,22 +1151,31 @@ anvil_required_selection := if anvil_impact_mode == "off" {
 # still expands the selected set to explicit `--package` arguments.
 anvil_explicit_package_args := if anvil_impact_mode == "off" { "" } else { "'{packages}'" }
 
+# Resolve cargo-each's optional workspace compatibility floor once, lazily.
+# The stable marker makes the dry-run output safe to consume as a Just value.
+workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
+workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
+
 # Resolve the command toolchain without overriding either RUSTUP_TOOLCHAIN or a
 # repository toolchain file. Repositories with neither use their declared
-# workspace rust-version through cargo-each's portable placeholder.
+# workspace rust-version when present and otherwise use Cargo's default.
 anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
     if path_exists(justfile_directory() + "/rust-toolchain.toml") {
         ""
     } else if path_exists(justfile_directory() + "/rust-toolchain") {
         ""
+    } else if workspace_rust_version == "" {
+        ""
     } else {
-        quote("+{workspace-rust-version}")
+        quote("+" + workspace_rust_version)
     }
 } else {
     ""
 }
 
-anvil_stable_install_prefix := if anvil_stable_toolchain_arg == "" { "# " } else { "" }
+anvil_workspace_toolchain_selection := if anvil_stable_toolchain_arg == "" { "--none" } else { "--workspace" }
+anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
+anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
 
 # Compute package-file artifacts for the three impact tiers. In consume/off
 # mode the interpolation comments out these command lines, making the recipe a
@@ -1418,6 +1429,18 @@ anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Affected tier. Batched builds can enable features through other selected
+# packages, hiding missing test dependencies or example feature requirements.
+# Check every package's targets independently with default features and with
+# defaults disabled, without linking or executing their test binaries.
+
+# Check all targets of affected packages independently.
+anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --no-default-features --locked
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
 # Affected tier. Per project policy, clippy runs on the affected set
 # rather than the modified set: a change in a crate can introduce a
 # clippy issue in a dependent crate (e.g., trait-bound or
@@ -1643,11 +1666,13 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier. cargo-fmt is a rustup component. We invoke it via the
-# pinned nightly (see versions.just) because rustfmt.toml uses
-# unstable_features = true (imports_granularity, group_imports,
-# format_code_in_doc_comments). Floating nightly would mean
-# format-drift breaking cloud workflows on rustup updates — the same trap we
-# explicitly avoid for udeps/miri/careful/external-types.
+# pinned nightly (see versions.just) to support the default catalog's
+# unstable rustfmt options (imports_granularity, group_imports,
+# format_code_in_doc_comments). The recipe retains that pin even when a
+# repository's formatting configuration enables only stable options.
+# Floating nightly would mean format-drift breaking cloud workflows on
+# rustup updates — the same trap we explicitly avoid for
+# udeps/miri/careful/external-types.
 #
 # Iterate workspace members rather than every local path dependency that
 # `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
@@ -1872,14 +1897,9 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-t
 
 # Run affected-package tests under the declared public MSRV. A repository
 # without a root MSRV is a no-op.
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --all-features --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --locked
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --all-features --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --locked
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -1957,56 +1977,13 @@ anvil-mutants-full: anvil-mutants-full-validate-prereqs
 # variable (e.g. an unexpanded pipeline macro) is a real error and fails
 # the check loudly rather than silently passing.
 
+anvil_pr_title := env("PR_TITLE", "")
+anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'
+anvil_pr_title_error := "PR title '" + anvil_pr_title + "' does not match the accepted Conventional Commits subset.\nAllowed patterns: <type>: <description>, <type>(<scope>): <description>, <type>!: <description>, <type>(<scope>)!: <description>\nAllowed types (case-insensitive): feat, fix, chore, docs, refactor, test, build, ci, perf, revert"
+
 # Validate the pull request title.
-[script("pwsh", "-NoProfile")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
-    $title = $env:PR_TITLE
-    if (-not $title) {
-        Write-Host 'anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation'
-        exit 0
-    }
-
-    # These human-readable formats are also the validation source of truth.
-    $allowedTypes = @('feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'build', 'ci', 'perf', 'revert')
-    $allowedPatterns = @(
-        '<type>: <description>'
-        '<type>(<scope>): <description>'
-        '<type>!: <description>'
-        '<type>(<scope>)!: <description>'
-    )
-    $placeholderRegex = @{
-        '<type>' = '(?:' + (($allowedTypes | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
-        '<scope>' = '[^)]+'
-        '<description>' = '.+'
-    }
-    $titlePatterns = $allowedPatterns | ForEach-Object {
-        # Escape first, expand second: escaping turns the display syntax into
-        # literal regex, after which the trusted fragments above are injected.
-        # Expanding first would escape those fragments and match them literally.
-        $pattern = [regex]::Escape($_)
-        foreach ($placeholder in $placeholderRegex.GetEnumerator()) {
-            $pattern = $pattern.Replace([regex]::Escape($placeholder.Key), $placeholder.Value)
-        }
-        $pattern
-    }
-    # Anchored at both ends so a title cannot smuggle extra lines past a
-    # matching prefix. `$` rather than `\z` leaves a lone trailing newline
-    # tolerated, which costs nothing and avoids failing on a title source
-    # that terminates its value.
-    $titleRegex = '^(?:' + ($titlePatterns -join '|') + ')$'
-
-    # The accepted forms are a deliberate subset of Conventional Commits, so the
-    # diagnostic names the subset rather than claiming the full grammar.
-    if ($title -notmatch $titleRegex) {
-        $diagnostic = @(
-            "PR title '$title' does not match the accepted Conventional Commits subset."
-            'Allowed patterns:'
-            $allowedPatterns | ForEach-Object { "  - $_" }
-            'Allowed types (case-insensitive): ' + ($allowedTypes -join ', ')
-        )
-        Write-Error ($diagnostic -join [Environment]::NewLine)
-        exit 1
-    }
+    {{ if anvil_pr_title == "" { "echo " + quote("anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation") } else if anvil_pr_title =~ anvil_pr_title_pattern { "# PR title matches the accepted Conventional Commits subset" } else { error(anvil_pr_title_error) } }}
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -2188,6 +2165,7 @@ anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
     anvil-clippy \
+    anvil-check-all-targets \
     anvil-cargo-sort \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
@@ -3779,17 +3757,15 @@ anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_ver
 
 [group("anvil-setup")]
 anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-install installer)
-    {{ anvil_stable_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-toolchain-stable-install
+
+[private]
+_anvil-toolchain-stable-install:
+    cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
-    exit $LASTEXITCODE
-
-[group("anvil-setup")]
-anvil-tool-pwsh-validate-prereqs:
-    pwsh --version
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
 # Pinned nightly toolchains.
 [group("anvil-setup")]
@@ -3811,25 +3787,21 @@ anvil-toolchain-nightly-external-types-validate-prereqs:
 # Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
 # toolchain file; repositories with neither use the workspace rust-version.
 _install-component toolchain component:
-    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "cargo each --workspace --once -- rustup component add --toolchain '{workspace-rust-version}' " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
+    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
 anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
 
 [group("anvil-setup")]
 anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
 
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
@@ -4034,7 +4006,7 @@ cargo_coverage_gate_version := "0.6.0"
 cargo_delta_version := "0.4.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.3.0"
+cargo_each_version := "0.4.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.0"
 cargo_hack_version := "0.6.45"
@@ -4220,6 +4192,14 @@ anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install insta
 [group("anvil-setup")]
 anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# Install prerequisites for the `anvil-check-all-targets` recipe.
+[group("anvil-setup")]
+anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+
+# Validate prerequisites for the `anvil-check-all-targets` recipe.
+[group("anvil-setup")]
+anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+
 # Install prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
 anvil-clippy-setup installer="install": (anvil-component-default-clippy-install installer)
@@ -4378,21 +4358,17 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 
 # Install the declared public MSRV.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test-setup: no root MSRV declared; skipping'; exit 0 }
-    rustup toolchain install $declared --profile minimal
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup
+
+[private]
+_anvil-msrv-test-setup:
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 # Validate the MSRV prerequisite without rustup auto-install behavior.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    rustup run $declared rustc --version
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup run '{workspace-rust-version}' rustc --version
 
 # --- pr-mutants members ---
 
@@ -4415,15 +4391,13 @@ anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install 
 [group("anvil-setup")]
 anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
-# pr-title is a pwsh script; no cargo tool to install.
-
-# Prepare the PowerShell prerequisite for pull request title validation.
+# PR-title validation is a Just expression; there is no tool to install.
 [group("anvil-setup")]
-anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-setup installer="install":
 
 # Validate prerequisites for the `anvil-pr-title` recipe.
 [group("anvil-setup")]
-anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-validate-prereqs:
 
 # Install prerequisites for the `anvil-readme-check` recipe.
 [group("anvil-setup")]
@@ -4465,6 +4439,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
+    (anvil-check-all-targets-setup installer) \
     (anvil-cargo-sort-setup installer) \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
@@ -4484,6 +4459,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
+    anvil-check-all-targets-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
@@ -5064,7 +5040,7 @@ allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 
 # Aspirational: when clippy.wildcard_imports is re-enabled (currently
-# allowed in cargo-clippy-lints.toml due to upstream bug rust-clippy#15036),
+# allowed by the catalog's Cargo lint policy due to upstream bug rust-clippy#15036),
 # we want the stricter variant that warns on ALL wildcard imports
 # including prelude. Setting it now means flipping the lint level to
 # warn later is a one-line change with no tuning afterthought.

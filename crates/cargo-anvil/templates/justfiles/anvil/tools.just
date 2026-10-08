@@ -50,17 +50,15 @@ anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_ver
 
 [group("anvil-setup")]
 anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-install installer)
-    {{ anvil_stable_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-toolchain-stable-install
+
+[private]
+_anvil-toolchain-stable-install:
+    cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
-    exit $LASTEXITCODE
-
-[group("anvil-setup")]
-anvil-tool-pwsh-validate-prereqs:
-    pwsh --version
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
 # Pinned nightly toolchains.
 [group("anvil-setup")]
@@ -82,25 +80,21 @@ anvil-toolchain-nightly-external-types-validate-prereqs:
 # Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
 # toolchain file; repositories with neither use the workspace rust-version.
 _install-component toolchain component:
-    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "cargo each --workspace --once -- rustup component add --toolchain '{workspace-rust-version}' " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
+    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
 anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
 
 [group("anvil-setup")]
 anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
 
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")

@@ -224,7 +224,7 @@ fn build_plan(
     }
 
     for file in compose_owned_file_sections(catalog, backends) {
-        let path = resolve_existing_case_insensitive(repo_root, file.path);
+        let path = resolve_existing_case_insensitive(repo_root, file.path)?;
         plan.push(plan_owned_file(repo_root, manifest, &path, &file.body)?);
     }
 

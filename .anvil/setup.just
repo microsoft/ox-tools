@@ -51,17 +51,15 @@ anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_ver
 
 [group("anvil-setup")]
 anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-install installer)
-    {{ anvil_stable_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-toolchain-stable-install
+
+[private]
+_anvil-toolchain-stable-install:
+    cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
-    exit $LASTEXITCODE
-
-[group("anvil-setup")]
-anvil-tool-pwsh-validate-prereqs:
-    pwsh --version
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
 # Pinned nightly toolchains.
 [group("anvil-setup")]
@@ -83,25 +81,21 @@ anvil-toolchain-nightly-external-types-validate-prereqs:
 # Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
 # toolchain file; repositories with neither use the workspace rust-version.
 _install-component toolchain component:
-    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "cargo each --workspace --once -- rustup component add --toolchain '{workspace-rust-version}' " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
+    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
 anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
 
 [group("anvil-setup")]
 anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
 
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
@@ -306,7 +300,7 @@ cargo_coverage_gate_version := "0.6.0"
 cargo_delta_version := "0.4.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.3.0"
+cargo_each_version := "0.4.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.0"
 cargo_hack_version := "0.6.45"
@@ -492,6 +486,14 @@ anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install insta
 [group("anvil-setup")]
 anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# Install prerequisites for the `anvil-check-all-targets` recipe.
+[group("anvil-setup")]
+anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+
+# Validate prerequisites for the `anvil-check-all-targets` recipe.
+[group("anvil-setup")]
+anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+
 # Install prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
 anvil-clippy-setup installer="install": (anvil-component-default-clippy-install installer)
@@ -650,21 +652,17 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 
 # Install the declared public MSRV.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test-setup: no root MSRV declared; skipping'; exit 0 }
-    rustup toolchain install $declared --profile minimal
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup
+
+[private]
+_anvil-msrv-test-setup:
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 # Validate the MSRV prerequisite without rustup auto-install behavior.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    rustup run $declared rustc --version
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup run '{workspace-rust-version}' rustc --version
 
 # --- pr-mutants members ---
 
@@ -687,15 +685,13 @@ anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install 
 [group("anvil-setup")]
 anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
-# pr-title is a pwsh script; no cargo tool to install.
-
-# Prepare the PowerShell prerequisite for pull request title validation.
+# PR-title validation is a Just expression; there is no tool to install.
 [group("anvil-setup")]
-anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-setup installer="install":
 
 # Validate prerequisites for the `anvil-pr-title` recipe.
 [group("anvil-setup")]
-anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-validate-prereqs:
 
 # Install prerequisites for the `anvil-readme-check` recipe.
 [group("anvil-setup")]
@@ -737,6 +733,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
+    (anvil-check-all-targets-setup installer) \
     (anvil-cargo-sort-setup installer) \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
@@ -756,6 +753,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
+    anvil-check-all-targets-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \

@@ -6,29 +6,20 @@
 
 # Run affected-package tests under the declared public MSRV. A repository
 # without a root MSRV is a no-op.
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --all-features --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --locked
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --all-features --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --locked
 
 # Install the declared public MSRV.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test-setup: no root MSRV declared; skipping'; exit 0 }
-    rustup toolchain install $declared --profile minimal
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup
+
+[private]
+_anvil-msrv-test-setup:
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 # Validate the MSRV prerequisite without rustup auto-install behavior.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    rustup run $declared rustc --version
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup run '{workspace-rust-version}' rustc --version

@@ -36,18 +36,20 @@ _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutant
 }
 
 # Scheduled groups execute a private group recipe in a child Just process so
-# ANVIL_IMPACT=off is visible while that child's dependency graph is evaluated.
+# the internal full-workspace override is visible while that child's dependency
+# graph is evaluated.
 [private]
-[script("pwsh", "-NoProfile")]
 _anvil-unscoped name:
-    $env:ANVIL_IMPACT = 'off'
-    & '{{ replace(just_executable(), "'", "''") }}' --justfile '{{ replace(justfile(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}
 
 # cargo-delta owns Git inspection, merge-base snapshots, cache invalidation, and
 # package projection. ANVIL_IMPACT=consume reads package files produced by an
-# earlier job; ANVIL_IMPACT=off selects the complete workspace.
-anvil_impact_mode := if env("ANVIL_IMPACT", "") == "" {
+# earlier job; ANVIL_IMPACT=off selects the complete workspace. Child Just
+# processes use the override rather than shell-specific environment mutation.
+anvil_impact_override := ""
+anvil_impact_mode := if anvil_impact_override != "" {
+    anvil_impact_override
+} else if env("ANVIL_IMPACT", "") == "" {
     ""
 } else if env("ANVIL_IMPACT") == "consume" {
     "consume"
@@ -102,22 +104,31 @@ anvil_required_selection := if anvil_impact_mode == "off" {
 # still expands the selected set to explicit `--package` arguments.
 anvil_explicit_package_args := if anvil_impact_mode == "off" { "" } else { "'{packages}'" }
 
+# Resolve cargo-each's optional workspace compatibility floor once, lazily.
+# The stable marker makes the dry-run output safe to consume as a Just value.
+workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
+workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
+
 # Resolve the command toolchain without overriding either RUSTUP_TOOLCHAIN or a
 # repository toolchain file. Repositories with neither use their declared
-# workspace rust-version through cargo-each's portable placeholder.
+# workspace rust-version when present and otherwise use Cargo's default.
 anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
     if path_exists(justfile_directory() + "/rust-toolchain.toml") {
         ""
     } else if path_exists(justfile_directory() + "/rust-toolchain") {
         ""
+    } else if workspace_rust_version == "" {
+        ""
     } else {
-        quote("+{workspace-rust-version}")
+        quote("+" + workspace_rust_version)
     }
 } else {
     ""
 }
 
-anvil_stable_install_prefix := if anvil_stable_toolchain_arg == "" { "# " } else { "" }
+anvil_workspace_toolchain_selection := if anvil_stable_toolchain_arg == "" { "--none" } else { "--workspace" }
+anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
+anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
 
 # Compute package-file artifacts for the three impact tiers. In consume/off
 # mode the interpolation comments out these command lines, making the recipe a
@@ -371,6 +382,18 @@ anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Affected tier. Batched builds can enable features through other selected
+# packages, hiding missing test dependencies or example feature requirements.
+# Check every package's targets independently with default features and with
+# defaults disabled, without linking or executing their test binaries.
+
+# Check all targets of affected packages independently.
+anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --no-default-features --locked
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
 # Affected tier. Per project policy, clippy runs on the affected set
 # rather than the modified set: a change in a crate can introduce a
 # clippy issue in a dependent crate (e.g., trait-bound or
@@ -596,11 +619,13 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier. cargo-fmt is a rustup component. We invoke it via the
-# pinned nightly (see versions.just) because rustfmt.toml uses
-# unstable_features = true (imports_granularity, group_imports,
-# format_code_in_doc_comments). Floating nightly would mean
-# format-drift breaking cloud workflows on rustup updates — the same trap we
-# explicitly avoid for udeps/miri/careful/external-types.
+# pinned nightly (see versions.just) to support the default catalog's
+# unstable rustfmt options (imports_granularity, group_imports,
+# format_code_in_doc_comments). The recipe retains that pin even when a
+# repository's formatting configuration enables only stable options.
+# Floating nightly would mean format-drift breaking cloud workflows on
+# rustup updates — the same trap we explicitly avoid for
+# udeps/miri/careful/external-types.
 #
 # Iterate workspace members rather than every local path dependency that
 # `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
@@ -825,14 +850,9 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-t
 
 # Run affected-package tests under the declared public MSRV. A repository
 # without a root MSRV is a no-op.
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --all-features --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --locked
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --all-features --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --locked
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -910,56 +930,13 @@ anvil-mutants-full: anvil-mutants-full-validate-prereqs
 # variable (e.g. an unexpanded pipeline macro) is a real error and fails
 # the check loudly rather than silently passing.
 
+anvil_pr_title := env("PR_TITLE", "")
+anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'
+anvil_pr_title_error := "PR title '" + anvil_pr_title + "' does not match the accepted Conventional Commits subset.\nAllowed patterns: <type>: <description>, <type>(<scope>): <description>, <type>!: <description>, <type>(<scope>)!: <description>\nAllowed types (case-insensitive): feat, fix, chore, docs, refactor, test, build, ci, perf, revert"
+
 # Validate the pull request title.
-[script("pwsh", "-NoProfile")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
-    $title = $env:PR_TITLE
-    if (-not $title) {
-        Write-Host 'anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation'
-        exit 0
-    }
-
-    # These human-readable formats are also the validation source of truth.
-    $allowedTypes = @('feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'build', 'ci', 'perf', 'revert')
-    $allowedPatterns = @(
-        '<type>: <description>'
-        '<type>(<scope>): <description>'
-        '<type>!: <description>'
-        '<type>(<scope>)!: <description>'
-    )
-    $placeholderRegex = @{
-        '<type>' = '(?:' + (($allowedTypes | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
-        '<scope>' = '[^)]+'
-        '<description>' = '.+'
-    }
-    $titlePatterns = $allowedPatterns | ForEach-Object {
-        # Escape first, expand second: escaping turns the display syntax into
-        # literal regex, after which the trusted fragments above are injected.
-        # Expanding first would escape those fragments and match them literally.
-        $pattern = [regex]::Escape($_)
-        foreach ($placeholder in $placeholderRegex.GetEnumerator()) {
-            $pattern = $pattern.Replace([regex]::Escape($placeholder.Key), $placeholder.Value)
-        }
-        $pattern
-    }
-    # Anchored at both ends so a title cannot smuggle extra lines past a
-    # matching prefix. `$` rather than `\z` leaves a lone trailing newline
-    # tolerated, which costs nothing and avoids failing on a title source
-    # that terminates its value.
-    $titleRegex = '^(?:' + ($titlePatterns -join '|') + ')$'
-
-    # The accepted forms are a deliberate subset of Conventional Commits, so the
-    # diagnostic names the subset rather than claiming the full grammar.
-    if ($title -notmatch $titleRegex) {
-        $diagnostic = @(
-            "PR title '$title' does not match the accepted Conventional Commits subset."
-            'Allowed patterns:'
-            $allowedPatterns | ForEach-Object { "  - $_" }
-            'Allowed types (case-insensitive): ' + ($allowedTypes -join ', ')
-        )
-        Write-Error ($diagnostic -join [Environment]::NewLine)
-        exit 1
-    }
+    {{ if anvil_pr_title == "" { "echo " + quote("anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation") } else if anvil_pr_title =~ anvil_pr_title_pattern { "# PR title matches the accepted Conventional Commits subset" } else { error(anvil_pr_title_error) } }}
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -1141,6 +1118,7 @@ anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
     anvil-clippy \
+    anvil-check-all-targets \
     anvil-cargo-sort \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
@@ -3246,17 +3224,15 @@ anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_ver
 
 [group("anvil-setup")]
 anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-install installer)
-    {{ anvil_stable_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-toolchain-stable-install
+
+[private]
+_anvil-toolchain-stable-install:
+    cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
-    exit $LASTEXITCODE
-
-[group("anvil-setup")]
-anvil-tool-pwsh-validate-prereqs:
-    pwsh --version
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
 # Pinned nightly toolchains.
 [group("anvil-setup")]
@@ -3278,25 +3254,21 @@ anvil-toolchain-nightly-external-types-validate-prereqs:
 # Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
 # toolchain file; repositories with neither use the workspace rust-version.
 _install-component toolchain component:
-    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "cargo each --workspace --once -- rustup component add --toolchain '{workspace-rust-version}' " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
+    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
 anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
 
 [group("anvil-setup")]
 anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
-    exit $LASTEXITCODE
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
 
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
@@ -3501,7 +3473,7 @@ cargo_coverage_gate_version := "0.6.0"
 cargo_delta_version := "0.4.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.3.0"
+cargo_each_version := "0.4.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.0"
 cargo_hack_version := "0.6.45"
@@ -3687,6 +3659,14 @@ anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install insta
 [group("anvil-setup")]
 anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# Install prerequisites for the `anvil-check-all-targets` recipe.
+[group("anvil-setup")]
+anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+
+# Validate prerequisites for the `anvil-check-all-targets` recipe.
+[group("anvil-setup")]
+anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+
 # Install prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
 anvil-clippy-setup installer="install": (anvil-component-default-clippy-install installer)
@@ -3845,21 +3825,17 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 
 # Install the declared public MSRV.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test-setup: no root MSRV declared; skipping'; exit 0 }
-    rustup toolchain install $declared --profile minimal
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup
+
+[private]
+_anvil-msrv-test-setup:
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
 # Validate the MSRV prerequisite without rustup auto-install behavior.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
-    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    rustup run $declared rustc --version
-    exit $LASTEXITCODE
+    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup run '{workspace-rust-version}' rustc --version
 
 # --- pr-mutants members ---
 
@@ -3882,15 +3858,13 @@ anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install 
 [group("anvil-setup")]
 anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
-# pr-title is a pwsh script; no cargo tool to install.
-
-# Prepare the PowerShell prerequisite for pull request title validation.
+# PR-title validation is a Just expression; there is no tool to install.
 [group("anvil-setup")]
-anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-setup installer="install":
 
 # Validate prerequisites for the `anvil-pr-title` recipe.
 [group("anvil-setup")]
-anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-validate-prereqs:
 
 # Install prerequisites for the `anvil-readme-check` recipe.
 [group("anvil-setup")]
@@ -3932,6 +3906,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
+    (anvil-check-all-targets-setup installer) \
     (anvil-cargo-sort-setup installer) \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
@@ -3951,6 +3926,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
+    anvil-check-all-targets-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
@@ -4365,6 +4341,8 @@ license: MIT
 This skill applies when reviewing pull requests. It does not apply to the coding
 agent when it writes code — see `AGENTS.md` for that.
 
+When reviewing tests, test helpers, or tests in `examples/`, apply [Test review rules](test-review.md).
+
 Every rule below exists because a review comment was filed, argued, and
 withdrawn. The cost of a wrong comment is not zero: the author has to reproduce
 your claim, disprove it, and write the rebuttal.
@@ -4501,6 +4479,175 @@ In priority order:
 
 If a finding does not fit one of these, and you cannot point at the evidence
 for it, leave it out.
+
+=== .github/skills/code-review/test-review.md ===
+<!-- GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY. -->
+
+# Test review rules
+
+Scope: every test target that `cargo test` runs (unit tests in `src/`, integration tests under `tests/`, and doctests), their helpers, and tests in Cargo example targets under `<crate>/examples/`. Benchmarks are out of scope. End-to-end or system tests that need provisioned services, credentials, or dedicated CI jobs are also out of scope: such coverage requires a separate design document defining purpose, boundaries, prerequisites, isolation, and runtime budget, so do not suggest it ad hoc.
+
+This guide is the repository's test policy. Within its scope it takes precedence over the convention rule in `SKILL.md`: request these forms even where Clippy permits alternatives. Apply them to tests that the pull request adds and to changed behavior within existing tests; adding an entry to an existing test's data does not require rewriting its setup. Do not request cleanup of unrelated existing tests.
+
+## Determinism first
+
+**Determinism is the primary focus.** A test must reach the same verdict from the same controlled inputs, independent of test order, parallel tests, host state, and timing. Determinism also makes tests fast: a test that avoids real I/O, wall-clock timers, network access, and subprocesses runs in-process in microseconds and never needs retries.
+
+Adding test-only APIs to achieve this is justified. Code that performs I/O or system calls, reads clocks, or uses randomness should be mockable ([M-MOCKABLE-SYSCALLS](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-MOCKABLE-SYSCALLS)), with the testing surface behind a test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)). When no existing seam controls a dependency, recommend adding one.
+
+## Doctests
+
+Doctests are documentation, not the test suite of record. They are compiled and run so that every example is something a user can copy, paste, and run. Review them for that purpose:
+
+- **The example runs as shown.** Use `no_run` only when running it needs something the test environment must not use, such as a network service or real time. Do not use `ignore`, which skips compilation too.
+- **Behavior is covered by tests, not doctests.** An assertion in an example shows the reader the result; it is not coverage. When an example demonstrates behavior that no unit or integration test covers, request a test. Do not make the doctest more elaborate.
+- **The visible code is what a user would write.** Hide only setup the reader does not need and feature gates.
+- **Feature gates.** Doctests compile with the features of each `cargo test` invocation, so they must build with all features and with default features. An example that needs a non-default feature, such as a `test-util` seam, gates its body with a hidden `cfg` so it runs only when that feature is enabled and the gate stays out of rendered documentation:
+
+  ````rust
+  /// ```
+  /// # #[cfg(feature = "test-util")]
+  /// # {
+  /// let clock = tick::Clock::new_frozen();
+  /// // ...
+  /// # }
+  /// ```
+  ````
+
+- **Determinism when run.** No network access, processes, sleeps, fixture writes, or assertions on wall-clock or random values.
+
+## Review sequence
+
+1. Read the changed tests, their setup and cleanup, and the exercised production path. Identify the contract and every uncontrolled dependency.
+2. Check input control, state isolation, and synchronization first, then assertions.
+3. Exercise the contract through the narrowest API that owns it, with collaborators mocked; prefer the public API from `tests/` when it suffices. For concurrency, verify invariants across explored schedules, not one fixed schedule.
+4. Report only evidenced defects: cite the source, name the wrong outcome or uncontrolled dependency, and recommend the smallest fix that preserves coverage. Skip style nits.
+
+Passing CI, stable snapshots, stress reruns, or a closed bug do not prove determinism or a root-cause fix. Distinguish harness defects from product races, and preserve security checks and meaningful assertions.
+
+Markers are search hints, not proof of a defect; check actual usage and imported aliases.
+
+## Control inputs and state
+
+### Network and host dependencies
+
+Tests must not depend on network services, host configuration, installed tools, sign-in, browsers, or developer credentials. Mock service and host dependencies, and derive expectations from controlled inputs, not machine configuration.
+
+Markers: `reqwest::`, `TcpStream::connect`, `UdpSocket::bind`.
+
+### Processes
+
+Tests must not spawn any process, including the crate's own binary or generated fake executables. This applies to integration tests under `tests/` too. Mock the process runner with scripted status, stdout, and stderr, and test command construction, parsing, and policy in-process. For CLI behavior, call the library entry point that the binary wraps with explicit arguments, environment, working directory, and I/O.
+
+Markers: `Command::new`, `.spawn()`, `.output()`, `CARGO_BIN_EXE_`, `assert_cmd`, `.success()`, `.failure()`, `.sh`, `.bat`.
+
+### Unscripted collaborators
+
+Mocks must not silently succeed on unspecified calls or fall through to the host. Reject unexpected calls, and script only the interactions the scenario needs.
+
+### Time and randomness
+
+Tests must not assert on wall-clock or random values, or use sleeps for ordering. Inject a [tick](https://docs.rs/tick/latest/tick/) clock: use `tick::Clock::new_frozen` (feature `test-util`) for fixed time, and `ClockControl` to advance time explicitly in timer tests. Seed or script randomness. Synchronize with channels, barriers, or notifications.
+
+Markers: `SystemTime::now`, `Instant::now`, `Utc::now`, `thread_rng`, `rand::rng`, `sleep`.
+
+### Fixtures
+
+Tests must not write input fixtures to disk during setup. Prefer in-memory values, byte buffers, or injected readers. If a file fixture is required, commit it as source and read it unchanged (`include_str!`, `include_bytes!`, or a checked-in path).
+
+Markers: `fs::write`, `File::create`, `create_dir_all`.
+
+### Shared mutable state
+
+Tests must not share mutable fixtures, caches, or output directories. Each test owns its mutable state; share only immutable inputs. When writing files is the behavior under test, give each test its own output directory, such as a `tempfile::TempDir` that is removed when the test ends.
+
+### Global state
+
+Atomics, save/restore, or partial locks do not prevent global-state interference or first-use ordering between parallel tests. Inject owned state instead. Initialize unavoidable shared infrastructure deterministically before concurrent tests, and isolate observations per test. Thread-local state works only if all observed work stays on that thread. Resetting state afterward does not prevent concurrent interference; unavoidable global mutation needs a separate test design.
+
+Markers: `static`, `AtomicUsize`, `thread_local!`, `set_hook`, `set_global_default`.
+
+### Process environment and paths
+
+Tests must not mutate the process environment or working directory, or depend on host-specific fixture paths. Pass environment and working directory as explicit inputs; use synthetic paths for mocked I/O or stable checked-in fixture paths.
+
+Markers: `set_var`, `remove_var`, `set_current_dir`, `current_dir`.
+
+### Permissions and filesystem metadata
+
+Tests must not depend on permission changes, lock races, mandatory privileges, or host-specific filesystem metadata. Mock filesystem operations and metadata, or inject specific errors. Preserve production security checks instead of relaxing them for fixtures.
+
+Markers: `set_permissions`, `symlink`.
+
+## Assert exact outcomes
+
+### Strings
+
+Do not check part of a result with substring assertions. Prefer full `insta` snapshots or exact string or structured equality. Control inputs and normalize only incidental values. Use `starts_with` for prefix contracts and check any meaningful remainder. Use `contains` only when containment itself is the contract.
+
+Markers: `assert!(x.contains(...))`.
+
+### Errors
+
+Negative tests must not accept any error or generic error text. Use `.unwrap_err()` or `.expect_err()` and assert the typed cause and its fields after setup reaches the intended branch. Test exact error wording separately with deterministic inputs.
+
+Markers: `.is_err()`, `.unwrap_err().to_string()`.
+
+### Values
+
+Boolean checks must not discard values or errors, or verify only that output is nonempty. For expected `Ok` or `Some`, use `.unwrap()` or `.expect()` and compare the value. For expected `None`, `assert!(actual.is_none())` is fine, since there is no value to compare. Also assert relevant state changes and side effects.
+
+Markers: `.is_ok()`, `.is_some()`, `assert!(!x.is_empty())`.
+
+### Variants
+
+Do not branch on the actual result and adapt assertions to it. Assert one expected variant: when the test only checks the variant, use `assert!(matches!(actual, Enum::A(_)))`; when it uses the payload afterward, bind it with `let Enum::A(x) = actual else { panic!("expected A") };` and assert the payload. Split distinct expected outcomes into separate cases, and fail on unexpected variants.
+
+Markers: `match` or `if let` on the value under test, wildcard arms.
+
+### Compiler implementation details
+
+Assert observable behavior that holds in both debug and release builds, not assumed stack layout, allocation counts, or call sites. Require such properties only when they are the explicit API contract; `black_box` does not guarantee them.
+
+Markers: allocation counts, `Backtrace`, `#[inline]` or `#[inline(...)]`, `black_box`.
+
+## Keep tests cheap and in place
+
+### Tests in examples
+
+Do not embed tests in Cargo example targets under `<crate>/examples/`. Keep examples focused on demonstration, and put regression tests in test modules or `tests/` targets. `cargo test` compiles example targets but does not run their tests unless the target sets `test = true`, so example-embedded tests are not coverage.
+
+Markers: `#[test]`, `#[tokio::test]`, or `#[cfg(test)]` under `examples/`.
+
+### Test subject
+
+Do not require a full pipeline to test a utility; call the utility directly with deterministic mocked collaborators. Conversely, do not mock the behavior being asserted: mock only dependencies and run the real code under test. Reports, probes, and policies can be mocked when they are dependencies, not the subject.
+
+### Test helpers
+
+Test helpers must not be part of default APIs. Keep private helpers in `#[cfg(test)]` modules. Gate exported helpers behind a non-default test feature ([M-TEST-UTIL](https://microsoft.github.io/rust-guidelines/guidelines/libs/resilience/#M-TEST-UTIL)) that workspace defaults do not enable.
+
+Markers: test-only `pub` items outside `#[cfg(test)]`, `default =` in `[features]`.
+
+### Runtime
+
+Target under one second per test, excluding compilation. Reduce fixtures and work, and mock expensive dependencies. Bound loops and explored schedules while preserving the invariant, and state exploration limits. Assert work bounds, not machine speed or wall-clock cutoffs; deadlines are only safety limits.
+
+Markers: `.elapsed()`, `timeout`, large iteration counts, `loom::model`.
+
+### Miri
+
+Do not exclude whole modules from Miri because one dependency is unsupported. Ignore only affected tests, each with a reason, and keep unaffected tests enabled.
+
+Do not run untuned stress workloads under Miri. Exclude them with a reasoned `#[cfg_attr(miri, ignore = "...")]`, or reduce the Miri workload and measure its runtime. Keep a small invariant-focused Miri case; native speed does not predict interpreter cost.
+
+Markers: `cfg(not(miri))` on whole modules, `cfg_attr(miri, ignore)` without a reason, `stress`, large iteration counts.
+
+### Flaky test fixes
+
+Retries, longer sleeps or timeouts, weaker assertions, ignored tests, or nonrecurrence are not fixes. Remove the evidenced uncontrolled dependency while preserving coverage, and keep unresolved product races under investigation. A temporary quarantine must name the lost coverage, an owner, and the restoration condition.
+
+Markers: `retry`, `#[ignore]`.
 
 === .github/workflows/anvil-pr-impl.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -5247,7 +5394,7 @@ allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 
 # Aspirational: when clippy.wildcard_imports is re-enabled (currently
-# allowed in cargo-clippy-lints.toml due to upstream bug rust-clippy#15036),
+# allowed by the catalog's Cargo lint policy due to upstream bug rust-clippy#15036),
 # we want the stricter variant that warns on ALL wildcard imports
 # including prelude. Setting it now means flipping the lint level to
 # warn later is a one-line change with no tuning afterthought.

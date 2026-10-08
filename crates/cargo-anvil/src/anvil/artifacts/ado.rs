@@ -271,15 +271,14 @@ mod tests {
                 ".anvil/ado/steps/job.yml",
                 ".anvil/ado/hooks/before-checks.yml",
                 ".anvil/ado/hooks/after-checks.yml",
-                ".anvil/ado/steps/pr-fast.yml",
             ]
             .as_slice(),
             &GROUP_STEPS.iter().map(|(_, path)| *path).collect::<Vec<_>>(),
             [
-                ".pipelines/anvil/pr.yml",
-                ".pipelines/anvil/scheduled.yml",
-                ".pipelines/anvil/custom-pr-stages.yml",
-                ".pipelines/anvil/custom-scheduled-stages.yml",
+                ".anvil/ado/pr.yml",
+                ".anvil/ado/scheduled.yml",
+                ".anvil/ado/custom/pr-stages.yml",
+                ".anvil/ado/custom/scheduled-stages.yml",
                 ".pipelines/anvil-pr.yml",
                 ".pipelines/anvil-scheduled.yml",
             ]

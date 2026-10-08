@@ -167,9 +167,10 @@ compiler. Caller-provided `RUSTUP_TOOLCHAIN` remains a native rustup input and
 is inherited unchanged by child commands. The presence of either root
 toolchain-file spelling suppresses an explicit selector so rustup can process
 the file natively at each command's working directory. Only the root MSRV
-fallback produces an explicit `+toolchain`; with no source, the command fails.
-Setup makes the selected compiler available before stable Cargo or Rust runs,
-while paired prerequisite validation remains read-only.
+fallback produces an explicit `+toolchain`; with no source, the command uses
+Cargo's default toolchain selection. Setup makes a declared compiler available
+before stable Cargo or Rust runs, while paired prerequisite validation remains
+read-only.
 
 ### `pr-fast`
 

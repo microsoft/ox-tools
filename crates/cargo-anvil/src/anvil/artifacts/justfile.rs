@@ -752,7 +752,9 @@ mod tests {
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
             for category in ["modified", "affected", "required"] {
-                if !body.contains(&format!("anvil_{category}_selection")) {
+                let uses_selection = body.contains(&format!("anvil_{category}_selection"))
+                    || (category == "affected" && body.contains("anvil_msrv_selection"));
+                if !uses_selection {
                     continue;
                 }
                 scoped += 1;
@@ -762,7 +764,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(scoped, 22, "every impact-scoped check must be covered");
+        assert_eq!(scoped, 20, "every direct impact-scoped check must be covered");
     }
 
     #[test]
@@ -855,7 +857,9 @@ mod tests {
             let calls: Vec<&str> = ["modified", "affected", "required"]
                 .into_iter()
                 .filter(|cat| {
-                    execution_body.contains(&format!("anvil_{cat}_selection")) || execution_body.contains(&format!("{cat}.packages"))
+                    execution_body.contains(&format!("anvil_{cat}_selection"))
+                        || execution_body.contains(&format!("{cat}.packages"))
+                        || (*cat == "affected" && execution_body.contains("anvil_msrv_selection"))
                 })
                 .collect();
             assert!(
@@ -912,7 +916,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (25, 7),
+            (24, 7),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
@@ -1046,12 +1050,11 @@ mod tests {
         ] {
             assert!(TIERS_JUST.contains(needle), "tier wrapper missing '{needle}'");
         }
-        // Scoping is disabled by a parent process, because `just` runs each
-        // dependency as its own process and a dependency-only recipe's body
-        // executes after its dependencies.
+        // Scoping is disabled in the child process before its dependency graph
+        // is evaluated.
         assert!(
-            HELPERS_JUST.contains("$env:ANVIL_IMPACT = 'off'"),
-            "the wrapper must force ANVIL_IMPACT=off for the scheduled/full tiers"
+            HELPERS_JUST.contains("--set anvil_impact_override off"),
+            "the wrapper must force the internal impact override off for scheduled/full tiers"
         );
         // The scheduled tier must fan out to every scheduled group, including
         // runtime-analysis (a separate group from exhaustive).
@@ -1095,12 +1098,13 @@ mod tests {
     fn stable_toolchain_selection_is_scoped_to_each_command() {
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
         assert!(IMPACT_JUST.contains("anvil_stable_toolchain_arg :="));
-        assert!(IMPACT_JUST.contains("+{workspace-rust-version}"));
+        assert!(IMPACT_JUST.contains("workspace_rust_version_line := `cargo each"));
+        assert!(IMPACT_JUST.contains("quote(\"+\" + workspace_rust_version)"));
         assert!(!TOOLS_JUST.contains("_anvil-resolve-stable"));
         assert_eq!(
             TOOLS_JUST.matches("[script(\"pwsh\", \"-NoProfile\")]").count(),
-            3,
-            "only native-failure-preserving stable validation commands need a shell boundary"
+            0,
+            "stable validation commands must remain direct cargo-each invocations"
         );
         assert!(TOOLS_JUST.contains("cargo each --workspace --once -- cargo "));
         assert!(TOOLS_JUST.contains("rustup component add --toolchain"));
@@ -1114,7 +1118,9 @@ mod tests {
             "cargo-each must bootstrap stable provisioning"
         );
         assert!(
-            TOOLS_JUST.contains("cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}'"),
+            TOOLS_JUST.contains(
+                "cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}'"
+            ),
             "stable fallback must delegate workspace rust-version resolution to cargo-each"
         );
         assert!(

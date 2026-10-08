@@ -899,11 +899,11 @@ Selection follows the shared local contract:
 1. inherit an existing caller-provided `RUSTUP_TOOLCHAIN` unchanged;
 2. when either root `rust-toolchain` spelling exists, pass no explicit selector
    and let rustup process toolchain files natively;
-3. otherwise pass the root manifest MSRV explicitly as `+<version>`.
+3. otherwise pass the root manifest MSRV explicitly as `+<version>` when
+   declared;
+4. with no declared root MSRV, use the runner's Cargo default.
 
-There is no runner-default fallback. With no environment override, root
-toolchain file, or root MSRV, setup and checks fail. Anvil never parses a
-toolchain file or replays options from a file suppressed by
+Anvil never parses a toolchain file or replays options from a file suppressed by
 `RUSTUP_TOOLCHAIN`. Because file selection remains native, rustup applies its
 normal lookup from each Cargo or Rust command's working directory.
 

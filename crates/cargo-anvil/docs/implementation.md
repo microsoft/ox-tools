@@ -5,15 +5,14 @@ with the user-visible contract in [design](./design/README.md).
 
 ## Pull request title validation
 
-The `pr-title.just` template owns both title validation and its failure diagnostic. The ordered
-human-readable pattern list is the source of truth: the PowerShell recipe expands its placeholders
-into regular-expression fragments and uses the same list verbatim in the error message. Allowed
-types are likewise defined once and used for both case-insensitive matching and diagnostics.
+The `pr-title.just` template owns both title validation and its failure diagnostic.
+Just reads `PR_TITLE`, applies one anchored case-insensitive regular expression,
+and raises `error(...)` with the accepted forms and types when it does not match.
+An unset or empty title expands to one portable `echo` invocation for the skip
+notice. No PowerShell prerequisite or script body is involved.
 
-Changes to accepted title syntax must therefore modify the pattern or type data rather than adding
-a separate regular expression. Pattern expansion escapes the display syntax before injecting the
-trusted regular-expression fragments; the reverse order would escape the fragments themselves and
-match them literally.
+Changes to accepted title syntax must update the regex and its human-readable
+diagnostic together.
 
 The skip path is shared by an unset and an explicitly empty `PR_TITLE`, because cloud backends
 publish an empty value outside a pull request context. Snapshot tests pin the emitted template,
@@ -34,13 +33,10 @@ remains the formatter's input boundary.
 
 ## Stable toolchain selection and setup
 
-The stable selector has two canonical implementation sites because it must run
-before Cargo can parse the root manifest. `versions.just` owns the lazy
-per-command argument expression; `tools.just` owns provisioning, workspace-MSRV
-validation, and the dedicated MSRV-test selection. Their small line-oriented
-root-manifest scanners intentionally duplicate the same accepted syntax and
-`workspace.package`-before-`package` precedence. Changes to one scanner must
-update the other and their focused resolver tests in the same patch.
+Cargo-each 0.4 owns root compatibility-floor resolution. A lazy dry run with a
+stable marker exposes `{workspace-rust-version}` to Just without parsing TOML in
+a recipe. The value is the root floor or an empty string when none is declared;
+malformed or inconsistent declarations still fail.
 
 Both implementations enforce the same ordinary-check decision table:
 
@@ -48,7 +44,8 @@ Both implementations enforce the same ordinary-check decision table:
 2. the presence of either root toolchain-file spelling emits no explicit
    argument;
 3. otherwise the root MSRV emits `+<MSRV>`;
-4. absence of every source fails.
+4. without any source, use Cargo's default selection and do not provision an
+   additional stable toolchain.
 
 The empty argument in the first two cases is load-bearing. It preserves
 rustup's native environment and working-directory-sensitive toolchain-file
@@ -58,15 +55,19 @@ Anvil parsing or replaying suppressed options.
 The dedicated MSRV run always names the exact version declared by the root
 manifest. Setup installs that public toolchain through rustup; prerequisite
 validation is read-only and verifies the same version with `rustup run` before
-tests start. Environments substituting an internally built compiler must expose
-it through rustup under the declared public name rather than supplying a
-separate Anvil mapping.
+tests start. When the declaration is absent, cargo-each receives `--none`, so
+setup, validation, and tests are successful no-ops without a shell guard.
+Environments substituting an internally built compiler must expose it through
+rustup under the declared public name rather than supplying a separate Anvil
+mapping.
 
 `tools.just` additionally exposes the declared root MSRV as the `root-msrv`
 action, answering with the version or `none`. It exists for the container image
 tag, which hashes that value, and being total matters there: an empty answer and
-an unasked question must not hash alike. It reads the manifest through the same
-scanner as every other path.
+an unasked question must not hash alike. This container-only boundary retains
+its manifest scanner because image construction can run before cargo-each is
+available and can receive `ANVIL_RUST_VERSION` when manifests are outside the
+build context.
 
 Setup dependencies, rather than the cloud templates, route provisioning.
 Cargo-tool installers, default-component installers, and stable-only setup

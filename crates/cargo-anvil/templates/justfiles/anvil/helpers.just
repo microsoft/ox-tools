@@ -43,10 +43,8 @@ _anvil-root-msrv:
     }
 
 # Scheduled groups execute a private group recipe in a child Just process so
-# ANVIL_IMPACT=off is visible while that child's dependency graph is evaluated.
+# the internal full-workspace override is visible while that child's dependency
+# graph is evaluated.
 [private]
-[script("pwsh", "-NoProfile")]
 _anvil-unscoped name:
-    $env:ANVIL_IMPACT = 'off'
-    & '{{ replace(just_executable(), "'", "''") }}' --justfile '{{ replace(justfile(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
-    exit $LASTEXITCODE
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}

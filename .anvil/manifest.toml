@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.13.0"
-catalog_checksum = "sha256:620b75b478885e79c477ac8321a521948598383e7db169f92b76b6d1999e09b5"
+catalog_checksum = "sha256:689eb09cb6509a795a3047749b97f68ea30eec4d33463a07f3f44b59eb1e60f3"
 
 [[file]]
 path = ".anvil/anvil.just"
@@ -9,7 +9,7 @@ checksum = "sha256:a50a52b34142889f740f2190ab66e431f14602f97c24b2664bf0bd45c12fb
 
 [[file]]
 path = ".anvil/checks.just"
-checksum = "sha256:4e7397c84a2853907f7590f1bf8d5c7dd014174e651df42a54d8f26eec874c6a"
+checksum = "sha256:6dde09f24396a2c01c3720e73b20c048dfd5daf68598be3cb9dd025684db680f"
 
 [[file]]
 path = ".anvil/container.just"
@@ -41,7 +41,7 @@ checksum = "sha256:ea44d5e1a2cb1471cf2cef05eceab846d8afa45cf691be800f21fec1218da
 
 [[file]]
 path = ".anvil/setup.just"
-checksum = "sha256:c081553bc93856ea8d6ce7013a3eb4e5d7a89a4c5340ea989d4f2ecb14806285"
+checksum = "sha256:a2fb4075398e2fb21af6033a9257fc9893f6ef6ca5a3375b67c48adf09953c89"
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"
@@ -53,7 +53,11 @@ checksum = "sha256:e64274f511cccef9207abebd095ee2f12b00316c7e0d7990b0a386560ef73
 
 [[file]]
 path = ".github/skills/code-review/SKILL.md"
-checksum = "sha256:7c43a36153ec346427892dca414fe971da616f99827fb5241167b1cf58a97b92"
+checksum = "sha256:049d9a7778bf9b99e22e1179bec212388369a0d366afbf88cac2ba47984d05f1"
+
+[[file]]
+path = ".github/skills/code-review/test-review.md"
+checksum = "sha256:f187469a214df5d6394ccc8caf4b15eaac91fec912addddf1fc357f90735ed19"
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
@@ -129,7 +133,7 @@ checksum = "sha256:4d9b76580fbfc54c40c787d4a8009f64a5ff110aae2de5ef6685cd023ebd9
 [[region]]
 host = "clippy.toml"
 id = "anvil-clippy"
-checksum = "sha256:0c37975f24d538358d792626e32d67a043c3a892d076ddf90267ce6757b3245b"
+checksum = "sha256:b37b5da03ba09708fbf8de1b5a9619054a009c3fe6b7d4d1f7d0e5df74050f3b"
 
 [[region]]
 host = "crates/automation/Cargo.toml"

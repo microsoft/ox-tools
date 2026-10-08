@@ -224,26 +224,30 @@ failed strategy.
 ### 4.3 Toolchains
 
 Pinned nightly toolchains and components remain direct `rustup` invocations.
-The root stable fallback is exposed by cargo-each as
-`{workspace-rust-version}`:
+The root stable fallback is exposed by cargo-each 0.4 as the optional
+`{workspace-rust-version}` value. Just resolves it lazily through a stable
+dry-run marker:
 
 ```just
-_anvil-install-workspace-toolchain:
-    cargo each --workspace --once -- rustup toolchain install {workspace-rust-version} --profile minimal
+workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
+workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
 ```
 
 The placeholder resolves the root `[workspace.package].rust-version`, falling
 back to root `[package].rust-version` for a single package. It validates that
 every workspace member has a resolved `rust_version` no newer than the root
-floor. It is one workspace value; no command-deduplication mode is needed.
+floor. When the root declaration is absent, it expands to an empty string.
+Dedicated MSRV recipes turn that into cargo-each's `--none` selection; ordinary
+stable commands omit an explicit toolchain and use Cargo's default selection.
 
 This creates one intentional bootstrap step: `cargo-each` is installed first
-with the already available Cargo toolchain. It then resolves and installs the
-repository-selected stable toolchain, after which remaining Cargo tools are
-installed with that selection. `cargo-each` must therefore retain an MSRV low
-enough to build with the bootstrap toolchains Anvil supports. A caller-selected
-`RUSTUP_TOOLCHAIN` or root toolchain file continues to take precedence and
-avoids the root-MSRV fallback.
+with the already available Cargo toolchain. The parent setup recipe then invokes
+a private recipe in a child Just process, ensuring lazy resolution occurs only
+after cargo-each is available. A declared root floor is installed before the
+remaining Cargo tools; an absent floor is a no-op. `cargo-each` must therefore
+retain an MSRV low enough to build with the bootstrap toolchains Anvil supports.
+A caller-selected `RUSTUP_TOOLCHAIN` or root toolchain file continues to take
+precedence and avoids the root-MSRV fallback.
 
 ## 5. Tool responsibilities
 

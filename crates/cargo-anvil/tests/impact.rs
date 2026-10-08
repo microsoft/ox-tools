@@ -286,23 +286,37 @@ fn msrv_recipes_are_noops_without_a_root_msrv() {
         .build()
         .unwrap();
     let temp = generated_workspace_with(&catalog);
+    let manifest_path = temp.path().join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
     write(
-        &temp.path().join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crate\"]\n",
+        &manifest_path,
+        &manifest.replace("[workspace.package]\nrust-version = \"1.95\"\n", ""),
     );
 
     for invocation in [
-        vec!["anvil-msrv-test-setup", "install"],
-        vec!["anvil-msrv-test-validate-prereqs"],
-        vec!["anvil-msrv-test"],
+        vec!["--set", "workspace_rust_version", "", "anvil-msrv-test-setup", "install"],
+        vec!["--set", "workspace_rust_version", "", "anvil-msrv-test-validate-prereqs"],
+        vec!["--set", "workspace_rust_version", "", "anvil-msrv-test"],
     ] {
-        let output = just(temp.path(), &invocation, &[("ANVIL_IMPACT", "off")]);
+        let path = std::env::join_paths(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
+        )
+        .unwrap();
+        let output = Command::new("just")
+            .args(&invocation)
+            .current_dir(temp.path())
+            .env("ANVIL_IMPACT", "off")
+            .env("PATH", path)
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "{} must no-op without a root MSRV:\n{}",
             invocation[0],
             stderr(&output)
         );
-        assert!(stdout(&output).contains("no root MSRV declared; skipping"));
+        let combined = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(combined.contains("selection resolved to no work; nothing to do"), "{combined}");
     }
 }

@@ -813,13 +813,13 @@ contract:
 1. inherit an existing caller-provided `RUSTUP_TOOLCHAIN` unchanged;
 2. when either root `rust-toolchain` spelling exists, pass no explicit selector
    and let rustup process toolchain files natively;
-3. otherwise pass the root manifest MSRV explicitly as `+<version>`.
+3. otherwise pass the root manifest MSRV explicitly as `+<version>` when
+   declared;
+4. with no declared root MSRV, use the agent's Cargo default.
 
-There is no agent-default fallback. With no environment override, root
-toolchain file, or root MSRV, setup and checks fail. Anvil does not parse
-repository toolchain files or replay options from a file suppressed by the
-environment override. Native file processing follows rustup's lookup from each
-Cargo or Rust command's working directory.
+Anvil does not parse repository toolchain files or replay options from a file
+suppressed by the environment override. Native file processing follows rustup's
+lookup from each Cargo or Rust command's working directory.
 
 The generated setup step restores Cargo home before bootstrapping Just, then
 invokes the selected catalog setup recipe. Setup ensures the selected compiler

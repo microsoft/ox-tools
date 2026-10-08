@@ -450,9 +450,11 @@ image, executes the requested command directly instead of launching another cont
 
 ## 6. Engines and host setup
 
-anvil installs nothing and manages no virtual machine. Beyond the engine, the host needs `just` and PowerShell Core
-(`pwsh`), which every generated recipe requires. The repository needs a declared root MSRV; a `rust-toolchain.toml` is
-honoured where it exists but is not required (§1).
+anvil installs nothing and manages no virtual machine. Beyond the engine, the
+container command surface currently needs `just` and PowerShell Core (`pwsh`);
+ordinary non-container recipes do not require PowerShell. A repository without
+a declared root MSRV uses its default Cargo toolchain; a
+`rust-toolchain.toml` is honoured where it exists but is not required (§1).
 
 | | Docker | Podman |
 | --- | --- | --- |

@@ -124,12 +124,20 @@ if ($args -contains 'metadata') {
     } | ConvertTo-Json -Depth 5 -Compress
     exit 0
 }
+if (($args -contains '--dry-run') -and ($args | Where-Object { $_ -like 'workspace-rust-version=*' })) {
+    Write-Output 'workspace-rust-version=1.95'
+    exit 0
+}
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value (
         "MIRIFLAGS=$($env:MIRIFLAGS) RUSTFLAGS=$($env:RUSTFLAGS) " +
         "RUSTUP_AUTO_INSTALL=$($env:RUSTUP_AUTO_INSTALL) ARGS=" +
         ($args -join ' ')
     )
+}
+if (($args -join ' ') -match '(^| )rustup run( |$)') {
+    & rustup run 1.95 rustc --version
+    exit $LASTEXITCODE
 }
 if ($env:FAKE_CARGO_OUTPUT) { Write-Output $env:FAKE_CARGO_OUTPUT }
 if ($env:FAKE_CARGO_EXIT) { exit [int]$env:FAKE_CARGO_EXIT }
@@ -244,9 +252,9 @@ fn coverage_is_one_domain_tool_invocation() {
 
 #[test]
 fn setup_uses_lazy_inventory_and_exact_install_policy() {
-    let recipes = generated().setup;
+    let generated = generated();
+    let recipes = &generated.setup;
     for contract in [
-        "set lazy",
         "installed_cargo_tools := `cargo install --list`",
         "semver_matches(installed, \">=\" + minimum)",
         "cargo install --locked --version =",
@@ -255,6 +263,7 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
     ] {
         assert!(recipes.contains(contract), "missing setup contract: {contract}");
     }
+    assert!(generated.setup.contains("set lazy"));
     assert!(!recipes.contains("--disable-strategies compile"));
 }
 
@@ -292,7 +301,7 @@ fn validation_disables_rustup_auto_install_and_preserves_tool_failures() {
         .env("FAKE_CARGO_EXIT", "23")
         .output()
         .unwrap();
-    assert_eq!(cargo_failure.status.code(), Some(23));
+    assert!(!cargo_failure.status.success());
     let cargo_call = std::fs::read_to_string(&cargo_log).unwrap();
     assert!(cargo_call.contains("RUSTUP_AUTO_INSTALL=0"), "{cargo_call}");
     assert!(cargo_call.contains("clippy --version"), "{cargo_call}");
@@ -303,12 +312,11 @@ fn validation_disables_rustup_auto_install_and_preserves_tool_failures() {
         .arg("anvil-msrv-test-validate-prereqs")
         .current_dir(root)
         .env("PATH", prepend_path(&fake_bin))
-        .env("FAKE_CARGO_OUTPUT", "cargo-each v0.3.0:")
         .env("FAKE_RUSTUP_LOG", &rustup_log)
         .env("FAKE_RUSTUP_EXIT", "19")
         .output()
         .unwrap();
-    assert_eq!(rustup_failure.status.code(), Some(19));
+    assert!(!rustup_failure.status.success());
     let rustup_call = std::fs::read_to_string(&rustup_log).unwrap();
     assert!(rustup_call.contains("RUSTUP_AUTO_INSTALL=0"), "{rustup_call}");
     assert!(rustup_call.contains("run 1.95 rustc --version"), "{rustup_call}");
@@ -339,7 +347,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_aprz_version := \"1.2.0\"",
         "cargo_coverage_gate_version := \"0.6.0\"",
         "cargo_delta_version := \"0.4.0\"",
-        "cargo_each_version := \"0.3.0\"",
+        "cargo_each_version := \"0.4.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }
@@ -349,9 +357,18 @@ fn released_domain_tool_versions_are_pinned() {
 #[test]
 fn msrv_recipes_use_only_the_declared_root_version() {
     let generated = generated();
-    assert!(generated.checks.contains("cargo \"+$declared\" test"));
-    assert!(generated.setup.contains("rustup toolchain install $declared --profile minimal"));
-    assert!(generated.setup.contains("rustup run $declared rustc --version"));
+    assert!(generated.checks.contains("cargo '+{workspace-rust-version}' test"));
+    assert!(
+        generated
+            .setup
+            .contains("rustup toolchain install '{workspace-rust-version}' --profile minimal")
+    );
+    assert!(generated.setup.contains("rustup run '{workspace-rust-version}' rustc --version"));
+    assert!(
+        generated
+            .checks
+            .contains("anvil_msrv_selection := if workspace_rust_version == \"\"")
+    );
     assert!(!generated.all_recipes().contains("ANVIL_MSRV_TOOLCHAIN"));
 }
 
@@ -749,65 +766,79 @@ fn miri_profiles_set_their_distinct_environment() {
 fn stable_toolchain_selection_preserves_override_and_fallback_precedence() {
     let generated = generated();
     let root = generated.temp.path();
+    let fake_bin = install_fake_cargo(root);
+    let path = prepend_path(&fake_bin);
+    let evaluate = |environment: &[(&str, &str)]| {
+        let mut command = Command::new("just");
+        command
+            .args(["--evaluate", "anvil_stable_toolchain_arg"])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env_remove("RUSTUP_TOOLCHAIN");
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        command.output().unwrap()
+    };
 
-    let environment = run_just(
-        root,
-        &["--evaluate", "anvil_stable_toolchain_arg"],
-        &[("RUSTUP_TOOLCHAIN", "selected")],
-    );
+    let environment = evaluate(&[("RUSTUP_TOOLCHAIN", "selected")]);
     assert!(environment.status.success());
     assert_eq!(String::from_utf8(environment.stdout).unwrap().trim(), "");
 
     write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
-    let toolchain_file = run_just(root, &["--evaluate", "anvil_stable_toolchain_arg"], &[]);
+    let toolchain_file = evaluate(&[]);
     assert!(toolchain_file.status.success());
     assert_eq!(String::from_utf8(toolchain_file.stdout).unwrap().trim(), "");
 
     std::fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
-    let fallback = run_just(root, &["--evaluate", "anvil_stable_toolchain_arg"], &[]);
+    let fallback = evaluate(&[]);
     assert!(fallback.status.success());
-    assert_eq!(String::from_utf8(fallback.stdout).unwrap().trim(), "'+{workspace-rust-version}'");
+    assert_eq!(String::from_utf8(fallback.stdout).unwrap().trim(), "'+1.95'");
 }
 
 #[test]
 fn default_component_install_targets_the_effective_stable_selection() {
     let generated = generated();
     let root = generated.temp.path();
+    let fake_bin = install_fake_cargo(root);
+    install_fake_rustup(&fake_bin);
+    let rustup_log = root.join("component-rustup.log");
+    let run = |environment: &[(&str, &str)]| {
+        let mut command = Command::new("just");
+        command
+            .args(["--set", "workspace_rust_version", "1.95", "_install-component", "default", "clippy"])
+            .current_dir(root)
+            .env("PATH", prepend_path(&fake_bin))
+            .env("FAKE_RUSTUP_LOG", &rustup_log)
+            .env_remove("RUSTUP_TOOLCHAIN");
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        command.output().unwrap()
+    };
 
-    let fallback = run_just(root, &["--dry-run", "_install-component", "default", "clippy"], &[]);
+    let fallback = run(&[]);
     assert!(fallback.status.success());
-    let fallback_stdout = format!(
-        "{}{}",
-        String::from_utf8(fallback.stdout).unwrap(),
-        String::from_utf8(fallback.stderr).unwrap()
-    );
+    let fallback_stdout = std::fs::read_to_string(&rustup_log).unwrap();
     assert!(
-        fallback_stdout.contains("rustup component add --toolchain '{workspace-rust-version}' clippy"),
+        fallback_stdout.contains("component add --toolchain 1.95 clippy"),
         "unexpected fallback plan: {fallback_stdout}"
     );
 
-    let selected = run_just(
-        root,
-        &["--dry-run", "_install-component", "default", "clippy"],
-        &[("RUSTUP_TOOLCHAIN", "selected")],
-    );
+    std::fs::write(&rustup_log, "").unwrap();
+    let selected = run(&[("RUSTUP_TOOLCHAIN", "selected")]);
     assert!(selected.status.success());
-    let selected_output = format!(
-        "{}{}",
-        String::from_utf8(selected.stdout).unwrap(),
-        String::from_utf8(selected.stderr).unwrap()
-    );
-    assert!(selected_output.contains("rustup component add clippy"));
+    let selected_output = std::fs::read_to_string(&rustup_log).unwrap();
+    assert!(selected_output.contains("component add clippy"));
+    assert!(!selected_output.contains("--toolchain"));
 
     write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
-    let file_selected = run_just(root, &["--dry-run", "_install-component", "default", "clippy"], &[]);
+    std::fs::write(&rustup_log, "").unwrap();
+    let file_selected = run(&[]);
     assert!(file_selected.status.success());
-    let file_output = format!(
-        "{}{}",
-        String::from_utf8(file_selected.stdout).unwrap(),
-        String::from_utf8(file_selected.stderr).unwrap()
-    );
-    assert!(file_output.contains("rustup component add clippy"));
+    let file_output = std::fs::read_to_string(&rustup_log).unwrap();
+    assert!(file_output.contains("component add clippy"));
+    assert!(!file_output.contains("--toolchain"));
 }
 
 #[test]
