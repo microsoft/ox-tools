@@ -1521,6 +1521,195 @@ mod tests {
     }
 
     #[test]
+    fn toml_array_dependency_remedy_retires_entry_ownership_before_changing_its_parent() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let text = concat!(
+            "# >>> anvil-managed: cfg\n[plugins]\n# <<< anvil-managed: cfg\n",
+            "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n"
+        );
+        let cfg = |body: &str| {
+            Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("cfg"),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            })
+        };
+        let entries = crate::catalog::TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned(), "default".to_owned()],
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "cfg", checksum_str("[plugins]\n"));
+        manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
+        let changing = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(cfg("[other]\n"))
+            .with_toml_array_region(entries)
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config.toml", text.to_owned());
+        let refused = build_plan_with_hosts(root, &workspace, &manifest, &[], &changing, &mut hosts).unwrap();
+        assert_eq!(refused.items()[0].decision, Decision::LeaveAlone);
+        assert_eq!(refused.items()[0].spliced_host, None);
+        assert_eq!(hosts.cached("config.toml").as_deref(), Some(text));
+        assert_eq!(
+            refused.refusals(),
+            &[concat!(
+                "Refused to manage config.toml [cfg]: this change would remove or rebind the live TOML array selector ",
+                "[\"plugins\", \"default\"]. This region was left unchanged; other regions in the same file and other ",
+                "artifacts may still be updated. Preserve the selected array's table headers, key, and brackets outside ",
+                "the changing region, or retire its array-entry ownership first. This dependent change was not applied."
+            )
+            .to_owned()]
+        );
+        let retire_entries = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(cfg("[plugins]\n"))
+            .build()
+            .unwrap();
+        let retired = build_plan_with_hosts(root, &workspace, &manifest, &[], &retire_entries, &mut hosts).unwrap();
+        assert_eq!(retired.refusals(), &[] as &[String]);
+        assert_eq!(
+            retired.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
+            [Decision::InSync, Decision::Remove]
+        );
+        let expected = "# >>> anvil-managed: cfg\n[plugins]\n# <<< anvil-managed: cfg\ndefault = [\n\"user\"]\n";
+        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
+        let manifest = retired.projected_manifest(&manifest);
+        assert_eq!(manifest.region_checksum("config.toml", "entries"), None);
+        let change_parent = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(cfg("[other]\n"))
+            .build()
+            .unwrap();
+        let changed = build_plan_with_hosts(root, &workspace, &manifest, &[], &change_parent, &mut hosts).unwrap();
+        assert_eq!(changed.refusals(), &[] as &[String]);
+        assert_eq!(changed.items()[0].decision, Decision::Write);
+        assert_eq!(
+            hosts.cached("config.toml").as_deref(),
+            Some("# >>> anvil-managed: cfg\n[other]\n# <<< anvil-managed: cfg\ndefault = [\n\"user\"]\n")
+        );
+    }
+
+    #[test]
+    fn toml_array_pending_retirement_refuses_scaffold_that_moves_another_live_array() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let text = concat!(
+            "plugins.a = true\nother = [\"user\"]\nplugins.b = true\n\n",
+            "# >>> anvil-managed: old\n[settings]\nmode = true\n# <<< anvil-managed: old\n"
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "old", checksum_str("[settings]\nmode = true\n"));
+        let array = |id: &'static str, path: Vec<String>| crate::catalog::TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new(id),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path,
+        };
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("new"),
+                body: "[settings]\nmode = false\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .with_toml_array_region(array("entries", vec!["plugins".to_owned(), "default".to_owned()]))
+            .with_toml_array_region(array("other", vec!["other".to_owned()]))
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config.toml", text.to_owned());
+        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.items()[1].decision, Decision::LeaveAlone);
+        assert_eq!(plan.items()[1].spliced_host, None);
+        assert_eq!(plan.projected_manifest(&manifest).region_checksum("config.toml", "entries"), None);
+        assert_eq!(
+            plan.refusals(),
+            &[concat!(
+                "Refused to manage config.toml [entries]: this change would remove or rebind the live TOML array selector ",
+                "[\"other\"]. This region was left unchanged; other regions in the same file and other artifacts may still ",
+                "be updated. Preserve the selected array's table headers, key, and brackets outside the changing region, ",
+                "or retire its array-entry ownership first. This dependent change was not applied."
+            )
+            .to_owned()]
+        );
+        assert_eq!(
+            hosts.cached("config.toml").as_deref(),
+            Some(concat!(
+                "plugins.a = true\nother = [\n  # >>> anvil-managed: other\n  \"managed\",\n  # <<< anvil-managed: other\n\"user\"]\n",
+                "plugins.b = true\n\n# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n"
+            ))
+        );
+    }
+
+    #[test]
+    fn toml_array_unsafe_scaffold_preserves_managed_and_repository_bytes() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let body = "plugins.a = true\nother = true\nplugins.b = true\n";
+        let text =
+            format!("# repository guidance\n# >>> anvil-managed: cfg\n{body}# <<< anvil-managed: cfg\n\n[settings]\nvalue = 'untouched'\n");
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "cfg", checksum_str(body));
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("cfg"),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"managed\",\n".to_owned(),
+                    syntax: CommentSyntax::Hash,
+                },
+                path: vec!["plugins".to_owned(), "default".to_owned()],
+            })
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config.toml", text.clone());
+        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(
+            plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
+            [Decision::InSync, Decision::LeaveAlone]
+        );
+        assert_eq!(plan.items()[1].spliced_host, None);
+        assert_eq!(hosts.cached("config.toml").as_deref(), Some(text.as_str()));
+        assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        assert_eq!(
+            plan.refusals(),
+            &[concat!(
+                "Refused to manage config.toml [entries]: the missing array cannot be scaffolded without changing existing managed ",
+                "content. This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
+                "Retire the existing ownership before managing these array entries, preserving any repository settings outside its ",
+                "sentinels. Retrying without changing that ownership cannot resolve this refusal."
+            )
+            .to_owned()]
+        );
+    }
+
+    #[test]
     fn toml_array_enclosing_region_can_retire_without_live_selector_dependencies() {
         let root = Path::new("__anvil_in_memory_repository__");
         let workspace = Workspace {
@@ -1921,6 +2110,11 @@ mod tests {
                     RefusalRemedy::CommentedArrayEntry,
                     "Move the repository comments outside the matching compound entry before adopting it. Anvil will \
                      not discard interior comments or silently duplicate the entry.",
+                ),
+                (
+                    RefusalRemedy::ArrayDependency,
+                    "Preserve the selected array's table headers, key, and brackets outside the changing region, \
+                     or retire its array-entry ownership first. This dependent change was not applied.",
                 ),
             ] {
                 let mut plan = Plan::default();

@@ -720,6 +720,24 @@ mod tests {
     }
 
     #[test]
+    fn scaffolding_refuses_to_reorder_interleaved_managed_dotted_keys() {
+        for body in [
+            "plugins.a = true\nother = true\nplugins.b = true\n",
+            "plugins.a.x = true\nplugins.b = true\nplugins.a.y = true\n",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let host = format!("# >>> anvil-managed: cfg\n{body}# <<< anvil-managed: cfg\n").replace('\n', newline);
+                let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec()).unwrap_err();
+                assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
+                assert_eq!(
+                    error.reason.to_string(),
+                    "the missing array cannot be scaffolded without changing existing managed content"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn missing_array_after_managed_parent_preserves_crlf_and_unterminated_closer() {
         for newline in ["\n", "\r\n"] {
             let host = "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n# <<< anvil-managed: cfg".replace('\n', newline);
