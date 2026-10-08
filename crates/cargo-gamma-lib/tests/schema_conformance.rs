@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! Validates that the emitted report conforms to the published `mutation-testing-elements` schema.

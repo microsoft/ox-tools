@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output, Stdio};
+use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io};
 
@@ -20,7 +20,6 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MIN_CARGO_LLVM_COV_VERSION: &str = "0.9.0";
 const METADATA_LOAD_CONTEXT: &str = "failed to load cargo workspace metadata";
 const NEXTEST_DESCRIPTION: &str = "cargo llvm-cov nextest";
-#[cfg(any(windows, test))]
 const WINDOWS_DIAGNOSTIC_UTF8_CONTEXT: &str = "cargo-llvm-cov's Windows command-too-long diagnostic was not UTF-8";
 #[cfg(any(windows, test))]
 const RUSTC_TARGET_LIBDIR_PARENT_ERROR: &str = "rustc target-libdir output had no parent directory";
@@ -331,15 +330,18 @@ impl Selection {
 
         let mut selected = BTreeSet::new();
         for selector in package_selectors {
+            let diagnostic = crate::package_glob::diagnostic(selector);
+            let pattern = crate::package_glob::parse(selector)
+                .map_err(|error| AppError::new(format!("invalid `--package` selector `{diagnostic}`: {error}")))?;
             let matches = workspace
                 .members
                 .iter()
-                .filter(|member| selector_matches(selector, member))
+                .filter(|member| selector_matches(selector, &pattern, member))
                 .cloned()
                 .collect::<Vec<_>>();
             if matches.is_empty() {
                 return Err(AppError::new(format!(
-                    "`--package` selector `{selector}` did not match any workspace member"
+                    "`--package` selector `{diagnostic}` did not match any workspace member"
                 )));
             }
             selected.extend(matches);
@@ -360,34 +362,8 @@ impl Selection {
     }
 }
 
-fn selector_matches(selector: &str, member: &WorkspaceMember) -> bool {
-    selector == member.spec() || glob_matches(selector, &member.name)
-}
-
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let pattern = pattern.chars().collect::<Vec<_>>();
-    let name = name.chars().collect::<Vec<_>>();
-    glob_matches_from(&pattern, &name)
-}
-
-fn glob_matches_from(pattern: &[char], name: &[char]) -> bool {
-    let Some((&token, remaining_pattern)) = pattern.split_first() else {
-        return name.is_empty();
-    };
-    match token {
-        '?' => name
-            .split_first()
-            .is_some_and(|(_, remaining_name)| glob_matches_from(remaining_pattern, remaining_name)),
-        '*' => {
-            glob_matches_from(remaining_pattern, name)
-                || name
-                    .split_first()
-                    .is_some_and(|(_, remaining_name)| glob_matches_from(pattern, remaining_name))
-        }
-        expected => name
-            .split_first()
-            .is_some_and(|(&actual, remaining_name)| expected == actual && glob_matches_from(remaining_pattern, remaining_name)),
-    }
+fn selector_matches(selector: &str, pattern: &glob::Pattern, member: &WorkspaceMember) -> bool {
+    selector == member.spec() || pattern.matches(&member.name)
 }
 
 fn normalized_configurations(requested: &[FeatureConfiguration]) -> Vec<FeatureConfiguration> {
@@ -511,13 +487,13 @@ fn cargo_llvm_cov_version(output: &str) -> Result<Version, AppError> {
 }
 
 fn read_stdout(command: &mut Command, description: &str) -> Result<String, AppError> {
-    read_stdout_with(command, description, std::process::Child::wait_with_output)
+    read_stdout_with(command, description, Child::wait_with_output)
 }
 
 fn read_stdout_with(
     command: &mut Command,
     description: &str,
-    wait_with_output: impl FnOnce(std::process::Child) -> io::Result<Output>,
+    wait_with_output: impl FnOnce(Child) -> io::Result<Output>,
 ) -> Result<String, AppError> {
     let display = command_display(command);
     command.stdout(Stdio::piped()).stderr(Stdio::inherit());
@@ -641,7 +617,13 @@ fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
     argument
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[derive(Debug)]
+/// The classified next step after inspecting `cargo llvm-cov report` output.
+enum ReportAction {
+    Complete,
+    WindowsFallback(Vec<String>),
+}
+
 fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Result<(), AppError> {
     let mut command = report_command(execution, configuration, lcov_path);
     let display = command_display(&command);
@@ -661,7 +643,6 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
         |path| fs::write(path, []).into_app_err(format!("failed to write empty LCOV file `{}`", path.display())),
     )? {
         ReportAction::Complete => Ok(()),
-        #[cfg(any(windows, test))]
         ReportAction::WindowsFallback(arguments) => {
             #[cfg(windows)]
             {
@@ -677,13 +658,6 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
             }
         }
     }
-}
-
-#[derive(Debug)]
-enum ReportAction {
-    Complete,
-    #[cfg(any(windows, test))]
-    WindowsFallback(Vec<String>),
 }
 
 #[expect(
@@ -705,7 +679,6 @@ fn handle_report_output_with(
         return Ok(ReportAction::Complete);
     }
 
-    #[cfg(any(windows, test))]
     if allow_windows_fallback && is_windows_command_too_long(&output.stderr) {
         forward(output, quiet)?;
         let stderr = std::str::from_utf8(&output.stderr).into_app_err(WINDOWS_DIAGNOSTIC_UTF8_CONTEXT)?;
@@ -713,7 +686,6 @@ fn handle_report_output_with(
         return Ok(ReportAction::WindowsFallback(arguments));
     }
 
-    let _ = allow_windows_fallback;
     if is_no_coverage_data(&String::from_utf8_lossy(&output.stderr)) {
         forward_stdout(output, quiet)?;
         write_empty(lcov_path)?;
@@ -770,12 +742,10 @@ fn is_no_coverage_data(stderr: &str) -> bool {
     stderr.contains("no coverage data found") && stderr.contains("could not load coverage information")
 }
 
-#[cfg(any(windows, test))]
 fn is_windows_command_too_long(stderr: &[u8]) -> bool {
     String::from_utf8_lossy(stderr).contains("(os error 206)")
 }
 
-#[cfg(any(windows, test))]
 fn command_too_long_response_arguments(stderr: &str) -> Result<Vec<String>, AppError> {
     if !stderr.contains("(os error 206)") {
         return Err(AppError::new("cargo-llvm-cov did not report Windows error 206"));
@@ -801,7 +771,6 @@ fn command_too_long_response_arguments(stderr: &str) -> Result<Vec<String>, AppE
     Ok(argv.into_iter().skip(2).collect())
 }
 
-#[cfg(any(windows, test))]
 fn parse_windows_command_line(command: &str) -> Result<Vec<String>, AppError> {
     if command.contains('\0') {
         return Err(AppError::new(
@@ -1093,6 +1062,20 @@ struct TemporaryPath {
 }
 
 #[cfg(any(windows, test))]
+/// A temporary-file writer boundary that makes durability failures independently testable.
+trait SynchronizedWrite: io::Write {
+    fn sync_all(&self) -> io::Result<()>;
+}
+
+#[cfg(any(windows, test))]
+impl SynchronizedWrite for fs::File {
+    #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
+    fn sync_all(&self) -> io::Result<()> {
+        Self::sync_all(self)
+    }
+}
+
+#[cfg(any(windows, test))]
 impl TemporaryPath {
     fn new(directory: &Path, label: &str) -> Self {
         let sequence = reserve_temporary_sequence(&TEMPORARY_SEQUENCE);
@@ -1137,15 +1120,11 @@ impl TemporaryPath {
 }
 
 #[cfg(any(windows, test))]
-trait SynchronizedWrite: io::Write {
-    fn sync_all(&self) -> io::Result<()>;
-}
-
-#[cfg(any(windows, test))]
-impl SynchronizedWrite for fs::File {
-    #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
-    fn sync_all(&self) -> io::Result<()> {
-        Self::sync_all(self)
+impl Drop for TemporaryPath {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -1157,15 +1136,6 @@ fn write_temporary_contents(temporary: &TemporaryPath, writer: &mut impl Synchro
     writer
         .sync_all()
         .into_app_err(format!("failed to flush temporary file `{}`", temporary.path().display()))
-}
-
-#[cfg(any(windows, test))]
-impl Drop for TemporaryPath {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1240,6 +1210,11 @@ fn reserve_temporary_sequence(sequence: &AtomicU64) -> u64 {
 mod tests {
     use std::cell::Cell;
     use std::num::NonZeroUsize;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
+    use std::process::{ExitStatus, id as process_id};
 
     use tempfile::tempdir;
 
@@ -1254,6 +1229,19 @@ mod tests {
 
     fn app_error(message: &'static str) -> AppError {
         AppError::new(message)
+    }
+
+    fn process_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
+        #[cfg(unix)]
+        let status = ExitStatus::from_raw(if success { 0 } else { 1 << 8 });
+        #[cfg(windows)]
+        let status = ExitStatus::from_raw(u32::from(!success));
+
+        Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
     }
 
     fn workspace(root: &Path) -> WorkspaceInfo {
@@ -1520,12 +1508,17 @@ mod tests {
     #[test]
     fn package_selector_matches_names_versions_and_globs() {
         let alpha = member("alpha", "1.2.3");
-        assert!(selector_matches("alpha", &alpha));
-        assert!(selector_matches("alpha@1.2.3", &alpha));
-        assert!(selector_matches("a?pha", &alpha));
-        assert!(selector_matches("alpha*", &alpha));
-        assert!(!selector_matches("alpha@1.2.4", &alpha));
-        assert!(!selector_matches("beta*", &alpha));
+        for (selector, expected) in [
+            ("alpha", true),
+            ("alpha@1.2.3", true),
+            ("a?pha", true),
+            ("alpha*", true),
+            ("alpha@1.2.4", false),
+            ("beta*", false),
+        ] {
+            let pattern = crate::package_glob::parse(selector).expect("valid selector");
+            assert_eq!(selector_matches(selector, &pattern, &alpha), expected, "{selector}");
+        }
     }
 
     #[test]
@@ -1550,6 +1543,17 @@ mod tests {
             selection.members.iter().map(WorkspaceMember::spec).collect::<Vec<_>>(),
             ["zeta@2.0.0", "alpha@1.0.0"]
         );
+    }
+
+    #[test]
+    fn package_selection_errors_encode_terminal_controls() {
+        let workspace = workspace(Path::new("repo"));
+        for selector in ["lib[\n\r\u{1b}[2J", "missing\n\r\u{1b}[2J"] {
+            let error = Selection::resolve(&workspace, &[selector.to_owned()]).expect_err("selector must fail");
+            let rendered = error.to_string();
+            assert!(!rendered.contains(selector));
+            assert!(rendered.contains(r"\n\r\u{1b}[2J"));
+        }
     }
 
     #[test]
@@ -1659,28 +1663,34 @@ mod tests {
             rustc: OsString::from("rustc"),
         };
 
-        for failed_call in 0..3 {
+        let successful_outputs = [
+            ("Cargo release query", "release: 1.99.0-nightly\n"),
+            ("rustc release query", "release: 1.99.0-nightly\n"),
+            ("cargo-llvm-cov version query", "cargo-llvm-cov 0.9.0\n"),
+        ];
+        for (failed_call, (failed_query, _)) in successful_outputs.iter().enumerate() {
             let mut call = 0;
             let error = validate_instrumentation_tools_with(&workspace, &tools, None, |_, description| {
                 let current = call;
                 call += 1;
                 if current == failed_call {
                     Err(AppError::new(format!("injected {description} failure")))
-                } else if current <= 1 {
-                    Ok("release: 1.99.0-nightly\n".to_owned())
                 } else {
-                    Ok("cargo-llvm-cov 0.9.0\n".to_owned())
+                    Ok(successful_outputs[current].1.to_owned())
                 }
             })
             .expect_err("injected reader failure must propagate");
-            assert!(error.to_string().contains("injected"), "failed_call={failed_call}: {error}");
+            assert!(
+                error.to_string().contains("injected"),
+                "failed query {failed_query} at index {failed_call}: {error}"
+            );
         }
     }
 
     #[cfg_attr(miri, ignore = "spawns a missing cargo process")]
     #[test]
     fn workspace_metadata_spawn_errors_are_returned() {
-        let missing = format!("missing-cargo-coverage-gate-{}", std::process::id());
+        let missing = format!("missing-cargo-coverage-gate-{}", process_id());
         let tools = ToolPrograms {
             cargo: OsString::from(&missing),
             rustc: OsString::from("rustc"),
@@ -1688,7 +1698,6 @@ mod tests {
         let error = WorkspaceInfo::load(&tools).expect_err("missing cargo must fail").to_string();
         assert!(error.contains(METADATA_LOAD_CONTEXT), "{error}");
     }
-
     #[test]
     fn plain_collection_command_preserves_selection_target_and_jobs() {
         let workspace = workspace(Path::new("repo"));
@@ -1812,11 +1821,11 @@ mod tests {
     }
 
     #[test]
-    fn glob_matching_covers_empty_and_repeated_star_branches() {
-        assert!(glob_matches("*", ""));
-        assert!(glob_matches("a**b", "axyzb"));
-        assert!(!glob_matches("a?", "a"));
-        assert!(!glob_matches("a*b", "ac"));
+    fn glob_matching_covers_empty_and_character_class_branches() {
+        assert!(crate::package_glob::parse("*").expect("valid glob").matches(""));
+        assert!(crate::package_glob::parse("lib[12]").expect("valid glob").matches("lib1"));
+        assert!(!crate::package_glob::parse("a?").expect("valid glob").matches("a"));
+        assert!(!crate::package_glob::parse("a*b").expect("valid glob").matches("ac"));
     }
 
     #[test]
@@ -1982,7 +1991,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "attempts to spawn a missing process")]
     fn process_spawn_errors_include_the_command() {
-        let missing = format!("missing-coverage-gate-command-{}", std::process::id());
+        let missing = format!("missing-coverage-gate-command-{}", process_id());
         let mut command = Command::new(&missing);
         let read_error = read_stdout(&mut command, "missing command")
             .expect_err("missing command must fail")
@@ -2016,7 +2025,6 @@ mod tests {
         assert!(error.contains("failed to wait for"), "{error}");
         assert!(error.contains("injected wait failure"), "{error}");
     }
-
     struct FailingWriter;
 
     impl io::Write for FailingWriter {
@@ -2030,17 +2038,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
     fn forwarding_errors_have_exact_context() {
-        #[cfg(windows)]
-        let status = Command::new("cmd").args(["/C", "exit", "0"]).status().expect("status");
-        #[cfg(not(windows))]
-        let status = Command::new("sh").args(["-c", "exit 0"]).status().expect("status");
-        let output = Output {
-            status,
-            stdout: b"stdout".to_vec(),
-            stderr: b"stderr".to_vec(),
-        };
+        let output = process_output(true, b"stdout", b"stderr");
         let stdout_error = forward_stdout_to(&output, false, &mut FailingWriter)
             .expect_err("stdout forwarding must fail")
             .to_string();
@@ -2057,17 +2056,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
     fn forwarding_obeys_quiet_and_preserves_both_streams() {
-        #[cfg(windows)]
-        let status = Command::new("cmd").args(["/C", "exit", "0"]).status().expect("status");
-        #[cfg(not(windows))]
-        let status = Command::new("sh").args(["-c", "exit 0"]).status().expect("status");
-        let output = Output {
-            status,
-            stdout: b"stdout".to_vec(),
-            stderr: b"stderr".to_vec(),
-        };
+        let output = process_output(true, b"stdout", b"stderr");
 
         for (quiet, expected_stdout) in [(false, b"stdout".as_slice()), (true, b"".as_slice())] {
             let mut stdout = Vec::new();
@@ -2079,17 +2069,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
     fn stdout_forwarder_passes_quiet_through_unchanged() {
-        #[cfg(windows)]
-        let status = Command::new("cmd").args(["/C", "exit", "0"]).status().expect("status");
-        #[cfg(not(windows))]
-        let status = Command::new("sh").args(["-c", "exit 0"]).status().expect("status");
-        let output = Output {
-            status,
-            stdout: b"stdout".to_vec(),
-            stderr: Vec::new(),
-        };
+        let output = process_output(true, b"stdout", b"");
         let mut stdout = Vec::new();
         {
             let mut forward = stdout_forwarder(&mut stdout);
@@ -2103,26 +2084,7 @@ mod tests {
         assert_eq!(stdout, b"stdout", "non-quiet fallback forwarding must preserve stdout");
     }
 
-    fn process_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
-        #[cfg(windows)]
-        let status = Command::new("cmd")
-            .args(["/C", "exit", if success { "0" } else { "1" }])
-            .status()
-            .expect("status");
-        #[cfg(not(windows))]
-        let status = Command::new("sh")
-            .args(["-c", if success { "exit 0" } else { "exit 1" }])
-            .status()
-            .expect("status");
-        Output {
-            status,
-            stdout: stdout.to_vec(),
-            stderr: stderr.to_vec(),
-        }
-    }
-
     #[test]
-    #[cfg_attr(miri, ignore = "spawns processes to construct exit statuses")]
     fn report_output_handling_propagates_each_boundary_error_and_quiet_value() {
         for quiet in [false, true] {
             let output = process_output(true, b"out", b"err");
@@ -2217,7 +2179,6 @@ mod tests {
         assert_eq!(ordinary_forward_error.to_string(), "failure forwarding failed");
     }
 
-    #[cfg_attr(miri, ignore = "spawns processes to construct exit statuses")]
     #[test]
     fn windows_overflow_output_handling_returns_parse_and_forward_errors() {
         let diagnostic = concat!(
@@ -2321,7 +2282,7 @@ mod tests {
             explicit: false,
             members: workspace.members.clone(),
         };
-        let missing = format!("missing-report-command-{}", std::process::id());
+        let missing = format!("missing-report-command-{}", process_id());
         let tools = ToolPrograms {
             cargo: OsString::from(&missing),
             rustc: OsString::from("rustc"),
@@ -2417,7 +2378,6 @@ mod tests {
             .expect_err("rustc reader failure must propagate");
         assert_eq!(error.to_string(), "rustc read failed");
     }
-
     #[test]
     fn windows_export_fallback_uses_response_file_argument() {
         let mut command = Command::new("llvm-cov-custom");
@@ -2849,7 +2809,6 @@ mod tests {
         assert!(error.contains(&missing.display().to_string()), "{error}");
         assert!(error.contains("@objects.rsp"), "{error}");
     }
-
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
     fn temporary_response_file_writes_and_cleans_up_on_drop() {
@@ -2887,6 +2846,7 @@ mod tests {
         assert!(write_error.contains("failed to create temporary file"), "{write_error}");
     }
 
+    /// Test double that independently injects temporary-file write and durability failures.
     struct ControlledTemporaryWriter {
         fail_write: bool,
         fail_sync: bool,
@@ -3023,7 +2983,7 @@ mod tests {
                 current
             },
             |path| {
-                if path.ends_with(format!("run-{}-0", std::process::id())) {
+                if path.ends_with(format!("run-{}-0", process_id())) {
                     collisions.set(collisions.get() + 1);
                     Err(io::Error::new(io::ErrorKind::AlreadyExists, "collision"))
                 } else {
@@ -3033,7 +2993,7 @@ mod tests {
         )
         .expect("allocation retries a collision");
         assert_eq!(collisions.get(), 1);
-        assert!(allocated.path().ends_with(format!("run-{}-1", std::process::id())));
+        assert!(allocated.path().ends_with(format!("run-{}-1", process_id())));
         allocated.armed = false;
         drop(allocated);
 

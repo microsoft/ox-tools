@@ -19,6 +19,7 @@ use crate::{HashMap, HashSet, Result};
 pub(super) struct Instrumented {
     pub(super) guards: Guards,
     pub(super) unavailable: Vec<u32>,
+    pub(super) written: Vec<Utf8PathBuf>,
 }
 
 /// What each file of the copied tree was last instrumented with, so a round can skip the rest.
@@ -47,6 +48,9 @@ pub(super) struct Splices {
     /// handed back instead of being recomputed.
     pub(super) placed: HashMap<Utf8PathBuf, (Vec<u32>, HashMap<u32, Guard>)>,
 
+    /// The live guard index, updated only for files whose splice changed.
+    guards: Guards,
+
     /// Maps file paths to positions in the growing plan.
     file_index: HashMap<Utf8PathBuf, usize>,
 
@@ -60,6 +64,7 @@ pub(super) struct Splices {
     indexed_mutants: usize,
     plan_identity: Option<usize>,
     withdrawn: HashSet<u32>,
+    active_selection: bool,
 }
 
 #[derive(Debug)]
@@ -99,6 +104,7 @@ impl Splices {
         // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.plan_identity = None;
         self.withdrawn.clear();
+        self.active_selection = false;
     }
 
     /// Writes the instrumented form of every mutated file into the copied tree.
@@ -116,6 +122,7 @@ impl Splices {
             self.sources.clear();
             // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.placed.clear();
+            self.guards.clear();
             // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.file_index.clear();
             // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -128,20 +135,53 @@ impl Splices {
             self.indexed_mutants = 0;
             // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.withdrawn.clear();
+            self.active_selection = false;
         }
 
         self.restore_removed_files(work, plan)?;
         let dirty = self.refresh_index(plan, withdrawn);
-        let mut guards = Guards::default();
-        let mut unavailable = Vec::new();
+        self.instrument_selected(work, plan, &dirty, |ordinal| !withdrawn.contains(&ordinal), true)
+    }
 
-        for (path, (_ordinals, found)) in &self.placed {
-            if !dirty.contains(path) {
-                for (ordinal, guard) in found {
-                    let _ = guards.insert(*ordinal, (path.clone(), guard.clone()));
-                }
-            }
+    /// Writes an exact active proof schema without constructing its population-sized complement.
+    pub(super) fn instrument_active(&mut self, work: &Workspace, plan: &Plan, active: &HashSet<u32>) -> Result<Instrumented> {
+        if self.root != work.root {
+            self.root = work.root.clone();
+            self.sources.clear();
+            self.placed.clear();
+            self.guards.clear();
+            self.file_index.clear();
+            self.mutants_by_file.clear();
+            self.file_by_ordinal.clear();
+            self.indexed_files = 0;
+            self.indexed_mutants = 0;
+            self.withdrawn.clear();
+            self.active_selection = false;
         }
+
+        self.restore_removed_files(work, plan)?;
+        let mut dirty = self.refresh_plan_index(plan);
+        dirty.extend(
+            self.placed
+                .iter()
+                .filter(|(_path, (ordinals, _guards))| !ordinals.is_empty())
+                .map(|(path, _placement)| path.clone()),
+        );
+        dirty.extend(active.iter().filter_map(|ordinal| self.file_by_ordinal.get(ordinal)).cloned());
+        self.active_selection = true;
+        self.instrument_selected(work, plan, &dirty, |ordinal| active.contains(&ordinal), false)
+    }
+
+    fn instrument_selected(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        dirty: &HashSet<Utf8PathBuf>,
+        is_live: impl Fn(u32) -> bool,
+        include_guards: bool,
+    ) -> Result<Instrumented> {
+        let mut unavailable = Vec::new();
+        let mut written = Vec::new();
 
         let mut dirty: Vec<usize> = dirty.iter().filter_map(|path| self.file_index.get(path).copied()).collect();
         // #[gamma::skip(iter.remove_sort, reason = "dirty files are independent and guards are keyed by ordinal, so visitation order cannot affect text, guards, or errors")]
@@ -151,6 +191,11 @@ impl Splices {
             let Some(file) = plan.files.get(position) else {
                 continue 'dirty_files;
             };
+            if let Some((_ordinals, previous)) = self.placed.get(&file.path) {
+                for ordinal in previous.keys() {
+                    let _removed = self.guards.remove(ordinal);
+                }
+            }
             let live: Vec<_> = self
                 .mutants_by_file
                 .get(&file.path)
@@ -158,7 +203,7 @@ impl Splices {
                 .flatten()
                 .filter_map(|position| plan.mutants.get(*position))
                 // #[gamma::skip(relational.gt_to_ge, reason = "ordinal is u32 and zero is absent from mutants_by_file because refresh_index excludes the sentinel before indexing")]
-                .filter(|mutant| mutant.ordinal > 0 && !withdrawn.contains(&mutant.ordinal))
+                .filter(|mutant| mutant.ordinal > 0 && is_live(mutant.ordinal))
                 .collect();
             let ordinals: Vec<u32> = live.iter().map(|mutant| mutant.ordinal).collect();
 
@@ -166,7 +211,7 @@ impl Splices {
                 && *placed == ordinals
             {
                 for (ordinal, guard) in found {
-                    let _ = guards.insert(*ordinal, (file.path.clone(), guard.clone()));
+                    let _ = self.guards.insert(*ordinal, (file.path.clone(), guard.clone()));
                 }
 
                 // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
@@ -191,21 +236,23 @@ impl Splices {
             };
 
             for (ordinal, guard) in &found {
-                let _ = guards.insert(*ordinal, (file.path.clone(), guard.clone()));
+                let _ = self.guards.insert(*ordinal, (file.path.clone(), guard.clone()));
             }
 
             // A live mutant with no guard would still be run — with nothing in the tree to make it
             // behave differently — and its verdict recorded as a survivor. That is a wrong answer
             // rather than a missing one, and nothing downstream could tell the difference, so the
             // invariant is checked rather than assumed.
-            if generation_matches && let Some(missing) = live.iter().find(|mutant| !guards.contains_key(&mutant.ordinal)) {
+            if generation_matches && let Some(missing) = live.iter().find(|mutant| !self.guards.contains_key(&mutant.ordinal)) {
                 return Err(Converger::missing_guard_error(missing));
             }
 
             // Rewriting a file with the text it already holds would make cargo rebuild its crate, so
             // an unchanged file is left alone and its mtime with it.
             let destination = work.root.join(&file.path);
-            let _written = Workspace::overwrite(&work.root, &destination, &instrumented)?;
+            if Workspace::overwrite(&work.root, &destination, &instrumented)? {
+                written.push(file.path.clone());
+            }
 
             let _replaced = self.placed.insert(file.path.clone(), (ordinals, found));
 
@@ -217,7 +264,11 @@ impl Splices {
             }
         }
 
-        Ok(Instrumented { guards, unavailable })
+        Ok(Instrumented {
+            guards: if include_guards { self.guards.clone() } else { Guards::default() },
+            unavailable,
+            written,
+        })
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -241,7 +292,11 @@ impl Splices {
                 let destination = work.root.join(&path);
                 let _written = Workspace::overwrite(&work.root, &destination, &original.serialized)?;
             }
-            let _placed = self.placed.remove(&path);
+            if let Some((_ordinals, guards)) = self.placed.remove(&path) {
+                for ordinal in guards.keys() {
+                    let _removed = self.guards.remove(ordinal);
+                }
+            }
             let _source = self.sources.remove(&path);
         }
 
@@ -249,6 +304,23 @@ impl Splices {
     }
 
     fn refresh_index(&mut self, plan: &Plan, withdrawn: &HashSet<u32>) -> HashSet<Utf8PathBuf> {
+        let mut dirty = self.refresh_plan_index(plan);
+
+        if self.active_selection {
+            dirty.extend(self.placed.keys().cloned());
+            self.active_selection = false;
+        }
+        for ordinal in withdrawn.symmetric_difference(&self.withdrawn) {
+            if let Some(path) = self.file_by_ordinal.get(ordinal) {
+                let _new = dirty.insert(path.clone());
+            }
+        }
+        self.withdrawn.clone_from(withdrawn);
+
+        dirty
+    }
+
+    fn refresh_plan_index(&mut self, plan: &Plan) -> HashSet<Utf8PathBuf> {
         let mut dirty = HashSet::default();
         let plan_identity = core::ptr::from_ref(plan) as usize;
 
@@ -280,17 +352,6 @@ impl Splices {
             }
         }
         self.indexed_mutants = plan.mutants.len();
-
-        if self.withdrawn.is_subset(withdrawn) {
-            for ordinal in withdrawn.difference(&self.withdrawn) {
-                if let Some(path) = self.file_by_ordinal.get(ordinal) {
-                    let _new = dirty.insert(path.clone());
-                }
-            }
-        } else {
-            dirty.extend(self.file_index.keys().cloned());
-        }
-        self.withdrawn.clone_from(withdrawn);
 
         dirty
     }
@@ -336,6 +397,7 @@ fn absent_from_plan(path: &Utf8PathBuf, current: &HashSet<&camino::Utf8Path>) ->
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -422,6 +484,7 @@ mod tests {
                 },
             )]),
             placed: HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), (vec![1], HashMap::default()))]),
+            guards: Guards::default(),
             file_index: HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), 1)]),
             mutants_by_file: HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), vec![1])]),
             file_by_ordinal: HashMap::from_iter([(1, Utf8PathBuf::from("src/lib.rs"))]),
@@ -429,6 +492,7 @@ mod tests {
             indexed_mutants: 1,
             plan_identity: Some(1),
             withdrawn: HashSet::from_iter([1]),
+            active_selection: true,
         };
 
         let guards = splices
@@ -486,7 +550,8 @@ mod tests {
         );
         assert_eq!(
             splices.refresh_index(&plan, &HashSet::default()),
-            HashSet::from_iter([Utf8PathBuf::from("src/a.rs"), Utf8PathBuf::from("src/b.rs")])
+            HashSet::from_iter([Utf8PathBuf::from("src/b.rs")]),
+            "re-activating one mutant dirties only its symmetric-difference file"
         );
 
         plan.files.truncate(1);
@@ -498,6 +563,94 @@ mod tests {
         assert_eq!(splices.indexed_mutants, 1);
         assert_eq!(splices.file_by_ordinal.len(), 1);
         assert!(splices.file_by_ordinal.contains_key(&1));
+    }
+
+    #[test]
+    fn campaign_scale_schema_delta_touches_only_symmetric_difference_files() {
+        const FILES: usize = 150;
+        const MUTANTS: usize = 40_000;
+
+        let root = Utf8PathBuf::from("workspace");
+        let mut plan = empty_plan(&root);
+        plan.files = (0..FILES)
+            .map(|index| {
+                let path = Utf8PathBuf::from(format!("src/file_{index}.rs"));
+                TargetFile {
+                    absolute: root.join(&path),
+                    path,
+                    package: format!("package_{}", index % 5),
+                    source: None,
+                }
+            })
+            .collect();
+        plan.mutants = (1..=MUTANTS)
+            .map(|ordinal| {
+                let mut mutant = crate::fixtures::mutant();
+                mutant.ordinal = u32::try_from(ordinal).expect("fixture ordinal");
+                mutant.file = plan.files[(ordinal - 1) % FILES].path.clone().into();
+                mutant
+            })
+            .collect();
+        let mut splices = Splices::default();
+
+        assert_eq!(splices.refresh_index(&plan, &HashSet::default()).len(), FILES);
+        assert!(splices.refresh_index(&plan, &HashSet::default()).is_empty());
+
+        let withdrawn = HashSet::from_iter([1, 2, 151]);
+        assert_eq!(
+            splices.refresh_index(&plan, &withdrawn),
+            HashSet::from_iter([Utf8PathBuf::from("src/file_0.rs"), Utf8PathBuf::from("src/file_1.rs"),])
+        );
+        assert_eq!(
+            splices.refresh_index(&plan, &HashSet::from_iter([2])),
+            HashSet::from_iter([Utf8PathBuf::from("src/file_0.rs")]),
+            "withdrawing and reactivating mutants uses the symmetric difference"
+        );
+    }
+
+    #[test]
+    fn normal_instrumentation_restores_files_temporarily_deactivated_by_a_proof() {
+        let directory = crate::testing::workdir("splices-active-transition-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test path");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        let original = "fn f(){a;}\n";
+        let mut plan = empty_plan(&root);
+        for path in ["src/a.rs", "src/b.rs"] {
+            fs::write(root.join(path), original).expect("source");
+            plan.files.push(TargetFile {
+                absolute: root.join(path),
+                path: Utf8PathBuf::from(path),
+                package: "subject".to_owned(),
+                source: None,
+            });
+        }
+        for (ordinal, path) in [(1, "src/a.rs"), (2, "src/b.rs")] {
+            let mut mutant = crate::fixtures::mutant();
+            mutant.ordinal = ordinal;
+            mutant.file = Utf8PathBuf::from(path).into();
+            mutant.span = 7..8;
+            plan.mutants.push(mutant);
+        }
+        let mut splices = Splices::default();
+
+        let full = splices
+            .instrument(&work, &plan, &HashSet::default())
+            .expect("the full schema is instrumented");
+        assert_eq!(full.guards.len(), 2);
+
+        splices
+            .instrument_active(&work, &plan, &HashSet::from_iter([1]))
+            .expect("the proof schema is instrumented");
+        assert_eq!(fs::read_to_string(root.join("src/b.rs")).unwrap(), original);
+
+        let resumed = splices
+            .instrument(&work, &plan, &HashSet::from_iter([1]))
+            .expect("normal instrumentation resumes");
+        assert!(!resumed.guards.contains_key(&1));
+        assert!(resumed.guards.contains_key(&2));
+        assert_eq!(fs::read_to_string(root.join("src/a.rs")).unwrap(), original);
+        assert_ne!(fs::read_to_string(root.join("src/b.rs")).unwrap(), original);
     }
 
     #[test]

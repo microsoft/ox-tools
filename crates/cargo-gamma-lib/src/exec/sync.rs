@@ -638,6 +638,7 @@ fn record(failure: &Mutex<Option<Error>>, cause: Error) {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
     use std::process::Command;

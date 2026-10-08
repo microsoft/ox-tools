@@ -460,6 +460,7 @@ fn parse_range(field: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use camino::Utf8Path;
 
@@ -521,6 +522,7 @@ mod fuzz {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io;
 

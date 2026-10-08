@@ -284,7 +284,8 @@ repo/
 │   ├── workflows/anvil-scheduled-impl.yml             owned
 │   ├── workflows/anvil-pr.yml                       owned   (root workflow: triggers/permissions/runner)
 │   ├── workflows/anvil-scheduled.yml                  owned
-│   └── skills/code-review/SKILL.md                  owned   (GitHub PR review guidance)
+│   ├── skills/code-review/SKILL.md                  owned   (GitHub PR review guidance)
+│   └── skills/code-review/test-review.md            owned   (test review rules linked from the skill)
 │
 └── .pipelines/                                    ADO registration stubs only
     ├── anvil-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)

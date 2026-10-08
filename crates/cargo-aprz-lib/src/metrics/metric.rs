@@ -79,6 +79,7 @@ pub fn default_metrics() -> impl Iterator<Item = Metric> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;

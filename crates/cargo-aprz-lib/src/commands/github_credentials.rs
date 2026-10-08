@@ -362,6 +362,7 @@ fn is_executable(candidate: &Path) -> bool {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::fs;

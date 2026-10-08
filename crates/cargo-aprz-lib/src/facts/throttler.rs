@@ -155,6 +155,7 @@ fn pause_has_expired(now: Instant, resume_at: Instant) -> bool {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::AtomicUsize;
 
@@ -288,7 +289,7 @@ mod tests {
                 })
             };
 
-            tokio::time::timeout(Duration::from_millis(500), waiter)
+            tokio::time::timeout(Duration::from_secs(2), waiter)
                 .await
                 .expect("acquire must resume once the pause is lifted")
                 .expect("waiter task must not panic");

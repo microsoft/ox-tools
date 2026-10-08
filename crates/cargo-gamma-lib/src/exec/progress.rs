@@ -166,6 +166,7 @@ pub(super) fn runtime_startup_failure(text: &[u8]) -> bool {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use super::{Progress, Watch};
     use crate::testing::{spliced, token};
@@ -238,6 +239,7 @@ mod fuzz {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::thread;
 

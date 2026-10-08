@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Exercises every exported attribute macro from an external consuming crate.
 //!
 //! A doctest inside this crate proves an expansion compiles; it does not prove the annotated item
@@ -8,6 +11,9 @@
 //! each macro annotates, so a shim that discarded the item, swapped its delegation for an
 //! unrelated validator, or otherwise mangled a valid expansion fails here even when every doctest
 //! still compiles.
+
+use std::env::current_exe;
+use std::process::Command;
 
 use gamma::gamma;
 
@@ -90,11 +96,23 @@ fn resource_leaves_the_annotated_test_callable() {
     assert_eq!(2 + 2, 4);
 }
 
+#[gamma::resource("cargo-subprocess")]
+mod alpha_resource_tests {
+    #[test]
+    fn callable() {}
+}
+
+#[gamma::resource("cargo-subprocess")]
+mod beta_resource_tests {
+    #[test]
+    fn callable() {}
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "spawns the current test executable to inspect harness listing")]
 fn resource_marker_is_exposed_to_harness_listing() {
-    let executable = std::env::current_exe().expect("the test harness has a current executable");
-    let output = std::process::Command::new(executable)
+    let executable = current_exe().expect("the test harness has a current executable");
+    let output = Command::new(executable)
         .args(["--list", "--format", "terse"])
         .output()
         .expect("the test harness can list its tests");
@@ -105,6 +123,8 @@ fn resource_marker_is_exposed_to_harness_listing() {
     );
     let listing = String::from_utf8(output.stdout).expect("libtest emits UTF-8 test names");
 
+    // The function marker is the protocol prefix plus lowercase hexadecimal UTF-8 bytes for the
+    // resource, `_test_`, the function name encoded the same way, and libtest's `: test` suffix.
     assert!(
         listing.contains(
             "__cargo_gamma_resource_636172676f2d73756270726f63657373_test_\
@@ -112,4 +132,12 @@ fn resource_marker_is_exposed_to_harness_listing() {
         ),
         "{listing}"
     );
+    for module in ["alpha_resource_tests", "beta_resource_tests"] {
+        assert!(
+            listing.contains(&format!(
+                "{module}::__cargo_gamma_resource_636172676f2d73756270726f63657373_binary: test"
+            )),
+            "{listing}"
+        );
+    }
 }

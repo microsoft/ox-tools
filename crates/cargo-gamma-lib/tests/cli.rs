@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg(not(miri))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 
 //! End-to-end tests of the command-line surface, driven through a fake host.
 
@@ -9,7 +11,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::testing::{Sink, gamma_base, run};
+use cargo_gamma_lib::testing::{Sink, gamma_base, run, write_fixture, write_project};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -21,16 +23,7 @@ const EXIT_USAGE: i32 = 1;
 /// Builds a throwaway single-package workspace containing `source` as its library.
 fn workspace(source: &str) -> TempDir {
     let dir = TempDir::new().expect("could not create a temporary directory");
-    let root = dir.path();
-
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
-    )
-    .expect("could not write the manifest");
-
-    fs::create_dir_all(root.join("src")).expect("could not create src");
-    fs::write(root.join("src/lib.rs"), source).expect("could not write the library");
+    write_project(dir.path(), &[("src/lib.rs", source)]);
 
     dir
 }
@@ -42,14 +35,17 @@ fn workspace(source: &str) -> TempDir {
 fn runtime_stub(root: &std::path::Path) {
     let runtime = root.join("runtime-stub");
 
-    fs::create_dir_all(runtime.join("src")).expect("could not create the runtime stub");
-    fs::write(
-        runtime.join("Cargo.toml"),
-        "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
-         [features]\nembedding = []\n",
-    )
-    .expect("could not write the runtime stub manifest");
-    fs::write(runtime.join("src/lib.rs"), "").expect("could not write the runtime stub library");
+    write_fixture(
+        &runtime,
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [features]\nembedding = []\n",
+            ),
+            ("src/lib.rs", ""),
+        ],
+    );
 }
 
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
@@ -599,7 +595,7 @@ fn list_help_shows_modes_instead_of_unrelated_run_options() {
 }
 
 #[test]
-fn list_mode_help_contains_only_that_modes_options() {
+fn list_mode_help_contains_only_options_for_that_mode() {
     let mut host = Sink::default();
     let code = run(&mut host, ["cargo-gamma", "gamma", "list", "mutators", "--help"]);
     let help = host.out();
@@ -722,19 +718,20 @@ fn a_redirected_runtime_dependency_keeps_the_feature_gating_its_own_api() {
 
     runtime_stub(root);
 
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-         [dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
-    )
-    .expect("could not write the manifest");
-
-    fs::create_dir_all(root.join("src")).expect("could not create src");
-    fs::write(
-        root.join("src/lib.rs"),
-        "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
-    )
-    .expect("could not write the library");
+    write_project(
+        root,
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
+            ),
+            (
+                "src/lib.rs",
+                "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
+            ),
+        ],
+    );
 
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 
@@ -752,25 +749,25 @@ fn a_workspace_inherited_runtime_dependency_keeps_the_feature_gating_its_own_api
 
     runtime_stub(root);
 
-    fs::write(
-        root.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
-         [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
-    )
-    .expect("could not write the workspace manifest");
-
-    fs::create_dir_all(root.join("subject/src")).expect("could not create the member's src");
-    fs::write(
-        root.join("subject/Cargo.toml"),
-        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-         [dependencies]\ngamma_rt = { workspace = true }\n",
-    )
-    .expect("could not write the member manifest");
-    fs::write(
-        root.join("subject/src/lib.rs"),
-        "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
-    )
-    .expect("could not write the member's library");
+    write_project(
+        root,
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
+                 [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
+            ),
+            (
+                "subject/Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\ngamma_rt = { workspace = true }\n",
+            ),
+            (
+                "subject/src/lib.rs",
+                "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
+            ),
+        ],
+    );
 
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 
@@ -911,7 +908,7 @@ fn seed_record(dir: &TempDir, population: &[(String, String)]) {
     assert_eq!(file, killed_file, "the promotion fixture expects both mutants in one file");
 
     let record = serde_json::json!({
-        "version": 10,
+        "version": 12,
         "context": {
             "features": "f",
             "profile": "p",
@@ -956,7 +953,7 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
     let written = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the artifact should have been written");
     let hints: yaml_serde::Value = yaml_serde::from_str(&written).expect("the artifact is YAML");
 
-    assert_eq!(hints["version"].as_u64(), Some(3), "{written}");
+    assert_eq!(hints["version"].as_u64(), Some(4), "{written}");
     assert!(
         hints["tool"].as_str().is_some_and(|tool| tool.starts_with("cargo-gamma ")),
         "the artifact has to say what wrote it: {written}"
@@ -1078,7 +1075,7 @@ fn regenerating_an_unchanged_artifact_changes_no_bytes() {
 fn no_op_promotion_preserves_a_current_artifact_without_generalized_hints() {
     let dir = workspace(SUBJECT);
     let artifact = concat!(
-        "version: 3\n",
+        "version: 4\n",
         "tool: cargo-gamma older\n",
         "context:\n",
         "  repo_sha: old\n",

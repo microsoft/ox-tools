@@ -15,7 +15,10 @@ macro_rules! mutators {
 }
 
 mutators! {
-    // ---- Function value replacement. ---------------------------------------------------------
+    // `default_on` includes generally applicable, useful mutations; measured low-yield variants
+    // are documented exceptions. Academic aliases follow established operator classes, while
+    // presets group user tasks and may intentionally overlap.
+    // Function value replacement.
     "fn_value.default",          true,  &["RV"],  "replace the function body with a default value";
     "fn_value.stated",           true,  &["RV"],  "replace the body with the value the site states in #[gamma::value(...)]";
     "fn_value.unit",             true,  &[],      "replace the body of a unit function with ()";
@@ -38,7 +41,7 @@ mutators! {
     "fn_value.one_element",      true,  &[],      "replace the body with a one-element collection or iterator";
     "fn_value.tuple",            true,  &[],      "replace the body with a tuple of replacement values";
 
-    // ---- Relational and boundary. ------------------------------------------------------------
+    // Relational and boundary.
     "relational.lt_to_le",       true,  &["ROR"], "replace < with <=";
     "relational.lt_to_gt",       true,  &["ROR"], "replace < with >";
     "relational.le_to_lt",       true,  &["ROR"], "replace <= with <";
@@ -50,7 +53,7 @@ mutators! {
     "relational.eq_to_ne",       true,  &["ROR"], "replace == with !=";
     "relational.ne_to_eq",       true,  &["ROR"], "replace != with ==";
 
-    // ---- Arithmetic. -------------------------------------------------------------------------
+    // Arithmetic.
     "arith.add_to_sub",          true,  &["AOR"], "replace + with -";
     "arith.add_to_mul",          true , &["AOR"], "replace + with *";
     "arith.sub_to_add",          true,  &["AOR"], "replace - with +";
@@ -62,7 +65,7 @@ mutators! {
     "arith.rem_to_div",          true,  &["AOR"], "replace % with /";
     "arith.rem_to_mul",          true , &["AOR"], "replace % with *";
 
-    // ---- Bitwise and shift. ------------------------------------------------------------------
+    // Bitwise and shift.
     "bitwise.and_to_or",         true,  &["AOR"], "replace & with |";
     "bitwise.or_to_and",         true,  &["AOR"], "replace | with &";
     "bitwise.xor_to_and",        true,  &["AOR"], "replace ^ with &";
@@ -70,7 +73,7 @@ mutators! {
     "shift.shl_to_shr",          true,  &["AOR"], "replace << with >>";
     "shift.shr_to_shl",          true,  &["AOR"], "replace >> with <<";
 
-    // ---- Compound assignment. ----------------------------------------------------------------
+    // Compound assignment.
     "assign.add_to_sub",         true,  &["ASR"], "replace += with -=";
     "assign.sub_to_add",         true,  &["ASR"], "replace -= with +=";
     "assign.mul_to_div",         true,  &["ASR"], "replace *= with /=";
@@ -82,7 +85,7 @@ mutators! {
     "assign.shl_to_shr",         true , &["ASR"], "replace <<= with >>=";
     "assign.shr_to_shl",         true , &["ASR"], "replace >>= with <<=";
 
-    // ---- Logical and condition. --------------------------------------------------------------
+    // Logical and condition.
     "logical.and_to_or",         true,  &["LCR"], "replace && with ||";
     "logical.or_to_and",         true,  &["LCR"], "replace || with &&";
     "logical.and_remove_left",   true,  &["LOR"], "replace a && b with b";
@@ -94,22 +97,22 @@ mutators! {
     "cond.always_true",          true , &["COR"], "force a branch condition to true";
     "cond.always_false",         true , &["COR"], "force a branch condition to false";
 
-    // ---- Match guards. The condition family's blind spot. --------------------------------------
+    // Match guards: the condition family's blind spot.
     "match_guard.negate",        true,  &["COR"], "negate a match arm's guard";
     "match_guard.always_true",   true , &["COR"], "force a match arm's guard to true";
     "match_guard.always_false",  true , &["COR"], "force a match arm's guard to false";
 
-    // ---- Match arms. -------------------------------------------------------------------------
+    // Match arms.
     "match_arm.never_matches",   true , &["SDL"], "stop a match arm from matching, falling through to the wildcard";
 
-    // ---- Struct literals. --------------------------------------------------------------------
+    // Struct literals.
     "struct_field.omit",         true , &["SDL"], "omit a struct literal field, leaving the base expression to supply it";
 
-    // ---- Ranges. -----------------------------------------------------------------------------
+    // Ranges.
     "range.exclusive_to_inclusive", true, &["ROR"], "extend a .. range to cover its endpoint";
     "range.inclusive_to_exclusive", true, &["ROR"], "shrink a ..= range to stop short of its endpoint";
 
-    // ---- Loop control flow. ------------------------------------------------------------------
+    // Loop control flow.
     "loop.break_to_continue",    true , &[],      "replace break with continue";
     "loop.continue_to_break",    true,  &[],      "replace continue with break";
     "loop.delete_break",         true , &["SDL"], "delete a break statement";
@@ -117,11 +120,11 @@ mutators! {
     "loop.break_value_default",  true,  &["EVR"], "replace a value carried by break with its default";
     "return_value.default",      true,  &["EVR"], "replace an early return value with its default";
 
-    // ---- Unary. ------------------------------------------------------------------------------
+    // Unary.
     "unary.remove_neg",          true,  &["UOI"], "remove a unary minus";
     "unary.remove_not",          true,  &["UOI"], "remove a unary not";
 
-    // ---- Literals. ---------------------------------------------------------------------------
+    // Literals.
     "literal.int_to_zero",       true,  &["CRP"], "replace an integer literal with 0";
     "literal.int_to_one",        true,  &["CRP"], "replace an integer literal with 1";
     "literal.int_increment",     true,  &["CRP"], "add one to an integer literal";
@@ -137,15 +140,15 @@ mutators! {
     "literal.byte_to_nul",       true,  &["CRP"], "replace a byte literal with NUL";
     "literal.byte_to_distinct",  true,  &["CRP"], "replace a byte literal with a distinct byte";
 
-    // ---- Statement deletion and side-effect removal. ------------------------------------------
+    // Statement deletion and side-effect removal.
     "stmt.delete_call",          true , &["SDL"], "delete a statement whose value is discarded";
     "stmt.delete_assign",        true , &["SDL"], "delete an assignment statement, plain or compound";
 
-    // ---- Focused numeric perturbation, in boundary-sensitive positions only. -------------------
+    // Focused numeric perturbation, in boundary-sensitive positions only.
     "expr.increment",            true,  &["EVR"], "add one to a numeric expression in a boundary-sensitive position";
     "expr.decrement",            true,  &["EVR"], "subtract one from a numeric expression in a boundary-sensitive position";
 
-    // ---- Option and Result construction. -------------------------------------------------------
+    // Option and Result construction.
     // These ask about error handling at the point it is decided, which whole-function replacement
     // can only ask about a function at a time.
     "option.some_to_none",       true,  &["EVR"], "replace Some(value) with None";
@@ -157,14 +160,14 @@ mutators! {
     "result.is_ok_to_is_err",    true,  &["EVR"], "replace is_ok with is_err";
     "result.is_err_to_is_ok",    true,  &["EVR"], "replace is_err with is_ok";
 
-    // ---- Propagation and fallback semantics. ---------------------------------------------------
+    // Propagation and fallback semantics.
     "try.propagate_to_unwrap",   true,  &["EVR"], "replace ? propagation with unwrap";
     "fallback.unwrap_or_to_default", true, &["EVR"], "replace unwrap_or with unwrap_or_default";
     "fallback.unwrap_or_else_to_default", true, &["EVR"], "replace an unwrap_or_else fallback with a default";
     "fallback.map_or_to_default", true, &["EVR"], "replace a map_or fallback with a default";
     "fallback.map_or_else_to_default", true, &["EVR"], "replace a map_or_else fallback with a default";
 
-    // ---- Iterator quantifiers and selectors. ---------------------------------------------------
+    // Iterator quantifiers and selectors.
     // Limited to a curated set of standard-library names. Without type resolution there is no way
     // to know that a user's `take` means what the standard library's does, so the risk is applying
     // a transformation that is not the one advertised.
@@ -181,7 +184,7 @@ mutators! {
     "iter.take_to_skip",         true,  &["EVR"], "replace take with skip";
     "iter.skip_to_take",         true,  &["EVR"], "replace skip with take";
 
-    // ---- String semantics. ---------------------------------------------------------------------
+    // String semantics.
     "string.starts_with_to_ends_with", true, &["EVR"], "replace starts_with with ends_with";
     "string.ends_with_to_starts_with", true, &["EVR"], "replace ends_with with starts_with";
     "string.lower_to_upper",     true,  &["EVR"], "replace to_lowercase with to_uppercase";
@@ -189,22 +192,22 @@ mutators! {
     "string.trim_start_to_trim_end", true, &["EVR"], "replace trim_start with trim_end";
     "string.trim_end_to_trim_start", true, &["EVR"], "replace trim_end with trim_start";
 
-    // ---- Collection construction. --------------------------------------------------------------
-    // Only `vec![]`, never an array: an array's length is part of its type, so removing an element
-    // changes the type rather than the behaviour.
+    // Collection construction.
+    // Element omission applies only to `vec![]`: an array's length is part of its type, so removing
+    // an element changes the type rather than the behaviour. Reversal preserves array length.
     "collection.omit_element",   true,  &["SDL"], "omit an element from a vec! literal";
     "collection.reverse_vec",    true,  &["EVR"], "reverse the elements of a vec! literal";
     "collection.reverse_array",  true,  &["EVR"], "reverse the elements of an array literal";
 
-    // ---- Assignment values. --------------------------------------------------------------------
+    // Assignment values.
     "assign_value.default",      true,  &["EVR"], "replace an assigned value with its type's default";
 
-    // ---- Calls and parameters. ------------------------------------------------------------------
+    // Calls and parameters.
     "call.replace_with_default", true,  &["SDL"], "replace a call and its side effects with a default value";
     "call_result.default",       true,  &["EVR"], "preserve a call's side effects but replace its result with a default";
     "parameter.default_shadow",  true,  &["EVR"], "shadow a function parameter with its type's default";
 
-    // ---- Parsed regular-expression semantics. --------------------------------------------------
+    // Parsed regular-expression semantics.
     "regex.remove_start_anchor", true,  &["EVR"], "remove a regular expression's leading anchor";
     "regex.remove_end_anchor",   true,  &["EVR"], "remove a regular expression's trailing anchor";
     "regex.star_to_plus",        true,  &["EVR"], "replace a regular-expression * quantifier with +";

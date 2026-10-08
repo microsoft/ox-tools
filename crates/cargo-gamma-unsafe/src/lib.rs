@@ -36,6 +36,7 @@ pub mod interrupt;
 pub mod job;
 
 #[cfg(all(windows, test))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod native_faults;
 mod platform_error;
 mod situation;
@@ -64,6 +65,7 @@ pub fn run_loom_models() {
 pub const fn run_loom_models() {}
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod unwind_contracts {
     use core::panic::{RefUnwindSafe, UnwindSafe};
 

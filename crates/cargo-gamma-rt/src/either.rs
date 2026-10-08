@@ -81,6 +81,7 @@ impl<T, A: ExactSizeIterator<Item = T>, B: ExactSizeIterator<Item = T>> ExactSiz
 impl<T, A: FusedIterator<Item = T>, B: FusedIterator<Item = T>> FusedIterator for Either<A, B> {}
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

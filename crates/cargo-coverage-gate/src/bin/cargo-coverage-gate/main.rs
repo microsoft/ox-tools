@@ -7,6 +7,8 @@
 
 mod cli;
 mod collect;
+#[path = "../../package_glob.rs"]
+mod package_glob;
 mod run;
 
 use std::process::ExitCode;

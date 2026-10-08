@@ -3,7 +3,11 @@
 
 use core::time::Duration;
 use std::fs;
+#[cfg(windows)]
+use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::ptr::addr_of;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -17,16 +21,6 @@ use super::progress::Progress;
 use super::request_tracker::RequestTracker;
 use super::{BugLabelMatcher, CrateRef, CratesData, Endpoints, ProviderResult};
 use crate::{HashMap, HashSet, Result};
-
-#[expect(clippy::needless_question_mark, reason = "the wrapper is an error-propagation mutation seam")]
-async fn acquire_collector_lock(cache_dir: &Path) -> Result<CacheLockGuard> {
-    Ok(acquire_cache_lock(cache_dir).await?)
-}
-
-#[expect(clippy::unnecessary_wraps, reason = "the wrapper is an optional-endpoint mutation seam")]
-const fn configured_endpoint(endpoint: &str) -> Option<&str> {
-    Some(endpoint)
-}
 
 /// Collector for gathering crate information from different sources
 pub struct Collector {
@@ -81,7 +75,7 @@ impl Collector {
         let docs_cache_dir = create_cache_dir(&cache_dir, "docs")?;
 
         // Acquire cache lock to prevent concurrent access
-        let cache_lock = acquire_collector_lock(cache_dir.as_ref()).await?;
+        let cache_lock = acquire_cache_lock(cache_dir.as_ref()).await?;
 
         let hosting_cache = Cache::new(hosting_cache_dir, hosting_cache_ttl, ignore_cached);
         let codebase_cache = Cache::new(codebase_cache_dir, codebase_cache_ttl, ignore_cached);
@@ -106,8 +100,8 @@ impl Collector {
 
             hosting_provider: super::hosting::Provider::new(github_token, codeberg_token, hosting_cache, bug_labels, endpoints)?,
             codebase_provider: super::codebase::Provider::new(codebase_cache),
-            coverage_provider: super::coverage::Provider::new(coverage_cache, configured_endpoint(endpoints.coverage_url())),
-            docs_provider: super::docs::Provider::new(docs_cache, configured_endpoint(endpoints.docs_url())),
+            coverage_provider: super::coverage::Provider::new(coverage_cache, Some(endpoints.coverage_url())),
+            docs_provider: super::docs::Provider::new(docs_cache, Some(endpoints.docs_url())),
             progress,
             _cache_lock: cache_lock,
         })
@@ -172,6 +166,10 @@ impl Collector {
             .map(|(crate_spec, _)| crate_spec.clone())
             .collect();
 
+        if all_queryable_specs.is_empty() {
+            return facts_map.into_values().collect();
+        }
+
         // Phase 1: Run advisory, hosting, codebase, and coverage providers in parallel.
         let (advisory_iter, hosting_iter, codebase_iter, coverage_iter) = tokio::join!(
             self.advisories_provider.get_advisory_data(Arc::clone(&all_queryable_specs)),
@@ -233,7 +231,7 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
 /// Disable NTFS compression for a newly created crates cache.
 #[cfg(windows)]
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
-// #[gamma::skip(fn_value.unit, parameter.default_shadow, call.replace_with_default, call_result.default, cond.always_false, cond.always_true, cond.negate, bool_expr.negate, reason = "NTFS compression is an opportunistic Windows filesystem optimization whose success depends on the host volume and privileges")]
+// #[gamma::skip(all, reason = "NTFS compression is an opportunistic Windows filesystem optimization whose success depends on the host volume and privileges")]
 fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creation: bool) {
     if should_disable_cache_compression(name, needs_creation) {
         let _ = disable_directory_compression(cache_path);
@@ -253,12 +251,10 @@ fn should_disable_cache_compression(name: &str, needs_creation: bool) -> bool {
 /// This function is completely opportunistic - if it fails for any reason, it fails silently.
 #[cfg(windows)]
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
-// #[gamma::skip(fn_value.bool_false, fn_value.unit, bitwise.or_to_and, bool_expr.negate, result.is_ok_to_is_err, option.some_to_none, literal.int_increment, reason = "raw Windows handle and DeviceIoControl behavior is an OS adapter whose results depend on the filesystem, volume policy, and process privileges")]
+// #[gamma::skip(all, reason = "raw Windows handle and DeviceIoControl behavior is an OS adapter whose results depend on the filesystem, volume policy, and process privileges")]
 fn disable_directory_compression(path: impl AsRef<Path>) -> bool {
     use std::ffi::OsStr;
-    use std::mem::MaybeUninit;
     use std::os::windows::ffi::OsStrExt;
-    use std::ptr::addr_of;
 
     use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -284,14 +280,14 @@ fn disable_directory_compression(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
 
     // Convert path to Windows HSTRING via wide string
-    let wide_chars: Vec<_> = OsStr::new(path).encode_wide().collect();
-    let path_wide = HSTRING::from_wide(&wide_chars);
+    let path: Vec<_> = OsStr::new(path).encode_wide().collect();
+    let path = HSTRING::from_wide(&path);
 
     // Open the directory with FILE_WRITE_DATA access and FILE_FLAG_BACKUP_SEMANTICS
     // SAFETY: Calling Windows API with valid path
     let handle = unsafe {
         CreateFileW(
-            &path_wide,
+            &path,
             GENERIC_READ.0 | GENERIC_WRITE.0,   // Read/write access is required for FSCTL_SET_COMPRESSION
             FILE_SHARE_READ | FILE_SHARE_WRITE, // Allow concurrent access
             None,                               // No security attributes
@@ -316,7 +312,7 @@ fn disable_directory_compression(path: impl AsRef<Path>) -> bool {
             handle,
             FSCTL_SET_COMPRESSION,
             Some(addr_of!(compression_format).cast()),
-            u32::try_from(size_of::<u16>()).expect("the size of u16 always fits in u32"),
+            u32::try_from(size_of::<u16>()).expect("the compression-format size always fits the control API input-length field"),
             None,
             0,
             Some(bytes_returned.as_mut_ptr()),
@@ -330,8 +326,10 @@ fn disable_directory_compression(path: impl AsRef<Path>) -> bool {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs;
     use std::mem::MaybeUninit;
     use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
 
     use tempfile::TempDir;
     use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
@@ -344,6 +342,7 @@ mod tests {
 
     use super::{disable_directory_compression, should_disable_cache_compression};
 
+    /// Owns a directory handle opened by a Windows-only test and closes it on drop.
     struct HandleGuard(HANDLE);
 
     impl Drop for HandleGuard {
@@ -355,7 +354,7 @@ mod tests {
         }
     }
 
-    fn open_directory(path: &std::path::Path) -> HandleGuard {
+    fn open_directory(path: &Path) -> HandleGuard {
         let wide_chars: Vec<_> = path.as_os_str().encode_wide().collect();
         let path_wide = HSTRING::from_wide(&wide_chars);
         // SAFETY: The path points at a live temporary directory.
@@ -385,7 +384,7 @@ mod tests {
                 None,
                 0,
                 Some(format.as_mut_ptr().cast()),
-                u32::try_from(size_of::<u16>()).expect("the size of u16 always fits in u32"),
+                u32::try_from(size_of::<u16>()).expect("the compression-format size always fits the control API input-length field"),
                 Some(bytes_returned.as_mut_ptr()),
                 None,
             )
@@ -399,7 +398,7 @@ mod tests {
     fn disabling_compression_is_opportunistic_for_an_existing_directory() {
         let dir = TempDir::new().expect("creating a temporary directory");
         let cache_dir = dir.path().join("cache");
-        std::fs::create_dir(&cache_dir).expect("creating the cache directory");
+        fs::create_dir(&cache_dir).expect("creating the cache directory");
         let handle = open_directory(&cache_dir);
 
         if disable_directory_compression(&cache_dir) {
@@ -431,6 +430,24 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod pure_tests {
+    use super::deduplicate_crate_refs;
+    use crate::facts::CrateRef;
+
+    #[test]
+    fn crate_references_are_deduplicated_in_insertion_order() {
+        let first = CrateRef::new("first", None);
+        let second = CrateRef::new("second", None);
+
+        assert_eq!(
+            deduplicate_crate_refs(&[first.clone(), second.clone(), first.clone()]),
+            [first, second]
+        );
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod portable_tests {
@@ -445,11 +462,11 @@ mod portable_tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{Collector, acquire_collector_lock, configured_endpoint, create_cache_dir, deduplicate_crate_refs};
+    use super::{Collector, CrateSpec, create_cache_dir};
     use crate::facts::cache::Cache;
     use crate::facts::crates::{CrateOverallData, CrateVersionData};
     use crate::facts::progress::Progress;
-    use crate::facts::{BugLabelMatcher, CrateRef, CrateSpec, CratesData, Endpoints, ProviderResult};
+    use crate::facts::{BugLabelMatcher, CrateRef, CratesData, Endpoints, ProviderResult};
 
     #[derive(Debug)]
     struct NoOpProgress;
@@ -462,6 +479,7 @@ mod portable_tests {
         fn done(&self) {}
     }
 
+    /// Records collector phase and completion notifications for orchestration assertions.
     #[derive(Clone, Debug, Default)]
     struct RecordingProgress {
         phases: Arc<Mutex<Vec<String>>>,
@@ -516,35 +534,6 @@ mod portable_tests {
         let err = create_cache_dir(&blocker, "nested").expect_err("a file cannot contain a cache directory");
 
         assert!(err.to_string().contains("creating `nested` cache directory"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn collector_lock_errors_are_propagated() {
-        let dir = tempfile::tempdir().expect("creating a temporary directory");
-        let blocker = dir.path().join("not-a-directory");
-        std::fs::write(&blocker, b"file").expect("creating lock-path blocker");
-
-        let error = acquire_collector_lock(&blocker)
-            .await
-            .expect_err("a file cannot contain the collector lock");
-
-        assert!(error.to_string().contains("opening cache lock file"), "{error}");
-    }
-
-    #[test]
-    fn configured_endpoints_remain_present() {
-        assert_eq!(configured_endpoint("https://example.invalid"), Some("https://example.invalid"));
-    }
-
-    #[test]
-    fn crate_references_are_deduplicated_in_insertion_order() {
-        let first = CrateRef::new("first", None);
-        let second = CrateRef::new("second", None);
-
-        assert_eq!(
-            deduplicate_crate_refs(&[first.clone(), second.clone(), first.clone()]),
-            [first, second]
-        );
     }
 
     fn csv(headers: &[&str], rows: Vec<Vec<String>>) -> String {

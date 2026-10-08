@@ -698,6 +698,7 @@ extern "C" fn handler(signal: i32) {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::cell::RefCell;
     use core::sync::atomic::AtomicBool;

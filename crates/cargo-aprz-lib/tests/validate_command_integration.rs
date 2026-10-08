@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Integration test for the `validate` command.
 //!
 //! Exercises the path where no explicit `--config` is provided, causing
@@ -11,6 +14,9 @@
 //! exercises local config validation logic (no network access).
 
 #![cfg(not(miri))]
+
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
 
 use std::io::Cursor;
 

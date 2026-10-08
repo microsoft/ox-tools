@@ -245,8 +245,8 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
 
     let components: Vec<&str> = release.split('.').collect();
-    // `str::split('.')` always yields at least one element. The upper bound
-    // keeps `i` below the three-element `actual_release` array.
+    // `str::split('.')` always yields at least one element. Cargo's maximum
+    // release-component count keeps the later index within `actual_release`.
     if components.len() > 3 {
         return false;
     }

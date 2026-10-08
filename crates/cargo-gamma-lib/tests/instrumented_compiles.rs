@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! Every mutant this tool generates has to compile.
@@ -21,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::OnceLock;
 
+use cargo_gamma_lib::internals::cfg::CfgSet;
 use cargo_gamma_lib::internals::ops::collect;
 use cargo_gamma_lib::internals::ops::registry::Selection;
 use cargo_gamma_lib::internals::parse::SourceFile;
@@ -167,11 +170,18 @@ fn attrs_crate() -> Option<&'static Path> {
 /// which is the failure mode a compile check is least able to notice on its own.
 #[track_caller]
 fn compiles(name: &str, source: &str, mutators: &str) -> usize {
+    let selection = Selection::parse(mutators).expect("the selector must resolve");
+
+    compiles_selection(name, source, &selection)
+}
+
+#[track_caller]
+fn compiles_selection(name: &str, source: &str, selection: &Selection) -> usize {
     let guard = guard_crate();
 
     let file = SourceFile::parse("subject.rs", source.to_owned()).expect("the subject must parse");
-    let selection = Selection::parse(mutators).expect("the selector must resolve");
-    let candidates = collect::collect(&file, &selection);
+    let defaults = collect::Defaults::of(file.ast());
+    let candidates = collect::collect_with(&file, selection, &CfgSet::unconditional(), &defaults);
     let mutants = collect::into_mutants(&file, "subject", candidates);
     let refs: Vec<&_> = mutants.iter().collect();
 
@@ -787,7 +797,7 @@ pub fn assigned(mut value: u32) -> u32 {
 }
 
 #[test]
-fn f4_default_on_semantics_compile_together() {
+fn representative_default_on_candidates_compile_together() {
     let source = r#"
 pub struct Regex;
 impl Regex {
@@ -829,24 +839,8 @@ pub fn collections() {
     let _ = Regex::new("^a+b*[cd]?$");
 }
 "#;
-    let mutators = [
-        "logical",
-        "bool_expr",
-        "option",
-        "result",
-        "try",
-        "fallback",
-        "collection",
-        "literal",
-        "loop.break_value_default",
-        "return_value",
-        "call",
-        "call_result",
-        "iter",
-        "parameter",
-        "regex",
-    ]
-    .join(",");
 
-    assert!(compiles("f4_default_on", source, &mutators) >= 38);
+    // The floor represents the default-on candidate families exercised above; recompute it when
+    // that catalog changes rather than lowering it to accommodate a missing family.
+    assert!(compiles_selection("representative_default_on", source, &Selection::default_preset()) >= 38);
 }

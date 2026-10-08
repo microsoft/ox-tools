@@ -33,6 +33,11 @@ proc-macro = true
 [dependencies]
 cargo-gamma-attrs-impl = { workspace = true }
 
+[dev-dependencies]
+cargo_metadata = { workspace = true }
+tempfile = { workspace = true }
+toml_edit = { workspace = true }
+
 # >>> anvil-managed: anvil-lints
 [lints]
 workspace = true

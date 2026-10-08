@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Integration test for the process-global setup the CLI performs before any work happens.
 //!
 //! This binary deliberately holds a *single* test: it installs a process-wide logger (which can
@@ -14,6 +17,9 @@
 #![cfg(any(target_os = "linux", target_os = "windows"))]
 
 mod support;
+
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
 
 use support::dump::Dump;
 use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db};

@@ -225,6 +225,7 @@ mod aggregate;
 mod attribute;
 mod error;
 mod lcov_cov;
+mod package_glob;
 mod render;
 mod target;
 mod threshold;
@@ -454,19 +455,29 @@ mod tests {
     fn evaluate_forwards_manifest_path_and_package_selectors() {
         let tmp = tempdir().expect("tempdir");
         fs::create_dir_all(tmp.path().join("explicit-manifest-only/src")).expect("create member");
+        fs::create_dir_all(tmp.path().join("must-remain-unselected/src")).expect("create unselected member");
         fs::write(
             tmp.path().join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"explicit-manifest-only\"]\n",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"explicit-manifest-only\", \"must-remain-unselected\"]\n",
         )
         .expect("write workspace manifest");
         fs::write(
             tmp.path().join("explicit-manifest-only/Cargo.toml"),
-            "[package]\nname = \"explicit-manifest-only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            "[package]\nname = \"explicit-manifest-only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
         )
         .expect("write member manifest");
         fs::write(tmp.path().join("explicit-manifest-only/src/lib.rs"), "").expect("write member source");
+        fs::write(
+            tmp.path().join("must-remain-unselected/Cargo.toml"),
+            "[package]\nname = \"must-remain-unselected\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [package.metadata.coverage-gate]\nmin-lines-percent = 80\n",
+        )
+        .expect("write unselected member manifest");
+        fs::write(tmp.path().join("must-remain-unselected/src/lib.rs"), "").expect("write unselected member source");
 
-        evaluate("", Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
+        let evaluated = evaluate("", Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
             .expect("the public wrapper must use the explicit manifest and preserve package selectors");
+        assert_eq!(evaluated.verdict(), Verdict::Pass);
     }
 }

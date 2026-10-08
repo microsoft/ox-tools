@@ -21,6 +21,7 @@ pub fn adoption_skill() -> Artifact {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

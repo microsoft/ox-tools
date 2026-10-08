@@ -33,7 +33,8 @@ use std::process::{Command, Stdio};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use saphyr_parser::{Event as YamlEvent, Parser as YamlParser};
-use serde::{Deserialize, Serialize};
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tick::{SimpleClock, SystemTimeExt as _};
 
 use super::input;
@@ -47,7 +48,7 @@ use crate::{HashMap, HashSet, Result};
 const FILE: &str = "gamma-hints.yaml";
 
 /// What the artifact format is; a file written by any other version is ignored rather than read.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// Producer prefix written into artifacts whose schema cargo-gamma owns.
 const TOOL_PREFIX: &str = "cargo-gamma ";
@@ -128,7 +129,7 @@ pub struct Hints {
 
     /// One entry per mutant with something to say about it, ordered by file and then by id.
     ///
-    /// This is the semantic form used in memory. The version-3 wire form groups these entries by
+    /// This is the semantic form used in memory. The version-4 wire form groups these entries by
     /// file and interns killers within each group.
     mutants: Vec<Hint>,
 
@@ -168,19 +169,41 @@ struct GroupedHints {
     tool: String,
     context: HintContext,
     files: Vec<FileHints>,
-    #[serde(default = "GeneralizedHints::empty_supported")]
-    generalized: GeneralizedHints,
+    #[serde(default)]
+    generalized: GeneralizedSection,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TolerantGroupedHints {
-    version: u32,
-    tool: String,
-    context: HintContext,
-    files: Vec<FileHints>,
-    #[serde(default)]
-    generalized: Option<yaml_serde::Value>,
+#[derive(Debug, Default)]
+enum GeneralizedSection {
+    #[default]
+    Missing,
+    Supported(GeneralizedHints),
+    Unsupported,
+}
+
+impl Serialize for GeneralizedSection {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Supported(hints) => hints.serialize(serializer),
+            Self::Missing | Self::Unsupported => Err(serde::ser::Error::custom("only supported generalized hints can be serialized")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GeneralizedSection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Supported(GeneralizedHints),
+            Unsupported(IgnoredAny),
+        }
+
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Supported(hints) => Self::Supported(hints),
+            Wire::Unsupported(_) => Self::Unsupported,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -284,7 +307,7 @@ impl Hints {
 
         if let Some(text) = existing_text(&current)? {
             return match Self::parse(&text) {
-                Some(hints) if replace || hints.generalized.supported().is_some() => Ok((hints, Some(text))),
+                Some(hints) if Self::promotion_can_preserve(&hints, replace) => Ok((hints, Some(text))),
                 Some(_hints) => Err(error!(
                     "`{current}` contains generalized hints this cargo-gamma cannot preserve, so incremental promotion would not preserve them; use `--replace` to discard them explicitly"
                 )),
@@ -296,6 +319,10 @@ impl Hints {
         }
 
         Ok((Self::default(), None))
+    }
+
+    fn promotion_can_preserve(hints: &Self, replace: bool) -> bool {
+        replace || hints.generalized.supported().is_some()
     }
 
     /// Whether this workspace has never had a checked-in hints artifact.
@@ -320,20 +347,30 @@ impl Hints {
             return None;
         }
 
-        let grouped = yaml_serde::from_str::<TolerantGroupedHints>(text).ok()?;
+        let grouped = yaml_serde::from_str::<GroupedHints>(text).ok()?;
         if grouped.version != VERSION || !Self::valid_tool(&grouped.tool) {
             return None;
         }
 
-        let generalized = grouped.generalized.map_or_else(GeneralizedHints::empty_supported, |value| {
-            yaml_serde::from_value(value).unwrap_or_default()
-        });
+        // Generalized hints have an independent compatibility boundary. Automatic loading keeps
+        // exact hints when that subsection has an unknown shape; top-level validation remains
+        // strict, and explicit promotion separately refuses data it cannot preserve.
+        let generalized = match grouped.generalized {
+            GeneralizedSection::Missing => GeneralizedHints::empty_supported(),
+            GeneralizedSection::Supported(hints) => hints,
+            GeneralizedSection::Unsupported => GeneralizedHints::default(),
+        };
         Self::from_files(grouped.files, generalized, grouped.context, grouped.tool)
     }
 
     #[cfg(test)]
     fn from_grouped(grouped: GroupedHints) -> Option<Self> {
-        Self::from_files(grouped.files, grouped.generalized, grouped.context, grouped.tool)
+        let generalized = match grouped.generalized {
+            GeneralizedSection::Missing => GeneralizedHints::empty_supported(),
+            GeneralizedSection::Supported(hints) => hints,
+            GeneralizedSection::Unsupported => GeneralizedHints::default(),
+        };
+        Self::from_files(grouped.files, generalized, grouped.context, grouped.tool)
     }
 
     fn from_files(files: Vec<FileHints>, generalized: GeneralizedHints, context: HintContext, tool: String) -> Option<Self> {
@@ -970,7 +1007,7 @@ impl From<&Hints> for GroupedHints {
             tool: hints.tool.clone(),
             context: hints.context.clone(),
             files,
-            generalized: hints.generalized.clone(),
+            generalized: GeneralizedSection::Supported(hints.generalized.clone()),
         }
     }
 }
@@ -1203,6 +1240,7 @@ const fn tier_of(outcome: Outcome) -> Option<Tier> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::record;
     use super::*;
@@ -1230,8 +1268,7 @@ mod tests {
         let dir = workdir(prefix);
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
 
-        fs::create_dir_all(root.join("src")).expect("the source directory should be creatable");
-        fs::write(root.join("src/lib.rs"), "fn add() {}").expect("the source should be writable");
+        crate::testing::write_fixture(root.as_std_path(), &[("src/lib.rs", "fn add() {}")]);
 
         (dir, root)
     }
@@ -1315,7 +1352,7 @@ mod tests {
     #[test]
     fn an_alias_bearing_artifact_is_ignored_before_deserialization() {
         let (_dir, root) = workspace("hints-alias-");
-        let text = "version: 3\n\
+        let text = "version: 4\n\
                     tool: cargo-gamma test\n\
                     context: &context\n\
                       repo_sha: 0123456789abcdef0123456789abcdef01234567\n\
@@ -1553,7 +1590,6 @@ mod tests {
 
     #[test]
     fn an_unknown_generalized_shape_is_ignored_without_losing_exact_hints() {
-        let (_dir, root) = workspace("hints-generalized-shape-");
         let artifact = Hints {
             version: VERSION,
             tool: "cargo-gamma test".to_owned(),
@@ -1570,14 +1606,42 @@ mod tests {
         let generalized = text.find("generalized:").expect("the artifact contains generalized hints");
         text.truncate(generalized);
         text.push_str("generalized:\n  futureShape: [unknown]\n");
-        fs::write(path(&root), text).expect("the artifact should be writable");
 
-        let loaded = Hints::load(&root);
+        let loaded = Hints::parse(&text).expect("the top-level artifact remains valid");
 
         assert_eq!(loaded.probes().get("abc"), Some(&killer("tests::exact")));
         assert!(loaded.generalized().is_empty());
-        let error = Hints::load_for_promotion(&root, false).expect_err("incremental promotion cannot round-trip an unknown tier");
-        assert!(error.to_string().contains("generalized hints"), "{error}");
+        assert!(!Hints::promotion_can_preserve(&loaded, false));
+        assert!(Hints::promotion_can_preserve(&loaded, true));
+    }
+
+    #[test]
+    fn an_explicitly_null_generalized_section_requires_replacement() {
+        let artifact = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".to_owned(),
+            context: hint_context(),
+            mutants: vec![Hint {
+                file: "src/lib.rs".into(),
+                id: "abc".into(),
+                killer: Some(killer("tests::exact")),
+                unviable: false,
+            }],
+            generalized: GeneralizedHints::empty_supported(),
+        };
+        let text = artifact
+            .rendered()
+            .expect("the artifact should serialize")
+            .split_once("generalized:")
+            .map(|(exact, _generalized)| format!("{exact}generalized: null\n"))
+            .expect("the artifact contains generalized hints");
+
+        let loaded = Hints::parse(&text).expect("the top-level artifact remains valid");
+
+        assert_eq!(loaded.probes().get("abc"), Some(&killer("tests::exact")));
+        assert!(loaded.generalized().is_empty());
+        assert!(!Hints::promotion_can_preserve(&loaded, false));
+        assert!(Hints::promotion_can_preserve(&loaded, true));
     }
 
     #[test]
@@ -1661,7 +1725,8 @@ mod tests {
         };
         let promoted = artifact(&[("src/new.rs", "new", "tests::new")]);
 
-        let error = Hints::merged(&existing, promoted, false, &root).expect_err("unknown generalized data cannot be round-tripped");
+        let error = Hints::merged(&existing, promoted, false, &root)
+            .expect_err("incremental promotion cannot round-trip an unknown generalized shape");
 
         assert!(error.to_string().contains("cannot preserve incrementally"), "{error}");
     }
@@ -1752,7 +1817,7 @@ mod tests {
     fn unsupported_older_and_newer_versions_are_ignored() {
         let (_dir, root) = workspace("hints-unsupported-version-");
 
-        for version in [0, VERSION + 1] {
+        for version in [VERSION - 1, VERSION + 1] {
             fs::write(
                 path(&root),
                 serde_json::to_vec(&serde_json::json!({

@@ -147,6 +147,7 @@ macro_rules! error {
 pub(crate) use error;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::backtrace::BacktraceStatus;
     use std::env;

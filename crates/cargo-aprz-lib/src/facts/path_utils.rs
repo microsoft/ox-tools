@@ -25,13 +25,14 @@ pub fn sanitize_path_component(s: &str) -> String {
     s.chars()
         .map(|character| match character {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            safe => safe,
+            unchanged => unchanged,
         })
         .collect()
 }
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

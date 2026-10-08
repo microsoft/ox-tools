@@ -344,6 +344,7 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::{env, fs};
 

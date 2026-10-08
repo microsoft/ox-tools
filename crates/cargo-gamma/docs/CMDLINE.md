@@ -15,6 +15,10 @@ Every subcommand and every option `cargo-gamma` accepts.
   * [Accepted by every subcommand](#accepted-by-every-subcommand)
   * [`gamma run`](#gamma-run)
   * [`gamma list`](#gamma-list)
+    * [`gamma list mutants`](#gamma-list-mutants)
+    * [`gamma list files`](#gamma-list-files)
+    * [`gamma list mutators`](#gamma-list-mutators)
+    * [`gamma list presets`](#gamma-list-presets)
   * [`gamma explain`](#gamma-explain)
   * [`gamma suppress`](#gamma-suppress)
   * [`gamma unsuppress`](#gamma-unsuppress)
@@ -59,6 +63,15 @@ is a run over the whole workspace; `cargo gamma list` is the `list` subcommand a
 
 <!-- end generated -->
 
+`gamma list` defaults to `mutants`. Its explicit modes are:
+
+| Mode | Purpose |
+| --- | --- |
+| `mutants` | List the current selected mutant population. |
+| `files` | List source files in the selected population. |
+| `mutators` | List registered mutators and their selection state. |
+| `presets` | List named mutator presets. |
+
 ## The option categories
 
 The same categories appear in `--help` and in the reference below. Knowing which category a setting
@@ -69,7 +82,7 @@ lives in is usually enough to find it:
 | **Selecting what to mutate** | Which files, packages, lines and mutators make up the population. Applied before anything is built. |
 | **Cargo features** | The feature set to compile under. Discovery and the build must agree, so these apply to both. |
 | **Configuration** | Where settings are read from, and whether the file is read at all. |
-| **Building** | The one build the whole run depends on: profile, arguments to cargo, timeouts, and how many rollback rounds are allowed. |
+| **Building** | Compiler convergence and test-binary generation: profile, arguments to Cargo, timeouts, and how many withdrawal rounds are allowed. |
 | **Running tests** | How the suite is executed per mutant: parallelism, timeouts, which test targets may decide a verdict, and which runner. |
 | **Memory** | The ceiling each test binary runs under, and how it is derived. A mutant can turn bounded allocation into unbounded allocation, which a timeout catches only slowly. |
 | **Scratch tree** | Where the instrumented copy of the workspace lives, and what is copied into it. |
@@ -157,9 +170,10 @@ gate failed, and a campaign that could not obtain a complete answer:
 | `3` | The command could not proceed or could not produce the requested complete result. |
 | `70` | An internal cargo-gamma panic reached the top-level boundary. |
 
-Without `--min-score`, an empty or partially completed population does not by itself become a score
-gate failure. Build convergence that leaves stuck mutants is still status `3`, because the selected
-population was not built completely enough to answer.
+An empty population fails only when a configured gate requires something to grade. A partially
+completed population fails when either `--min-score` or `--max-flaky` is configured; with no strict
+gate it remains a reportable result. Build convergence that leaves stuck mutants is still status
+`3`, because the selected population was not built completely enough to answer.
 
 A failing baseline also returns status `3`. Cargo-gamma lets completing baseline binaries report
 all their test failures, writes each failure under
@@ -244,7 +258,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--show-build` |  | Let cargo's own build output through, instead of only its progress bar. |
+| `--show-build` |  | Show Cargo's raw build output. |
 | `-j`, `--jobs` | `<N>` | How many mutants to test at once. Defaults to one more than the available parallelism. |
 | `--resource-concurrency` | `<NAME=N>` | Override the maximum concurrency of a test resource declared with `#[gamma::resource]`. |
 | `--test-timeout-multiplier` | `<FACTOR>` | Multiple of each test binary's baseline duration that a mutant is allowed. |
@@ -276,9 +290,9 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | --- | --- | --- |
 | `--profile` | `<NAME>` | Which Cargo profile to build with. |
 | `-C`, `--cargo-arg` | `<ARG>` | Pass an argument through to every cargo invocation. |
-| `--build-timeout` | `<SECONDS>` | Seconds the build may take before the run is abandoned. |
-| `--build-timeout-multiplier` | `<FACTOR>` | Multiple of the first successful build's duration that a later build round is allowed. |
-| `--rollback-rounds` | `<ROUNDS>` | How many times the tree may be rebuilt while withdrawing mutants that do not compile. Defaults to `256`. |
+| `--build-timeout` | `<SECONDS>` | Seconds a compiler invocation may take before the run is abandoned. |
+| `--build-timeout-multiplier` | `<FACTOR>` | Multiple of the first compiler round's duration that a later round is allowed. |
+| `--rollback-rounds` | `<ROUNDS>` | How many compiler rounds may withdraw mutants that do not compile. Defaults to `256`. |
 
 **Cache**
 
@@ -513,7 +527,7 @@ cargo gamma suppress [OPTIONS]
 | Option | Value | What it does |
 | --- | --- | --- |
 | `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose completed campaign should be used. Defaults to `.`. |
-| `--apply` |  | Write the generated directives instead of printing what would be written. |
+| `--apply` |  | Write and verify the generated directives instead of printing the proposed diff. |
 | `--eligible` | `<LIST>` | Which verdicts may be suppressed. Defaults to `timeout,outofmem`. |
 | `--allow-dirty` |  | Edit source files that have uncommitted changes. |
 

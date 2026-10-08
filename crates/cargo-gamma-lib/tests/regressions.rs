@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! One test per bug that has already been fixed once.
@@ -27,7 +29,7 @@ use cargo_gamma_lib::internals::ops::collect::{Shape, collect};
 use cargo_gamma_lib::internals::ops::registry::Selection;
 use cargo_gamma_lib::internals::parse::SourceFile;
 use cargo_gamma_lib::internals::suppress::directives;
-use cargo_gamma_lib::testing::Sink;
+use cargo_gamma_lib::testing::{Sink, write_project};
 
 /// The ox-tools workspace root.
 fn repository() -> Utf8PathBuf {
@@ -121,12 +123,14 @@ fn survivor(file: &str, line: usize) -> Mutant {
         original: "a > b".to_owned().into(),
         replacement: "a >= b".to_owned().into(),
         shape: Shape::Expr,
+        confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
         outcome: Outcome::Survived,
         suppression: None,
         expectation: None,
         test_timeout_multiplier: None,
         elapsed_ms: 0,
         killed_by: None,
+        killer: None,
         note: None,
     }
 }
@@ -162,17 +166,16 @@ fn issue_002_a_pattern_that_matches_nothing_is_a_usage_error() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("utf-8");
 
-    fs::write(
-        root.join("Cargo.toml").as_std_path(),
-        "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-    )
-    .expect("manifest");
-    fs::create_dir_all(root.join("src").as_std_path()).expect("src");
-    fs::write(
-        root.join("src/lib.rs").as_std_path(),
-        "pub fn f(a: i32, b: i32) -> bool { a > b }\n",
-    )
-    .expect("lib");
+    write_project(
+        root.as_std_path(),
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            ),
+            ("src/lib.rs", "pub fn f(a: i32, b: i32) -> bool { a > b }\n"),
+        ],
+    );
 
     let (code, text) = cli(&["list", "mutants", "--file", "src/nothing_here.rs", "--dir", root.as_str()]);
 

@@ -13,18 +13,20 @@
 //! - The once token (valid only in `--once` mode): `{packages}`. Must stand
 //!   alone as a whole argument; it expands to the resolved selection flags,
 //!   which is several tokens.
-//! - The workspace token `{workspace-rust-version}`, valid in every mode.
+//! - The workspace token `{workspace-rust-version}`, valid in Cargo-backed
+//!   per-package, per-target, and once modes. An absent root declaration
+//!   expands to an empty string.
+//! - JSON-record fields through `{json:key}`, valid only in JSON-record mode.
 //!
 //! Using a token in the wrong mode is a usage error ([`PlaceholderMisuseError`]).
 //!
-//! Only the tokens above are interpreted. Any other `{…}` sequence — a typo
-//! like `{manfiest}`, a wrong-case `{Name}`, or a literal brace an argument
-//! genuinely needs — is passed through **verbatim** to the spawned command.
-//! There is no brace-escape mechanism, so this passthrough is a deliberate part
-//! of the contract (`cargo-each` never interprets the command beyond these
-//! fixed substitutions), not an oversight.
+//! Every `{json:…}` sequence is validated as a JSON placeholder. Other
+//! unrecognized `{…}` sequences — a typo like `{manfiest}`, a wrong-case
+//! `{Name}`, or a literal brace an argument genuinely needs — are passed through
+//! **verbatim** to the spawned command. There is no brace-escape mechanism, so
+//! this passthrough is a deliberate part of the contract, not an oversight.
 
-use crate::error::{EachError, PlaceholderMisuseError, WorkspaceRustVersionError};
+use crate::error::{EachError, JsonRecordFieldError, PlaceholderMisuseError};
 use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
@@ -35,6 +37,8 @@ const TARGET_TOKEN: &str = "{target}";
 const PACKAGES_TOKEN: &str = "{packages}";
 /// The workspace-wide Rust compatibility floor token.
 const WORKSPACE_RUST_VERSION_TOKEN: &str = "{workspace-rust-version}";
+/// Prefix of a dynamic JSON-record field placeholder.
+const JSON_TOKEN_PREFIX: &str = "{json:";
 
 /// The substitution context for one command invocation.
 #[derive(Debug, Clone)]
@@ -87,11 +91,65 @@ impl Placeholders {
     }
 }
 
-fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: Vec<(&'static str, &'a str)>) -> Result<String, EachError> {
+fn visit_json_tokens<'a>(arg: &'a str, mut visit: impl FnMut(usize, usize, &'a str) -> Result<(), EachError>) -> Result<(), EachError> {
+    let mut cursor = 0;
+    while let Some(relative_start) = arg[cursor..].find(JSON_TOKEN_PREFIX) {
+        let start = cursor + relative_start;
+        let key_start = start + JSON_TOKEN_PREFIX.len();
+        let Some(relative_end) = arg[key_start..].find('}') else {
+            return Err(
+                PlaceholderMisuseError::new(arg[start..].to_owned(), "JSON placeholder is missing its closing `}`".to_owned()).into(),
+            );
+        };
+        let end = key_start + relative_end + 1;
+        let key = &arg[key_start..end - 1];
+        if key.is_empty() || key.contains('{') {
+            return Err(
+                PlaceholderMisuseError::new(arg[start..end].to_owned(), "expected a nonempty top-level field name".to_owned()).into(),
+            );
+        }
+        visit(start, end, key)?;
+        cursor = end;
+    }
+    Ok(())
+}
+
+fn replace_json_arg(
+    arg: &str,
+    fields: &serde_json::Map<String, serde_json::Value>,
+    source: &str,
+    line: usize,
+) -> Result<String, EachError> {
+    let mut replaced = String::with_capacity(arg.len());
+    let mut cursor = 0;
+    visit_json_tokens(arg, |start, end, key| {
+        replaced.push_str(&arg[cursor..start]);
+        let Some(value) = fields.get(key) else {
+            return Err(JsonRecordFieldError::new(source.to_owned(), line, key.to_owned(), "field is missing".to_owned()).into());
+        };
+        let Some(value) = value.as_str() else {
+            return Err(JsonRecordFieldError::new(source.to_owned(), line, key.to_owned(), "field is not a string".to_owned()).into());
+        };
+        if value.contains('\0') {
+            return Err(JsonRecordFieldError::new(
+                source.to_owned(),
+                line,
+                key.to_owned(),
+                "field contains a NUL byte, which cannot be passed in a process argument".to_owned(),
+            )
+            .into());
+        }
+        replaced.push_str(value);
+        cursor = end;
+        Ok(())
+    })?;
+    replaced.push_str(&arg[cursor..]);
+    Ok(replaced)
+}
+
+fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: Vec<(&'static str, &'a str)>) -> String {
     if arg.contains(WORKSPACE_RUST_VERSION_TOKEN) {
-        let version = placeholders.workspace_rust_version().ok_or_else(|| {
-            WorkspaceRustVersionError::new("the command uses the placeholder but its root value was not resolved".to_owned())
-        })?;
+        let version = placeholders.workspace_rust_version().unwrap_or_default();
         replacements.push((WORKSPACE_RUST_VERSION_TOKEN, version));
     }
 
@@ -111,7 +169,7 @@ fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: 
     }
     replaced.push_str(rest);
 
-    Ok(replaced)
+    replaced
 }
 
 /// Whether a command template uses the lazy workspace Rust-version token.
@@ -134,6 +192,9 @@ pub(crate) fn uses_workspace_rust_version(args: &[String]) -> bool {
 /// embedded in a larger argument rather than standing alone.
 pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), EachError> {
     for arg in args {
+        if arg.contains(JSON_TOKEN_PREFIX) {
+            return Err(PlaceholderMisuseError::new("{json:key}".to_owned(), "only valid in JSON-record mode".to_owned()).into());
+        }
         if mode == Mode::Once {
             if let Some(token) = PER_PACKAGE_TOKENS.iter().find(|t| arg.contains(**t)) {
                 return Err(
@@ -166,6 +227,32 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
     Ok(())
 }
 
+/// Validate placeholders accepted by JSON-record mode.
+pub(crate) fn validate_json_placeholders(args: &[String]) -> Result<(), EachError> {
+    for arg in args {
+        for token in PER_PACKAGE_TOKENS
+            .into_iter()
+            .chain([TARGET_TOKEN, PACKAGES_TOKEN, WORKSPACE_RUST_VERSION_TOKEN])
+        {
+            if arg.contains(token) {
+                return Err(PlaceholderMisuseError::new(token.to_owned(), "not valid in JSON-record mode".to_owned()).into());
+            }
+        }
+        visit_json_tokens(arg, |_start, _end, _key| Ok(()))?;
+    }
+    Ok(())
+}
+
+/// Expand JSON placeholders after [`validate_json_placeholders`] succeeds.
+pub(crate) fn substitute_json_prevalidated(
+    args: &[String],
+    fields: &serde_json::Map<String, serde_json::Value>,
+    source: &str,
+    line: usize,
+) -> Result<Vec<String>, EachError> {
+    args.iter().map(|arg| replace_json_arg(arg, fields, source, line)).collect()
+}
+
 /// Substitute placeholders in `args` for one invocation.
 ///
 /// Returns the fully-expanded argument vector.
@@ -176,12 +263,11 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
 /// token under `--once`, or `{packages}` outside `--once`), or if `{packages}`
 /// is embedded in a larger argument rather than standing alone.
 pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<String>, EachError> {
-    let mode = match placeholders {
-        Placeholders::Package { .. } => Mode::PerPackage,
-        Placeholders::Target { .. } => Mode::PerTarget,
-        Placeholders::Once { .. } => Mode::Once,
-    };
-    validate_placeholders(args, mode)?;
+    match placeholders {
+        Placeholders::Package { .. } => validate_placeholders(args, Mode::PerPackage)?,
+        Placeholders::Target { .. } => validate_placeholders(args, Mode::PerTarget)?,
+        Placeholders::Once { .. } => validate_placeholders(args, Mode::Once)?,
+    }
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
         match placeholders {
@@ -202,7 +288,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                     // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package manifest token was emptied")]
                     ("{manifest}", manifest.as_str()),
                 ];
-                let replaced = replace_arg(arg, placeholders, replacements)?;
+                let replaced = replace_arg(arg, placeholders, replacements);
                 out.push(replaced);
             }
             Placeholders::Target {
@@ -224,7 +310,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                     ("{manifest}", manifest.as_str()),
                     (TARGET_TOKEN, target.as_str()),
                 ];
-                let replaced = replace_arg(arg, placeholders, replacements)?;
+                let replaced = replace_arg(arg, placeholders, replacements);
                 out.push(replaced);
             }
             Placeholders::Once { packages, .. } => {
@@ -233,7 +319,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 if arg == PACKAGES_TOKEN {
                     out.extend(packages.iter().cloned());
                 } else {
-                    out.push(replace_arg(arg, placeholders, Vec::new())?);
+                    out.push(replace_arg(arg, placeholders, Vec::new()));
                 }
             }
         }
@@ -414,10 +500,13 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_workspace_rust_version_is_reported_in_package_and_target_modes() {
+    fn absent_workspace_rust_version_expands_to_empty_in_every_mode() {
         let command = args(&["echo", "{workspace-rust-version}"]);
-        let package_error = substitute(&command, &pkg()).expect_err("package value is unresolved");
-        assert!(package_error.to_string().contains("root value was not resolved"), "{package_error}");
+        assert_eq!(substitute(&command, &pkg()).expect("optional package value"), ["echo", ""]);
+        assert_eq!(
+            substitute(&args(&["+{workspace-rust-version}"]), &pkg()).expect("textual empty substitution"),
+            ["+"]
+        );
 
         let target = Placeholders::Target {
             name: "crate".to_owned(),
@@ -427,17 +516,13 @@ mod tests {
             target: "example".to_owned(),
             workspace_rust_version: None,
         };
-        let target_error = substitute(&command, &target).expect_err("target value is unresolved");
-        assert!(target_error.to_string().contains("root value was not resolved"), "{target_error}");
+        assert_eq!(substitute(&command, &target).expect("optional target value"), ["echo", ""]);
 
         let once = Placeholders::Once {
             packages: args(&["--workspace"]),
             workspace_rust_version: None,
         };
-        assert_eq!(
-            substitute(&command, &once).expect_err("once value is unresolved").to_string(),
-            "cannot resolve `{workspace-rust-version}`: the command uses the placeholder but its root value was not resolved"
-        );
+        assert_eq!(substitute(&command, &once).expect("optional once value"), ["echo", ""]);
     }
 
     #[test]
@@ -492,5 +577,51 @@ mod tests {
     fn detects_workspace_rust_version_usage() {
         assert!(uses_workspace_rust_version(&args(&["tool", "v={workspace-rust-version}"])));
         assert!(!uses_workspace_rust_version(&args(&["tool", "{name}"])));
+    }
+
+    #[test]
+    fn json_fields_expand_without_rescanning_inserted_values() {
+        let fields = serde_json::json!({
+            "package": "alpha",
+            "test": "{json:package}"
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let command = args(&["{json:package}:{json:test}:{json:package}"]);
+        validate_json_placeholders(&command).expect("valid JSON placeholders");
+        assert_eq!(
+            substitute_json_prevalidated(&command, &fields, "records.jsonl", 4).expect("JSON substitution"),
+            ["alpha:{json:package}:alpha"]
+        );
+    }
+
+    #[test]
+    fn json_mode_rejects_missing_nonstring_and_foreign_placeholders() {
+        let fields = serde_json::json!({"number": 1, "nul": "a\u{0}b"})
+            .as_object()
+            .expect("object")
+            .clone();
+        for (command, expected) in [
+            ("{json:missing}", "field is missing"),
+            ("{json:number}", "field is not a string"),
+            ("{json:nul}", "field contains a NUL byte"),
+            ("{name}", "not valid in JSON-record mode"),
+            ("{json:", "missing its closing"),
+            ("{json:}", "nonempty top-level field name"),
+            ("{json:{nested}}", "nonempty top-level field name"),
+        ] {
+            let command = args(&[command]);
+            let error = validate_json_placeholders(&command)
+                .and_then(|()| substitute_json_prevalidated(&command, &fields, "records.jsonl", 2))
+                .expect_err("invalid JSON placeholder must fail");
+            assert!(error.to_string().contains(expected), "{command:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn ordinary_modes_reject_json_placeholders() {
+        let error = substitute(&args(&["echo", "{json:value}"]), &pkg()).expect_err("JSON placeholder outside JSON mode must fail");
+        assert!(error.to_string().contains("only valid in JSON-record mode"));
     }
 }

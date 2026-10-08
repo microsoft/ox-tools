@@ -112,6 +112,7 @@ pub(crate) enum FeatureConfiguration {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use clap::CommandFactory;
 

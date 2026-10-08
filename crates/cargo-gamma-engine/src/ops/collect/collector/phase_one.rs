@@ -34,8 +34,8 @@
 
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, Field, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
-    ItemFn, ItemStatic, ItemStruct, ItemType, ItemUse, Stmt, TraitItem, TraitItemConst, TraitItemFn,
+    Arm, Attribute, Block, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, Field, ImplItem, ImplItemConst, ImplItemFn, Item,
+    ItemConst, ItemFn, ItemMod, ItemStatic, ItemStruct, ItemType, ItemUse, Stmt, TraitItem, TraitItemConst, TraitItemFn,
 };
 
 use crate::Result;
@@ -184,13 +184,31 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     }
 
     fn visit_item_type(&mut self, node: &'ast ItemType) {
-        self.walk.alias(&node.ident.to_string(), &node.ty);
+        self.walk.alias(&node.ident.to_string(), &node.generics, &node.ty);
         visit::visit_item_type(self, node);
     }
 
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         self.walk.on_item_struct(node);
         visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        self.walk.on_item_mod(node);
+        self.walk.enter_module(&node.ident);
+        visit::visit_item_mod(self, node);
+        self.walk.exit_scope();
+    }
+
+    fn visit_block(&mut self, node: &'ast Block) {
+        self.walk.enter_block(node);
+        visit::visit_block(self, node);
+        self.walk.exit_scope();
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.walk.on_item_trait(node);
+        visit::visit_item_trait(self, node);
     }
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
@@ -241,6 +259,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -296,7 +315,10 @@ mod tests {
         assert_eq!(indexes.constants.get("STEP"), Some(&true));
         assert_eq!(indexes.constants.get("CAPACITY"), Some(&true));
         assert_eq!(indexes.fields.get("count"), Some(&true));
-        assert_eq!(indexes.imports.get("Vec"), Some(&Some(vec!["std".to_owned(), "vec".to_owned()])));
+        assert_eq!(
+            indexes.imports.get("Vec"),
+            Some(&Some(vec!["std".to_owned(), "vec".to_owned(), "Vec".to_owned()]))
+        );
         assert!(indexes.aliases.contains_key("Count"));
         assert!(indexes.numeric_uses.names.contains("index"));
     }

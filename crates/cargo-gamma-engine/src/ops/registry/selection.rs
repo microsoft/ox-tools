@@ -7,11 +7,21 @@ use crate::{HashSet, Result};
 /// The mutator that consumes caller-supplied error values.
 const ERR_WITH: &str = "fn_value.err_with";
 
+/// Returns whether optimistic sites for a mutator require an explicit selector.
+#[must_use]
+pub fn optimistic_requires_explicit(name: &str) -> bool {
+    matches!(
+        name,
+        "literal.int_decrement" | "expr.increment" | "expr.decrement" | "iter.remove_filter"
+    )
+}
+
 /// A resolved set of mutator names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selection {
     names: HashSet<&'static str>,
     errors: Vec<String>,
+    optimistic: HashSet<&'static str>,
 }
 
 impl Selection {
@@ -21,6 +31,7 @@ impl Selection {
         Self {
             names: REGISTRY.iter().filter(|m| m.default_on).map(|m| m.name).collect(),
             errors: Vec::new(),
+            optimistic: HashSet::default(),
         }
     }
 
@@ -30,6 +41,7 @@ impl Selection {
         Self {
             names: REGISTRY.iter().map(|m| m.name).collect(),
             errors: Vec::new(),
+            optimistic: REGISTRY.iter().map(|m| m.name).collect(),
         }
     }
 
@@ -70,6 +82,12 @@ impl Selection {
         self.names.contains(name)
     }
 
+    /// Returns whether unresolved semantic guesses were explicitly requested.
+    #[must_use]
+    pub fn includes_optimistic(&self, name: &str) -> bool {
+        self.optimistic.contains(name)
+    }
+
     /// Returns whether any mutator of a family is selected.
     ///
     /// A family is the part of a name before the dot. Asked by the collector, which builds some of
@@ -92,9 +110,12 @@ impl Selection {
     }
 
     /// Adds every mutator matched by one selector.
-    fn add(&mut self, selector: &str) -> Result<()> {
+    fn add(&mut self, selector: &str, admit_optimistic: bool) -> Result<()> {
         for name in resolve(selector)? {
             let _ = self.names.insert(name);
+            if admit_optimistic {
+                let _ = self.optimistic.insert(name);
+            }
         }
 
         Ok(())
@@ -104,6 +125,7 @@ impl Selection {
     fn remove(&mut self, selector: &str) -> Result<()> {
         for name in resolve(selector)? {
             let _ = self.names.remove(name);
+            let _ = self.optimistic.remove(name);
         }
 
         Ok(())
@@ -126,7 +148,7 @@ impl Selection {
             if let Some(rest) = selector.strip_prefix('!') {
                 self.remove(rest.trim())?;
             } else {
-                self.add(selector)?;
+                self.add(selector, selector != "@default" && selector != "default")?;
             }
         }
 
@@ -143,6 +165,7 @@ impl Selection {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -189,6 +212,60 @@ mod tests {
         for name in all.sorted() {
             assert!(combined.contains(name), "{name} is not reachable through a shipped preset");
         }
+    }
+
+    #[test]
+    fn only_explicit_selection_admits_optimistic_candidates() {
+        assert!(optimistic_requires_explicit("literal.int_decrement"));
+        assert!(optimistic_requires_explicit("expr.increment"));
+        assert!(optimistic_requires_explicit("expr.decrement"));
+        assert!(optimistic_requires_explicit("iter.remove_filter"));
+        assert!(!optimistic_requires_explicit("fn_value.default"));
+        assert!(!Selection::default_preset().includes_optimistic("literal.int_decrement"));
+        assert!(!Selection::parse("@default").unwrap().includes_optimistic("literal.int_decrement"));
+        assert!(
+            Selection::parse("literal.int_decrement")
+                .unwrap()
+                .includes_optimistic("literal.int_decrement")
+        );
+        assert!(
+            !Selection::parse("literal.int_decrement")
+                .unwrap()
+                .includes_optimistic("fn_value.default")
+        );
+        assert!(Selection::parse("@all").unwrap().includes_optimistic("literal.int_decrement"));
+        assert!(Selection::everything().includes_optimistic("literal.int_decrement"));
+    }
+
+    #[test]
+    fn changed_presets_have_exact_membership() {
+        assert_eq!(
+            Selection::parse("@numeric").unwrap().sorted(),
+            [
+                "expr.decrement",
+                "expr.increment",
+                "literal.float_negate",
+                "literal.float_to_one",
+                "literal.float_to_zero",
+                "literal.int_decrement",
+                "literal.int_increment",
+                "literal.int_to_one",
+                "literal.int_to_zero",
+            ]
+        );
+        assert_eq!(
+            Selection::parse("@removal").unwrap().sorted(),
+            [
+                "call.replace_with_default",
+                "collection.omit_element",
+                "match_arm.never_matches",
+                "stmt.delete_assign",
+                "stmt.delete_call",
+                "struct_field.omit",
+                "unary.remove_neg",
+                "unary.remove_not",
+            ]
+        );
     }
 
     #[test]

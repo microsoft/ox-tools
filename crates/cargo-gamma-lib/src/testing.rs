@@ -11,6 +11,7 @@
 //! compiles as its own crate and sees nothing such a gate creates, which would leave the
 //! integration tests maintaining a second capturing host of their own.
 
+#![cfg_attr(coverage_nightly, coverage(off))]
 // This module is test scaffolding that happens to be compiled as a library module, so the lints
 // written for production code do not apply to it: a fixture builder whose result is dropped is a
 // test bug the test itself reveals, and `panic` is how a fixture reports one.
@@ -37,6 +38,12 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::commands::Host;
 use crate::exec::Workspace;
+
+#[path = "../tests/support/project.rs"]
+mod project;
+
+#[doc(inline)]
+pub use project::{write_fixture, write_project};
 
 type PauseChannels = (mpsc::SyncSender<usize>, mpsc::Receiver<()>);
 
@@ -255,7 +262,6 @@ pub struct Sink {
     /// Everything written to the diagnostic stream.
     pub err: Vec<u8>,
 
-    terminal: bool,
     width: Option<u16>,
     env: Vec<(String, String)>,
 }
@@ -264,13 +270,16 @@ impl Sink {
     /// Presents the host as a terminal of the given width.
     #[must_use]
     pub fn terminal(mut self, width: u16) -> Self {
-        self.terminal = true;
         self.width = Some(width);
         self
     }
 
     /// Changes the width reported by this terminal.
     pub fn resize_terminal(&mut self, width: u16) {
+        assert!(
+            self.width.is_some(),
+            "Sink::resize_terminal requires a Sink constructed with Sink::terminal"
+        );
         self.width = Some(width);
     }
 
@@ -304,7 +313,7 @@ impl Host for Sink {
     }
 
     fn is_terminal(&self) -> bool {
-        self.terminal
+        self.width.is_some()
     }
 
     fn terminal_width(&self) -> Option<u16> {
@@ -678,6 +687,7 @@ pub fn test_binary(path: &str) -> crate::exec::TestBinary {
         package: String::new(),
         package_id: String::new(),
         target: String::new(),
+        target_kind: String::new(),
         manifest_dir: Utf8PathBuf::new(),
         linked_sources: None,
         libtest: Some(true),
@@ -704,7 +714,7 @@ pub struct Recorder {
     /// Number of workload entries and worker lanes announced for the sweep.
     pub sweep_plan: Option<(usize, usize)>,
 
-    /// Number of workers announced as they started a mutant.
+    /// Number of mutant-start events announced by workers.
     pub mutant_starts: usize,
 
     /// Number of quiet-sweep heartbeat events.
@@ -712,6 +722,9 @@ pub struct Recorder {
 
     /// Every warning the run raised, in order.
     pub warnings: Vec<String>,
+
+    /// Every compiler-unviability census update, in publication order.
+    pub convergence: Vec<usize>,
 }
 
 impl crate::exec::Events for Recorder {
@@ -737,6 +750,10 @@ impl crate::exec::Events for Recorder {
 
     fn heartbeat(&mut self) {
         self.heartbeats = self.heartbeats.saturating_add(1);
+    }
+
+    fn convergence_progress(&mut self, unviable: usize) {
+        self.convergence.push(unviable);
     }
 }
 
@@ -1076,6 +1093,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Sink::resize_terminal requires a Sink constructed with Sink::terminal")]
+    fn a_redirected_sink_cannot_be_resized_into_a_mixed_terminal_state() {
+        Sink::default().resize_terminal(80);
+    }
+
+    #[test]
     fn integration_dispatch_finds_every_supported_directory_spelling_and_defaults_safely() {
         let split = [OsString::from("cargo-gamma"), OsString::from("--dir"), OsString::from("split")];
         let long_joined = [OsString::from("cargo-gamma"), OsString::from("--dir=long")];
@@ -1227,12 +1250,14 @@ pub mod ci_fixture {
             original: "a > b".into(),
             replacement: "a >= b".into(),
             shape: Shape::Expr,
+            confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
             outcome,
             suppression: None,
             expectation: None,
             test_timeout_multiplier: None,
             elapsed_ms: 0,
             killed_by: None,
+            killer: None,
             note: None,
         }
     }
@@ -1270,12 +1295,14 @@ pub mod advise_fixture {
             original: "a".into(),
             replacement: "b".into(),
             shape: Shape::Expr,
+            confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
             outcome,
             suppression: None,
             expectation: None,
             test_timeout_multiplier: None,
             elapsed_ms: ms,
             killed_by: None,
+            killer: None,
             note: None,
         }
     }
@@ -1295,6 +1322,7 @@ pub mod advise_fixture {
             package: package.to_owned(),
             package_id: format!("path+file:///w/{package}#0.0.0"),
             target: target.to_owned(),
+            target_kind: String::new(),
             manifest_dir: Utf8PathBuf::from(format!("/w/{package}")),
             linked_sources: None,
             libtest: Some(true),
@@ -1337,12 +1365,14 @@ pub mod discover_fixture {
             original: "a > b".into(),
             replacement: "a >= b".into(),
             shape: collect::Shape::Expr,
+            confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
             outcome: Outcome::Survived,
             suppression: None,
             expectation: None,
             test_timeout_multiplier: None,
             elapsed_ms: 0,
             killed_by: None,
+            killer: None,
             note: None,
         }
     }

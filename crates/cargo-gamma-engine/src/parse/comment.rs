@@ -317,6 +317,7 @@ const fn utf8_width(first: u8) -> usize {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use super::scan_comments;
     use crate::parse::source_file::line_starts;
@@ -357,6 +358,7 @@ mod fuzz {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::source_file::{SourceFile, line_starts};
     use super::*;

@@ -80,7 +80,7 @@ pub use row_iter::RowIter;
 use row_reader::RowReader;
 use row_writer::RowWriter;
 pub use table::Table;
-use table::{TABLE_HEADER_SIZE, define_rows, define_table, map_table_file, validate_table_header};
+use table::{TABLE_HEADER_SIZE, define_rows, define_table, validate_table_header};
 pub use table_mgr::TableMgr;
 pub use teams_table::{TeamsTable, TeamsTableIndex};
 pub use users_table::{UsersTable, UsersTableIndex};

@@ -298,6 +298,7 @@ fn results(kept: &[&Mutant], root: &Utf8Path, level: Level) -> Vec<Finding> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use serde_json::Value;
 

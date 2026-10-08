@@ -60,7 +60,6 @@ pub const EXIT_INTERNAL: i32 = 70;
 /// and the exit codes themselves, is reachable from an ordinary integration test.
 pub fn run<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> i32 {
     #[cfg(windows)]
-    // #[gamma::skip(stmt.delete_call, reason = "Windows error-dialog suppression changes process-global OS policy and cannot be observed safely from an in-process test")]
     cargo_gamma_unsafe::job::suppress_error_dialogs();
 
     let notes = crate::notes::Run::new();
@@ -357,6 +356,7 @@ fn check_shard(select: &SelectArgs) -> crate::Result<()> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
     use std::sync::Barrier;

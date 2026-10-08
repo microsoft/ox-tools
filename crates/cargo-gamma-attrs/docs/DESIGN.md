@@ -21,9 +21,22 @@ test target without runtime registration.
 - The macros must not instrument production code or add runtime behavior.
 - Resource markers are ignored tests: they appear in harness listings but
   never execute.
+- Resource names start with an ASCII letter and otherwise contain only ASCII
+  letters, digits, `.`, `_`, or `-`.
+- A function resource annotation requires a test attribute and applies to that
+  test. A module resource annotation requires an inline module and applies to
+  the containing test target.
+- Resource arguments and annotated items are rejected before recursive parsing
+  when their token shape exceeds the shared nesting and expression-chain
+  limits, so malformed input produces a diagnostic rather than exhausting the
+  compiler stack.
 
 ## Public contract
 
 The supported attributes, selector grammar, and diagnostics are part of
 cargo-gamma's source-level configuration contract. Invalid directives fail at
 compile time instead of becoming silent no-ops.
+
+Compiler-hosted diagnostic consumers belong to the provisioned
+[real-toolchain system-test boundary](../../cargo-gamma-lib/docs/design/system-tests.md);
+scripted process results cannot prove public macro acceptance or rejection.

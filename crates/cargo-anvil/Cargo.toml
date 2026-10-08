@@ -24,6 +24,12 @@ categories = ["development-tools::cargo-plugins"]
 #
 allowed_external_types = ["ohno::app::error::AppError"]
 
+# Production code is measured while test-only modules and scaffolding opt out with
+# `#[cfg_attr(coverage_nightly, coverage(off))]`. This floor records the lowest cross-platform
+# production result from the coverage-gate CI matrix; raise it only after that matrix improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 99.86445
+
 [[bin]]
 name = "cargo-anvil"
 path = "src/main.rs"
@@ -41,6 +47,7 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 assert_cmd = { workspace = true }
 insta = { workspace = true, features = ["filters"] }
 predicates = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }

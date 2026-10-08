@@ -124,7 +124,12 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
         && merged.flaky.len() > maximum
     {
         for finding in &merged.flaky {
-            writeln!(host.error(), "{} {finding}", styler.error("error:"))?;
+            writeln!(
+                host.error(),
+                "{} {}",
+                styler.error("error:"),
+                crate::report::encode_controls(finding)
+            )?;
         }
         writeln!(
             host.error(),
@@ -399,6 +404,7 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
 

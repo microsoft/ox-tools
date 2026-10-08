@@ -6,12 +6,12 @@
 use core::fmt::Write as _;
 use core::time::Duration;
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write, stderr, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{Metadata, MetadataCommand};
 use chrono::Local;
 use clap::{Args, ValueEnum};
 use ohno::IntoAppError;
@@ -219,7 +219,6 @@ impl CommonArgs {
 pub struct Common<'a, H: super::Host> {
     pub collector: Collector,
     pub config: Config,
-    pub metadata_cmd: MetadataCommand,
     host: &'a mut H,
     color: ColorMode,
     error_if_high_risk: bool,
@@ -238,43 +237,44 @@ impl<'a, H: super::Host> Common<'a, H> {
     ///
     /// Returns an error if the collector or config cannot be initialized
     pub async fn new(host: &'a mut H, args: &CommonArgs) -> Result<Self> {
-        use std::io::{IsTerminal, stderr};
+        Self::new_with_metadata(host, args, |_| {}).await.map(|(common, _metadata)| common)
+    }
 
-        // #[gamma::skip(stmt.delete_call, tag = "trivial", reason = "the process-global logger can only be initialized once and cannot be observed safely from an in-process unit test")]
+    pub async fn new_with_metadata(
+        host: &'a mut H,
+        args: &CommonArgs,
+        configure: impl FnOnce(&mut MetadataCommand),
+    ) -> Result<(Self, Metadata)> {
         Self::init_logging(args.log_level);
 
         // Create metadata command for workspace operations
         let mut metadata_cmd = MetadataCommand::new();
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "deleting the manifest path turns the deterministic missing-manifest error test into real workspace collector initialization and external cache or download work")]
         let _ = metadata_cmd.manifest_path(&args.manifest_path);
+        configure(&mut metadata_cmd);
 
         // Execute metadata command once and use it for both cache and config paths
         let metadata = metadata_cmd.exec().into_app_err("retrieving workspace metadata")?;
 
         // Use workspace_root for config base path
-        let config_base_path = metadata.workspace_root;
+        let config_base_path = metadata.workspace_root.clone();
 
         // Load config from the determined base path first (we need the cache TTL)
         let config = Config::load(&config_base_path, args.config.as_ref())?;
 
         // Determine cache directory: use provided path or default cache directory for the platform
-        let cache_dir = match Self::resolve_cache_dir(args.cache_dir.as_deref()) {
-            Ok(cache_dir) => cache_dir,
-            Err(error) => return Err(error),
-        };
+        let cache_dir = Self::resolve_cache_dir(args.cache_dir.as_deref())?;
 
         let delay = progress_delay(args.log_level);
 
-        let use_colors_for_progress = progress_uses_colors(args.color, stderr().is_terminal());
+        let use_colors_for_progress = output_uses_colors(args.color, stderr().is_terminal());
 
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
 
         let endpoints = args.endpoints();
         let github_token = discover(args.github_token.as_ref(), args.github_token_from_gh, &endpoints).await;
 
-        let bug_label_matcher = match config.bug_label_matcher() {
-            Ok(matcher) => matcher,
-            Err(error) => return Err(error),
-        };
+        let bug_label_matcher = config.bug_label_matcher()?;
         let collector = Collector::new(
             github_token.as_ref().map(GitHubToken::expose_secret),
             args.codeberg_token.as_deref(),
@@ -291,30 +291,28 @@ impl<'a, H: super::Host> Common<'a, H> {
         )
         .await?;
 
-        // Create a fresh metadata command for the caller to use
-        let mut metadata_cmd = MetadataCommand::new();
-        let _ = metadata_cmd.manifest_path(&args.manifest_path);
-
         let console = args.console.as_ref().map(|sections| ConsoleOutputMode {
             appraisal: sections.contains(&ConsoleSection::Appraisal),
             reasons: sections.contains(&ConsoleSection::Reasons),
             metrics: sections.contains(&ConsoleSection::Metrics),
         });
 
-        Ok(Self {
-            collector,
-            config,
-            metadata_cmd,
-            host,
-            color: args.color,
-            error_if_high_risk: args.error_if_high_risk,
-            error_if_medium_risk: args.error_if_medium_risk,
-            console,
-            html: args.html.clone(),
-            excel: args.excel.clone(),
-            csv: args.csv.clone(),
-            json: args.json.clone(),
-        })
+        Ok((
+            Self {
+                collector,
+                config,
+                host,
+                color: args.color,
+                error_if_high_risk: args.error_if_high_risk,
+                error_if_medium_risk: args.error_if_medium_risk,
+                console,
+                html: args.html.clone(),
+                excel: args.excel.clone(),
+                csv: args.csv.clone(),
+                json: args.json.clone(),
+            },
+            metadata,
+        ))
     }
 
     fn resolve_cache_dir(cache_dir: Option<&Utf8Path>) -> Result<PathBuf> {
@@ -353,8 +351,6 @@ impl<'a, H: super::Host> Common<'a, H> {
     }
 
     pub fn report(&mut self, processed_crates: impl IntoIterator<Item = CrateFacts>) -> Result<()> {
-        use std::io::{IsTerminal, stdout};
-
         // Filter out crates with missing core data (can't be reported)
         let (analyzable_crates, failed_crates): (Vec<_>, Vec<_>) =
             processed_crates.into_iter().partition(|facts| facts.crates_data.is_found());
@@ -430,8 +426,8 @@ impl<'a, H: super::Host> Common<'a, H> {
             && !reportable_crates.is_empty()
         {
             let mut console_output = String::new();
-            // #[gamma::skip(bool_expr.negate, tag = "trivial", reason = "the real stdout terminal state is a process boundary; the complete color truth table is tested through progress_uses_colors")]
-            let use_colors = progress_uses_colors(self.color, stdout().is_terminal());
+            // #[gamma::skip(bool_expr.negate, tag = "trivial", reason = "the real stdout terminal state is a process boundary; the complete color truth table is tested through output_uses_colors")]
+            let use_colors = output_uses_colors(self.color, stdout().is_terminal());
             _ = generate_console(&reportable_crates, use_colors, mode, &mut console_output);
             let _ = write!(self.host.output(), "{console_output}");
         }
@@ -482,11 +478,11 @@ const fn progress_delay(log_level: LogLevel) -> Duration {
     }
 }
 
-const fn progress_uses_colors(color: ColorMode, stderr_is_terminal: bool) -> bool {
+const fn output_uses_colors(color: ColorMode, stream_is_terminal: bool) -> bool {
     match color {
         ColorMode::Always => true,
         ColorMode::Never => false,
-        ColorMode::Auto => stderr_is_terminal,
+        ColorMode::Auto => stream_is_terminal,
     }
 }
 
@@ -733,8 +729,10 @@ fn should_include_rejection_details(console_mode: Option<&ConsoleOutputMode>) ->
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::io::{Error, ErrorKind};
+
     use clap::{CommandFactory, Parser};
     use semver::{Version, VersionReq};
 
@@ -742,6 +740,8 @@ mod tests {
     use crate::commands::config::AllowListEntry;
     use crate::commands::host::TestHost;
     use crate::expr::Appraisal;
+    #[cfg(not(miri))]
+    use crate::expr::Expression;
 
     /// A minimal command whose only job is to parse `CommonArgs` the way the real CLI does.
     #[derive(Parser)]
@@ -836,10 +836,10 @@ mod tests {
             assert_eq!(progress_delay(level), Duration::from_hours(8_760), "{level:?}");
         }
 
-        assert!(progress_uses_colors(ColorMode::Always, false));
-        assert!(!progress_uses_colors(ColorMode::Never, true));
-        assert!(progress_uses_colors(ColorMode::Auto, true));
-        assert!(!progress_uses_colors(ColorMode::Auto, false));
+        assert!(output_uses_colors(ColorMode::Always, false));
+        assert!(!output_uses_colors(ColorMode::Never, true));
+        assert!(output_uses_colors(ColorMode::Auto, true));
+        assert!(!output_uses_colors(ColorMode::Auto, false));
         assert_eq!(RUST_LOG_ENV, "RUST_LOG");
     }
 
@@ -858,34 +858,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     fn excel_report_propagates_file_creation_errors() {
         let root = tempfile::tempdir().expect("creating a report fixture");
         let missing_parent = Utf8PathBuf::try_from(root.path().join("missing").join("report.xlsx")).expect("temporary paths are UTF-8");
         let error = write_excel_report(&[], &missing_parent).expect_err("the parent directory does not exist");
         assert_eq!(
-            error
-                .source()
-                .and_then(|source| source.downcast_ref::<std::io::Error>())
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::NotFound)
+            error.source().and_then(|source| source.downcast_ref::<Error>()).map(Error::kind),
+            Some(ErrorKind::NotFound)
         );
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     fn text_report_propagates_write_errors() {
         let root = tempfile::tempdir().expect("creating a report fixture");
         let missing_parent = Utf8PathBuf::try_from(root.path().join("missing").join("report.txt")).expect("temporary paths are UTF-8");
         let error = write_text_report(&missing_parent, "report".to_owned()).expect_err("the parent directory does not exist");
         assert_eq!(
-            error
-                .source()
-                .and_then(|source| source.downcast_ref::<std::io::Error>())
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::NotFound)
+            error.source().and_then(|source| source.downcast_ref::<Error>()).map(Error::kind),
+            Some(ErrorKind::NotFound)
         );
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn expression_and_report_detection_considers_every_input() {
         let mut config = Config::default();
         config.high_risk.clear();
@@ -893,12 +890,12 @@ mod tests {
         assert!(!has_expressions(&config));
         config
             .high_risk
-            .push(crate::expr::Expression::new("high", None, "true", None).expect("the fixture expression is valid"));
+            .push(Expression::new("high", None, "true", None).expect("the fixture expression is valid"));
         assert!(has_expressions(&config));
         config.high_risk.clear();
         config
             .eval
-            .push(crate::expr::Expression::new("weighted", None, "true", None).expect("the fixture expression is valid"));
+            .push(Expression::new("weighted", None, "true", None).expect("the fixture expression is valid"));
         assert!(has_expressions(&config));
 
         let path = Utf8PathBuf::from("report");
@@ -931,6 +928,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     async fn common_initialization_propagates_configuration_errors() {
         let root = tempfile::tempdir().expect("creating a configuration fixture");
         let config_path = Utf8PathBuf::try_from(root.path().join("aprz.toml")).expect("temporary paths are UTF-8");
@@ -946,6 +945,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     async fn common_initialization_propagates_collector_errors() {
         let root = tempfile::tempdir().expect("creating a cache fixture");
         let cache_file = Utf8PathBuf::try_from(root.path().join("not-a-directory")).expect("temporary paths are UTF-8");

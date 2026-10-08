@@ -258,6 +258,7 @@ pub(super) fn line_starts(text: &str) -> Vec<usize> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -336,8 +337,10 @@ mod tests {
     #[test]
 
     fn read_loads_and_parses_a_file_from_disk() {
-        let path = Utf8Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/parse/source_file.rs"));
-        let file = SourceFile::read(path).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = Utf8Path::from_path(directory.path()).unwrap().join("lib.rs");
+        std::fs::write(&path, "pub struct SourceFile;\n").unwrap();
+        let file = SourceFile::read(&path).unwrap();
 
         assert_eq!(file.path, path);
         assert!(file.text.contains("pub struct SourceFile"));
@@ -346,9 +349,11 @@ mod tests {
     #[test]
 
     fn read_failures_name_the_missing_file() {
-        let error = SourceFile::read(Utf8Path::new("target/does-not-exist/source.rs")).unwrap_err();
+        let directory = tempfile::tempdir().unwrap();
+        let path = Utf8Path::from_path(directory.path()).unwrap().join("does-not-exist/source.rs");
+        let error = SourceFile::read(&path).unwrap_err();
 
-        assert!(error.to_string().contains("could not read"));
+        assert!(error.to_string().starts_with(&format!("could not read `{path}`")));
     }
 
     #[test]
@@ -477,6 +482,7 @@ mod tests {
 }
 
 #[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
     use super::{SourceFile, line_starts};
 

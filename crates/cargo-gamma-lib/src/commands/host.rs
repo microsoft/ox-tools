@@ -68,6 +68,7 @@ impl<W: Write> Write for Results<W> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

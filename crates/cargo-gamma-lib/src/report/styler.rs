@@ -132,6 +132,7 @@ const fn outcome_style(outcome: Outcome) -> (&'static str, Style) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

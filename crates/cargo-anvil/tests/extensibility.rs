@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))] // miri can't sandbox the FS ops these tests do (TempDir, run_update).
 #![allow(
     clippy::expect_used,

@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::config::Config;
 use super::memory::MemoryPolicy;
 use super::rustc_wrapper::RustcInvocation;
-use crate::discover::{Glob, Plan};
+use crate::discover::{Glob, Killer, Plan};
 use crate::model::{Mutant, Outcome};
 
 /// A test executable and the package that produced it.
@@ -32,6 +32,9 @@ pub struct TestBinary {
     /// `tests/` becomes a target of its own, so this is the finest granularity cargo offers for
     /// naming part of a suite — and the granularity `package` is too coarse for.
     pub target: String,
+
+    /// Cargo's target kind, used to distinguish same-named test harnesses.
+    pub(crate) target_kind: String,
 
     /// The directory holding the package's `Cargo.toml`, which is where cargo would run it.
     ///
@@ -93,6 +96,39 @@ pub struct TestBinary {
 }
 
 impl TestBinary {
+    /// Returns the stable, kind-qualified target identity used in killer records.
+    #[must_use]
+    pub fn killer_target(&self) -> String {
+        if self.target_kind.is_empty() {
+            self.target.clone()
+        } else {
+            format!("{}:{}", self.target_kind, self.target)
+        }
+    }
+
+    /// Returns whether a persisted killer identifies this binary.
+    pub(crate) fn matches_killer(&self, killer: &Killer) -> bool {
+        self.matches_target(&killer.package, &killer.target)
+    }
+
+    /// Returns whether package and stable target identity identify this binary.
+    pub(crate) fn matches_target(&self, package: &str, target: &str) -> bool {
+        if self.package != package {
+            return false;
+        }
+        if self.target == target {
+            return true;
+        }
+        if self.target_kind.is_empty() {
+            return false;
+        }
+
+        target
+            .strip_prefix(&self.target_kind)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .is_some_and(|name| name == self.target)
+    }
+
     /// Computes the timeout budget for this binary given an optional per-mutant multiplier override and a floor.
     ///
     /// An override rescales a calibrated budget; it cannot manufacture one, because on a run with
@@ -220,6 +256,14 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let target_kind = message
+                .get("target")
+                .and_then(|target| target.get("kind"))
+                .and_then(Value::as_array)
+                .and_then(|kinds| kinds.first())
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
             let target_source = message
                 .get("target")
                 .and_then(|target| target.get("src_path"))
@@ -238,6 +282,7 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                 package,
                 package_id,
                 target,
+                target_kind,
                 manifest_dir,
                 linked_sources: captures
                     .as_ref()
@@ -801,7 +846,7 @@ fn reaches_mutant(binary: &TestBinary, mutant: &Mutant, plan: &Plan, scope: &Tes
 ///
 /// Exact per-mutant and learned file-local killers are applied later by the verdict path and
 /// therefore still take precedence over this cold-run order; so does
-/// [`Census`](super::census::Census)'s own
+/// [`Census`](crate::exec::census::Census)'s own
 /// current-cost order, which further reorders this tier's tail once a census is available.
 pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str) {
     binaries.sort_by(|left, right| {
@@ -824,7 +869,7 @@ pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str
 /// Package reachability is a coarser fact than a census: it says a binary is *permitted* to be
 /// consulted for a mutant's package, never that a specific test or a specific mutation site is
 /// covered. Nothing here may ever be read as evidence that a site or a test is uncovered — only
-/// [`Census`](super::census::Census), and only when its own census for that binary completed,
+/// [`Census`](crate::exec::census::Census), and only when its own census for that binary completed,
 /// settles that.
 #[derive(Debug, Default)]
 pub(super) struct Reachability<'binaries> {
@@ -1042,6 +1087,7 @@ fn is_version(fragment: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1143,6 +1189,9 @@ mod tests {
             ("linked", &root.join("tests/linked.rs"), &linked_executable),
             ("independent", &root.join("tests/independent.rs"), &independent_executable),
         ]);
+        // Cargo emits this shape for a build-script execution. It deliberately looks like a test
+        // artifact, including `profile.test`, to prove the selector rejects the message by
+        // `reason` before consulting artifact-only fields.
         let stdout = format!(
             "{stdout}\n{}",
             serde_json::json!({
@@ -1171,13 +1220,17 @@ mod tests {
         assert_eq!(reachable.len(), 1);
         assert_eq!(reachable[0].target, "linked");
 
-        fs::write(
-            root.join("Cargo.toml").as_std_path(),
-            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )
-        .expect("fixture manifest");
-        fs::write(root.join("tests/linked.rs").as_std_path(), "#[test]\nfn linked() {}\n").expect("linked target");
-        fs::write(root.join("tests/independent.rs").as_std_path(), "#[test]\nfn independent() {}\n").expect("independent target");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+                ),
+                ("tests/linked.rs", "#[test]\nfn linked() {}\n"),
+                ("tests/independent.rs", "#[test]\nfn independent() {}\n"),
+            ],
+        );
         let cargo_target = root.join("cargo-target");
         let initial = built_test_targets(&root, &cargo_target, &["build", "--tests"]);
         let mut narrowed = vec!["build"];
@@ -1802,7 +1855,7 @@ mod tests {
     #[test]
     fn the_target_name_is_kept_from_cargo_json() {
         let stdout = concat!(
-            r#"{"reason":"compiler-artifact","profile":{"test":true},"target":{"name":"conformance_xsd"},"executable":"/tmp/c"}"#,
+            r#"{"reason":"compiler-artifact","profile":{"test":true},"target":{"name":"conformance_xsd","kind":["test"]},"executable":"/tmp/c"}"#,
             "\n"
         );
 
@@ -1810,6 +1863,8 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].target, "conformance_xsd");
+        assert_eq!(found[0].target_kind, "test");
+        assert_eq!(found[0].killer_target(), "test:conformance_xsd");
     }
 
     /// Cargo has always reported this, but an older or stubbed stream must not lose the binary.
@@ -1931,12 +1986,14 @@ mod tests {
                 original: "a + b".to_owned().into(),
                 replacement: "a - b".to_owned().into(),
                 shape: crate::ops::collect::Shape::Expr,
+                confidence: cargo_gamma_engine::ops::collect::Confidence::Proven,
                 outcome: Outcome::Pending,
                 suppression: None,
                 expectation: None,
                 test_timeout_multiplier: None,
                 elapsed_ms: 0,
                 killed_by: None,
+                killer: None,
                 note: None,
             })
             .collect();

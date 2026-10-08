@@ -9,7 +9,7 @@ use super::cli::ExplainArgs;
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use crate::error::error;
-use crate::model::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION};
+use crate::model::MUTANT_ID_VERSION;
 use crate::ops::registry;
 
 /// Implements `explain`.
@@ -30,6 +30,9 @@ pub(super) fn explain<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Resul
         writeln!(stream, "{}", mutator.name)?;
         writeln!(stream, "  {}", mutator.description)?;
         writeln!(stream, "  enabled by default: {}", if mutator.default_on { "yes" } else { "no" })?;
+        if registry::optimistic_requires_explicit(mutator.name) {
+            writeln!(stream, "  optimistic sites: require an explicit selector")?;
+        }
 
         if !mutator.aliases.is_empty() {
             writeln!(stream, "  also known as: {}", mutator.aliases.join(", "))?;
@@ -43,7 +46,7 @@ pub(super) fn explain<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Resul
 }
 
 fn mutant_id_syntax(subject: &str) -> bool {
-    subject.len() == MUTANT_ID_HEX_LEN && subject.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    super::CanonicalMutantId::parse(subject).is_ok()
 }
 
 #[expect(
@@ -182,6 +185,7 @@ fn default_report_path(root: &Utf8Path, configured_artifact_dir: Option<&Utf8Pat
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     use super::*;
@@ -222,6 +226,24 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert!(text.contains("also known as: RV"), "{text}");
         assert!(text.contains("suppress with: // #[gamma::skip(fn_value.default)]"), "{text}");
+        assert!(!text.contains("optimistic sites"), "{text}");
+
+        let mut host = Sink::default();
+        let code = explain(&mut host, &args("literal.int_decrement", Utf8PathBuf::from("."))).expect("explain optimistic policy");
+
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(
+            host.out(),
+            concat!(
+                "literal.int_decrement\n",
+                "  subtract one from an integer literal\n",
+                "  enabled by default: yes\n",
+                "  optimistic sites: require an explicit selector\n",
+                "  also known as: CRP\n",
+                "  suppress with: // #[gamma::skip(literal.int_decrement)]\n",
+                "\n",
+            )
+        );
     }
 
     /// Piping into a consumer that exits early is successful consumption.

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! The installed executable, launched as a process rather than called as a library.
@@ -18,18 +20,25 @@
 use std::process::{Command, Output};
 
 use cargo_gamma_lib::internals::commands::{EXIT_OK, EXIT_USAGE};
+use cargo_gamma_lib::testing::{workdir, write_project};
 
 /// Runs the built executable with `arguments` and returns everything the process produced.
 fn gamma(arguments: &[&str]) -> Output {
+    let directory = workdir("gamma-binary-");
+    write_project(directory.path(), &[("src/lib.rs", "")]);
     Command::new(env!("CARGO_BIN_EXE_cargo-gamma"))
+        .current_dir(directory.path())
         .args(arguments)
         .output()
         .expect("the built cargo-gamma binary runs")
 }
 
 fn wrapper(arguments: &[&str]) -> Output {
+    let directory = workdir("gamma-wrapper-");
+    write_project(directory.path(), &[("src/lib.rs", "")]);
     Command::new(env!("CARGO_BIN_EXE_cargo-gamma"))
-        .env("CARGO_GAMMA_RUSTC_CAPTURE_DIR", env!("CARGO_MANIFEST_DIR"))
+        .current_dir(directory.path())
+        .env("CARGO_GAMMA_RUSTC_CAPTURE_DIR", directory.path())
         .args(arguments)
         .output()
         .expect("the built cargo-gamma binary runs as a rustc wrapper")

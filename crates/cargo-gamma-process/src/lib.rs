@@ -84,11 +84,14 @@ mod memory_usage;
 mod process_tree;
 
 #[cfg(any(test, feature = "fault-injection"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod faults;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod testing;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod unwind_contracts {
     use core::panic::{RefUnwindSafe, UnwindSafe};
 

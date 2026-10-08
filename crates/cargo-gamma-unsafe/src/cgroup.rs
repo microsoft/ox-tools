@@ -27,6 +27,14 @@
 //! the arrangement `systemd-run --user --scope -p Delegate=yes` expects of anyone it delegates to.
 //! Where none of that is possible, `support` says so with the reason, and the run reports that
 //! rather than claiming a limit it never installed.
+//!
+//! Coverage exclusions group operations that require a live delegated Linux cgroup, `/proc`
+//! process identity, background reaping, or a child-side `pre_exec` boundary. Deterministic parsing
+//! and file-policy decisions are exercised through temporary-directory seams, while process-level
+//! tests cover the observable kernel behavior. An excluded production path should return to normal
+//! coverage when a target configuration can execute that real boundary and exit normally with
+//! counters flushed. The unit-test module is excluded as a whole so test implementation is not
+//! counted as production coverage.
 
 #[cfg(not(loom))]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -954,6 +962,9 @@ fn remove_with_retry(mut remove: impl FnMut() -> bool, mut pause: impl FnMut()) 
 }
 
 #[cfg(all(test, not(miri)))]
+// Test implementation is excluded from production coverage; remove this annotation only if the
+// package intentionally changes its metric to include test-source lines.
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::cell::RefCell;
     use std::error::Error as _;
@@ -992,7 +1003,6 @@ mod tests {
             }
         }
 
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn watch_cgroup(&self, group: i32, cgroup: &mut Cgroup) -> Option<usize> {
             self.registry
                 .watch_cgroup(group, cgroup, &|group| self.killed_groups.borrow_mut().push(group), &|descriptor| {
@@ -1004,7 +1014,6 @@ mod tests {
             self.registry.forget(slot, group);
         }
 
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn finish(self) {
             assert_eq!(
                 self.registry
@@ -1024,7 +1033,6 @@ mod tests {
     /// Reached only when somebody asked for these by name, so the answer is a failure rather than a
     /// skip: they asked for coverage of the memory feature and did not get it, and the reason is
     /// the same one the tool itself would give a user who asked for a ceiling here.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn demand_delegation() {
         assert!(root().is_ok(), "{NEEDS_DELEGATION}: {:?}", root().err());
     }
@@ -1286,7 +1294,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_live_process_cgroup_is_visible_under_the_unified_mount() {
         match own() {
             Ok(path) => {
@@ -1626,7 +1633,6 @@ mod tests {
     /// ordinary case is that it is empty. Retrying regardless would add the whole retry budget to
     /// the end of every invocation, which for a sweep of thousands is the run's pace.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_removable_cgroup_is_removed_without_waiting() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("leaf");
@@ -1657,7 +1663,6 @@ mod tests {
     /// A cgroup still holding an orphan the test spawned will not become removable, and an
     /// untidy directory is a far smaller cost than a run that stops until that orphan exits.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_cgroup_that_cannot_be_removed_is_left_behind() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("leaf");
@@ -1976,7 +1981,6 @@ mod tests {
 
     /// An unsupported host explains itself in terms of the machine, not of this tool.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_undelegated_host_says_what_is_missing() {
         if let Err(reason) = root() {
             assert!(
@@ -1989,7 +1993,6 @@ mod tests {
     /// A cgroup leaf measures the memory of the child that ran in it.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_leaf_measures_what_the_child_allocated() {
         demand_delegation();
 
@@ -2015,7 +2018,6 @@ mod tests {
     /// A child that passes the ceiling is killed by the kernel and reported as such.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_child_that_passes_the_ceiling_is_reported_as_exhausted() {
         demand_delegation();
 
@@ -2044,7 +2046,6 @@ mod tests {
     /// A cgroup that was never used is removed when it is dropped.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_spent_leaf_is_removed() {
         demand_delegation();
 
@@ -2061,7 +2062,6 @@ mod tests {
     /// Orphans can outlast bounded foreground cleanup, but not the shared reaper.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn repeated_orphan_exits_do_not_accumulate_leaves() {
         demand_delegation();
 

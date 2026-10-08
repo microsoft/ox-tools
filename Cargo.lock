@@ -435,6 +435,7 @@ dependencies = [
  "mutants",
  "ohno",
  "predicates",
+ "serde_json",
  "serial_test",
  "sha2",
  "tempfile",
@@ -449,6 +450,7 @@ name = "cargo-aprz"
 version = "1.2.0"
 dependencies = [
  "cargo-aprz-lib",
+ "cargo-gamma-attrs",
  "mimalloc",
  "mutants",
  "tokio",
@@ -525,6 +527,7 @@ dependencies = [
  "cargo-platform",
  "cargo_metadata",
  "clap",
+ "glob",
  "lcov",
  "mutants",
  "ohno",
@@ -536,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-each"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "assert_cmd",
  "cargo_metadata",
@@ -587,6 +590,9 @@ name = "cargo-gamma-attrs"
 version = "0.2.1"
 dependencies = [
  "cargo-gamma-attrs-impl",
+ "cargo_metadata",
+ "tempfile",
+ "toml_edit 0.25.13+spec-1.1.0",
 ]
 
 [[package]]
@@ -614,6 +620,7 @@ dependencies = [
  "serde",
  "strsim",
  "syn 3.0.4",
+ "tempfile",
  "walkdir",
 ]
 
@@ -649,6 +656,7 @@ dependencies = [
  "tick",
  "toml",
  "toml_edit 0.25.13+spec-1.1.0",
+ "unicode-width",
  "walkdir",
  "yaml_serde",
 ]
@@ -2312,6 +2320,12 @@ dependencies = [
  "gix-traverse",
  "parking_lot",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "globset"
@@ -5010,6 +5024,12 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unicode-xid"

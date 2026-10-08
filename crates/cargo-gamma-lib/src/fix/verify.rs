@@ -41,6 +41,7 @@ pub fn verify(before: &[Mutant], after: &[Mutant], intended: &BTreeSet<String>) 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::once;
 

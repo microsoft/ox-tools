@@ -42,6 +42,7 @@ impl<T: Clone> ProviderResult<T> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use ohno::app_err;
 

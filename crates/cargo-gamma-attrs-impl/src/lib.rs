@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #![cfg(not(all(test, miri)))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![doc(hidden)]
 #![forbid(
     unsafe_code,
@@ -52,6 +53,7 @@ pub use implementation::{inert, inert_timeout, resource, value};
 /// Development-only access used by the workspace's cross-crate agreement test.
 #[cfg(feature = "agreement")]
 #[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     use proc_macro2::TokenStream;
 

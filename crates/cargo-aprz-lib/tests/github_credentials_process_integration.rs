@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! End-to-end coverage for GitHub CLI credential discovery.
 //!
 //! This binary deliberately contains one test because it temporarily changes
@@ -9,6 +12,9 @@
 #![cfg(not(miri))]
 
 mod support;
+
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

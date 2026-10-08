@@ -1,25 +1,53 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![cfg(not(miri))]
 
 //! Checks each exported macro's diagnostic identity and essential reason.
 //!
 //! A `compile_fail` doctest only proves that *some* error occurred; it accepts a diagnostic from
 //! any cause, including an unrelated one a regression introduced by accident. These tests compile
-//! through Cargo against this checkout's path dependency, then check the macro prefix and message
-//! fragment that distinguish the intended rejection.
+//! embedded consumers using the real macro library, then check the macro prefix and message
+//! fragment that distinguish the intended rejection. The consumers have no Cargo dependencies
+//! and build with an empty Cargo home; the already-built macro is copied into each fixture.
 
+use std::env;
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::process::{self, Command};
-use std::{env, fs};
+use std::process::{Command, Output};
+
+use tempfile::TempDir;
+
+#[path = "../../cargo-gamma-lib/tests/support/macros.rs"]
+mod macros;
+#[path = "../../cargo-gamma-lib/tests/support/project.rs"]
+mod project;
 
 fn cargo() -> OsString {
     env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-/// Compiles `source` against this checkout's `gamma` crate and returns Cargo's stderr.
+/// Compiles embedded `source` in a standalone project using the actual macro entry points.
+fn compile_consumer(name: &str, source: &str) -> Output {
+    let directory = TempDir::new().expect("could not create a consumer project directory");
+    let home = TempDir::new().expect("could not create an empty Cargo home");
+    let manifest = format!("[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n");
+    project::write_project(directory.path(), &[("Cargo.toml", &manifest), ("src/lib.rs", source)]);
+    let local_macro = macros::copy_gamma_macro(directory.path());
+
+    Command::new(cargo())
+        .current_dir(directory.path())
+        .env("CARGO_HOME", home.path())
+        .args(["rustc", "--quiet", "--offline", "--lib", "--target-dir"])
+        .arg(directory.path().join("target"))
+        .args(["--", "--extern"])
+        .arg(format!("gamma={}", local_macro.display()))
+        .output()
+        .unwrap_or_else(|error| panic!("Cargo must be runnable to check what it reports for {name}: {error}"))
+}
+
+/// Returns the macro diagnostic produced by deliberately malformed embedded `source`.
 ///
 /// Every failure is reported as a failure. A skip here would be indistinguishable from a passing
 /// diagnostic check, so a lookup that stopped finding the artifact, or a host without a usable
@@ -29,28 +57,7 @@ fn cargo() -> OsString {
 /// compile means the validation this test exists to pin has stopped rejecting it.
 #[track_caller]
 fn diagnostic_for(name: &str, source: &str) -> String {
-    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let directory = scratch.join(format!("diagnostics-{}-{name}", process::id()));
-    let target = scratch.join(format!("diagnostics-{}-target", process::id()));
-    let source_dir = directory.join("src");
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let manifest = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
-         [workspace]\n\n[dependencies]\ngamma = {{ package = \"cargo-gamma-attrs\", path = {manifest_dir:?} }}\n"
-    );
-
-    fs::create_dir_all(&source_dir).expect("the scratch directory must be creatable");
-    fs::write(directory.join("Cargo.toml"), manifest).expect("the fixture manifest must be writable");
-    fs::write(source_dir.join("lib.rs"), source).expect("the fixture source must be writable");
-
-    let compiler = cargo();
-    let output = Command::new(&compiler)
-        .args(["check", "--quiet", "--manifest-path"])
-        .arg(directory.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(target)
-        .output()
-        .unwrap_or_else(|error| panic!("Cargo must be runnable to check what it reports for {name}: {error}"));
+    let output = compile_consumer(name, source);
 
     assert!(
         !output.status.success(),
@@ -67,6 +74,20 @@ fn assert_diagnostic(name: &str, source: &str, fragments: &[&str]) {
     for fragment in fragments {
         assert!(reported.contains(fragment), "expected `{fragment}` in:\n{reported}");
     }
+}
+
+#[test]
+fn a_valid_macro_consumer_builds_without_a_registry_cache() {
+    let built = compile_consumer(
+        "valid_consumer",
+        "#[gamma::skip]\npub fn accepts(value: u32) -> bool { value >= 1 }\n",
+    );
+
+    assert!(
+        built.status.success(),
+        "the real macro must compile a valid standalone consumer offline:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
 }
 
 #[test]

@@ -348,6 +348,7 @@ fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
 mod tests {
     use super::*;
     use crate::anvil::artifacts;
+    use crate::{CommentSyntax, HostSelector, RegionId, RegionSpec};
 
     #[test]
     fn subcommand_derives_bin_name() {
@@ -669,19 +670,22 @@ mod tests {
 
     #[test]
     fn canonical_repr_uses_explicit_stable_tags() {
-        let file = Artifact::backend_file(crate::backend::Backend::GitHub, "x.txt", "body");
-        let region = Artifact::region(crate::catalog::RegionSpec {
-            host: crate::catalog::HostSelector::Path("Cargo.toml".to_owned()),
-            id: crate::catalog::RegionId::new("anvil"),
+        let github_file = Artifact::backend_file(crate::backend::Backend::GitHub, "x.txt", "body");
+        let ado_file = Artifact::backend_file(crate::backend::Backend::Ado, "x.txt", "body");
+        let region = Artifact::region(RegionSpec {
+            host: HostSelector::Path("Cargo.toml".to_owned()),
+            id: RegionId::new("anvil"),
             body: "region-body".to_owned(),
-            syntax: crate::region::CommentSyntax::SlashSlash,
+            syntax: CommentSyntax::SlashSlash,
         });
 
-        let file_repr = canonical_repr(&file, None);
+        let github_repr = canonical_repr(&github_file, None);
+        let ado_repr = canonical_repr(&ado_file, None);
         let region_repr = canonical_repr(&region, None);
 
-        assert!(file_repr.contains("gate=github"));
-        assert!(file_repr.contains("file"));
+        assert!(github_repr.contains("gate=github"));
+        assert!(github_repr.contains("file"));
+        assert!(ado_repr.contains("gate=ado"));
         assert!(region_repr.contains("path:Cargo.toml"));
         assert!(!region_repr.contains("single_crate_cargo_toml"));
         assert!(region_repr.contains("slashslash"));

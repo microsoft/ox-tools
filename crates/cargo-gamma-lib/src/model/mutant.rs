@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use camino::Utf8Path;
 use cargo_gamma_engine::model::MutantDefinition;
+use cargo_gamma_engine::ops::collect::Confidence;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,19 @@ pub struct Expectation {
 
     /// The stated reason, if any.
     pub reason: Option<String>,
+}
+
+/// Stable identity of the test binary and test that killed a mutant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KillerIdentity {
+    /// The package whose test binary caught the mutant.
+    pub package: String,
+
+    /// The Cargo target within that package.
+    pub target: String,
+
+    /// The test name reported by the harness.
+    pub test: String,
 }
 
 /// One mutant: a single change to a single site, with a stable identity.
@@ -95,6 +109,10 @@ pub struct Mutant {
     /// How the site must be guarded when the schema is instrumented.
     pub shape: Shape,
 
+    /// How strongly source-visible evidence supported the candidate compiling.
+    #[serde(skip)]
+    pub confidence: Confidence,
+
     /// The verdict.
     pub outcome: Outcome,
 
@@ -118,6 +136,12 @@ pub struct Mutant {
 
     /// The name of the test that killed it, when one did.
     pub killed_by: Option<String>,
+
+    /// Full identity of the test that killed it.
+    ///
+    /// Older persisted records contain only [`Mutant::killed_by`], so this defaults to absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killer: Option<KillerIdentity>,
 
     /// Anything else worth saying about the verdict.
     ///
@@ -144,12 +168,14 @@ impl Mutant {
             original: definition.site.original.clone(),
             replacement: definition.replacement,
             shape: definition.shape,
+            confidence: definition.confidence,
             outcome: Outcome::Pending,
             suppression: None,
             expectation: None,
             test_timeout_multiplier: None,
             elapsed_ms: 0,
             killed_by: None,
+            killer: None,
             note: None,
         }
     }
@@ -216,6 +242,7 @@ pub fn one_line(text: &str, width: usize) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use cargo_gamma_engine::model::MutationSite;
 
@@ -269,9 +296,11 @@ mod tests {
         // instrumentation time — the shape only changes how the guard is wrapped, not how the
         // change is described to a human.
         let expr = mutant(Shape::Expr, "a + b", "a - b");
+        let iterator = mutant(Shape::IterExpr, "values.map(f)", "values.filter_map(f)");
         let block = mutant(Shape::Block, "{ a() }", "{ b() }");
 
         assert_eq!(expr.summary(), "replace a + b with a - b");
+        assert_eq!(iterator.summary(), "replace values.map(f) with values.filter_map(f)");
         assert_eq!(block.summary(), "replace { a() } with { b() }");
     }
 
@@ -343,6 +372,7 @@ mod tests {
             replacement_index: 1,
             replacement: "a <= b".to_owned().into(),
             shape: Shape::Expr,
+            confidence: Confidence::Proven,
         };
 
         let mutant = Mutant::from_definition(definition, Arc::from("subject"));

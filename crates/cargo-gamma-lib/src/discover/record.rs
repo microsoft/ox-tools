@@ -3,10 +3,12 @@
 
 //! Build facts and checked hints from the last run.
 
+use core::error::Error as StdError;
+use core::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::process::Command;
 use std::slice::Iter;
-use std::{env, fs};
+use std::{env, fs, io};
 
 use blake3::Hasher;
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
@@ -16,7 +18,7 @@ use super::killers::Killers;
 use super::workspace_snapshot::WorkspaceSnapshot;
 use super::{Plan, input};
 use crate::cfg::Build;
-use crate::model::{Mutant, MutantId, Outcome, normalize_site_text};
+use crate::model::{MUTANT_ID_VERSION, Mutant, MutantId, Outcome, normalize_site_text};
 use crate::{HashMap, HashSet};
 
 /// What the cache format is; a file written by any other version is discarded rather than read.
@@ -33,7 +35,7 @@ use crate::{HashMap, HashSet};
 /// nothing. Discarding it instead would throw away the probes and the build order to defend a
 /// question they do not depend on. What moves this number is a change of *meaning* in what is
 /// already there, which no reader could detect for itself.
-const VERSION: u32 = 10;
+const VERSION: u32 = 12;
 
 /// The file name under the gamma scratch base.
 const FILE: &str = "last-gamma-run.json";
@@ -64,6 +66,8 @@ pub enum Trust {
 pub(crate) struct Settled {
     pub(crate) outcome: Outcome,
     pub(crate) compiler_reason: Option<String>,
+    pub(crate) killed_by: Option<String>,
+    pub(crate) killer: Option<Killer>,
 }
 
 /// One term of the build context, digested on its own so that a tier can name what it depends on.
@@ -437,9 +441,9 @@ pub struct RunRecord {
 
 /// The test that caught a mutant, and the binary it lives in.
 ///
-/// The binary is named by package and target rather than by path because a path is not stable
-/// across runs: the binaries a run judges live in a scratch tree that is rebuilt each time, so a
-/// recorded path would miss every time and the map would be permanently cold.
+/// The binary is named by package and a stable kind-qualified target rather than by path because a
+/// path is not stable across runs: the binaries a run judges live in a scratch tree that is rebuilt
+/// each time, so a recorded path would miss every time and the map would be permanently cold.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Killer {
@@ -457,12 +461,13 @@ impl Killer {
     /// Whether this names the given binary.
     #[must_use]
     pub fn names(&self, package: &str, target: &str) -> bool {
-        self.package == package && self.target == target
+        self.package == package
+            && (self.target == target || target.rsplit_once(':').is_some_and(|(_, target_name)| self.target == target_name))
     }
 }
 
 /// Schema version for generalized, score-neutral hint tiers.
-pub const GENERALIZED_HINTS_VERSION: u32 = 2;
+pub const GENERALIZED_HINTS_VERSION: u32 = 3;
 
 /// Durable generalized knowledge that can only affect execution order.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -481,6 +486,20 @@ pub struct GeneralizedHints {
 
     /// Stable mutation sites mapped to an interned census reach set.
     pub reach: Vec<ReachCluster>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyGeneralizedHints {
+    version: u32,
+    #[serde(default)]
+    items: Vec<ItemHints>,
+    #[serde(default)]
+    binaries: Vec<FileBinaryHints>,
+    #[serde(default)]
+    test_sets: Vec<Vec<Killer>>,
+    #[serde(default)]
+    reach: Vec<ReachCluster>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -514,6 +533,13 @@ struct CompactFileBinaryHints {
     candidates: Vec<RankedHint<u32>>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GeneralizedHintsWire {
+    Compact(CompactGeneralizedHints),
+    Legacy(LegacyGeneralizedHints),
+}
+
 impl Serialize for GeneralizedHints {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let compact = CompactGeneralizedHints::from(self);
@@ -526,8 +552,17 @@ impl<'de> Deserialize<'de> for GeneralizedHints {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
 
-        let compact = CompactGeneralizedHints::deserialize(deserializer)?;
-        Self::try_from(compact).map_err(D::Error::custom)
+        match GeneralizedHintsWire::deserialize(deserializer)? {
+            GeneralizedHintsWire::Compact(compact) => Self::try_from(compact).map(Self::migrated).map_err(D::Error::custom),
+            GeneralizedHintsWire::Legacy(legacy) => Ok(Self {
+                version: legacy.version,
+                items: legacy.items,
+                binaries: legacy.binaries,
+                test_sets: legacy.test_sets,
+                reach: legacy.reach,
+            }
+            .migrated()),
+        }
     }
 }
 
@@ -665,6 +700,31 @@ fn pool_entry<T: Clone>(pool: &[T], index: u32) -> Result<T, &'static str> {
 }
 
 impl GeneralizedHints {
+    fn migrated(mut self) -> Self {
+        fn reset<T>(candidate: &mut RankedHint<T>) {
+            candidate.seeds = candidate.seeds.max(1);
+            candidate.hits = 0;
+            candidate.misses = 0;
+            candidate.measured_ms = 0;
+            candidate.samples = 0;
+        }
+
+        match self.version {
+            1 => {
+                for candidate in self.items.iter_mut().flat_map(|item| &mut item.candidates) {
+                    reset(candidate);
+                }
+                for candidate in self.binaries.iter_mut().flat_map(|file| &mut file.candidates) {
+                    reset(candidate);
+                }
+            }
+            2 => {}
+            _ => return self,
+        }
+        self.version = GENERALIZED_HINTS_VERSION;
+        self
+    }
+
     /// Returns these tiers only when their schema is understood.
     #[must_use]
     pub fn supported(&self) -> Option<&Self> {
@@ -915,6 +975,10 @@ struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     killed_by: Option<String>,
 
+    /// Full identity of the test that did the killing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    killer: Option<Killer>,
+
     /// The workspace-relative file that declared `killed_by` before execution.
     ///
     /// The name alone is insufficient: moving a test with the same qualified name to another file
@@ -965,6 +1029,42 @@ pub(crate) struct RecordedOutcome {
     pub(crate) file_digest: String,
     pub(crate) suppression: Option<crate::model::Suppression>,
     pub(crate) site: Option<RecordedSite>,
+}
+
+#[derive(Debug)]
+enum UpdateLoadError {
+    UnsupportedVersion { path: Utf8PathBuf, version: u64 },
+    Read { path: Utf8PathBuf, cause: io::Error },
+    TooLarge { path: Utf8PathBuf },
+}
+
+impl Display for UpdateLoadError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedVersion { path, version } => {
+                write!(
+                    f,
+                    "`{path}` has unsupported version {version}; expected {VERSION}; remove it or use a compatible cargo-gamma version"
+                )
+            }
+            Self::Read { path, cause } => write!(f, "`{path}` could not be read: {cause}"),
+            Self::TooLarge { path } => write!(f, "`{path}` is larger than the {} bytes cargo-gamma will retain", input::MAX_BYTES),
+        }
+    }
+}
+
+impl StdError for UpdateLoadError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Read { cause, .. } => Some(cause),
+            Self::UnsupportedVersion { .. } | Self::TooLarge { .. } => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RecordVersion {
+    version: u64,
 }
 
 /// Every recorded verdict in a [`RunRecord`], with files in stored order and entries within each
@@ -1108,15 +1208,27 @@ impl RunRecord {
         (record.version == VERSION && record.paths_are_workspace_relative()).then_some(record)
     }
 
-    fn load_for_update(base: &Utf8Path, file: &str) -> Result<Option<Self>, u64> {
-        let Some(text) = File::open(base.join(file)).ok().and_then(|input| input::text(input).ok().flatten()) else {
-            return Ok(None);
+    fn load_for_update(base: &Utf8Path, file: &str) -> Result<Option<Self>, UpdateLoadError> {
+        let path = base.join(file);
+        let input = match File::open(&path) {
+            Ok(input) => input,
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(cause) => return Err(UpdateLoadError::Read { path, cause }),
         };
-        let version = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|document| document.get("version")?.as_u64());
-        if let Some(version) = version.filter(|version| *version != u64::from(VERSION)) {
-            return Err(version);
+        let text = input::text(input)
+            .map_err(|cause| UpdateLoadError::Read { path: path.clone(), cause })?
+            .ok_or_else(|| UpdateLoadError::TooLarge { path: path.clone() })?;
+
+        // A version-only pass preserves readable foreign contracts without materializing the
+        // complete document as a generic JSON tree. Inputs that establish no version remain
+        // replaceable as corrupt state.
+        if let Ok(header) = serde_json::from_str::<RecordVersion>(&text)
+            && header.version != u64::from(VERSION)
+        {
+            return Err(UpdateLoadError::UnsupportedVersion {
+                path,
+                version: header.version,
+            });
         }
 
         Ok(serde_json::from_str::<Self>(&text)
@@ -1158,7 +1270,6 @@ impl RunRecord {
     pub fn iter(&self) -> Entries<'_> {
         Entries {
             files: self.files.iter(),
-            // #[gamma::skip(option.none_to_some, reason = "slice::Iter::default() is an empty iterator, so both states make the first next() advance to the first file")]
             mutants: None,
         }
     }
@@ -1268,15 +1379,42 @@ impl RunRecord {
         Self::store_knowledge_at(base, INCOMPLETE_FILE, probes, generalized);
     }
 
+    /// Publishes compiler-confirmed outcomes from a campaign that did not reach completion.
+    ///
+    /// The incomplete record is deliberately narrower than a completed campaign record: pending,
+    /// ignored, and test-derived outcomes carry no evidence that a later run may consume. Existing
+    /// score-neutral probe learning is retained because the sweep may have written it independently.
+    pub(crate) fn store_incomplete_convergence(&self, base: &Utf8Path) -> crate::Result<Self> {
+        let earlier = Self::load_for_update(base, INCOMPLETE_FILE)
+            .map_err(|failure| {
+                crate::error::error!(
+                    "refusing to overwrite incomplete campaign learning `{}`",
+                    base.join(INCOMPLETE_FILE)
+                )
+                .caused_by(failure)
+            })?
+            .unwrap_or_default();
+        let mut merged = self.absorbing(&earlier);
+
+        for file in &mut merged.files {
+            file.mutants.retain(|entry| entry.outcome == Outcome::CompileError);
+        }
+        merged.files.retain(|file| !file.mutants.is_empty());
+        let text = serde_json::to_string(&merged)
+            .map_err(|cause| crate::error::error!("could not serialize incomplete compiler learning").caused_by(cause))?;
+
+        crate::elements::write(&base.join(INCOMPLETE_FILE), &text)
+            .map_err(|cause| crate::error::error!("could not save incomplete compiler learning").caused_by(cause))?;
+
+        Ok(merged)
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn store_knowledge_at(base: &Utf8Path, file: &str, probes: &HashMap<MutantId, Killer>, generalized: Option<&GeneralizedHints>) {
         let mut record = match Self::load_for_update(base, file) {
             Ok(record) => record.unwrap_or_default(),
-            Err(version) => {
-                crate::notes::note(format!(
-                    "did not overwrite campaign state `{}` with unsupported version {version}; remove it or use a compatible cargo-gamma version",
-                    base.join(file)
-                ));
+            Err(failure) => {
+                crate::notes::note(format!("did not overwrite campaign state: {failure}"));
                 return;
             }
         };
@@ -1403,6 +1541,8 @@ impl RunRecord {
                     Settled {
                         outcome: entry.outcome,
                         compiler_reason: entry.compiler_reason.clone(),
+                        killed_by: entry.killed_by.clone(),
+                        killer: entry.killer.clone(),
                     },
                 );
             }
@@ -1450,7 +1590,6 @@ impl RunRecord {
 
     #[must_use]
     #[cfg(test)]
-    // #[gamma::skip(all, reason = "snapshot construction, Rust-file filtering, normalization, and deduplication are asserted by deterministic record round trips")]
     pub(crate) fn from_plan_snapshot(plan: &Plan, context: &ContextDigest, inputs: WorkspaceSnapshot, killers: &Killers) -> Option<Self> {
         Self::from_plan_snapshot_checked(plan, context, inputs, killers, true)
     }
@@ -1561,6 +1700,11 @@ impl RunRecord {
                 compiler_reason: (mutant.outcome == Outcome::CompileError).then(|| mutant.note.clone()).flatten(),
                 reusable: settled_verdict(mutant.outcome),
                 killed_by: mutant.killed_by.clone(),
+                killer: mutant.killer.as_ref().map(|killer| Killer {
+                    package: killer.package.clone(),
+                    target: killer.target.clone(),
+                    test: killer.test.clone(),
+                }),
                 killer_file,
                 elapsed_ms: mutant.elapsed_ms,
                 suppression: mutant.suppression.clone(),
@@ -1640,11 +1784,8 @@ impl RunRecord {
     pub fn store(&self, base: &Utf8Path, root: &Utf8Path) {
         let earlier = match Self::load_for_update(base, FILE) {
             Ok(record) => record.unwrap_or_default(),
-            Err(version) => {
-                crate::notes::note(format!(
-                    "did not overwrite campaign state `{}` with unsupported version {version}; remove it or use a compatible cargo-gamma version",
-                    base.join(FILE)
-                ));
+            Err(failure) => {
+                crate::notes::note(format!("did not overwrite campaign state: {failure}"));
                 return;
             }
         };
@@ -1671,12 +1812,7 @@ impl RunRecord {
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn store_completed(&self, base: &Utf8Path) -> crate::Result<Self> {
         let earlier = Self::load_for_update(base, FILE)
-            .map_err(|version| {
-                crate::error::error!(
-                    "refusing to overwrite campaign state `{}` with unsupported version {version}; remove it or use a compatible cargo-gamma version",
-                    base.join(FILE)
-                )
-            })?
+            .map_err(|failure| crate::error::error!("refusing to overwrite campaign state `{}`", base.join(FILE)).caused_by(failure))?
             .unwrap_or_default();
         let merged = self.absorbing(&earlier);
         let text = serde_json::to_string(&merged)
@@ -2151,6 +2287,12 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
     policy_parts.extend(of.cargo_test_args.iter().map(String::as_bytes));
     policy_parts.push(b":post--:");
     policy_parts.extend(of.test_args.iter().map(String::as_bytes));
+    let mut resource_concurrency: Vec<_> = of
+        .resource_concurrency
+        .iter()
+        .map(|limit| (limit.name(), limit.max_concurrency()))
+        .collect();
+    resource_concurrency.sort_unstable();
     let policy = format!(
         "baseline={};confirm={};stall={};timeout_multiplier={:?};timeout_floor={:?};memory={:?};\
          memory_multiplier={:?};memory_headroom={:?};memory_limit={:?};baseline_memory_limit={:?};\
@@ -2172,7 +2314,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         of.build_timeout,
         of.build_timeout_multiplier,
         of.rollback_rounds,
-        of.resource_concurrency
+        resource_concurrency
     );
     policy_parts.push(policy.as_bytes());
 
@@ -2182,6 +2324,8 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         environment_parts.push(value.as_slice());
     }
 
+    let identity_version = MUTANT_ID_VERSION.to_le_bytes();
+
     Some(ContextDigest {
         features: term(Term::Features, &features),
         profile: term(Term::Profile, &[of.profile.unwrap_or_default().as_bytes()]),
@@ -2190,7 +2334,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         config: None,
         extra: term(Term::Extra, &of.extra.iter().map(String::as_bytes).collect::<Vec<&[u8]>>()),
         toolchain: term(Term::Toolchain, &[toolchain.as_bytes()]),
-        tool: term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes()]),
+        tool: term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version]),
         tests: term(Term::Tests, &test_parts),
         policy: term(Term::Policy, &policy_parts),
         environment: Some(term(Term::Environment, &environment_parts)),
@@ -2265,6 +2409,7 @@ fn term(name: Term, parts: &[&[u8]]) -> String {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -2280,6 +2425,7 @@ mod tests {
             compiler_reason: None,
             reusable: true,
             killed_by: None,
+            killer: None,
             killer_file: None,
             elapsed_ms: 0,
             suppression: None,
@@ -2315,6 +2461,47 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn killer_identity_round_trips_and_legacy_entries_remain_readable() {
+        let entry = Entry {
+            id: "a".to_owned().into(),
+            outcome: Outcome::Killed,
+            compiler_reason: None,
+            reusable: true,
+            killed_by: Some("tests::caught".to_owned()),
+            killer: Some(Killer {
+                package: "subject".to_owned(),
+                target: "test:shared".to_owned(),
+                test: "tests::caught".to_owned(),
+            }),
+            killer_file: None,
+            elapsed_ms: 7,
+            suppression: None,
+            site: None,
+        };
+        let mut value = serde_json::to_value(&entry).expect("record entry");
+        let round_trip: Entry = serde_json::from_value(value.clone()).expect("current record entry");
+
+        assert_eq!(round_trip.killer, entry.killer);
+        let killer = round_trip.killer.as_ref().expect("round-tripped killer");
+        assert!(killer.names("subject", "test:shared"));
+        assert!(!killer.names("subject", "lib:shared"));
+
+        let _killer = value.as_object_mut().expect("entry is an object").remove("killer");
+        let legacy: Entry = serde_json::from_value(value).expect("legacy record entry");
+
+        assert_eq!(legacy.killed_by.as_deref(), Some("tests::caught"));
+        assert_eq!(legacy.killer, None);
+
+        let legacy_killer = Killer {
+            package: "subject".to_owned(),
+            target: "shared".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        assert!(legacy_killer.names("subject", "test:shared"));
+    }
+
     use crate::testing::workdir;
 
     fn mutant(id: &str, file: &str, outcome: Outcome) -> Mutant {
@@ -2451,12 +2638,112 @@ mod tests {
         assert_eq!(value.to_string().matches("tests::shared").count(), 1);
     }
 
+    #[test]
+    fn current_records_accept_and_migrate_version_one_generalized_hints() {
+        let (_dir, root) = workspace("record-legacy-generalized-", "");
+        let mut stored = serde_json::to_value(RunRecord::default()).expect("record JSON");
+        stored["version"] = VERSION.into();
+        stored["generalized"] = serde_json::json!({
+            "version": 1,
+            "items": [{
+                "file": "src/lib.rs",
+                "item": "subject::add",
+                "candidates": [{
+                    "candidate": {
+                        "package": "subject",
+                        "target": "lib",
+                        "test": "tests::legacy"
+                    },
+                    "seeds": 0,
+                    "hits": 4,
+                    "misses": 3,
+                    "measuredMs": 120,
+                    "samples": 7,
+                    "order": 2
+                }]
+            }],
+            "binaries": [],
+            "testSets": [],
+            "reach": []
+        });
+        fs::write(root.join(FILE), serde_json::to_vec(&stored).expect("record JSON")).expect("legacy record");
+
+        let loaded = RunRecord::load_for_update(&root, FILE)
+            .expect("current state remains readable")
+            .expect("legacy state exists");
+        let candidate = &loaded.generalized.items[0].candidates[0];
+
+        assert_eq!(loaded.generalized.version, GENERALIZED_HINTS_VERSION);
+        assert_eq!(candidate.candidate.test, "tests::legacy");
+        assert_eq!(candidate.seeds, 1);
+        assert_eq!(
+            (candidate.hits, candidate.misses, candidate.measured_ms, candidate.samples),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn version_eleven_records_are_ignored_after_killer_provenance_changed() {
+        let dir = workdir("record-legacy-target-identity-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
+        let mut stored = serde_json::to_value(RunRecord::default()).expect("record JSON");
+        stored["version"] = (VERSION - 1).into();
+        fs::write(root.join(FILE), serde_json::to_vec(&stored).expect("record JSON")).expect("legacy record");
+
+        assert!(RunRecord::load_raw(&root).is_none());
+        assert!(matches!(
+            RunRecord::load_for_update(&root, FILE),
+            Err(UpdateLoadError::UnsupportedVersion { version: 11, .. })
+        ));
+    }
+
+    #[test]
+    fn version_two_generalized_hints_migrate_without_losing_observations() {
+        let hints: GeneralizedHints = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "items": [{
+                "file": "src/lib.rs",
+                "item": "subject::add",
+                "candidates": [{
+                    "candidate": {
+                        "package": "subject",
+                        "target": "lib",
+                        "test": "tests::legacy"
+                    },
+                    "seeds": 2,
+                    "hits": 4,
+                    "misses": 3,
+                    "measuredMs": 120,
+                    "samples": 7,
+                    "order": 2
+                }]
+            }],
+            "binaries": [],
+            "testSets": [],
+            "reach": []
+        }))
+        .expect("version two generalized hints");
+        let candidate = &hints.items[0].candidates[0];
+
+        assert_eq!(hints.version, GENERALIZED_HINTS_VERSION);
+        assert_eq!(candidate.candidate.target, "lib");
+        assert_eq!(
+            (
+                candidate.seeds,
+                candidate.hits,
+                candidate.misses,
+                candidate.measured_ms,
+                candidate.samples
+            ),
+            (2, 4, 3, 120, 7)
+        );
+    }
+
     fn workspace(prefix: &str, body: &str) -> (tempfile::TempDir, Utf8PathBuf) {
         let dir = workdir(prefix);
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
 
-        fs::create_dir_all(root.join("src")).expect("the source directory should be creatable");
-        fs::write(root.join("src/lib.rs"), body).expect("the source should be writable");
+        crate::testing::write_fixture(root.as_std_path(), &[("src/lib.rs", body)]);
 
         (dir, root)
     }
@@ -2471,9 +2758,31 @@ mod tests {
         let error = RunRecord::default()
             .store_completed(&root)
             .expect_err("an unsupported record must not be replaced");
+        let leaf = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<UpdateLoadError>())
+            .expect("the aggregate error retains the update-safety failure");
 
-        assert!(error.to_string().contains("unsupported version 999"), "{error}");
+        assert!(matches!(leaf, UpdateLoadError::UnsupportedVersion { version: 999, .. }));
         assert_eq!(fs::read_to_string(path).expect("unsupported record remains"), unsupported);
+    }
+
+    #[test]
+    fn completed_campaign_does_not_replace_state_that_cannot_be_read() {
+        let (_dir, root) = workspace("record-unreadable-update-", "");
+        let path = root.join(FILE);
+        fs::create_dir(&path).expect("a directory provides deterministic unreadable record state");
+
+        let error = RunRecord::default()
+            .store_completed(&root)
+            .expect_err("unreadable state must not be replaced");
+        let leaf = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<UpdateLoadError>())
+            .expect("the aggregate error retains the update-safety failure");
+
+        assert!(matches!(leaf, UpdateLoadError::Read { .. }));
+        assert!(path.is_dir(), "the unreadable state remains untouched");
     }
 
     /// Indexes the tests declared by a file written into the workspace for the purpose.
@@ -2544,21 +2853,28 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
 
         for package in ["a", "b"] {
-            fs::create_dir_all(root.join(format!("crates/{package}/src"))).expect("package source directory");
-            fs::write(
-                root.join(format!("crates/{package}/Cargo.toml")),
-                format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
-            )
-            .expect("package manifest");
-            fs::write(
-                root.join(format!("crates/{package}/src/lib.rs")),
-                format!("pub fn {package}() -> bool {{ true }}\n"),
-            )
-            .expect("package source");
+            crate::testing::write_fixture(
+                root.as_std_path(),
+                &[
+                    (
+                        &format!("crates/{package}/Cargo.toml"),
+                        &format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
+                    ),
+                    (
+                        &format!("crates/{package}/src/lib.rs"),
+                        &format!("pub fn {package}() -> bool {{ true }}\n"),
+                    ),
+                ],
+            );
         }
 
-        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n").expect("workspace manifest");
-        fs::write(root.join("Cargo.lock"), "# lock\n").expect("workspace lockfile");
+        crate::testing::write_fixture(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n"),
+                ("Cargo.lock", "# lock\n"),
+            ],
+        );
 
         (dir, root)
     }
@@ -3341,6 +3657,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resource_capacity_order_does_not_change_the_context() {
+        let cargo = crate::exec::ResourceLimit::new("cargo", 2).expect("valid resource");
+        let network = crate::exec::ResourceLimit::new("network", 1).expect("valid resource");
+        let first = [cargo.clone(), network.clone()];
+        let reordered = [network, cargo];
+
+        assert_eq!(
+            context(&Context {
+                resource_concurrency: &first,
+                ..plain()
+            }),
+            context(&Context {
+                resource_concurrency: &reordered,
+                ..plain()
+            })
+        );
+    }
+
     /// Every axis that decides whether a mutant compiles has to reach the digest.
     ///
     /// The cache is believed rather than re-checked, so an axis missing from the key is not a slower
@@ -3483,6 +3818,7 @@ mod tests {
                     ..plain()
                 },
             ),
+            ("library-only testing", Context { test_lib: true, ..plain() }),
             (
                 "test execution optimization",
                 Context {
@@ -3645,14 +3981,20 @@ mod tests {
     #[test]
     fn the_tool_version_is_a_term_of_the_digest_rather_than_loose_bytes() {
         let spelled = [env!("CARGO_PKG_VERSION").to_owned()];
+        let current = context(&plain()).unwrap();
+        let identity_version = MUTANT_ID_VERSION.to_le_bytes();
 
         assert_ne!(
-            context(&plain()).unwrap(),
+            current,
             context(&Context {
                 extra: &spelled,
                 ..plain()
             })
             .unwrap()
+        );
+        assert_eq!(
+            current.term(Term::Tool),
+            term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version])
         );
     }
 
@@ -4140,6 +4482,123 @@ mod tests {
         assert_eq!(record.len(), 0);
         assert!(record.ordering().is_empty());
         assert!(RunRecord::load(&root).probes().is_empty());
+    }
+
+    #[test]
+    fn incomplete_convergence_retains_only_compiler_outcomes_and_existing_probes() {
+        let (_dir, root) = workspace("record-incomplete-convergence-", "fn add() {}");
+        let mut unviable = mutant("unviable", "src/lib.rs", Outcome::CompileError);
+        unviable.note = Some("E0308: mismatched types".to_owned());
+        let detected_mutant = mutant("killed", "src/lib.rs", Outcome::Killed);
+        let killer = Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        RunRecord::store_incomplete_knowledge(&root, &core::iter::once((unviable.id.clone(), killer.clone())).collect(), None);
+
+        let record = from_run(&root, &[unviable.clone(), detected_mutant], &envelope());
+        let stored = record.store_incomplete_convergence(&root).expect("incomplete compiler learning");
+        let loaded = RunRecord::load_incomplete(&root);
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.ordering(), [unviable.id.as_str()]);
+        assert_eq!(loaded.probes().get(&unviable.id), Some(&killer));
+    }
+
+    #[test]
+    fn successive_disjoint_incomplete_records_retain_reasons_and_probe_learning() {
+        let (_dir, root) = workspace("record-successive-incomplete-", "fn first() {}");
+        let base = root.join("target/cargo-gamma");
+        fs::create_dir_all(&base).expect("campaign base");
+        fs::write(root.join("src/other.rs"), "fn second() {}").expect("second source");
+        let mut first = mutant("first", "src/lib.rs", Outcome::CompileError);
+        first.note = Some("E0308: first reason".to_owned());
+        let mut second = mutant("second", "src/other.rs", Outcome::CompileError);
+        second.note = Some("E0277: second reason".to_owned());
+        let killer = Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::first".to_owned(),
+        };
+        RunRecord::store_incomplete_knowledge(&base, &core::iter::once((first.id.clone(), killer.clone())).collect(), None);
+
+        let first_record = from_run(&root, &[first.clone()], &envelope());
+        first_record.store_incomplete_convergence(&base).expect("first partial");
+        let second_record = from_run(&root, &[second.clone()], &envelope());
+        let earlier = RunRecord::load_incomplete(&base);
+        assert_eq!(earlier.context, second_record.context);
+        assert_eq!(earlier.inputs, second_record.inputs);
+        second_record.store_incomplete_convergence(&base).expect("second partial");
+        let loaded = RunRecord::load_incomplete(&base);
+        let reason = |id: &MutantId| {
+            loaded
+                .files
+                .iter()
+                .flat_map(|file| &file.mutants)
+                .find(|entry| &entry.id == id)
+                .and_then(|entry| entry.compiler_reason.as_deref())
+        };
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(reason(&first.id), first.note.as_deref());
+        assert_eq!(reason(&second.id), second.note.as_deref());
+        assert_eq!(loaded.probes().get(&first.id), Some(&killer));
+    }
+
+    #[test]
+    fn incomplete_merge_drops_prior_compiler_outcomes_when_compilation_inputs_change() {
+        let (_dir, root) = workspace("record-incomplete-input-change-", "fn first() {}");
+        let base = root.join("target/cargo-gamma");
+        fs::create_dir_all(&base).expect("campaign base");
+        fs::write(root.join("src/other.rs"), "fn second() {}").expect("second source");
+
+        let first = mutant("first", "src/lib.rs", Outcome::CompileError);
+        from_run(&root, core::slice::from_ref(&first), &envelope())
+            .store_incomplete_convergence(&base)
+            .expect("first partial");
+
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"subject\"\nversion = \"0.2.0\"\n").expect("changed manifest");
+
+        let second = mutant("second", "src/other.rs", Outcome::CompileError);
+        from_run(&root, core::slice::from_ref(&second), &envelope())
+            .store_incomplete_convergence(&base)
+            .expect("second partial");
+        let loaded = RunRecord::load_incomplete(&base);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.ordering(), [second.id.as_str()]);
+    }
+
+    #[test]
+    fn large_incomplete_record_has_linear_deterministic_population_work() {
+        const FILES: usize = 150;
+        const MUTANTS: usize = 40_000;
+
+        let (_dir, root) = workspace("record-large-incomplete-", "fn seed() {}");
+        for index in 1..FILES {
+            fs::write(root.join(format!("src/file_{index}.rs")), format!("fn file_{index}() {{}}")).expect("fixture source");
+        }
+        let population = (0..MUTANTS)
+            .map(|index| {
+                let path = if index % FILES == 0 {
+                    "src/lib.rs".to_owned()
+                } else {
+                    format!("src/file_{}.rs", index % FILES)
+                };
+                mutant(&format!("mutant-{index:05}"), &path, Outcome::CompileError)
+            })
+            .collect::<Vec<_>>();
+
+        let stored = from_run(&root, &population, &envelope())
+            .store_incomplete_convergence(&root)
+            .expect("large incomplete publication");
+        let loaded = RunRecord::load_incomplete(&root);
+
+        assert_eq!(stored.len(), MUTANTS);
+        assert_eq!(loaded.len(), MUTANTS);
+        assert_eq!(loaded.ordering().len(), MUTANTS);
     }
 
     /// The ordering tier answers whatever the context is, because being wrong about an order costs

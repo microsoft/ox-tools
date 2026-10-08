@@ -208,7 +208,7 @@ unrelated edits elsewhere in a file do not invalidate it.
 
 Hints can contain:
 
-- an exact previously killing `{ package, target, test }` for a mutant ID;
+- an exact previously killing `{ package, kind-qualified target, test }` for a mutant ID;
 - ranked exact tests for a stable `(source file, enclosing item)`;
 - ranked test binaries for a source file;
 - test sets known to reach a stable source site;
@@ -218,7 +218,7 @@ Hints are guesses, not verdicts. A test or binary named by a hint is run again
 before it can affect the result. Missing, stale, corrupt, or unsupported hints
 fall back to colder scheduling.
 
-The version-3 YAML artifact groups exact mutant hints by workspace-relative source
+The version-4 YAML artifact groups exact mutant hints by workspace-relative source
 file. Each file group contains a deterministic table of distinct killer
 identities, and its mutant entries refer to those identities by index. The
 source path and repeated package, target, and test strings therefore occur
@@ -374,6 +374,9 @@ Cargo-gamma estimates each pending mutant's serial test cost:
 
 Persisted generalized candidates seed their scheduling probability and probe
 cost from the hint artifact's hit, miss, measured-time, and sample counters.
+Speculative hint probes are bounded candidates, not an exhaustive isolation
+search: a miss or inconclusive probe falls back to the authoritative admitted
+selection instead of enumerating every possible test subset.
 
 The cost order is still partitioned into package queues and interleaved. That
 order supplies deterministic package-fair, longest-work-first secondary
@@ -519,17 +522,21 @@ After the sweep:
   circuit-breaker-rejected opportunities for exact mutant hints and
   generalized item, reach, file, and census tiers;
 - `gamma-selection.jsonl` receives each mutant's completed attempts as one worker-side batch, then
-  records and immediately flushes every selection attempt with its mutant ordinal, candidate tier and rank, binary
-  and optional test identity, hit/miss/inconclusive result, elapsed time, and
-  canonical fallback estimate, so interrupted campaigns can be replayed
-  without treating telemetry as verdict evidence;
+  records and immediately flushes every retained selection attempt with its mutant ordinal,
+  candidate tier and rank, binary and optional test identity, hit/miss/inconclusive result, elapsed
+  time, and canonical fallback estimate. Serialization reuses one buffer and issues one write per
+  complete record. The journal retains at most 64 MiB per campaign and appends a truncation record
+  when the ceiling is reached, so diagnostic growth cannot stop mutant execution; the retained
+  prefix of complete records can still be replayed without treating telemetry as verdict evidence;
 - package sweep timelines report first start, final completion, and wall span
   relative to sweep start. These spans can overlap under concurrency and are
   distinct from the package CPU totals; and
 - diagnostics retain total launches and launches saved, including the subset
-  saved by learned reach evidence.
+  saved by learned reach evidence. The live dashboard's estimated hint savings subtract every
+  attempted selection in the successful mutant's chain from the canonical fallback estimate, not
+  only the final successful launch.
 
-Promotion writes version 3 YAML atomically. File groups, mutant entries, killer
+Promotion writes version 4 YAML atomically. File groups, mutant entries, killer
 tables, generalized identities, and interned reach sets use canonical ordering,
 so equivalent knowledge produces identical reviewable bytes regardless of
 discovery or completion order. A no-op preserves `generated_on` and produces no
@@ -542,8 +549,9 @@ round-trip without losing future fields. Publication compares against the exact
 YAML bytes used by the merge, so a concurrent update
 is left intact and reported as a conflict.
 
-The generalized section uses schema version 2, separating seed observations
-from transfer hits and misses. Older generalized schemas are unsupported.
+The generalized section uses schema version 3, separating seed observations
+from transfer hits and misses and storing kind-qualified target identities. Versions 1 and 2 are
+migrated on read; other generalized schemas are unsupported.
 
 Persisted knowledge changes ordering and selection only. It never carries a
 verdict into a new campaign without executing the relevant test again.

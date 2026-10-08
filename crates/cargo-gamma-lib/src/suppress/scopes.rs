@@ -303,6 +303,7 @@ fn foreign_item_attributes(item: &ForeignItem) -> &[Attribute] {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use syn::ItemFn;
 

@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! The collision rule, exercised through the library against synthetic cargo
 //! workspaces. The rule is the crate's substance, so it is tested by calling
 //! `check` directly rather than through the binary; `cli.rs` covers the

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use core::fmt::{Debug, Formatter};
+use core::num::NonZeroU8;
 #[cfg(test)]
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -22,12 +23,11 @@ type ProgressCallback = Box<dyn Fn() -> (u64, u64, String) + Send + Sync>;
 type DrawTargetFactory = Box<dyn Fn() -> ProgressDrawTarget + Send + Sync>;
 type LineSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Refresh rate for progress updates (10 Hz).
-const REFRESH_INTERVAL_MS: u64 = 100;
-const REFRESHES_PER_SECOND: u8 = 10;
+/// Refresh rate for progress updates.
+const REFRESHES_PER_SECOND: NonZeroU8 = NonZeroU8::new(10).expect("the progress refresh rate is non-zero");
 
 fn refresh_interval() -> Duration {
-    Duration::from_millis(REFRESH_INTERVAL_MS)
+    Duration::from_millis(1_000 / u64::from(REFRESHES_PER_SECOND.get()))
 }
 
 const DETERMINATE_TEMPLATE: &str = "{prefix:>12.bold.cyan} [{bar:25}] {msg}";
@@ -277,7 +277,7 @@ fn stderr_draw_target() -> ProgressDrawTarget {
 }
 
 const fn refreshes_per_second() -> u8 {
-    REFRESHES_PER_SECOND
+    REFRESHES_PER_SECOND.get()
 }
 
 /// Background refresh task that periodically updates the progress bar.
@@ -326,7 +326,33 @@ async fn refresh_task(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod miri_tests {
+    use core::time::Duration;
+
+    use super::{
+        DETERMINATE_TEMPLATE, DETERMINATE_TEMPLATE_NO_COLOR, INDETERMINATE_TEMPLATE, INDETERMINATE_TEMPLATE_NO_COLOR, determinate_template,
+        indeterminate_template, refresh_interval, refreshes_per_second,
+    };
+
+    #[test]
+    fn refresh_interval_is_one_tenth_of_a_second() {
+        assert_eq!(refresh_interval(), Duration::from_millis(100));
+        assert_eq!(refreshes_per_second(), 10);
+    }
+
+    #[test]
+    fn templates_follow_the_color_setting() {
+        assert_eq!(determinate_template(true), DETERMINATE_TEMPLATE);
+        assert_eq!(determinate_template(false), DETERMINATE_TEMPLATE_NO_COLOR);
+        assert_eq!(indeterminate_template(true), INDETERMINATE_TEMPLATE);
+        assert_eq!(indeterminate_template(false), INDETERMINATE_TEMPLATE_NO_COLOR);
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::Ordering;
     use core::time::Duration;
@@ -337,13 +363,14 @@ mod tests {
     use std::time::Instant;
 
     use indicatif::{ProgressDrawTarget, TermLike};
+    use tokio::time::sleep;
 
-    use super::{
-        DETERMINATE_TEMPLATE, DETERMINATE_TEMPLATE_NO_COLOR, DrawTargetFactory, INDETERMINATE_TEMPLATE, INDETERMINATE_TEMPLATE_NO_COLOR,
-        ProgressReporter, REFRESHES_PER_SECOND, determinate_template, indeterminate_template, refresh_interval, refreshes_per_second,
-    };
+    use super::{DrawTargetFactory, ProgressReporter, refresh_interval};
     use crate::facts::Progress;
 
+    /// In-memory terminal adapter that captures the progress bar's current frame without touching stderr.
+    ///
+    /// Clearing a line clears the captured frame, matching how the tests observe redraws.
     #[derive(Clone, Debug, Default)]
     struct CaptureTerm {
         contents: Arc<Mutex<String>>,
@@ -405,27 +432,12 @@ mod tests {
         ProgressReporter::with_draw_target(delay, use_colors, factory)
     }
 
-    #[test]
-    fn refresh_interval_is_one_tenth_of_a_second() {
-        assert_eq!(refresh_interval(), Duration::from_millis(100));
-        assert_eq!(REFRESHES_PER_SECOND, 10);
-        assert_eq!(refreshes_per_second(), 10);
-    }
-
     #[tokio::test]
     async fn reporter_starts_hidden() {
         let reporter = hidden_reporter(Duration::from_hours(1), false);
         assert!(reporter.bar.is_hidden());
         assert!(!reporter.state.visible.load(Ordering::Relaxed));
         reporter.done();
-    }
-
-    #[test]
-    fn templates_follow_the_color_setting() {
-        assert_eq!(determinate_template(true), DETERMINATE_TEMPLATE);
-        assert_eq!(determinate_template(false), DETERMINATE_TEMPLATE_NO_COLOR);
-        assert_eq!(indeterminate_template(true), INDETERMINATE_TEMPLATE);
-        assert_eq!(indeterminate_template(false), INDETERMINATE_TEMPLATE_NO_COLOR);
     }
 
     #[tokio::test]
@@ -471,7 +483,7 @@ mod tests {
             if predicate(reporter) {
                 return true;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            sleep(Duration::from_millis(25)).await;
         }
         predicate(reporter)
     }
@@ -497,11 +509,13 @@ mod tests {
     #[tokio::test]
     async fn configured_styles_render_the_expected_chrome() {
         let determinate_term = CaptureTerm::default();
-        let determinate_target = determinate_term.clone();
         let determinate = ProgressReporter::with_draw_target(
             Duration::ZERO,
             false,
-            Box::new(move || ProgressDrawTarget::term_like(Box::new(determinate_target.clone()))),
+            Box::new({
+                let determinate_term = determinate_term.clone();
+                move || ProgressDrawTarget::term_like(Box::new(determinate_term.clone()))
+            }),
         );
         determinate.set_phase("Collecting");
         determinate.set_determinate(Box::new(|| (10, 4, "crates".to_owned())));
@@ -512,11 +526,13 @@ mod tests {
         determinate.done();
 
         let indeterminate_term = CaptureTerm::default();
-        let indeterminate_target = indeterminate_term.clone();
         let indeterminate = ProgressReporter::with_draw_target(
             Duration::ZERO,
             false,
-            Box::new(move || ProgressDrawTarget::term_like(Box::new(indeterminate_target.clone()))),
+            Box::new({
+                let indeterminate_term = indeterminate_term.clone();
+                move || ProgressDrawTarget::term_like(Box::new(indeterminate_term.clone()))
+            }),
         );
         indeterminate.set_phase("Fetching");
         indeterminate.set_indeterminate(Box::new(|| "data".to_owned()));
@@ -529,11 +545,13 @@ mod tests {
     #[tokio::test]
     async fn refresh_loop_advances_only_indeterminate_animation() {
         let term = CaptureTerm::default();
-        let target = term.clone();
         let reporter = ProgressReporter::with_draw_target(
             Duration::ZERO,
             false,
-            Box::new(move || ProgressDrawTarget::term_like(Box::new(target.clone()))),
+            Box::new({
+                let term = term.clone();
+                move || ProgressDrawTarget::term_like(Box::new(term.clone()))
+            }),
         );
         reporter.set_indeterminate(Box::new(|| "working".to_owned()));
         assert!(wait_until(&reporter, |_| term.contents().contains("working")).await);
@@ -631,7 +649,7 @@ mod tests {
         reporter.set_phase("Preparing");
         reporter.set_determinate(Box::new(|| (5, 1, "1/5".to_owned())));
 
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        sleep(refresh_interval() * 3 + Duration::from_millis(50)).await;
 
         assert!(!reporter.state.visible.load(Ordering::Relaxed));
         assert_eq!("", reporter.bar.message());
@@ -712,8 +730,12 @@ mod tests {
             }),
         );
         reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
-        assert!(wait_until(&reporter, |r| r.state.visible.load(Ordering::Relaxed)).await);
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(wait_until(&reporter, |_| installations.load(Ordering::Relaxed) == 1).await);
+        let completed = reporter.state.refreshes.load(Ordering::Relaxed);
+        assert!(
+            wait_until(&reporter, |r| r.state.refreshes.load(Ordering::Relaxed) >= completed + 2).await,
+            "two refreshes did not complete after installing the draw target"
+        );
         assert_eq!(installations.load(Ordering::Relaxed), 1);
         reporter.done();
     }

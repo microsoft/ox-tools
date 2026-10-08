@@ -113,14 +113,14 @@
 
 # Seconds the build may take before the run is abandoned. Default: unlimited.
 #
-# A run builds once, so a build that never finishes costs everything rather than one mutant.
+# A compiler invocation that never finishes blocks the campaign before mutant execution.
 #
 # build-timeout = 1800.0
 
-# Multiple of the first successful build's duration a later build round is allowed.
+# Multiple of the first compiler round's duration a later round is allowed.
 #
-# Rollback rounds rebuild the same tree with fewer mutants, so a round running far longer than the
-# first is a sign something is wrong rather than a slow machine. Default: unset.
+# Convergence checks the same warm tree with fewer admitted mutants, so a later round running far
+# longer than the first is a sign something is wrong rather than a slow machine. Default: unset.
 #
 # build-timeout-multiplier = 3.0
 

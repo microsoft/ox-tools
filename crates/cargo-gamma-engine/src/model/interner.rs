@@ -76,6 +76,7 @@ impl Interner {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::model::MutantId;
@@ -121,6 +122,7 @@ mod tests {
             replacement_index: 0,
             replacement: "false".to_owned().into(),
             shape: Shape::Expr,
+            confidence: crate::ops::collect::Confidence::Proven,
         };
 
         let mut mutations = vec![sample("a.rs"), sample("a.rs")];
