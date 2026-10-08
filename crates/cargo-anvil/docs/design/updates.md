@@ -155,6 +155,17 @@ ordinary-region validation. A temporary duplicate table from an accepted
 migration does not refuse a later array introduction, update or in-sync check.
 The projection preserves byte offsets; splices, marker checks and ownership
 checks still use the original text, including the retiring region until removal.
+Safe retirements are rediscovered on every run, including before array planning
+and when an ordinary replacement is already in sync. If an interrupted apply
+wrote that replacement but not the retirement, the remaining duplicate table
+does not strand recovery. The retirement candidate participates in its own
+validation projection only after its markers and recorded body ownership pass.
+When the raw host is invalid, validation also reconstructs the pre-write view
+by masking only complete live ordinary regions matching their current templates.
+This preserves checks on array delimiters and source bindings supplied by the
+retiring region; masking the candidate alone cannot prove those safe to remove.
+Edited or untracked orphans, malformed markers, and unrelated invalid repository
+content are not bypassed by this recovery.
 
 Semantic matching does not authorize deleting comments inside a matching
 compound value. Such a candidate refuses, as does a separator owned by another
