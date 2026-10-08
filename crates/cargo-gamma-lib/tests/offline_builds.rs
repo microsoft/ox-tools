@@ -9,6 +9,8 @@ use std::{env, fs};
 use cargo_gamma_lib::testing::write_project;
 use tempfile::TempDir;
 
+#[path = "support/child_test.rs"]
+mod child_test;
 #[path = "support/rustflags.rs"]
 mod rustflags;
 
@@ -121,8 +123,8 @@ fn configured_rustflags_and_inherited_analysis_flags_both_reach_the_compiler() {
             .output()
             .expect("the running test executable must be runnable as a child process");
         assert!(
-            output.status.success(),
-            "both configured and inherited flags must reach the offline compiler:\n{}\n{}",
+            output.status.success() && child_test::passed_exactly_one(&output.stdout),
+            "the child harness must execute and pass exactly one compiler-flag test:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );

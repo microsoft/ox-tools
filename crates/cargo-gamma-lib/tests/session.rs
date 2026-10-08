@@ -21,6 +21,8 @@ use camino::Utf8PathBuf;
 use cargo_gamma_lib::testing::{Sink, gamma_base, run, write_fixture, write_project};
 use tempfile::TempDir;
 
+#[path = "support/child_test.rs"]
+mod child_test;
 #[path = "support/macros.rs"]
 mod macros;
 #[path = "support/rustflags.rs"]
@@ -307,8 +309,8 @@ fn with_resource_workspace(test: &str, check: impl FnOnce(&Path)) {
         .output()
         .expect("the resource test must be runnable in an isolated child process");
     assert!(
-        output.status.success(),
-        "the public resource macro test must pass:\n{}\n{}",
+        output.status.success() && child_test::passed_exactly_one(&output.stdout),
+        "the child harness must execute and pass exactly one resource test:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

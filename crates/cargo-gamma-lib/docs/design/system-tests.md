@@ -129,5 +129,7 @@ as exhaustive proof.
 Spawn/build/artifact/copy failures remain explicit. Negative macro cases
 require their expected public diagnostic fragments, and a positive consumer
 prevents an unrelated compiler failure from being counted as correct
-validation. Cold build and resource exit/overlap assertions are not weakened
-by retries, skips, relaxed thresholds, or success-shaped fallback behavior.
+validation. Re-executed checks require exactly one passing child test; a
+successful zero-test selection is a harness failure. Cold build and resource
+exit/overlap assertions are not weakened by retries, skips, relaxed thresholds,
+or success-shaped fallback behavior.
