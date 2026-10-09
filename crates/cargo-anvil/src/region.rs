@@ -43,7 +43,7 @@ pub enum CommentSyntax {
 
 /// Lexical ownership boundaries shared by every region in a host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostScanner {
+pub(crate) enum HostScanner {
     /// Only actual TOML comment tokens can carry sentinels.
     Toml,
     /// Full lines are interpreted using the region's comment syntax.

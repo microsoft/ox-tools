@@ -1054,6 +1054,30 @@ mod tests {
     }
 
     #[test]
+    fn existing_inline_parent_refuses_with_shape_guidance() {
+        let error = plan_toml_array_region(&Manifest::default(), Some("plugins = { default = [] }\n"), "config.toml", &spec()).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::ArrayShape);
+        assert_eq!(error.reason.to_string(), "array parents must be normal TOML tables");
+    }
+
+    #[test]
+    fn neighbor_validation_allows_missing_selectors_but_rejects_replaced_delimiters() {
+        let paths = vec![vec!["plugins".to_owned(), "default".to_owned()]];
+        validate_neighbor_splice("", "[plugins]\ndefault = []\n", &paths).unwrap();
+        let error = validate_neighbor_splice(
+            "[plugins]\ndefault = [\"old\"]\n",
+            "[plugins]\ndefault = { replacement = [\"old\"] }\n",
+            &paths,
+        )
+        .unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::ArrayDependency);
+        assert_eq!(
+            error.reason.to_string(),
+            "this change would remove or rebind the live TOML array selector [\"plugins\", \"default\"]"
+        );
+    }
+
+    #[test]
     fn adoption_refuses_a_separator_owned_by_another_region() {
         let host = "plugins.default = [\n  \"managed\"\n  # >>> anvil-managed: other\n  ,\n  # <<< anvil-managed: other\n  \"user\"\n]\n";
         assert_eq!(
@@ -1061,6 +1085,13 @@ mod tests {
                 .unwrap_err()
                 .remedy,
             RefusalRemedy::BetweenManagedRegions
+        );
+        let document = Document::parse(host).unwrap();
+        let error = adopt_entries(host, document["plugins"]["default"].as_array().unwrap(), "\"managed\",\n").unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
+        assert_eq!(
+            error.reason.to_string(),
+            "the matching array entry's separator belongs to another managed region"
         );
     }
 
