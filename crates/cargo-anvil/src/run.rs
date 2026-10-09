@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 
-use ohno::{AppError, bail};
+use ohno::{AppError, app_err, bail};
 use tracing::info;
 
 use crate::anvil::artifacts;
@@ -162,7 +162,12 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 /// Computed before anything is planned, because the validity check each region
 /// runs has to know which of the regions already in its host are on their way
 /// out — and removals are not planned until every region has been visited.
-fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> Result<BTreeSet<(String, String)>, AppError> {
+fn live_region_keys(
+    repo_root: &Path,
+    workspace: &Workspace,
+    catalog: &Catalog,
+    hosts: &HostTextCache,
+) -> Result<BTreeSet<(String, String)>, AppError> {
     let mut keys = BTreeSet::new();
     let mut identities = BTreeSet::new();
     for artifact in catalog.artifacts() {
@@ -170,7 +175,7 @@ fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) 
             continue;
         };
         for host in region_host_paths(workspace, spec) {
-            let host = resolve_existing_case_insensitive(repo_root, host)?;
+            let host = (hosts.resolve)(repo_root, host)?;
             if !identities.insert((host.to_ascii_lowercase(), spec.id.as_str().to_owned())) {
                 bail!("duplicate resolved region identity: {host} [{}]", spec.id);
             }
@@ -203,7 +208,7 @@ fn build_plan_with_hosts(
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
     let mut composed = ComposedHosts {
-        live: live_region_keys(repo_root, workspace, catalog)?,
+        live: live_region_keys(repo_root, workspace, catalog, hosts)?,
         ..ComposedHosts::default()
     };
     let (array_paths, mut original_hosts) = array_host_inputs(repo_root, workspace, manifest, catalog, hosts)?;
@@ -214,7 +219,7 @@ fn build_plan_with_hosts(
             .map(|(host, _)| host)
             .chain(manifest.regions.keys().map(|key| &key.host))
         {
-            let other = resolve_existing_case_insensitive(repo_root, other)?;
+            let other = (hosts.resolve)(repo_root, other)?;
             if host != &other && host.eq_ignore_ascii_case(&other) {
                 bail!("ambiguous casing for TOML array host: {host} and {other}");
             }
@@ -227,7 +232,7 @@ fn build_plan_with_hosts(
     // by `push_region_at` when it plans the region, with that region's own
     // comment syntax rather than the `Hash` assumed below.
     for key in manifest.regions.keys() {
-        let host = resolve_existing_case_insensitive(repo_root, &key.host)?;
+        let host = (hosts.resolve)(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
@@ -240,7 +245,7 @@ fn build_plan_with_hosts(
             Artifact::OwnedFile(spec) => {
                 let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
                 if selected {
-                    let path = resolve_existing_case_insensitive(repo_root, spec.path)?;
+                    let path = (hosts.resolve)(repo_root, spec.path)?;
                     plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
                 }
             }
@@ -251,7 +256,7 @@ fn build_plan_with_hosts(
                         path: path.to_vec(),
                     };
                     for host in region_host_paths(workspace, spec) {
-                        let host = resolve_existing_case_insensitive(repo_root, host)?;
+                        let host = (hosts.resolve)(repo_root, host)?;
                         let current = hosts.get_or_read(repo_root, &host)?;
                         match crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array) {
                             Ok(item) => {
@@ -262,7 +267,7 @@ fn build_plan_with_hosts(
                             }
                             Err(refusal) => {
                                 // No partially composed host is returned for application.
-                                bail!("refused TOML array region {host} [{}]: {}", spec.id, refusal.reason);
+                                return Err(array_plan_refusal(&host, &refusal));
                             }
                         }
                     }
@@ -281,10 +286,23 @@ fn build_plan_with_hosts(
         if let Target::Region { host, .. } = &item.target
             && let Some(after) = &item.spliced_host
         {
-            let host = resolve_existing_case_insensitive(repo_root, host)?;
+            let host = (hosts.resolve)(repo_root, host)?;
             if let Some(paths) = array_paths.get(&host) {
                 let before = original_hosts.get(&host).expect("array hosts were captured before planning");
-                crate::emit::toml_array_region::validate_neighbor_splice(before, after, paths).map_err(|refusal| refusal.reason)?;
+                let adopted = item.rendered.as_deref().and_then(|body| {
+                    match crate::region::adopt_unmanaged_toml_tables(before, body, CommentSyntax::Hash) {
+                        crate::region::TomlAdoption::Adopted { text, .. } => Some(text),
+                        _ => None,
+                    }
+                });
+                // Table adoption and region insertion are separate edits. Checking
+                // their combined envelope would reject an untouched array between them.
+                if let Some(adopted) = &adopted {
+                    crate::emit::toml_array_region::validate_neighbor_splice(before, adopted, paths)
+                        .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
+                }
+                crate::emit::toml_array_region::validate_neighbor_splice(adopted.as_deref().unwrap_or(before), after, paths)
+                    .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
                 original_hosts.insert(host, after.clone());
             }
         }
@@ -308,7 +326,7 @@ fn array_host_inputs(
             && let Some(path) = catalog.toml_array_path(spec)
         {
             for host in region_host_paths(workspace, spec) {
-                let host = resolve_existing_case_insensitive(repo_root, host)?;
+                let host = (hosts.resolve)(repo_root, host)?;
                 paths.entry(host).or_default().push(path.to_vec());
             }
         }
@@ -316,16 +334,16 @@ fn array_host_inputs(
     let mut candidates: BTreeSet<String> = paths.keys().cloned().collect();
     for key in manifest.regions.keys() {
         if HostScanner::for_path(&key.host) == HostScanner::Toml {
-            candidates.insert(resolve_existing_case_insensitive(repo_root, &key.host)?);
+            candidates.insert((hosts.resolve)(repo_root, &key.host)?);
         }
     }
     let mut originals = HashMap::new();
-    let live = live_region_keys(repo_root, workspace, catalog)?;
+    let live = live_region_keys(repo_root, workspace, catalog, hosts)?;
     for host in candidates {
         let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
         match crate::emit::toml_array_region::existing_array_paths(&text) {
             Ok(existing) if !existing.is_empty() || paths.contains_key(&host) => {
-                crate::emit::toml_array_region::validated_regions(&text).map_err(|refusal| refusal.reason)?;
+                crate::emit::toml_array_region::validated_regions(&text).map_err(|refusal| array_plan_refusal(&host, &refusal))?;
                 paths.entry(host.clone()).or_default().extend(existing);
                 originals.insert(host, text);
             }
@@ -336,7 +354,7 @@ fn array_host_inputs(
                         .keys()
                         .any(|key| key.host.eq_ignore_ascii_case(&host) && !live.contains(&(host.clone(), key.id.clone()))) =>
             {
-                return Err(refusal.reason);
+                return Err(array_plan_refusal(&host, &refusal));
             }
             _ => {}
         }
@@ -369,10 +387,20 @@ fn array_host_inputs(
 /// cache from disk; every subsequent region splices against — and, when it
 /// writes, updates — the accumulated in-memory text, so the composed
 /// result preserves every region. See `updates.md §4`.
-#[derive(Default)]
 struct HostTextCache {
     texts: HashMap<String, Option<String>>,
     newlines: HashMap<String, &'static str>,
+    resolve: fn(&Path, &str) -> Result<String, AppError>,
+}
+
+impl Default for HostTextCache {
+    fn default() -> Self {
+        Self {
+            texts: HashMap::new(),
+            newlines: HashMap::new(),
+            resolve: resolve_existing_case_insensitive,
+        }
+    }
 }
 
 impl HostTextCache {
@@ -480,7 +508,7 @@ fn push_region_at(
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
-    let host = resolve_existing_case_insensitive(repo_root, host)?;
+    let host = (hosts.resolve)(repo_root, host)?;
     if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
         return Ok(());
     }
@@ -646,7 +674,28 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
     // the sentence break is supplied only when the reason has not already
     // written one.
     let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
-    let remedy = match remedy {
+    let remedy = refusal_guidance(remedy);
+    plan.refusal(format!(
+        "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
+         file and other artifacts may still be updated. {remedy}"
+    ));
+    plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
+}
+
+fn array_plan_refusal(host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
+    let guidance = if refusal.remedy == RefusalRemedy::BetweenManagedRegions {
+        "Reconcile the neighboring managed regions in the catalog before retrying; array hosts cannot depend on staged ownership migrations."
+    } else {
+        refusal_guidance(refusal.remedy)
+    };
+    app_err!(
+        "Refused TOML array host {host}: {}. No plan was produced; no files were changed. {guidance}",
+        refusal.reason
+    )
+}
+
+fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
+    match remedy {
         RefusalRemedy::EnclosingOwnership
         | RefusalRemedy::ArrayDependency
         | RefusalRemedy::MisplacedArrayMarkers
@@ -700,12 +749,7 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
              missing sentinel around the body anvil generated, or delete the stray one together with the \
              body it was meant to enclose."
         }
-    };
-    plan.refusal(format!(
-        "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
-         file and other artifacts may still be updated. {remedy}"
-    ));
-    plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
+    }
 }
 
 /// Bring a composed host's state up to date and report whether the region may
@@ -1125,7 +1169,7 @@ fn plan_removals(
         // the two are compared through the same resolution. Without it a
         // case-only rename makes anvil's own file look retired and the removal
         // below deletes the artifact this very pass just wrote.
-        let resolved = resolve_existing_case_insensitive(repo_root, path)?;
+        let resolved = (hosts.resolve)(repo_root, path)?;
         if live_files.contains(&resolved) {
             continue;
         }
@@ -1187,7 +1231,7 @@ fn plan_removals(
         // No `resolved_host != key.host` guard: the `continue` above has
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
-        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host)?;
+        let resolved_host = (hosts.resolve)(repo_root, &key.host)?;
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
         // owned-file loop above keeps. A lock entry naming a region the catalog
@@ -1320,7 +1364,7 @@ mod tests {
     }
 
     fn array_plan(text: &str, manifest: &Manifest, catalog: &Catalog) -> Result<Plan, AppError> {
-        let mut hosts = HostTextCache::default();
+        let mut hosts = memory_hosts();
         hosts.set("config.toml", text.to_owned());
         hosts.newlines.insert("config.toml".to_owned(), crate::region::text_newline(text));
         build_plan_with_hosts(
@@ -1334,6 +1378,13 @@ mod tests {
             catalog,
             &mut hosts,
         )
+    }
+
+    fn memory_hosts() -> HostTextCache {
+        HostTextCache {
+            resolve: |_, path| Ok(path.to_owned()),
+            ..HostTextCache::default()
+        }
     }
 
     #[test]
@@ -1391,6 +1442,106 @@ mod tests {
     }
 
     #[test]
+    fn toml_array_neighbor_adoption_preserves_the_array_between_edits() {
+        let source = "[settings]\nmode = true\n\n[plugins]\ndefault = [\"user\"]\n";
+        let expected = "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  \"required\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: settings\n[settings]\nmode = true\n# <<< anvil-managed: settings\n";
+        let neighbor = RegionSpec {
+            host: HostSelector::Path("config.toml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "[settings]\nmode = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        for array_first in [false, true] {
+            let catalog = array_catalog(Some(neighbor.clone()), array_first);
+            let plan = array_plan(source, &Manifest::default(), &catalog).unwrap();
+            assert!(plan.refusals().is_empty());
+            assert_eq!(
+                plan.items().iter().filter_map(|item| item.spliced_host.as_deref()).next_back(),
+                Some(expected)
+            );
+            let manifest = plan.projected_manifest(&Manifest::default());
+            let synced = array_plan(expected, &manifest, &catalog).unwrap();
+            assert_eq!(synced.dry_run_exit_code(), 0);
+            let retired = array_plan(expected, &manifest, &array_catalog(None, array_first)).unwrap();
+            assert_eq!(
+                retired.items().iter().filter_map(|item| item.spliced_host.as_deref()).next_back(),
+                Some(
+                    "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  \"required\",\n  # <<< anvil-managed: entries\n\"user\"]\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn toml_array_plan_refuses_existing_whole_file_ownership() {
+        let mut manifest = Manifest::default();
+        manifest
+            .files
+            .insert("config.toml".to_owned(), checksum_str("[plugins]\ndefault = []\n"));
+        assert_eq!(
+            array_plan("[plugins]\ndefault = []\n", &manifest, &array_catalog(None, true))
+                .unwrap_err()
+                .to_string(),
+            "retire whole-file ownership separately before managing TOML array entries: config.toml"
+        );
+    }
+
+    #[test]
+    fn array_plan_refusal_preserves_guidance_without_partial_apply_advice() {
+        for (remedy, expected) in [
+            (
+                RefusalRemedy::ArrayShape,
+                "Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.",
+            ),
+            (
+                RefusalRemedy::ArrayScaffold,
+                "Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.",
+            ),
+            (
+                RefusalRemedy::ArrayDependency,
+                "Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.",
+            ),
+            (
+                RefusalRemedy::EnclosingOwnership,
+                "Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.",
+            ),
+            (
+                RefusalRemedy::MisplacedArrayMarkers,
+                "Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.",
+            ),
+            (
+                RefusalRemedy::InvalidGeneratedToml,
+                "The generated region is invalid TOML even without repository content. Repair the catalog template that renders this region before retrying.",
+            ),
+            (
+                RefusalRemedy::HostAlreadyUnparsable,
+                "This file does not parse as it stands, before this region is written, so no run can write it until the existing TOML is repaired.",
+            ),
+            (
+                RefusalRemedy::BetweenManagedRegions,
+                "Reconcile the neighboring managed regions in the catalog before retrying; array hosts cannot depend on staged ownership migrations.",
+            ),
+            (
+                RefusalRemedy::MalformedMarkers,
+                "Without a matching pair of sentinels the boundary of the generated body cannot be established, so anvil will not write this region rather than risk appending a second copy of it. Restore the missing sentinel around the body anvil generated, or delete the stray one together with the body it was meant to enclose.",
+            ),
+            (
+                RefusalRemedy::EditedRegion,
+                "The body between the sentinels is anvil's to write, and it will not overwrite changes it did not make. Settings that must survive belong outside the sentinels, where anvil never touches them.",
+            ),
+        ] {
+            assert_eq!(
+                array_plan_refusal(
+                    "config.toml",
+                    &crate::emit::managed_region::ManagedRegionRefusal::new(app_err!("problem"), remedy)
+                )
+                .to_string(),
+                format!("Refused TOML array host config.toml: problem. No plan was produced; no files were changed. {expected}")
+            );
+        }
+    }
+
+    #[test]
     fn toml_array_plan_refuses_header_dependencies_and_partial_migrations() {
         let header = "# >>> anvil-managed: parent\n[plugins]\n# <<< anvil-managed: parent\n";
         let entries = "default = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n\"user\"]\n";
@@ -1416,7 +1567,10 @@ mod tests {
         array_plan(&format!("{header}{entries}"), &manifest, &empty).unwrap_err();
         let malformed = format!("{header}{entries}# >>> anvil-managed: stray\n");
         let error = array_plan(&malformed, &manifest, &empty).unwrap_err();
-        assert_eq!(error.to_string(), "opening sentinel without its matching close");
+        assert_eq!(
+            error.to_string(),
+            "Refused TOML array host config.toml: opening sentinel without its matching close. No plan was produced; no files were changed. Without a matching pair of sentinels the boundary of the generated body cannot be established, so anvil will not write this region rather than risk appending a second copy of it. Restore the missing sentinel around the body anvil generated, or delete the stray one together with the body it was meant to enclose."
+        );
         let duplicate = format!("{header}{entries}\n[plugins]\nmode = true\n");
         array_plan(&duplicate, &manifest, &array_catalog(None, true)).unwrap_err();
         array_plan(&duplicate, &manifest, &array_catalog(None, false)).unwrap_err();
@@ -1482,7 +1636,15 @@ mod tests {
                 })
                 .build()
                 .unwrap();
-            let error = build_plan(Path::new("in-memory-array-tests"), &workspace, &Manifest::default(), &[], &catalog).unwrap_err();
+            let error = build_plan_with_hosts(
+                Path::new("in-memory-array-tests"),
+                &workspace,
+                &Manifest::default(),
+                &[],
+                &catalog,
+                &mut memory_hosts(),
+            )
+            .unwrap_err();
             assert_eq!(error.to_string(), "duplicate resolved region identity: Cargo.toml [same]");
         }
     }
@@ -1510,12 +1672,15 @@ mod tests {
                 members: Vec::new(),
                 has_workspace_table: false,
             };
-            let error = build_plan(
+            let mut hosts = memory_hosts();
+            hosts.texts.insert("config.toml".to_owned(), None);
+            let error = build_plan_with_hosts(
                 Path::new("in-memory-array-tests"),
                 &workspace,
                 &Manifest::default(),
                 &[],
                 &builder.build().unwrap(),
+                &mut hosts,
             )
             .unwrap_err();
             assert_eq!(error.to_string(), "a TOML array host cannot also be an owned file: CONFIG.toml");
@@ -1540,12 +1705,16 @@ mod tests {
             members: Vec::new(),
             has_workspace_table: false,
         };
-        let error = build_plan(
+        let mut hosts = memory_hosts();
+        hosts.texts.insert("config.toml".to_owned(), None);
+        hosts.texts.insert("CONFIG.toml".to_owned(), None);
+        let error = build_plan_with_hosts(
             Path::new("in-memory-array-tests"),
             &workspace,
             &Manifest::default(),
             &[],
             &builder.build().unwrap(),
+            &mut hosts,
         )
         .unwrap_err();
         assert!(error.to_string().starts_with("ambiguous casing for TOML array host:"));
