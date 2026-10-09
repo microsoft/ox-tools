@@ -138,6 +138,11 @@ Each Cargo output stream is retained up to 256 MiB for artifact and diagnostic
 processing, and each logical line is bounded at 1 MiB. The buffers grow with
 observed output rather than reserving those ceilings for every invocation.
 
+Each completed baseline observation records at least one nanosecond. Zero
+remains reserved for binaries for which no baseline was measured, including
+`--no-baseline` runs, even when the platform clock cannot distinguish the start
+and end of a very fast observation.
+
 Each failed baseline observation retains a bounded 64 KiB, 2,000-line tail from
 stdout and stderr, along with the process exit code or signal when available.
 Direct libtest baselines continue after a failure announcement, within their
