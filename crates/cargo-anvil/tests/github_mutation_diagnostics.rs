@@ -74,6 +74,10 @@ just() {
         return 90
       fi
       if ((sample + 1 < REQUIRED_SAMPLES)); then
+        if [[ "$FAKE_FAILURE" == "debug-log" ]]; then
+          mkdir -p mutants.out
+          printf 'earlier-debug-record\nlatest-debug-record\n' > mutants.out/debug.log
+        fi
         printf 'next\n' >&4
       fi
     done
@@ -148,19 +152,25 @@ fn run_group(group: &str, runner_os: &str, runner_environment: &str, exit_code: 
         return;
     }
     let outputs = fs::read_to_string(root.join("outputs")).unwrap();
-    assert!(outputs.contains(&format!("exit_code={exit_code}\n")));
-    if exit_code != 0 {
-        assert!(outputs.contains("failed_recipe=anvil-mutants-diff\n"));
-    }
+    let recipe = if exit_code == 0 {
+        format!("anvil-{group}")
+    } else {
+        "anvil-mutants-diff".into()
+    };
+    assert_eq!(outputs, format!("failed_recipe={recipe}\nexit_code={exit_code}\n"));
     if group == "pr-mutants" && runner_os == "Linux" {
         assert_eq!(fs::read_to_string(root.join("core-limit")).unwrap().trim(), "0");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout.matches("[anvil-resources]").count(), required_samples);
         let stored_samples = if failure == "log" { required_samples - 1 } else { required_samples };
-        assert_eq!(
-            fs::read_to_string(resources).unwrap().matches("[anvil-resources]").count(),
-            stored_samples
-        );
+        let stored = fs::read_to_string(resources).unwrap();
+        assert_eq!(stored.matches("[anvil-resources]").count(), stored_samples);
+        if failure == "debug-log" {
+            for text in [stdout.as_ref(), &stored] {
+                assert_eq!(text.matches("latest-debug-record").count(), 1);
+                assert!(!text.contains("earlier-debug-record"));
+            }
+        }
         if matches!(failure, "probe" | "log" | "core-restore") {
             assert!(stdout.contains("::warning::"));
         }
@@ -217,4 +227,9 @@ fn failed_core_routing_setup_does_not_start_recipe() {
 #[test]
 fn empty_original_core_routing_is_restored() {
     run_group("pr-mutants", "Linux", "github-hosted", 0, "empty-core-pattern");
+}
+
+#[test]
+fn debug_log_streams_only_the_latest_record_after_it_appears() {
+    run_group("pr-mutants", "Linux", "github-hosted", 0, "debug-log");
 }
