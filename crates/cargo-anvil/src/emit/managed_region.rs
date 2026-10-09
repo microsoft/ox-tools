@@ -721,6 +721,38 @@ yanked = \"deny\"
         );
     }
 
+    #[test]
+    fn xml_regions_keep_the_existing_drift_and_reconciliation_contract() {
+        let old_body = "  <Project Include=\"old.proj\" />\n";
+        let new_body = "  <Project Include=\"new.proj\" />\n";
+        let host = format!(
+            "<Project>\n  <ItemGroup Label=\"before\" />\n<!-- >>> anvil-managed: r -->\n{old_body}<!-- <<< anvil-managed: r -->\n  <Target Name=\"after\" />\n</Project>\n"
+        );
+        let request = ManagedRegionRequest::at_end("dirs.proj", "r", new_body, CommentSyntax::Xml);
+        let mut manifest = Manifest::default();
+        manifest.set_region("dirs.proj", "r", checksum_str(old_body));
+
+        let item = plan_managed_region(&manifest, Some(&host), request).unwrap();
+        assert_eq!(item.decision, Decision::Write);
+        assert_eq!(
+            item.spliced_host.as_deref(),
+            Some(concat!(
+                "<Project>\n",
+                "  <ItemGroup Label=\"before\" />\n",
+                "<!-- >>> anvil-managed: r -->\n",
+                "  <Project Include=\"new.proj\" />\n",
+                "<!-- <<< anvil-managed: r -->\n",
+                "  <Target Name=\"after\" />\n",
+                "</Project>\n",
+            ))
+        );
+
+        let edited = host.replace("old.proj", "user.proj");
+        let refusal = plan_managed_region(&manifest, Some(&edited), request).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::EditedRegion);
+        assert!(refusal.reason.to_string().contains("contains edits"));
+    }
+
     /// An update whose body disagrees with a hand-written value still has no
     /// safe output, so it refuses exactly as an introduction does — and the
     /// remedy the diagnostic names is one the user can actually carry out.

@@ -237,11 +237,14 @@ The tool produces a small set of files. They fall into three categories:
   since the last render** — claiming a file with no upstream churn produces zero
   noise.
 - **managed-region** — a user-composed file with one or more tool-managed sections
-  bracketed by sentinel comments. The sentinel pair (`# >>> anvil-managed: <id>` …
-  `# <<< anvil-managed: <id>`) delimits the region body and identifies it by stable ID;
-  the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
-  sentinels, the user's content is preserved byte-for-byte — except that first
-  adoption into a TOML host may relocate compatible hand-written settings, see
+  bracketed by complete-line sentinel comments. Hash hosts use
+  `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`, `//` hosts use the
+  equivalent line comments, and XML/MSBuild hosts use
+  `<!-- >>> anvil-managed: <id> -->` … `<!-- <<< anvil-managed: <id> -->`.
+  The pair delimits the region body and identifies it by stable ID; the manifest
+  tracks the last-rendered checksum per `(host, id)`. Outside the sentinels, the
+  user's content is preserved byte-for-byte — except that first adoption into a
+  TOML host may relocate compatible hand-written settings, see
   [updates.md](./updates.md#adopting-a-hand-written-table).
 - **user-authored** — files the user owns; the tool only reads them.
   `rust-toolchain.toml` and `.cargo/config.toml` fall in this category.

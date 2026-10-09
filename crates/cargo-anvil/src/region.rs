@@ -12,6 +12,8 @@
 //! …content owned by anvil…
 //! # <<< anvil-managed: <id>
 //! ```
+//! XML hosts use complete XML comment lines instead:
+//! `<!-- >>> anvil-managed: <id> -->`.
 //!
 //! The user's content outside the sentinels is preserved byte-for-byte, with
 //! a single exception: introducing a region into a TOML host removes a
@@ -31,14 +33,15 @@ use toml_edit::{Item, Key, RawString, Table};
 
 /// Comment syntax used by the host file.
 ///
-/// Both supported flavors today use `#`-prefixed comments (Justfiles,
-/// TOML, YAML). `//` is reserved for future hosts (e.g. JSON5).
+/// Markers always occupy a complete comment line in the host syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentSyntax {
     /// `#`-prefixed line comments — Justfile, TOML, YAML.
     Hash,
     /// `//`-prefixed line comments — JSON5 and friends.
     SlashSlash,
+    /// `<!-- ... -->` comments — XML and `MSBuild` project files.
+    Xml,
 }
 
 /// Where a newly rendered managed region is placed in its host file.
@@ -60,10 +63,44 @@ pub enum RegionPlacement {
 }
 
 impl CommentSyntax {
-    fn prefix(self) -> &'static str {
+    const ALL: [Self; 3] = [Self::Hash, Self::SlashSlash, Self::Xml];
+
+    fn marker(self, id: &str, opens: bool) -> String {
+        let direction = if opens { ">>>" } else { "<<<" };
         match self {
-            Self::Hash => "#",
-            Self::SlashSlash => "//",
+            Self::Hash => format!("# {direction} anvil-managed: {id}"),
+            Self::SlashSlash => format!("// {direction} anvil-managed: {id}"),
+            Self::Xml => format!("<!-- {direction} anvil-managed: {id} -->"),
+        }
+    }
+
+    fn marker_id(self, line: &str, opens: bool) -> Option<&str> {
+        let direction = if opens { ">>>" } else { "<<<" };
+        match self {
+            Self::Hash => line.strip_prefix(&format!("# {direction} anvil-managed:")).map(str::trim),
+            Self::SlashSlash => line.strip_prefix(&format!("// {direction} anvil-managed:")).map(str::trim),
+            Self::Xml => line
+                .strip_prefix(&format!("<!-- {direction} anvil-managed:"))
+                .and_then(|rest| rest.strip_suffix("-->"))
+                .map(str::trim),
+        }
+    }
+
+    fn is_header_comment(self, line: &str) -> bool {
+        match self {
+            Self::Hash => line
+                .strip_prefix('#')
+                .map(str::trim_start)
+                .is_some_and(|comment| !comment.starts_with(">>> anvil-managed:") && !comment.starts_with("<<< anvil-managed:")),
+            Self::SlashSlash => line
+                .strip_prefix("//")
+                .map(str::trim_start)
+                .is_some_and(|comment| !comment.starts_with(">>> anvil-managed:") && !comment.starts_with("<<< anvil-managed:")),
+            Self::Xml => line
+                .strip_prefix("<!--")
+                .and_then(|comment| comment.strip_suffix("-->"))
+                .map(str::trim)
+                .is_some_and(|comment| !comment.starts_with(">>> anvil-managed:") && !comment.starts_with("<<< anvil-managed:")),
         }
     }
 }
@@ -146,8 +183,8 @@ fn is_horizontal_whitespace(character: char) -> bool {
 /// The host is left exactly as found and the caller refuses the region.
 #[must_use]
 pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
-    let opener = format!("{} >>> anvil-managed: {id}", syntax.prefix());
-    let closer = format!("{} <<< anvil-managed: {id}", syntax.prefix());
+    let opener = syntax.marker(id, true);
+    let closer = syntax.marker(id, false);
     let markers: Vec<(ByteRange, bool)> = iterate_lines(text)
         .filter_map(|line| {
             let value = text[line.start..line.end].trim();
@@ -199,8 +236,8 @@ pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepa
 /// sentinels for the same id, an opening sentinel with no matching close,
 /// or a close before its open.
 pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
-    let opener = format!("{} >>> anvil-managed: {id}", syntax.prefix());
-    let closer = format!("{} <<< anvil-managed: {id}", syntax.prefix());
+    let opener = syntax.marker(id, true);
+    let closer = syntax.marker(id, false);
 
     let mut start_line: Option<ByteRange> = None;
     let mut end_line: Option<ByteRange> = None;
@@ -368,11 +405,7 @@ pub(crate) fn start_region_offset(text: &str, syntax: CommentSyntax) -> usize {
         .split_inclusive('\n')
         .take_while(|line| {
             let line = line.trim();
-            line.is_empty()
-                || line
-                    .strip_prefix(syntax.prefix())
-                    .map(str::trim_start)
-                    .is_some_and(|comment| !comment.starts_with(">>> anvil-managed:") && !comment.starts_with("<<< anvil-managed:"))
+            line.is_empty() || syntax.is_header_comment(line)
         })
         .map(str::len)
         .sum();
@@ -421,11 +454,8 @@ fn trailing_blank_line_len(text: &str) -> usize {
 }
 
 fn render_region(id: &str, body: &str, syntax: CommentSyntax, newline: &str) -> String {
-    let prefix = syntax.prefix();
     let mut out = String::with_capacity(body.len() + 80);
-    out.push_str(prefix);
-    out.push_str(" >>> anvil-managed: ");
-    out.push_str(id);
+    out.push_str(&syntax.marker(id, true));
     out.push_str(newline);
     for line in body.split_inclusive('\n') {
         let content = line
@@ -434,11 +464,21 @@ fn render_region(id: &str, body: &str, syntax: CommentSyntax, newline: &str) -> 
         out.push_str(content);
         out.push_str(newline);
     }
-    out.push_str(prefix);
-    out.push_str(" <<< anvil-managed: ");
-    out.push_str(id);
+    out.push_str(&syntax.marker(id, false));
     out.push_str(newline);
     out
+}
+
+/// Identify the syntax of a complete marker line for `id`, if present.
+pub(crate) fn comment_syntax_for_region(text: &str, id: &str) -> Option<CommentSyntax> {
+    CommentSyntax::ALL.into_iter().find(|syntax| {
+        let opener = syntax.marker(id, true);
+        let closer = syntax.marker(id, false);
+        iterate_lines(text).any(|line| {
+            let value = text[line.start..line.end].trim();
+            value == opener || value == closer
+        })
+    })
 }
 
 /// Splice the named region out of `text`, returning the host content
@@ -1320,17 +1360,14 @@ fn managed_region_ranges(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
 
 /// As [`managed_region_ranges`], paired with each region's id.
 fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {
-    let open = syntax.prefix().to_owned() + " >>> anvil-managed:";
-    let close = syntax.prefix().to_owned() + " <<< anvil-managed:";
-
     let mut ranges = Vec::new();
     let mut start = None;
     for line in iterate_lines(text) {
         let trimmed = text[line.start..line.end].trim();
-        if let Some(id) = trimmed.strip_prefix(&open) {
-            start.get_or_insert_with(|| (id.trim().to_owned(), line.start));
-        } else if let Some(closing_id) = trimmed.strip_prefix(&close)
-            && start.as_ref().is_some_and(|(id, _)| id == closing_id.trim())
+        if let Some(id) = syntax.marker_id(trimmed, true) {
+            start.get_or_insert_with(|| (id.to_owned(), line.start));
+        } else if let Some(closing_id) = syntax.marker_id(trimmed, false)
+            && start.as_ref().is_some_and(|(id, _)| id == closing_id)
             && let Some((id, open_at)) = start.take()
         {
             ranges.push((
@@ -2239,6 +2276,89 @@ mod tests {
         let text = "// >>> anvil-managed: x\nbody\n// <<< anvil-managed: x\n";
         let region = find_region(text, "x", CommentSyntax::SlashSlash).unwrap().unwrap();
         assert_eq!(region.body_str(), "body\n");
+    }
+
+    #[test]
+    fn xml_syntax_renders_a_complete_comment_line_pair() {
+        let new = upsert_region(
+            "",
+            "anvil-cloudbuild-projects",
+            "<Project Include=\"src/demo\" />\n",
+            CommentSyntax::Xml,
+        )
+        .unwrap();
+        assert_eq!(
+            new,
+            "<!-- >>> anvil-managed: anvil-cloudbuild-projects -->\n\
+             <Project Include=\"src/demo\" />\n\
+             <!-- <<< anvil-managed: anvil-cloudbuild-projects -->\n"
+        );
+    }
+
+    #[test]
+    fn xml_syntax_finds_and_updates_in_place_without_touching_surrounding_xml() {
+        let text = concat!(
+            "<?xml version=\"1.0\"?>\r\n",
+            "<Project>\r\n",
+            "  <ItemGroup Label=\"user-before\" />\r\n",
+            "  <!-- >>> anvil-managed: anvil-cloudbuild-projects -->\r\n",
+            "  <Project Include=\"old.proj\" />\r\n",
+            "  <!-- <<< anvil-managed: anvil-cloudbuild-projects -->\r\n",
+            "  <Target Name=\"UserAfter\" />\r\n",
+            "</Project>\r\n",
+        );
+        let region = find_region(text, "anvil-cloudbuild-projects", CommentSyntax::Xml).unwrap().unwrap();
+        assert_eq!(region.body_str(), "  <Project Include=\"old.proj\" />\r\n");
+
+        let updated = upsert_region(
+            text,
+            "anvil-cloudbuild-projects",
+            "  <Project Include=\"new.proj\" />\n",
+            CommentSyntax::Xml,
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            concat!(
+                "<?xml version=\"1.0\"?>\r\n",
+                "<Project>\r\n",
+                "  <ItemGroup Label=\"user-before\" />\r\n",
+                "<!-- >>> anvil-managed: anvil-cloudbuild-projects -->\r\n",
+                "  <Project Include=\"new.proj\" />\r\n",
+                "<!-- <<< anvil-managed: anvil-cloudbuild-projects -->\r\n",
+                "  <Target Name=\"UserAfter\" />\r\n",
+                "</Project>\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn xml_syntax_refuses_unpaired_markers() {
+        let text = "<Project>\n<!-- >>> anvil-managed: x -->\n<ItemGroup />\n</Project>\n";
+        assert!(
+            find_region(text, "x", CommentSyntax::Xml)
+                .unwrap_err()
+                .to_string()
+                .contains("no closing sentinel")
+        );
+        assert_eq!(repair_markers(text, "x", CommentSyntax::Xml), MarkerRepair::Unpaired);
+    }
+
+    #[test]
+    fn xml_marker_shaped_text_must_be_a_complete_xml_comment_line() {
+        let text = "<Project>\n\
+                    <PropertyGroup><Note>&lt;!-- >>> anvil-managed: x --&gt;</Note></PropertyGroup>\n\
+                    <!-- prefix >>> anvil-managed: x -->\n\
+                    <!-- >>> anvil-managed: x --> suffix\n\
+                    body\n\
+                    <!-- <<< anvil-managed: x --> suffix\n\
+                    </Project>\n";
+        assert_eq!(find_region(text, "x", CommentSyntax::Xml).unwrap(), None);
+        assert_eq!(
+            repair_markers(text, "x", CommentSyntax::Xml),
+            MarkerRepair::Repaired(text.to_owned())
+        );
+        assert_eq!(comment_syntax_for_region(text, "x"), None);
     }
 
     #[test]

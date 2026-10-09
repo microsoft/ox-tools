@@ -96,6 +96,13 @@ The region owns the header and its generated assignments. User-only settings
 belong outside the sentinels, directly after the closing marker and before the
 next table. They must not repeat the table header or a managed key.
 
+Markers are complete comment lines in the host's comment syntax. Hash and
+slash-slash hosts use `# >>> anvil-managed: <id>` and
+`// >>> anvil-managed: <id>` (with matching `<<<` closers). XML and MSBuild
+hosts use `<!-- >>> anvil-managed: <id> -->` and
+`<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
+element, attribute, or larger comment is ordinary user content.
+
 ### Strict ownership
 
 | State | Action |
@@ -268,11 +275,11 @@ Before ownership checks, remove redundant or unmatched marker **lines only**:
 | Two openers followed by a close | Keep the first opener and close; remove the duplicate opener, preserving intervening content. |
 | Opener followed by two closers | Keep the first complete pair; remove the extra close. Content after the first close stays unmanaged. |
 
-The same rules apply to `#` and `//` sentinels. Removed marker noise does not
-participate in body checksums. Cleanup is persisted even for otherwise in-sync
-regions and even if remaining content conflicts. Cleanup never blesses a changed
-non-marker body. Nested cross-id recovery and general broken-input repair are
-outside this contract.
+The same rules apply to `#`, `//`, and complete-line XML comment sentinels.
+Removed marker noise does not participate in body checksums. Cleanup is
+persisted even for otherwise in-sync regions and even if remaining content
+conflicts. Cleanup never blesses a changed non-marker body. Nested cross-id
+recovery and general broken-input repair are outside this contract.
 Retired markers in hosts receiving new regions are repaired before adoption
 and validation, using the same accumulated text through retirement. If two
 complete pairs share a retired id, only the first body is owned; the second
