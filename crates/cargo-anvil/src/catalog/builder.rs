@@ -8,20 +8,24 @@
 //! from it via [`Catalog::into_builder`] (or from empty via
 //! [`Catalog::builder`]) and customizes the identity and artifacts through
 //! the three uniform verbs, then calls [`CatalogBuilder::build`].
-//!
-//! See [`extensibility.md §4, §5`](../../docs/design/extensibility.md).
 
 use ohno::{AppError, bail};
 
 use crate::catalog::artifact::Artifact;
 use crate::catalog::meta::CliMeta;
+use crate::catalog::{HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
 use crate::checksum::checksum_str;
+
+// U+001F (unit separator) cannot appear in paths/ids and is vanishingly
+// unlikely in bodies, so it disambiguates the joined fields.
+const SEP: char = '\u{1f}';
 
 /// The set of artifacts a tool emits, plus its CLI identity.
 #[derive(Debug, Clone)]
 pub struct Catalog {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    toml_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
 }
 
 impl Catalog {
@@ -29,7 +33,11 @@ impl Catalog {
     /// ([`Catalog::anvil`], defined in the `anvil` module) and the builder go
     /// through this so the fields stay private to the reusable engine.
     pub(crate) fn from_parts(cli: CliMeta, artifacts: Vec<Artifact>) -> Self {
-        Self { cli, artifacts }
+        Self {
+            cli,
+            artifacts,
+            toml_array_paths: Vec::new(),
+        }
     }
 
     /// Start a new, empty catalog from a CLI identity.
@@ -38,6 +46,7 @@ impl Catalog {
         CatalogBuilder {
             cli,
             artifacts: Vec::new(),
+            toml_array_paths: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -48,6 +57,7 @@ impl Catalog {
         CatalogBuilder {
             cli: self.cli,
             artifacts: self.artifacts,
+            toml_array_paths: self.toml_array_paths,
             errors: Vec::new(),
         }
     }
@@ -64,19 +74,32 @@ impl Catalog {
         &self.artifacts
     }
 
+    /// The TOML array key components for this region identity, if opted in.
+    #[must_use]
+    pub fn toml_array_path(&self, region: &RegionSpec) -> Option<&[String]> {
+        self.toml_array_paths
+            .iter()
+            .find(|(host, id, _)| host == &region.host && id == &region.id)
+            .map(|(_, _, path)| path.as_slice())
+    }
+
     /// A `sha256:…` checksum over the whole catalog — every artifact's
-    /// identity and rendered body, in canonical (sorted) order.
+    /// identity, rendered body, and static TOML array selector metadata, in
+    /// canonical (sorted) order.
     ///
     /// Deterministic and independent of any repository: it depends only on
     /// the artifact set, not on artifact insertion order and not on the
     /// [`CliMeta`] identity. Two builds that share a `tool_version` but
     /// differ in any artifact (an extra file, an overridden body, a swapped
-    /// backend file) produce different checksums. See
-    /// [`updates.md §1`](../../docs/design/updates.md) and
-    /// [`extensibility.md §5.1`](../../docs/design/extensibility.md).
+    /// backend file, or a changed array selector) produce different checksums.
     #[must_use]
     pub fn checksum(&self) -> String {
         let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
+        entries.extend(
+            self.toml_array_paths
+                .iter()
+                .map(|(host, id, path)| format!("array-path{SEP}{}{SEP}{}{SEP}{path:?}", host_repr(host), id.as_str())),
+        );
         entries.sort();
         checksum_str(&entries.join("\n"))
     }
@@ -86,9 +109,6 @@ impl Catalog {
 /// (including gate / syntax) followed by its rendered body. The leading
 /// fields make sorting these strings a canonical, order-independent ordering.
 fn canonical_repr(artifact: &Artifact) -> String {
-    // U+001F (unit separator) cannot appear in paths/ids and is vanishingly
-    // unlikely in bodies, so it disambiguates the joined fields.
-    const SEP: char = '\u{1f}';
     match artifact {
         Artifact::OwnedFile(spec) => {
             format!("file{SEP}{}{SEP}gate={}{SEP}{}", spec.path, gate_repr(spec.gate), spec.body)
@@ -135,6 +155,7 @@ fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
 pub struct CatalogBuilder {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    toml_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
     errors: Vec<String>,
 }
 
@@ -184,6 +205,35 @@ impl CatalogBuilder {
         self
     }
 
+    /// Append an ordinary region with opt-in TOML array placement.
+    ///
+    /// Duplicate host/id identities are rejected, including ordinary regions.
+    /// Replacement preserves the selector; removal removes it.
+    /// The path must contain at least one TOML key component (not a dotted
+    /// expression); quoted or empty TOML keys are supported as literal components.
+    /// The host must have a `.toml` suffix (case insensitive).
+    /// The region must use hash comments and contain only TOML string entries
+    /// and comments, with a trailing comma after the last entry.
+    /// Actual full-line managed-region sentinel comments are not valid body content;
+    /// marker-looking string values remain valid entries.
+    /// Invalid specifications are reported by [`Self::build`].
+    /// Ownership migrations and dependencies on other regions' table headers refuse.
+    #[must_use]
+    pub fn with_toml_array_region(mut self, spec: TomlArrayRegionSpec) -> Self {
+        let placement = (spec.region.host.clone(), spec.region.id, spec.path);
+        let artifact = Artifact::region(spec.region);
+        if self.position_of(&artifact).is_some() {
+            self.errors.push(format!(
+                "with_toml_array_region: an artifact with identity {:?} already exists; use replace_artifact to override it",
+                artifact.key()
+            ));
+        } else {
+            self.toml_array_paths.push(placement);
+            self.artifacts.push(artifact);
+        }
+        self
+    }
+
     /// Override an existing artifact in place (preserving its position).
     /// Records an error if no artifact with that identity exists.
     #[must_use]
@@ -208,6 +258,10 @@ impl CatalogBuilder {
     pub fn without_artifact(mut self, artifact: Artifact) -> Self {
         match self.position_of(&artifact) {
             Some(index) => {
+                if let Artifact::Region(region) = &artifact {
+                    self.toml_array_paths
+                        .retain(|(host, id, _)| host != &region.host || id != &region.id);
+                }
                 self.artifacts.remove(index);
             }
             None => self
@@ -222,18 +276,42 @@ impl CatalogBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if any `with_artifact` / `replace_artifact` /
+    /// Returns an error if any `with_artifact` / `with_toml_array_region` / `replace_artifact` /
     /// `without_artifact` call violated its add/override/remove invariant, or
-    /// if an owned file under `justfiles/` is not a `.just` recipe.
+    /// if an owned file under `justfiles/` is not a `.just` recipe. TOML array
+    /// regions also fail validation for an empty selector path, non-hash syntax,
+    /// invalid TOML entry bodies, generated ownership sentinel comments, or a
+    /// missing final comma on a nonempty body.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let (_, _, path) = self
+                .toml_array_paths
+                .iter()
+                .find(|(host, id, _)| host == &region.host && id == &region.id)?;
+            let spec = TomlArrayRegionSpec {
+                region: region.clone(),
+                path: path.clone(),
+            };
+            crate::emit::toml_array_region::validate_spec(&spec)
+                .err()
+                .map(|refusal| format!("TOML array region '{}': {}", spec.region.id, refusal.reason))
+        }));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let toml_host = self.toml_array_paths.iter().any(|(host, _, _)| host == &region.host);
+            (toml_host && region.syntax != crate::region::CommentSyntax::Hash)
+                .then(|| format!("region '{}' has comment syntax incompatible with its TOML array host", region.id))
+        }));
         if !errors.is_empty() {
             bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, errors.join("\n  - "));
         }
         Ok(Catalog {
             cli: self.cli,
             artifacts: self.artifacts,
+            toml_array_paths: self.toml_array_paths,
         })
     }
 }
@@ -263,8 +341,35 @@ fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::CommentSyntax;
     use crate::anvil::artifacts;
-    use crate::{CommentSyntax, HostSelector, RegionId, RegionSpec};
+
+    #[test]
+    fn rejects_conflicting_array_host_comment_syntax() {
+        let array = TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned()],
+        };
+        let error = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(array)
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("other"),
+                body: "setting = true\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid catalog for 'anvil':\n  - region 'other' has comment syntax incompatible with its TOML array host"
+        );
+    }
 
     #[test]
     fn subcommand_derives_bin_name() {
@@ -392,6 +497,69 @@ mod tests {
             .unwrap();
         assert_eq!(catalog.artifacts().len(), 1);
         assert_eq!(catalog.cli().subcommand, "solo");
+    }
+
+    #[test]
+    fn without_array_artifact_removes_only_its_selector_and_checksum_contribution() {
+        let array = |host: &str, id: &'static str| TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let removed = array("config.toml", "entries");
+        let same_host = array("config.toml", "other");
+        let same_id = array("other.toml", "entries");
+        let expected = Catalog::builder(CliMeta::new("tool"))
+            .with_toml_array_region(same_host.clone())
+            .with_toml_array_region(same_id.clone())
+            .build()
+            .unwrap();
+        let before = expected
+            .clone()
+            .into_builder()
+            .with_toml_array_region(removed.clone())
+            .build()
+            .unwrap();
+        let after = before
+            .clone()
+            .into_builder()
+            .without_artifact(Artifact::region(removed.region.clone()))
+            .build()
+            .unwrap();
+        assert_eq!(after.artifacts(), expected.artifacts());
+        assert_eq!(after.toml_array_path(&removed.region), None);
+        assert_eq!(after.toml_array_path(&same_host.region), Some(same_host.path.as_slice()));
+        assert_eq!(after.toml_array_path(&same_id.region), Some(same_id.path.as_slice()));
+        assert_eq!(after.checksum(), expected.checksum());
+        assert_ne!(after.checksum(), before.checksum());
+    }
+
+    #[test]
+    fn without_owned_file_preserves_array_selector_and_checksum_contribution() {
+        let array = TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let expected = Catalog::builder(CliMeta::new("tool"))
+            .with_toml_array_region(array.clone())
+            .build()
+            .unwrap();
+        let removed = Artifact::owned_file("removed.txt", "managed");
+        let before = expected.clone().into_builder().with_artifact(removed.clone()).build().unwrap();
+        let after = before.clone().into_builder().without_artifact(removed).build().unwrap();
+        assert_eq!(after.artifacts(), expected.artifacts());
+        assert_eq!(after.toml_array_path(&array.region), Some(array.path.as_slice()));
+        assert_eq!(after.checksum(), expected.checksum());
+        assert_ne!(after.checksum(), before.checksum());
     }
 
     #[test]

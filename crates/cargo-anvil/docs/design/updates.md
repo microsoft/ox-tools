@@ -351,3 +351,7 @@ updates still apply safe items and preserve tracking for refused regions.
 anvil detects the backend from the origin remote; `--no-backends` emits local
 artifacts only. Previously tracked files for deselected backends follow the
 owned-file retirement rules. Backend selection does not change region ownership.
+## Shared TOML array entries
+
+The opt-in string-entry API has a deliberately narrower contract than ordinary
+whole-table regions: see [Required strings in shared TOML arrays](array-regions.md).

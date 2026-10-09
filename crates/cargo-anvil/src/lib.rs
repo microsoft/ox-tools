@@ -450,7 +450,7 @@ use std::process::ExitCode;
 // is deliberately not surfaced at the crate root.
 pub use anvil::artifacts;
 pub use backend::Backend;
-pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
+pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec, TomlArrayRegionSpec};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

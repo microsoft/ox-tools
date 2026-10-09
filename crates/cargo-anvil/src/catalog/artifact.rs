@@ -9,8 +9,7 @@
 //! catalog's artifacts and dispatches each to the generic owned-file /
 //! managed-region drivers in [`crate::emit`].
 //!
-//! See [`extensibility.md §4`](../../docs/design/extensibility.md) for the
-//! design rationale. The on-disk vocabulary (`anvil-managed` sentinels,
+//! The on-disk vocabulary (`anvil-managed` sentinels,
 //! `justfiles/anvil/`, `.anvil.lock`) is fixed engine format — an artifact
 //! never parameterizes it.
 
@@ -100,6 +99,24 @@ pub struct RegionSpec {
     pub syntax: CommentSyntax,
 }
 
+/// A managed region containing required string entries of a TOML array.
+///
+/// The table and array delimiters remain repository-owned. `region.body`
+/// contains string entries, including a trailing comma, and uses hash comments.
+/// Hosts require a `.toml` suffix and a selector through normal tables.
+/// Scaffolding must be independent of other regions; ownership migrations refuse.
+/// Identity is still the region's host and id, not its array selector.
+///
+/// Like [`RegionSpec`], this is editable catalog input, not a validated
+/// catalog. [`super::CatalogBuilder::build`] validates its path and body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TomlArrayRegionSpec {
+    /// Ordinary region identity, content, and comment syntax.
+    pub region: RegionSpec,
+    /// Parsed TOML key components, for example `["plugins", "default"]`.
+    pub path: Vec<String>,
+}
+
 /// One catalog artifact: an owned file or a managed region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Artifact {
@@ -187,6 +204,15 @@ impl Artifact {
     #[must_use]
     pub fn region(spec: RegionSpec) -> Self {
         Self::Region(spec)
+    }
+
+    /// The region specification, if this artifact is a managed region.
+    #[must_use]
+    pub(crate) fn region_spec(&self) -> Option<&RegionSpec> {
+        match self {
+            Self::OwnedFile(_) => None,
+            Self::Region(spec) => Some(spec),
+        }
     }
 
     /// Construct a per-member managed region (`EachMemberManifest` + `Hash`
