@@ -867,27 +867,33 @@ fn commit_workspace(dir: &TempDir) {
             .arg(dir.path())
             .args(arguments)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .output()
             .expect("git should start")
     };
+    let assert_git = |arguments: &[&str]| {
+        let output = git(arguments);
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
 
-    assert!(git(&["init", "--quiet"]).success());
-    assert!(git(&["add", "Cargo.toml", "src"]).success());
-    assert!(
-        git(&[
-            "-c",
-            "user.name=cargo-gamma",
-            "-c",
-            "user.email=cargo-gamma@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture",
-        ])
-        .success()
-    );
+    assert_git(&["init", "--quiet"]);
+    assert_git(&["config", "core.autocrlf", "false"]);
+    assert_git(&["config", "core.safecrlf", "false"]);
+    assert_git(&["add", "Cargo.toml", "src"]);
+    assert_git(&[
+        "-c",
+        "user.name=cargo-gamma",
+        "-c",
+        "user.email=cargo-gamma@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+    ]);
 }
 
 fn seed_record(dir: &TempDir, population: &[(String, String)]) {

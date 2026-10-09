@@ -44,46 +44,46 @@ const CODE_REVIEW_SKILL: &str = include_str!("../../../templates/github/code-rev
 /// Test review rules linked from the code review skill.
 const TEST_REVIEW_RULES: &str = include_str!("../../../templates/github/test-review.md");
 
-/// `.github/actions/anvil-setup/action.yml`.
+/// `.anvil/github/actions/setup/action.yml`.
 #[inline]
 #[must_use]
 pub fn setup_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-setup/action.yml", SETUP_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/setup/action.yml", SETUP_ACTION)
 }
 
-/// `.github/actions/anvil-setup/just-problem-matcher.json`.
+/// `.anvil/github/actions/setup/just-problem-matcher.json`.
 #[inline]
 #[must_use]
 pub fn just_problem_matcher() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
-        ".github/actions/anvil-setup/just-problem-matcher.json",
+        ".anvil/github/actions/setup/just-problem-matcher.json",
         JUST_PROBLEM_MATCHER,
     )
 }
 
-/// `.github/actions/anvil-run-group/action.yml`.
+/// `.anvil/github/actions/run-group/action.yml`.
 #[inline]
 #[must_use]
 pub fn run_group_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/run-group/action.yml", RUN_GROUP_ACTION)
 }
 
-/// `.github/actions/anvil-report-status/action.yml`.
+/// `.anvil/github/actions/report-status/action.yml`.
 #[inline]
 #[must_use]
 pub fn report_status_action() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
-        ".github/actions/anvil-report-status/action.yml",
+        ".anvil/github/actions/report-status/action.yml",
         REPORT_STATUS_ACTION,
     )
 }
 
-/// `.github/actions/anvil-impact/action.yml`.
+/// `.anvil/github/actions/impact/action.yml`.
 #[must_use]
 pub fn impact_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-impact/action.yml", IMPACT_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/impact/action.yml", IMPACT_ACTION)
 }
 
 /// `.github/workflows/anvil-pr-impl.yml` — the PR reusable workflow.
@@ -170,21 +170,21 @@ mod tests {
     fn artifacts_keep_their_emission_order() {
         let paths: Vec<_> = all()
             .into_iter()
-            .map(|artifact| {
-                let Artifact::OwnedFile(spec) = artifact else {
-                    panic!("GitHub artifacts must be owned files");
-                };
-                spec.path
+            .map(|artifact| match artifact {
+                Artifact::OwnedFile(spec) => spec.path,
+                Artifact::OwnedFileSection(_) | Artifact::Region(_) => {
+                    panic!("GitHub artifacts must be owned files")
+                }
             })
             .collect();
         assert_eq!(
             paths,
             [
-                ".github/actions/anvil-setup/action.yml",
-                ".github/actions/anvil-setup/just-problem-matcher.json",
-                ".github/actions/anvil-run-group/action.yml",
-                ".github/actions/anvil-report-status/action.yml",
-                ".github/actions/anvil-impact/action.yml",
+                ".anvil/github/actions/setup/action.yml",
+                ".anvil/github/actions/setup/just-problem-matcher.json",
+                ".anvil/github/actions/run-group/action.yml",
+                ".anvil/github/actions/report-status/action.yml",
+                ".anvil/github/actions/impact/action.yml",
                 ".github/workflows/anvil-pr-impl.yml",
                 ".github/workflows/anvil-scheduled-impl.yml",
                 ".github/workflows/anvil-pr.yml",
@@ -233,7 +233,7 @@ mod tests {
             "Cargo home must be restored before Just is bootstrapped"
         );
         assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
-        assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_ACTION.contains("$minimum = [version]'1.47.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn run_group_action_captures_and_reports_results() {
-        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
+        assert!(RUN_GROUP_ACTION.contains("uses: ./.anvil/github/actions/setup"));
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
         assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
         assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
@@ -301,7 +301,7 @@ mod tests {
             reporter.contains("if: always()"),
             "reporting must run after the authoritative recipe step fails"
         );
-        assert!(reporter.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(reporter.contains("uses: ./.anvil/github/actions/report-status"));
         assert!(
             reporter.contains("exit_code: ${{ steps.run.outputs.exit_code }}"),
             "the reporter must consume the exit code recorded before failure propagation"
@@ -447,10 +447,11 @@ export -f just
     fn impact_action_uses_group_none_and_runs_the_shared_recipe() {
         // The impact action reuses anvil-setup (group=none) + the cargo-delta
         // install, then runs the same `just anvil-impact` recipe adopters run
-        // locally and uploads the whole cache as a per-OS artifact. The include
-        // lists reach group jobs through that downloaded cache, never job
+        // locally and uploads the whole cache as a per-OS artifact. The package
+        // files reach group jobs through that downloaded cache, never job
         // outputs, so CI and local execution stay identical by construction.
         assert!(IMPACT_ACTION.contains("group: none"));
+        assert!(IMPACT_ACTION.contains("just anvil-tool-cargo-each-install binstall"));
         assert!(IMPACT_ACTION.contains("just anvil-tool-cargo-delta-install binstall"));
         assert!(IMPACT_ACTION.contains("run: just anvil-impact"));
         assert!(IMPACT_ACTION.contains("uses: actions/upload-artifact"));
@@ -527,7 +528,7 @@ export -f just
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
             4,
-            "both impact jobs plus SemVer and mutation checks must use the event-specific base"
+            "both impact jobs plus the fast and mutation group jobs must use the event-specific base"
         );
         for group in PR_GROUPS {
             assert!(
@@ -536,7 +537,7 @@ export -f just
             );
         }
         assert_eq!(
-            PR_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            PR_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/run-group").count(),
             PR_GROUPS.len(),
             "every PR group job must use the shared group action"
         );
@@ -614,7 +615,7 @@ export -f just
         assert!(publisher_permissions.contains("\n    permissions:\n      issues: write"));
         assert!(!publisher_permissions.contains("contents: read"));
         assert_eq!(
-            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/run-group").count(),
             SCHEDULED_GROUPS.len(),
             "every scheduled group job must use the shared group action"
         );
@@ -948,7 +949,7 @@ async function scenario(items) {
             .1;
         assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
         assert!(validation_caller.contains("statuses: write"));
-        assert!(validation_caller.contains("pull-requests: write"));
+        assert!(!validation_caller.contains("pull-requests: write"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));

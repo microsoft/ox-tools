@@ -19,63 +19,18 @@
 # variable (e.g. an unexpanded pipeline macro) is a real error and fails
 # the check loudly rather than silently passing.
 
+anvil_pr_title := env("PR_TITLE", "")
+anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'
+anvil_pr_title_error := "PR title '" + anvil_pr_title + "' does not match the accepted Conventional Commits subset.\nAllowed patterns: <type>: <description>, <type>(<scope>): <description>, <type>!: <description>, <type>(<scope>)!: <description>\nAllowed types (case-insensitive): feat, fix, chore, docs, refactor, test, build, ci, perf, revert"
+
 # Validate the pull request title.
-[script("pwsh", "-NoProfile")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
-    $title = $env:PR_TITLE
-    if (-not $title) {
-        Write-Host 'anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation'
-        exit 0
-    }
+    {{ if anvil_pr_title == "" { "echo " + quote("anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation") } else if anvil_pr_title =~ anvil_pr_title_pattern { "# PR title matches the accepted Conventional Commits subset" } else { error(anvil_pr_title_error) } }}
 
-    # These human-readable formats are also the validation source of truth.
-    $allowedTypes = @('feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'build', 'ci', 'perf', 'revert')
-    $allowedPatterns = @(
-        '<type>: <description>'
-        '<type>(<scope>): <description>'
-        '<type>!: <description>'
-        '<type>(<scope>)!: <description>'
-    )
-    $placeholderRegex = @{
-        '<type>' = '(?:' + (($allowedTypes | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
-        '<scope>' = '[^)]+'
-        '<description>' = '.+'
-    }
-    $titlePatterns = $allowedPatterns | ForEach-Object {
-        # Escape first, expand second: escaping turns the display syntax into
-        # literal regex, after which the trusted fragments above are injected.
-        # Expanding first would escape those fragments and match them literally.
-        $pattern = [regex]::Escape($_)
-        foreach ($placeholder in $placeholderRegex.GetEnumerator()) {
-            $pattern = $pattern.Replace([regex]::Escape($placeholder.Key), $placeholder.Value)
-        }
-        $pattern
-    }
-    # Anchored at both ends so a title cannot smuggle extra lines past a
-    # matching prefix. `$` rather than `\z` leaves a lone trailing newline
-    # tolerated, which costs nothing and avoids failing on a title source
-    # that terminates its value.
-    $titleRegex = '^(?:' + ($titlePatterns -join '|') + ')$'
-
-    # The accepted forms are a deliberate subset of Conventional Commits, so the
-    # diagnostic names the subset rather than claiming the full grammar.
-    if ($title -notmatch $titleRegex) {
-        $diagnostic = @(
-            "PR title '$title' does not match the accepted Conventional Commits subset."
-            'Allowed patterns:'
-            $allowedPatterns | ForEach-Object { "  - $_" }
-            'Allowed types (case-insensitive): ' + ($allowedTypes -join ', ')
-        )
-        Write-Error ($diagnostic -join [Environment]::NewLine)
-        exit 1
-    }
-
-# pr-title is a pwsh script; no cargo tool to install.
-
-# Prepare the PowerShell prerequisite for pull request title validation.
+# PR-title validation is a Just expression; there is no tool to install.
 [group("anvil-setup")]
-anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-setup installer="install":
 
 # Validate prerequisites for the `anvil-pr-title` recipe.
 [group("anvil-setup")]
-anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
+anvil-pr-title-validate-prereqs:
