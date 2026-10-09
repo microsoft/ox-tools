@@ -311,7 +311,7 @@ fn build_plan_with_hosts(
     Ok(plan)
 }
 
-type ArrayHostPaths = HashMap<String, Vec<Vec<String>>>;
+type ArrayHostPaths = std::collections::BTreeMap<String, Vec<Vec<String>>>;
 
 fn array_host_inputs(
     repo_root: &Path,
@@ -1388,6 +1388,79 @@ mod tests {
     }
 
     #[test]
+    fn toml_array_retirement_preserves_adjacent_repository_bytes() {
+        let catalog = array_catalog(None, true);
+        let empty = Catalog::builder(catalog.cli().clone()).build().unwrap();
+        for newline in ["\n", "\r\n"] {
+            for tail in ["\n\"user\"]\n", "\n\n# user\n\"user\"]", " \t\n\"user\"]\n", "]\n"] {
+                let source = format!("[plugins]\ndefault = [\n{tail}").replace('\n', newline);
+                let introduced = array_plan(&source, &Manifest::default(), &catalog).unwrap();
+                let managed = introduced.items()[0].spliced_host.as_ref().unwrap();
+                let manifest = introduced.projected_manifest(&Manifest::default());
+                let retired = array_plan(managed, &manifest, &empty).unwrap();
+                assert_eq!(retired.items().len(), 1);
+                assert_eq!(retired.items()[0].decision, Decision::Remove);
+                assert_eq!(retired.items()[0].spliced_host.as_deref(), Some(source.as_str()));
+                assert_eq!(retired.projected_manifest(&manifest).regions.len(), 0);
+                let emptied = managed.replace(&format!("  \"required\",{newline}"), "");
+                let retired_empty = array_plan(&emptied, &manifest, &empty).unwrap();
+                assert_eq!(retired_empty.items()[0].spliced_host.as_deref(), Some(source.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn toml_array_preflight_leaves_live_ordinary_hosts_alone() {
+        let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("settings"),
+                body: "setting = true\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "settings", checksum_str("setting = true\n"));
+        for text in ["setting = true\n", "not valid TOML\n"] {
+            let mut hosts = memory_hosts();
+            hosts.set("config.toml", text.to_owned());
+            let (paths, originals) = array_host_inputs(
+                Path::new("in-memory-array-tests"),
+                &Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+                &manifest,
+                &catalog,
+                &mut hosts,
+            )
+            .unwrap();
+            assert_eq!(paths, ArrayHostPaths::new());
+            assert_eq!(originals, HashMap::new());
+        }
+    }
+
+    #[test]
+    fn toml_array_invalid_retirement_refuses_before_producing_a_plan() {
+        let source = "[plugins]\ndefault = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "entries", checksum_str("\"required\",\n"));
+        let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
+        let refusal = crate::emit::toml_array_region::existing_array_paths(source).unwrap_err();
+        assert_eq!(
+            array_plan(source, &manifest, &empty).unwrap_err().to_string(),
+            array_plan_refusal("config.toml", &refusal).to_string()
+        );
+        // A declared array without historical ownership must also refuse at preflight.
+        let catalog = array_catalog(None, true);
+        assert_eq!(
+            array_plan(source, &Manifest::default(), &catalog).unwrap_err().to_string(),
+            array_plan_refusal("config.toml", &refusal).to_string()
+        );
+    }
+
+    #[test]
     fn toml_array_plan_lifecycle_preserves_repository_and_schema_one() {
         let catalog = array_catalog(None, true);
         let source = "# user\n[plugins]\ndefault = ['required', \"user\", { option = true }]\n";
@@ -1717,7 +1790,10 @@ mod tests {
             &mut hosts,
         )
         .unwrap_err();
-        assert!(error.to_string().starts_with("ambiguous casing for TOML array host:"));
+        assert_eq!(
+            error.to_string(),
+            "ambiguous casing for TOML array host: CONFIG.toml and config.toml"
+        );
     }
 
     fn write(path: &Path, contents: &str) {

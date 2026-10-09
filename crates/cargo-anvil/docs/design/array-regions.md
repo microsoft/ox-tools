@@ -39,7 +39,10 @@ Updates replace only the recorded body. Matching content is in sync; an
 empty body is regenerated; an edited body that matches neither the recorded
 checksum nor the current template refuses. Retirement removes a clean or
 empty body and its markers, preserves repository entries and scaffolding,
-and drops its lock entry. Edited retirements retain their ownership record
+and drops its lock entry. Adjacent repository blank lines are preserved;
+unlike ordinary regions, array retirement removes exactly the sentinel
+lines and body, without consuming a separator blank line.
+Edited retirements retain their ownership record
 until reconciled. Removing the final catalog declaration still uses the
 TOML-aware scanner, derived from the host suffix.
 
