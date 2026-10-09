@@ -358,7 +358,7 @@ pub(crate) fn plan_toml_array_region_with_retirements(
         placement: RegionPlacement::End,
         newline: Some(newline),
     };
-    plan_region_with_splice(manifest, host_text, request, || {
+    plan_region_with_splice(manifest, host_text, request, crate::region::HostScanner::Toml, || {
         let spliced = if let Some(region) = region {
             format!("{}{}{}", &base[..region.start_line.start], rendered, &base[region.end_line.end..])
         } else {

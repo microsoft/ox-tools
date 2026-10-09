@@ -1,4 +1,4 @@
-version = 1
+version = 2
 tool = "anvil"
 tool_version = "0.13.0"
 catalog_checksum = "sha256:dfaf58166631905ff5990c0dbf4741a15c9db94d33804212faad51d7f9c3790b"
@@ -453,3 +453,115 @@ checksum = "sha256:1a3c6aae0ff88f8b81d96b8ebea5580173ec87b91f020b11c7c6b7ad4b168
 host = "spellcheck.toml"
 id = "anvil-spellcheck-root"
 checksum = "sha256:fa2a5eb89b1bf9a8631b7c44b6dcbc2b863b0cdee6548f17aa2b8e44cd989276"
+
+[[host]]
+path = ".anvil/container/Dockerfile"
+scanner = "lines"
+
+[[host]]
+path = ".delta.toml"
+scanner = "toml"
+
+[[host]]
+path = ".gitattributes"
+scanner = "lines"
+
+[[host]]
+path = "Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "Justfile"
+scanner = "lines"
+
+[[host]]
+path = "clippy.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/automation/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-anvil/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-aprz-lib/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-aprz/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-coverage-gate/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-each/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-ensure-no-default-features/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-attrs-impl/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-attrs/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-engine/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-lib/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-process/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-rt/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma-unsafe/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-gamma/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-heather/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-unique-target-names/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo-unused-deps/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "crates/cargo_ensure_no_cyclic_deps/Cargo.toml"
+scanner = "toml"
+
+[[host]]
+path = "deny.toml"
+scanner = "toml"
+
+[[host]]
+path = "rustfmt.toml"
+scanner = "toml"
+
+[[host]]
+path = "spellcheck.toml"
+scanner = "toml"

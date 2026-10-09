@@ -451,7 +451,7 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec, TomlArrayRegionSpec};
-pub use region::CommentSyntax;
+pub use region::{CommentSyntax, HostScanner};
 
 /// One-call entry point for a tool built on the anvil engine.
 ///

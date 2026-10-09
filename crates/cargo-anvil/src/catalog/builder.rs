@@ -216,6 +216,8 @@ impl CatalogBuilder {
     /// Actual full-line managed-region sentinel comments are not valid body content;
     /// marker-looking string values and quoted keys remain valid entries.
     /// Invalid specifications are reported by [`Self::build`].
+    /// Registration declares TOML for the whole host, regardless of its suffix.
+    /// Ordinary neighbors use that scanner too; incompatible comment syntax refuses.
     #[must_use]
     pub fn with_toml_array_region(mut self, spec: TomlArrayRegionSpec) -> Self {
         let placement = (spec.region.host.clone(), spec.region.id, spec.path);
@@ -297,6 +299,12 @@ impl CatalogBuilder {
                 .err()
                 .map(|refusal| format!("TOML array region '{}': {}", spec.region.id, refusal.reason))
         }));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let toml_host = self.toml_array_paths.iter().any(|(host, _, _)| host == &region.host);
+            (toml_host && region.syntax != crate::region::CommentSyntax::Hash)
+                .then(|| format!("region '{}' has comment syntax incompatible with its TOML array host", region.id))
+        }));
         if !errors.is_empty() {
             bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, errors.join("\n  - "));
         }
@@ -335,6 +343,33 @@ mod tests {
     use super::*;
     use crate::CommentSyntax;
     use crate::anvil::artifacts;
+
+    #[test]
+    fn provenance_rejects_conflicting_array_host_comment_syntax() {
+        let array = TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned()],
+        };
+        let error = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(array)
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("other"),
+                body: "setting = true\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid catalog for 'anvil':\n  - region 'other' has comment syntax incompatible with its TOML array host"
+        );
+    }
 
     #[test]
     fn subcommand_derives_bin_name() {

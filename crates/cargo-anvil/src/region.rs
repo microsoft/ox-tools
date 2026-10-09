@@ -41,6 +41,67 @@ pub enum CommentSyntax {
     SlashSlash,
 }
 
+/// Lexical ownership boundaries shared by every region in a host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostScanner {
+    /// Only actual TOML comment tokens can carry sentinels.
+    Toml,
+    /// Full lines are interpreted using the region's comment syntax.
+    Lines,
+}
+
+impl HostScanner {
+    pub(crate) fn for_path(host: &str) -> Self {
+        if host.to_ascii_lowercase().ends_with(".toml") {
+            Self::Toml
+        } else {
+            Self::Lines
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Toml => "toml",
+            Self::Lines => "lines",
+        }
+    }
+
+    pub(crate) fn find<'a>(self, text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
+        match self {
+            Self::Toml => find_toml_region(text, id, syntax),
+            Self::Lines => find_region(text, id, syntax),
+        }
+    }
+
+    pub(crate) fn repair(self, text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
+        match self {
+            Self::Toml => repair_toml_markers(text, id, syntax),
+            Self::Lines => repair_markers(text, id, syntax),
+        }
+    }
+
+    pub(crate) fn remove(self, text: &str, id: &str, syntax: CommentSyntax) -> Result<String, AppError> {
+        match self {
+            Self::Toml => remove_toml_region(text, id, syntax),
+            Self::Lines => remove_region(text, id, syntax),
+        }
+    }
+
+    pub(crate) fn insert_after(self, text: &str, id: &str, extra: &str, syntax: CommentSyntax) -> Result<String, AppError> {
+        match self {
+            Self::Toml => insert_after_located_region(text, id, extra, || self.find(text, id, syntax)),
+            Self::Lines => insert_after_region(text, id, extra, syntax),
+        }
+    }
+
+    pub(crate) fn ids(self, text: &str, syntax: CommentSyntax) -> Vec<String> {
+        match self {
+            Self::Toml => toml_region_ids(text, syntax),
+            Self::Lines => managed_region_ids(text, syntax),
+        }
+    }
+}
+
 /// Where a newly rendered managed region is placed in its host file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionPlacement {
@@ -213,14 +274,6 @@ pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result
 /// Locate ownership only at TOML comment tokens, including in a duplicate-table intermediate.
 pub(crate) fn find_toml_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
     find_region_in_lines(text, id, syntax, toml_comment_lines(text))
-}
-
-pub(crate) fn find_host_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax, host: &str) -> Result<Option<Region<'a>>, AppError> {
-    if host.to_ascii_lowercase().ends_with(".toml") {
-        find_toml_region(text, id, syntax)
-    } else {
-        find_region(text, id, syntax)
-    }
 }
 
 /// Full comment lines retain original byte bounds; quoted keys and string data never qualify.
@@ -527,14 +580,6 @@ pub(crate) fn remove_toml_region(text: &str, id: &str, syntax: CommentSyntax) ->
     Ok(remove_located_region(text, find_toml_region(text, id, syntax)?))
 }
 
-pub(crate) fn remove_host_region(text: &str, id: &str, syntax: CommentSyntax, host: &str) -> Result<String, AppError> {
-    if host.to_ascii_lowercase().ends_with(".toml") {
-        remove_toml_region(text, id, syntax)
-    } else {
-        remove_region(text, id, syntax)
-    }
-}
-
 fn remove_located_region(text: &str, region: Option<Region<'_>>) -> String {
     let Some(region) = region else {
         return text.to_owned();
@@ -582,15 +627,7 @@ pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyn
     insert_after_located_region(text, id, extra, || find_region(text, id, syntax))
 }
 
-pub(crate) fn insert_after_host_region(text: &str, id: &str, extra: &str, syntax: CommentSyntax, host: &str) -> Result<String, AppError> {
-    if host.to_ascii_lowercase().ends_with(".toml") {
-        insert_after_located_region(text, id, extra, || find_toml_region(text, id, syntax))
-    } else {
-        insert_after_region(text, id, extra, syntax)
-    }
-}
-
-fn insert_after_located_region<'a>(
+pub(crate) fn insert_after_located_region<'a>(
     text: &'a str,
     id: &str,
     extra: &str,

@@ -21,14 +21,11 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
+use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
-use crate::region::{
-    CommentSyntax, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, managed_region_ids,
-    repair_markers,
-};
+use crate::region::{CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement};
 #[cfg(test)]
 use crate::region::{remove_region, upsert_region};
 use crate::workspace::{self, Workspace};
@@ -219,6 +216,12 @@ fn build_plan_with_hosts(
             }
         }
     }
+    let resolved_manifest = resolve_host_scanners(repo_root, manifest, hosts, &composed)?;
+    let manifest = &resolved_manifest;
+    composed.host_scanners.clone_from(&hosts.scanners);
+    for (host, scanner) in &manifest.host_scanners {
+        plan.record_host_scanner(host.clone(), *scanner);
+    }
     // Adoption, validation, and retirement must see the same repaired text.
     // Extra complete pairs retain their bodies as unmanaged settings.
     //
@@ -297,6 +300,83 @@ fn build_plan_with_hosts(
     Ok(plan)
 }
 
+/// Resolve one scanner before any repair or splice can change a host.
+fn resolve_host_scanners(
+    repo_root: &Path,
+    previous: &Manifest,
+    hosts: &mut HostTextCache,
+    composed: &ComposedHosts,
+) -> Result<Manifest, AppError> {
+    previous.validate_host_scanners()?;
+    let mut manifest = previous.clone();
+    let mut paths: BTreeSet<String> = composed.live.iter().map(|(host, _)| host.clone()).collect();
+    for key in previous.regions.keys() {
+        paths.insert(hosts.resolve_host(repo_root, &key.host)?);
+    }
+    hosts.scanners.clear();
+    for host in paths {
+        let declared_toml = HostScanner::for_path(&host) == HostScanner::Toml || composed.array_paths.contains_key(&host);
+        let recorded = previous.host_scanner(&host);
+        if declared_toml && recorded == Some(HostScanner::Lines) {
+            bail!(
+                "host '{host}' declares TOML ownership but .anvil.lock records the lines scanner; \
+                   retire its existing regions with the previous catalog before changing the host format"
+            );
+        }
+        if composed_host_spec(&host).is_some() && (declared_toml || recorded == Some(HostScanner::Toml)) {
+            bail!("host '{host}' has a non-TOML composed-host declaration that conflicts with TOML ownership");
+        }
+        let scanner = recorded.unwrap_or(if declared_toml { HostScanner::Toml } else { HostScanner::Lines });
+        if scanner == HostScanner::Toml
+            && composed
+                .ordinary_regions
+                .get(&host)
+                .into_iter()
+                .flatten()
+                .any(|spec| spec.syntax != CommentSyntax::Hash)
+        {
+            bail!("host '{host}' uses the TOML scanner but an ordinary region declares non-TOML comment syntax");
+        }
+        if recorded.is_none()
+            && HostScanner::for_path(&host) == HostScanner::Lines
+            && previous.has_region_host(&host)
+            && let Some(text) = hosts.get_or_read(repo_root, &host)?
+        {
+            for key in previous.regions.keys().filter(|key| key.host.eq_ignore_ascii_case(&host)) {
+                let live_syntax = composed
+                    .ordinary_regions
+                    .get(&host)
+                    .into_iter()
+                    .flatten()
+                    .find(|spec| spec.id.as_str() == key.id)
+                    .map(|spec| spec.syntax);
+                // A live non-hash declaration already rules out TOML ownership.
+                // Do not inspect unrelated hash markers with the same id.
+                if live_syntax == Some(CommentSyntax::SlashSlash) {
+                    continue;
+                }
+                let syntax = CommentSyntax::Hash;
+                let same_repair = HostScanner::Lines.repair(&text, &key.id, syntax) == HostScanner::Toml.repair(&text, &key.id, syntax);
+                let same_region = HostScanner::Lines.find(&text, &key.id, syntax).map_err(|error| error.to_string())
+                    == HostScanner::Toml.find(&text, &key.id, syntax).map_err(|error| error.to_string());
+                if !same_repair || !same_region {
+                    bail!(
+                        "legacy host '{host}' has ambiguous scanner provenance for region '{}'; \
+                           no host bytes were changed. After verifying its format and sentinel boundaries, \
+                           set version = 2 and add [[host]] with path = \"{host}\" and scanner = \"toml\" or \"lines\" \
+                           in .anvil.lock, then retry",
+                        key.id
+                    );
+                }
+            }
+        }
+        hosts.scanners.insert(host.clone(), scanner);
+        manifest.host_scanners.retain(|path, _| !path.eq_ignore_ascii_case(&host));
+        manifest.host_scanners.insert(host, scanner);
+    }
+    Ok(manifest)
+}
+
 /// In-memory accumulator of host-file text, shared across every region
 /// (and region removal) targeting the same host file within one planning
 /// pass.
@@ -309,14 +389,18 @@ fn build_plan_with_hosts(
 /// but the last). Instead, the first region to touch a host seeds the
 /// cache from disk; every subsequent region splices against — and, when it
 /// writes, updates — the accumulated in-memory text, so the composed
-/// result preserves every region. See `updates.md §4`.
+/// result preserves every region.
 #[derive(Default)]
 struct HostTextCache {
     texts: HashMap<String, Option<String>>,
     newlines: HashMap<String, &'static str>,
+    scanners: HashMap<String, HostScanner>,
 }
 
 impl HostTextCache {
+    fn scanner(&self, host: &str) -> HostScanner {
+        self.scanners.get(host).copied().unwrap_or_else(|| HostScanner::for_path(host))
+    }
     /// Cached hosts already carry their resolved spelling. Reuse it instead of
     /// consulting the filesystem again, including for fully in-memory plans.
     fn resolve_host(&self, repo_root: &Path, host: &str) -> Result<String, AppError> {
@@ -501,7 +585,7 @@ fn push_region_at(
             if legacy_lint_region_id(spec.id.as_str()).is_some_and(|legacy_id| {
                 current
                     .as_deref()
-                    .is_some_and(|text| matches!(crate::region::find_host_region(text, legacy_id, spec.syntax, &host), Ok(Some(_))))
+                    .is_some_and(|text| matches!(hosts.scanner(&host).find(text, legacy_id, spec.syntax), Ok(Some(_))))
             }) {
                 composed.states.insert(host.clone(), ComposedHostState::Unsafe(reason.clone()));
                 composed.reported.insert(host.clone());
@@ -515,7 +599,12 @@ fn push_region_at(
         .map(|text| composed.retiring_regions(manifest, &host, text, spec.syntax))
         .unwrap_or_default();
     if item.decision == Decision::Write
-        && let Some(refusal) = toml_introduction_refusal(current.as_deref(), request, &retiring)
+        && let Some(refusal) = crate::emit::managed_region::toml_introduction_refusal_with_scanner(
+            current.as_deref(),
+            request,
+            &retiring,
+            hosts.scanner(&host),
+        )
     {
         refuse_region(plan, host, spec.id.as_str(), &refusal.reason, refusal.remedy);
         return Ok(());
@@ -751,7 +840,7 @@ fn repair_or_refuse(
 /// Persist cheap marker repairs independently of adopting or updating the body.
 ///
 /// Reports whether the region's markers can be worked with at all. Unpaired
-/// markers are left exactly as found: see [`repair_markers`] for why removing
+/// markers are left exactly as found: see [`crate::region::repair_markers`] for why removing
 /// them is the corrupting answer.
 fn repair_host_markers(
     repo_root: &Path,
@@ -764,11 +853,7 @@ fn repair_host_markers(
     let Some(text) = hosts.get_or_read(repo_root, host)? else {
         return Ok(MarkerRepair::Repaired(String::new()));
     };
-    let outcome = if host.to_ascii_lowercase().ends_with(".toml") {
-        crate::region::repair_toml_markers(&text, id, syntax)
-    } else {
-        repair_markers(&text, id, syntax)
-    };
+    let outcome = hosts.scanner(host).repair(&text, id, syntax);
     if let MarkerRepair::Repaired(repaired) = &outcome
         && repaired != &text
     {
@@ -908,6 +993,7 @@ struct ComposedHosts {
     ordinary_regions: HashMap<String, Vec<RegionSpec>>,
     /// Safe retirements discovered for neighboring writes or in-sync regions.
     pending_retirements: HashMap<String, BTreeSet<String>>,
+    host_scanners: HashMap<String, HostScanner>,
 }
 
 impl ComposedHosts {
@@ -934,11 +1020,12 @@ impl ComposedHosts {
     /// writes a duplicate header, and treating a removed one as staying refuses
     /// a migration that is about to become valid.
     fn retiring_regions(&self, manifest: &Manifest, host_relpath: &str, host_text: &str, syntax: CommentSyntax) -> BTreeSet<String> {
-        let ids = if host_relpath.to_ascii_lowercase().ends_with(".toml") {
-            crate::region::toml_region_ids(host_text, syntax)
-        } else {
-            managed_region_ids(host_text, syntax)
-        };
+        let scanner = self
+            .host_scanners
+            .get(host_relpath)
+            .copied()
+            .unwrap_or_else(|| manifest.scanner(host_relpath));
+        let ids = scanner.ids(host_text, syntax);
         ids.into_iter()
             .filter(|id| !self.live.contains(&(host_relpath.to_owned(), id.clone())))
             .filter(|id| {
@@ -957,14 +1044,15 @@ impl ComposedHosts {
                     // a duplicate of a region that is on its way out.
                     return false;
                 };
-                let region = crate::region::find_host_region(host_text, id, syntax, host_relpath).ok().flatten();
+                let region = scanner.find(host_text, id, syntax).ok().flatten();
                 region.is_some_and(|region| region.is_empty() || checksum_str(region.body_str()) == *last)
             })
             .filter(|id| {
                 let Some(paths) = self.array_paths.get(host_relpath) else {
                     return true;
                 };
-                let spliced = crate::region::remove_host_region(host_text, id, syntax, host_relpath)
+                let spliced = scanner
+                    .remove(host_text, id, syntax)
                     .expect("the preceding filter established paired region markers");
                 let mut retiring = self.pending_retirements.get(host_relpath).cloned().unwrap_or_default();
                 retiring.insert(id.clone());
@@ -984,7 +1072,8 @@ impl ComposedHosts {
                 // Keeping that prefix intact preserves selectors owned by the
                 // orphan; the first validation protects selectors in the suffix
                 // with the live regions still present. Repository edits stay visible.
-                let candidate = crate::region::find_host_region(host_text, id, syntax, host_relpath)
+                let candidate = scanner
+                    .find(host_text, id, syntax)
                     .expect("the preceding filter established paired region markers")
                     .expect("the preceding filter established a present region");
                 let synchronized = self
@@ -993,7 +1082,8 @@ impl ComposedHosts {
                     .into_iter()
                     .flatten()
                     .filter(|spec| {
-                        crate::region::find_host_region(host_text, spec.id.as_str(), syntax, host_relpath)
+                        scanner
+                            .find(host_text, spec.id.as_str(), syntax)
                             .ok()
                             .flatten()
                             .is_some_and(|region| {
@@ -1266,7 +1356,9 @@ fn plan_removals(
             // When that assumption changes, the manifest will need to
             // record the syntax used.
             let syntax = CommentSyntax::Hash;
-            let region = crate::region::find_host_region(&host_text, &key.id, syntax, &resolved_host)
+            let region = hosts
+                .scanner(&resolved_host)
+                .find(&host_text, &key.id, syntax)
                 .expect("repair_or_refuse above established that this host has well-formed region markers");
             let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
             let decision = if region.as_ref().is_some_and(crate::region::Region::is_empty) {
@@ -1283,7 +1375,9 @@ fn plan_removals(
                     // cache is keyed by the resolved spelling, which is what
                     // the writes used; reading under the recorded spelling
                     // would miss it and splice into the pre-pass text.
-                    let spliced = crate::region::remove_host_region(&host_text, &key.id, syntax, &resolved_host)
+                    let spliced = hosts
+                        .scanner(&resolved_host)
+                        .remove(&host_text, &key.id, syntax)
                         .expect("the region markers were validated by repair_or_refuse above");
                     if !composed.allow_array_splice(plan, &resolved_host, &key.id, Some(&host_text), &spliced) {
                         continue;
@@ -1339,6 +1433,7 @@ fn live_files(plan: &Plan) -> BTreeSet<String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use tempfile::TempDir;
@@ -1346,6 +1441,507 @@ mod tests {
     use super::*;
     use crate::anvil::artifacts::region;
     use crate::{CliMeta, RegionId};
+
+    fn provenance_workspace() -> Workspace {
+        Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        }
+    }
+
+    fn provenance_array(body: &str) -> crate::catalog::TomlArrayRegionSpec {
+        crate::catalog::TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("entries"),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned(), "default".to_owned()],
+        }
+    }
+
+    #[test]
+    fn provenance_refused_retirement_retains_scanner_and_recovers() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        for quote in ["'''", "\"\"\""] {
+            for newline in ["\n", "\r\n"] {
+                let prefix = format!("message = {quote}\n# >>> anvil-managed: entries\nfake\n# <<< anvil-managed: entries\n{quote}\n")
+                    .replace('\n', newline);
+                let paired = "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
+                    .replace('\n', newline);
+                let mut manifest = Manifest::default();
+                manifest.set_region("config", "entries", checksum_str("  \"managed\",\n"));
+                manifest.host_scanners.insert("CONFIG".to_owned(), HostScanner::Toml);
+                let manifest = Manifest::parse(&manifest.to_toml()).unwrap();
+                for broken in [
+                    paired.replace("\"managed\"", "\"edited\""),
+                    paired.replace(&format!("  # <<< anvil-managed: entries{newline}"), ""),
+                ] {
+                    let original = format!("{prefix}{broken}");
+                    let mut hosts = HostTextCache::default();
+                    hosts.set("config", original.clone());
+                    let plan = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &empty, &mut hosts).unwrap();
+                    assert_eq!(plan.items().len(), 1);
+                    assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+                    assert_eq!(plan.refusals().len(), 1);
+                    assert_eq!(hosts.cached("config").as_deref(), Some(original.as_str()));
+                    let persisted = Manifest::parse(&plan.projected_manifest(&manifest).to_toml()).unwrap();
+                    assert_eq!(persisted.regions, manifest.regions);
+                    assert_eq!(persisted.host_scanners, BTreeMap::from([("config".to_owned(), HostScanner::Toml)]));
+
+                    let mut fresh = HostTextCache::default();
+                    fresh.set("config", format!("{prefix}{paired}"));
+                    let retirement = build_plan_with_hosts(root, &provenance_workspace(), &persisted, &[], &empty, &mut fresh).unwrap();
+                    assert_eq!(retirement.refusals(), &[] as &[String]);
+                    assert_eq!(
+                        fresh.cached("config").as_deref(),
+                        Some(format!("{prefix}plugins.default = [{newline}]{newline}").as_str())
+                    );
+                    assert_eq!(retirement.projected_manifest(&persisted), Manifest::default());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn provenance_ordinary_adoption_update_and_repair_share_persisted_scanner() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let prefix = "message = '''\n# >>> anvil-managed: policy\nfake\n# <<< anvil-managed: policy\n'''\n";
+        let build_catalog = |body: &str| {
+            Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("config".to_owned()),
+                    id: RegionId::new("policy"),
+                    body: body.to_owned(),
+                    syntax: CommentSyntax::Hash,
+                }))
+                .build()
+                .unwrap()
+        };
+        let mut manifest = Manifest::default();
+        manifest.host_scanners.insert("config".to_owned(), HostScanner::Toml);
+        let mut hosts = HostTextCache::default();
+        hosts.set("config", format!("{prefix}[policy]\nflag = true\nextra = \"keep\"\n"));
+        let catalog = build_catalog("[policy]\nflag = true\n");
+        let introduction = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(introduction.refusals(), &[] as &[String]);
+        let expected =
+            format!("{prefix}\n# >>> anvil-managed: policy\n[policy]\nflag = true\n# <<< anvil-managed: policy\nextra = \"keep\"\n");
+        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+        let manifest = Manifest::parse(&introduction.projected_manifest(&manifest).to_toml()).unwrap();
+        let duplicate = expected.replacen(
+            "\n# >>> anvil-managed: policy\n[policy]",
+            "\n# >>> anvil-managed: policy\n# >>> anvil-managed: policy\n[policy]",
+            1,
+        );
+        let mut fresh = HostTextCache::default();
+        fresh.set("config", duplicate);
+        let repair = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &catalog, &mut fresh).unwrap();
+        assert_eq!(repair.refusals(), &[] as &[String]);
+        assert_eq!(fresh.cached("config").as_deref(), Some(expected.as_str()));
+        let changed = build_catalog("[policy]\nflag = false\n");
+        let update = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &changed, &mut fresh).unwrap();
+        assert_eq!(update.refusals(), &[] as &[String]);
+        assert_eq!(
+            fresh.cached("config").as_deref(),
+            Some(expected.replace("flag = true", "flag = false").as_str())
+        );
+    }
+
+    #[test]
+    fn provenance_partial_apply_recovery_keeps_string_data_on_extensionless_host() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let prefix = "message = '''\n# >>> anvil-managed: old\nfake\n# <<< anvil-managed: old\n'''\n";
+        let old = "[settings]\nmode = true\n";
+        let new = "[settings]\nmode = false\n";
+        let interrupted = format!(
+            "{prefix}plugins.default = [\"user\"]\n\n# >>> anvil-managed: old\n{old}# <<< anvil-managed: old\n\n# >>> anvil-managed: new\n{new}# <<< anvil-managed: new\n"
+        );
+        let mut previous = Manifest::default();
+        previous.set_region("config", "old", checksum_str(old));
+        previous.host_scanners.insert("config".to_owned(), HostScanner::Toml);
+        let previous = Manifest::parse(&previous.to_toml()).unwrap();
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("new"),
+                body: new.to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .with_toml_array_region(provenance_array("\"managed\",\n"))
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config", interrupted);
+        let plan = build_plan_with_hosts(root, &provenance_workspace(), &previous, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        let expected = format!(
+            "{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: new\n{new}# <<< anvil-managed: new\n"
+        );
+        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+        let mut expected_manifest = Manifest::default();
+        expected_manifest.set_region("config", "entries", checksum_str("  \"managed\",\n"));
+        expected_manifest.set_region("config", "new", checksum_str(new));
+        expected_manifest.host_scanners.insert("config".to_owned(), HostScanner::Toml);
+        assert_eq!(plan.projected_manifest(&previous), expected_manifest);
+    }
+
+    #[test]
+    fn provenance_programmatic_metadata_and_declaration_conflicts_refuse_before_repairs() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let ordinary = |host: &str, syntax| {
+            Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path(host.to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "setting = true\n".to_owned(),
+                    syntax,
+                }))
+                .build()
+                .unwrap()
+        };
+        for (entries, host, syntax, diagnostic) in [
+            (
+                vec![("config", HostScanner::Lines), ("CONFIG", HostScanner::Toml)],
+                "config",
+                CommentSyntax::Hash,
+                "duplicate or case-aliased [[host]] entry for 'config'",
+            ),
+            (
+                vec![("config.toml", HostScanner::Lines)],
+                "config.toml",
+                CommentSyntax::Hash,
+                "[[host]] 'config.toml' conflicts with its TOML path declaration",
+            ),
+            (
+                vec![("../config", HostScanner::Toml)],
+                "config",
+                CommentSyntax::Hash,
+                "[[host]] path '../config' must be a relative path inside the repository",
+            ),
+            (
+                vec![("config", HostScanner::Toml)],
+                "config",
+                CommentSyntax::SlashSlash,
+                "host 'config' uses the TOML scanner but an ordinary region declares non-TOML comment syntax",
+            ),
+            (
+                vec![(".anvil/container/Dockerfile", HostScanner::Toml)],
+                ".anvil/container/Dockerfile",
+                CommentSyntax::Hash,
+                "host '.anvil/container/Dockerfile' has a non-TOML composed-host declaration that conflicts with TOML ownership",
+            ),
+        ] {
+            let manifest = Manifest {
+                host_scanners: entries.into_iter().map(|(path, scanner)| (path.to_owned(), scanner)).collect(),
+                ..Manifest::default()
+            };
+            let original = "# >>> anvil-managed: entries\n# >>> anvil-managed: entries\nsetting = true\n# <<< anvil-managed: entries\n";
+            let mut hosts = HostTextCache::default();
+            hosts.set(host, original.to_owned());
+            let error =
+                build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &ordinary(host, syntax), &mut hosts).unwrap_err();
+            assert_eq!(error.to_string(), diagnostic);
+            assert_eq!(hosts.cached(host).as_deref(), Some(original));
+        }
+    }
+
+    #[test]
+    fn provenance_mixed_neighbors_keep_toml_after_last_array_retirement() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = provenance_workspace();
+        let prefix = "message = '''\n# >>> anvil-managed: policy\nfake\n# <<< anvil-managed: policy\n'''\n";
+        for array_first in [false, true] {
+            let ordinary = Artifact::region(RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("policy"),
+                body: "[policy]\nflag = true\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            });
+            let builder = Catalog::builder(CliMeta::new("anvil"));
+            let catalog = if array_first {
+                builder
+                    .with_toml_array_region(provenance_array("\"managed\",\n"))
+                    .with_artifact(ordinary.clone())
+            } else {
+                builder
+                    .with_artifact(ordinary.clone())
+                    .with_toml_array_region(provenance_array("\"managed\",\n"))
+            }
+            .build()
+            .unwrap();
+            let mut hosts = HostTextCache::default();
+            hosts.set("config", format!("{prefix}plugins.default = []\n"));
+            let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+            assert_eq!(plan.refusals(), &[] as &[String]);
+            let expected = format!(
+                "{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  \
+                # <<< anvil-managed: entries\n]\n\n# >>> anvil-managed: policy\n[policy]\nflag = true\n# <<< anvil-managed: policy\n"
+            );
+            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+            let manifest = Manifest::parse(&plan.projected_manifest(&Manifest::default()).to_toml()).unwrap();
+            assert_eq!(manifest.host_scanner("CONFIG"), Some(HostScanner::Toml));
+            let ordinary_catalog = Catalog::builder(CliMeta::new("anvil")).with_artifact(ordinary).build().unwrap();
+            let retirement = build_plan_with_hosts(root, &workspace, &manifest, &[], &ordinary_catalog, &mut hosts).unwrap();
+            assert_eq!(retirement.refusals(), &[] as &[String]);
+            let expected = format!(
+                "{prefix}plugins.default = [\n]\n\n# >>> anvil-managed: policy\n[policy]\nflag = true\n# <<< anvil-managed: policy\n"
+            );
+            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+            let manifest = Manifest::parse(&retirement.projected_manifest(&manifest).to_toml()).unwrap();
+            assert_eq!(manifest.host_scanner("config"), Some(HostScanner::Toml));
+            let insync = build_plan_with_hosts(root, &workspace, &manifest, &[], &ordinary_catalog, &mut hosts).unwrap();
+            assert_eq!(insync.refusals(), &[] as &[String]);
+            assert_eq!(insync.items()[0].decision, Decision::InSync);
+            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+            let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty, &mut hosts).unwrap();
+            assert_eq!(plan.refusals(), &[] as &[String]);
+            assert_eq!(
+                hosts.cached("config").as_deref(),
+                Some(format!("{prefix}plugins.default = [\n]\n").as_str())
+            );
+            assert!(plan.projected_manifest(&manifest).host_scanners.is_empty());
+        }
+    }
+
+    #[test]
+    fn provenance_legacy_ambiguity_diagnostic_and_explicit_recovery() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = provenance_workspace();
+        let prefix = "message = '''\n# >>> anvil-managed: entries\n  \"managed\",\n# <<< anvil-managed: entries\n'''\n";
+        let original =
+            format!("{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n");
+        let mut legacy = Manifest::default();
+        legacy.set_region("config", "entries", checksum_str("  \"managed\",\n"));
+        let legacy = Manifest::parse(&legacy.to_toml().replacen("version = 2", "version = 1", 1)).unwrap();
+        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        let active = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(provenance_array("\"managed\",\n"))
+            .build()
+            .unwrap();
+        for catalog in [&empty, &active] {
+            let mut hosts = HostTextCache::default();
+            hosts.set("config", original.clone());
+            let error = build_plan_with_hosts(root, &workspace, &legacy, &[], catalog, &mut hosts).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                concat!(
+                    "legacy host 'config' has ambiguous scanner provenance for region 'entries'; no host bytes were changed. ",
+                    "After verifying its format and sentinel boundaries, set version = 2 and add [[host]] with path = \"config\" ",
+                    "and scanner = \"toml\" or \"lines\" in .anvil.lock, then retry"
+                )
+            );
+            assert_eq!(hosts.cached("config").as_deref(), Some(original.as_str()));
+            let repaired = Manifest::parse(&format!("{}[[host]]\npath = \"config\"\nscanner = \"toml\"\n", legacy.to_toml())).unwrap();
+            let plan = build_plan_with_hosts(root, &workspace, &repaired, &[], catalog, &mut hosts).unwrap();
+            assert_eq!(plan.refusals(), &[] as &[String]);
+            let expected = if catalog.artifacts().is_empty() {
+                format!("{prefix}plugins.default = [\n]\n")
+            } else {
+                original.clone()
+            };
+            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    #[test]
+    fn provenance_legacy_retirement_ignores_unused_comment_syntax() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        for newline in ["\n", "\r\n"] {
+            let original = "// >>> anvil-managed: old\nbody\n// <<< anvil-managed: old\n".replace('\n', newline);
+            let mut legacy = Manifest::default();
+            legacy.set_region("tool.cfg", "old", checksum_str("body\n"));
+            let legacy = Manifest::parse(&legacy.to_toml().replacen("version = 2", "version = 1", 1)).unwrap();
+            let mut hosts = HostTextCache::default();
+            hosts.set("tool.cfg", original.clone());
+            let plan = build_plan_with_hosts(root, &provenance_workspace(), &legacy, &[], &empty, &mut hosts).unwrap();
+            assert_eq!(plan.refusals(), &[] as &[String]);
+            assert_eq!(hosts.cached("tool.cfg").as_deref(), Some(original.as_str()));
+            let projected = plan.projected_manifest(&legacy);
+            assert_eq!(projected.regions, BTreeMap::new());
+            assert_eq!(projected.host_scanners, BTreeMap::new());
+        }
+    }
+
+    #[test]
+    fn provenance_legacy_unambiguous_migration_and_lines_behavior() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = provenance_workspace();
+        let initial = "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n";
+        let mut legacy = Manifest::default();
+        legacy.set_region("config", "entries", checksum_str("  \"managed\",\n"));
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(provenance_array("\"managed\",\n"))
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config", initial.to_owned());
+        let plan = build_plan_with_hosts(root, &workspace, &legacy, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(plan.items()[0].decision, Decision::InSync);
+        assert_eq!(hosts.cached("config").as_deref(), Some(initial));
+        assert_eq!(plan.projected_manifest(&legacy).host_scanner("config"), Some(HostScanner::Toml));
+
+        let ordinary = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("entries"),
+                body: "echo new\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        legacy.set_region("config", "entries", checksum_str("echo old\n"));
+        hosts.set(
+            "config",
+            "# >>> anvil-managed: entries\necho old\n# <<< anvil-managed: entries\n".to_owned(),
+        );
+        let plan = build_plan_with_hosts(root, &workspace, &legacy, &[], &ordinary, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(
+            hosts.cached("config").as_deref(),
+            Some("# >>> anvil-managed: entries\necho new\n# <<< anvil-managed: entries\n")
+        );
+        let mut known = plan.projected_manifest(&legacy);
+        assert_eq!(known.host_scanner("config"), Some(HostScanner::Lines));
+        known.set_region("config", "entries", checksum_str("echo new\n"));
+        hosts.set(
+            "config",
+            "message = '''\n# >>> anvil-managed: entries\necho new\n# <<< anvil-managed: entries\n'''\n".to_owned(),
+        );
+        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        let plan = build_plan_with_hosts(root, &workspace, &known, &[], &empty, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(hosts.cached("config").as_deref(), Some("message = '''\n'''\n"));
+    }
+
+    #[test]
+    fn provenance_format_conflict_recovery_retires_before_format_change() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = provenance_workspace();
+        let original = "# >>> anvil-managed: old\nsetting = true\n# <<< anvil-managed: old\nplugins.default = []\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("config", "old", checksum_str("setting = true\n"));
+        manifest.host_scanners.insert("config".to_owned(), HostScanner::Lines);
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(provenance_array("\"managed\",\n"))
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config", original.to_owned());
+        let error = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "host 'config' declares TOML ownership but .anvil.lock records the lines scanner; retire its existing regions with the previous catalog before changing the host format"
+        );
+        assert_eq!(hosts.cached("config").as_deref(), Some(original));
+        let previous = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        let retirement = build_plan_with_hosts(root, &workspace, &manifest, &[], &previous, &mut hosts).unwrap();
+        assert_eq!(retirement.refusals(), &[] as &[String]);
+        assert_eq!(hosts.cached("config").as_deref(), Some("plugins.default = []\n"));
+        let manifest = Manifest::parse(&retirement.projected_manifest(&manifest).to_toml()).unwrap();
+        assert!(manifest.host_scanners.is_empty());
+        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(
+            hosts.cached("config").as_deref(),
+            Some("plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n")
+        );
+    }
+
+    #[test]
+    fn provenance_extensionless_array_introduction_and_update() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let prefix = "message = '''\n# >>> anvil-managed: entries\nfake\n# <<< anvil-managed: entries\n'''\n";
+        let array = |body: &str| crate::catalog::TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config".to_owned()),
+                id: RegionId::new("entries"),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned(), "default".to_owned()],
+        };
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(array("\"managed\",\n"))
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config", format!("{prefix}plugins.default = []\n"));
+        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        let expected =
+            format!("{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n");
+        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+        let manifest = Manifest::parse(&plan.projected_manifest(&Manifest::default()).to_toml()).unwrap();
+        let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(rerun.refusals(), &[] as &[String]);
+        assert_eq!(rerun.items()[0].decision, Decision::InSync);
+        let changed = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(array("\"new\",\n"))
+            .build()
+            .unwrap();
+        let update = build_plan_with_hosts(root, &workspace, &manifest, &[], &changed, &mut hosts).unwrap();
+        assert_eq!(update.refusals(), &[] as &[String]);
+        let expected = expected.replace("  \"managed\",", "  \"new\",");
+        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
+        let manifest = Manifest::parse(&update.projected_manifest(&manifest).to_toml()).unwrap();
+        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        let retirement = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty, &mut hosts).unwrap();
+        assert_eq!(retirement.refusals(), &[] as &[String]);
+        assert_eq!(
+            hosts.cached("config").as_deref(),
+            Some(format!("{prefix}plugins.default = [\n]\n").as_str())
+        );
+        assert!(retirement.projected_manifest(&manifest).regions.is_empty());
+    }
+
+    #[test]
+    fn provenance_extensionless_array_last_retirement_from_fresh_lock() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let prefix = "message = '''\n# >>> anvil-managed: entries\n  \"managed\",\n# <<< anvil-managed: entries\n'''\n";
+        let initial =
+            format!("{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n");
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("config".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"managed\",\n".to_owned(),
+                    syntax: CommentSyntax::Hash,
+                },
+                path: vec!["plugins".to_owned(), "default".to_owned()],
+            })
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache::default();
+        hosts.set("config", initial);
+        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        let manifest = Manifest::parse(&plan.projected_manifest(&Manifest::default()).to_toml()).unwrap();
+        let mut fresh_hosts = HostTextCache::default();
+        fresh_hosts.set("config", hosts.cached("config").unwrap());
+        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
+        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty, &mut fresh_hosts).unwrap();
+        assert_eq!(plan.refusals(), &[] as &[String]);
+        assert_eq!(
+            fresh_hosts.cached("config").as_deref(),
+            Some(format!("{prefix}plugins.default = [\n]\n").as_str())
+        );
+        assert!(plan.projected_manifest(&manifest).regions.is_empty());
+    }
 
     #[test]
     fn review_toml_marker_data_survives_pipeline_retirement() {
@@ -2247,6 +2843,7 @@ mod tests {
                     assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), decisions);
                     assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
                     let mut expected_manifest = Manifest::default();
+                    expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
                     expected_manifest.set_region("config.toml", "new", checksum_str(new_body));
                     expected_manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
                     let projected = plan.projected_manifest(&manifest);
@@ -2311,7 +2908,9 @@ mod tests {
             [Decision::InSync, Decision::LeaveAlone, Decision::LeaveAlone]
         );
         assert_eq!(hosts.cached("config.toml"), Some(text));
-        assert_eq!(plan.projected_manifest(&manifest), manifest);
+        let mut expected_manifest = manifest.clone();
+        expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
+        assert_eq!(plan.projected_manifest(&manifest), expected_manifest);
     }
 
     #[test]
@@ -2375,6 +2974,7 @@ mod tests {
                 let mut hosts = HostTextCache::default();
                 hosts.set("config.toml", text.clone());
                 let mut expected_manifest = manifest.clone();
+                expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
                 expected_manifest.set_region("config.toml", "parent", checksum_str(parent_body));
                 expected_manifest.set_region("config.toml", "new", checksum_str(new_body));
                 for _ in 0..2 {
@@ -2417,6 +3017,8 @@ mod tests {
                     manifest.set_region("config.toml", "old", checksum_str(last_body));
                 }
                 manifest.set_region("config.toml", "new", checksum_str(new_body));
+                let mut expected_manifest = manifest.clone();
+                expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
                 let ordinary = Artifact::region(RegionSpec {
                     host: HostSelector::Path("config.toml".to_owned()),
                     id: RegionId::new("new"),
@@ -2473,7 +3075,7 @@ mod tests {
                         assert_eq!(item.rendered_checksum, checksum);
                     }
                     assert_eq!(hosts.cached("config.toml"), Some(text.clone()));
-                    assert_eq!(plan.projected_manifest(&manifest), manifest);
+                    assert_eq!(plan.projected_manifest(&manifest), expected_manifest);
                 }
             }
         }
