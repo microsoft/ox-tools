@@ -692,7 +692,6 @@ mod tests {
         for needle in [
             "${prefix}: cargo metadata failed",
             "coverage-gate {{ anvil_explicit_package_args }} run",
-            "could not resolve the cargo-careful executable",
             "mutants_command_prefix",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
@@ -738,6 +737,25 @@ mod tests {
             "bolero discovery must not pass repeated --package arguments"
         );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
+        assert!(
+            checks.contains(r#"anvil_careful_executable_hash := sha256_file(which("cargo-careful"))"#),
+            "careful identity must include the resolved executable contents"
+        );
+        assert!(
+            checks.contains(r#"anvil_careful_rustc_identity := shell("rustup run " + rust_nightly + " rustc -vV")"#),
+            "careful identity must include the complete nightly compiler identity"
+        );
+        assert!(
+            checks.contains("--target-dir {{ quote(anvil_careful_target_dir) }}"),
+            "careful must isolate Cargo artifacts by compiler and tool identity"
+        );
+        for retired in [
+            "careful-sysroot.id",
+            "cargo clean",
+            "[script(\"pwsh\", \"-NoProfile\")]\nanvil-careful:",
+        ] {
+            assert!(!checks.contains(retired), "retired careful behavior survived: {retired}");
+        }
     }
 
     #[test]

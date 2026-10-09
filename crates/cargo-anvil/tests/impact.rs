@@ -60,7 +60,15 @@ fn just(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .args(args)
         .env_remove("BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
-        .env_remove("GITHUB_BASE_REF");
+        .env_remove("GITHUB_BASE_REF")
+        .env(
+            "PATH",
+            std::env::join_paths(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
+            )
+            .unwrap(),
+        );
     for (name, value) in env {
         command.env(name, value);
     }
@@ -261,11 +269,17 @@ fn empty_affected_selection_skips_careful_and_mutants_before_side_effects() {
             "{recipe} must skip before tool/base/cache work:\n{}",
             stderr(&output)
         );
-        assert!(stdout(&output).contains("no affected packages; skipping"));
+        let combined = format!("{}{}", stdout(&output), stderr(&output));
+        let expected = if recipe == "anvil-careful" {
+            "selection resolved to no work; nothing to do"
+        } else {
+            "no affected packages; skipping"
+        };
+        assert!(combined.contains(expected), "{combined}");
     }
     assert!(
-        !temp.path().join("target/anvil/careful-sysroot.id").exists(),
-        "careful must not rewrite its marker for an empty selection"
+        !temp.path().join("target/anvil/careful").exists(),
+        "careful must not create an identity target directory for an empty selection"
     );
 }
 

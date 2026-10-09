@@ -72,11 +72,11 @@ owns GitHub credential discovery.
 
 Scripts remain only where the domain tool has no equivalent interface:
 README comparison, spell dictionary generation, Miri profile environment,
-cargo-careful cache repair, mutation-diff preparation, and container
-orchestration. Bolero discovery uses a JSONL file consumed by cargo-each;
-PR-title policy is a Just regex and the MSRV path uses cargo-each's optional
-workspace-version contract. The remaining scripts are not shared Anvil runners
-and do not own generic package iteration.
+mutation-diff preparation, and container orchestration. Cargo-careful uses an
+identity-keyed target directory; Bolero discovery uses a JSONL file consumed by
+cargo-each; PR-title policy is a Just regex; and the MSRV path uses cargo-each's
+optional workspace-version contract. The remaining scripts are not shared Anvil
+runners and do not own generic package iteration.
 
 ### Groups and tiers
 
@@ -200,7 +200,7 @@ a good boundary for a small standalone tool with explicit input/output paths,
 atomic output, and tests for encoding, ordering, filtering, duplicates, and
 empty/missing inputs.
 
-### cargo-careful cache repair
+### cargo-careful artifact isolation
 
 cargo-careful builds a custom standard library into a stable cache path. Cargo
 fingerprints the `--sysroot` path but not the contents behind that path. When
@@ -208,12 +208,15 @@ the pinned nightly or cargo-careful executable changes, cargo-careful replaces
 the sysroot in place while workspace artifacts can remain apparently fresh;
 the next build may then fail with rustc metadata-version mismatches.
 
-The recipe hashes `rustc -vV` plus the cargo-careful executable, stores that
-identity under `target/anvil/`, and runs `cargo clean` before careful testing
-when the identity changes. The optimal fix belongs in cargo-careful: key its
-sysroot/cache path by compiler and tool identity, or expose a machine-readable
-identity/invalidation command. An unconditional clean is shell-free but makes
-every careful run substantially more expensive.
+The recipe hashes the complete pinned-nightly `rustc -vV` output together with
+the SHA-256 of the resolved cargo-careful executable, using Just's `which`,
+`sha256_file`, and `sha256` functions. It forwards
+`--target-dir target/anvil/careful/<identity>` through cargo-careful to its final
+Cargo invocation. A compiler or tool change therefore gets a fresh artifact
+directory instead of reusing binaries built against the previous contents of
+the stable sysroot path. No marker file, conditional `cargo clean`, or
+PowerShell state machine is required. Old identity directories remain ordinary
+Cargo cache entries under `target/` and are removed by normal target cleanup.
 
 ## 7. Daily use
 
