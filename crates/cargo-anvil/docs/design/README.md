@@ -1,191 +1,483 @@
-# cargo-anvil design
+# cargo-anvil — Design
 
-`cargo-anvil` generates and maintains a Rust repository's local checks and cloud
-workflow wiring. Generated files are committed with the repository; running
-checks does not require the generator. The design separates **what policy is
-generated**, **how updates preserve ownership**, and **where checks execute**.
+> **Why "anvil"?** Borrowing the smithing metaphor: an anvil is a stable, opinionated
+> surface against which build tooling is forged into the shape each repo needs.
+> The metaphor stays out of the user-facing docs; this is the only place it's named.
 
-This is the architecture map, not an installation guide or a second template
-catalog. For commands, see the [crate documentation](../../README.md).
+This is the top-level design document. It captures the why, the principles, and the
+user-visible shape of the tool. Detail lives in companion documents:
 
-| Design | Owns |
-|---|---|
-| [Updates](./updates.md) | Ownership, adoption, checksums, refusals and retirement |
-| [Extensibility](./extensibility.md) | Catalog composition and downstream distributions |
-| [Checks](./checks.md) | Group boundaries, check semantics and impact selection |
-| [Local execution](./local.md) | Just recipes, tool setup and impact-cache protocol |
-| [GitHub](./github.md) | Actions topology, permissions and reporting |
-| [Azure DevOps](./ado.md) | Pipeline topology and enterprise extension boundary |
-| [Containers](./containers.md) | Explicit container execution and image identity |
+- [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
+- [local.md](./local.md) — the `justfiles/anvil/` layout, recipe surface, and customization.
+- [updates.md](./updates.md) — ownership, TOML adoption, marker recovery, and retirement.
+- [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
+- [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
+- [ado.md](./ado.md) — Azure DevOps Pipelines emission and compliance-template composition.
+- [containers.md](./containers.md) — containerized execution: the explicit `anvil-container`
+  recipe, the content-addressed image, and the credential hook.
+- [../implementation.md](../implementation.md) — internal implementation guidance.
+- [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
+  fixture tests, schema validation.
 
-## Purpose and non-goals
+## 1. Problem
 
-The default catalog provides a coherent engineering baseline: formatting,
-linting, documentation, dependency policy, tests, coverage, MSRV validation,
-runtime analysis and mutation testing. Repositories should share that policy
-without maintaining parallel local and cloud implementations.
+Across the surveyed Rust repos (`oxidizer`, `oxidizer-github`, `ox-tools`, `ox-tools-gh`,
+`assistants-oxide`, `ox-docs`) the build/test/cloud workflows infrastructure is conceptually similar but
+implemented six different ways:
 
-The generator is not a build runner, an installer invoked by every build, a
-general configuration merger, or a compliance system. It does not infer whether
-arbitrary repository-specific code is safe. Generated setup and check recipes
-install tools and execute repository code; container hooks execute on the host.
-Those are execution-time trust boundaries, not generator guarantees.
+| Repo | cloud workflows | Justfile shape | Toolchain | Notable specifics |
+|------|----|----------------|-----------|-------------------|
+| `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | caller-provisioned | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
+| `oxidizer-github`  | GitHub Actions            | Modular `justfiles/{basic,coverage,format,setup,spelling}.just` + `constants.env` | `1.93` | `cargo-delta` impact-scoped builds, sticky semver comments, composite `setup` action |
+| `ox-tools`         | ADO (CloudBuild + classic) | none in worktree                       | caller-provisioned | NuGet/MSBuild scaffolding, internal templates |
+| `ox-tools-gh`      | GitHub Actions            | Same modular shape as `oxidizer-github` | `1.93` | Mirror surface to OSS oxidizer |
+| `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | caller-provisioned | Symcrypt setup steps, NuGet publish stage |
+| `ox-docs`          | ADO classic               | Monolith                                | caller-provisioned | Mixed C#/.NET + Rust, mdbook/docfx |
 
-## Architecture and update flow
+The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, udeps,
+semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
+ensure-no-default-features, doc2readme, …) are spelled in subtly different ways in each repo, with
+different argument sets, different tool versions, and different opinions about which tier (PR vs.
+scheduled) a check belongs to.
 
-The implementation has two layers:
+Maintaining six artisanal copies is expensive: improvements made in one repo (e.g. `cargo-delta`
+impact scoping in `oxidizer-github`) take months to propagate, security/policy upgrades are
+missed, and onboarding new Rust repos requires copying-and-praying.
 
-- The engine in [run.rs](../../src/run.rs), [catalog](../../src/catalog),
-  [emit](../../src/emit), [plan.rs](../../src/plan.rs) and
-  [manifest.rs](../../src/manifest.rs) discovers the workspace, plans ownership
-  changes, applies them and records provenance.
-- The built-in policy in [anvil](../../src/anvil) assembles artifacts from
-  [templates](../../templates). An organization's distribution can compose a
-  different catalog without implementing another updater.
+## 2. Goals
 
-A run:
+1. **One opinionated build profile** for Rust repos, with sane defaults distilled from the
+   strongest patterns observed across the existing repos.
+2. **Two tiers**: `pr` (blocking on every pull request) and `scheduled` (slow, runs on a schedule).
+3. **Both cloud-workflow backends** — GitHub Actions and Azure DevOps Pipelines — generated from the same
+   source of truth. The user picks one or both per repo via a CLI flag.
+4. **Compliance preservation**: ADO pipelines that must `extends:` 1ESPT/SubstratePT continue to
+   do so. The tool's emitted templates contain no references to those harnesses; the user's
+   root pipeline does the wrapping. See [ado.md](./ado.md).
+5. **Local/cloud workflows parity at every level**: every individual check, every group of checks, and the
+   full tier are all reproducible locally with a single `just` invocation, using the exact same
+   arguments cloud workflows uses. The three commands `just anvil-pr`, `just anvil-scheduled`, and
+   `just anvil-full` (= pr + scheduled) are first-class local entry points.
+6. **Repository-wide agent guidance**: emit an owned
+   `.github/instructions/cargo-anvil.instructions.md` with `applyTo: "**"` so
+   coding agents use the same setup, complete validation, fast fallback, and
+   targeted-rerun workflow in every adopter repository. Also emit the
+   `cargo-anvil-adoption` repository skill, which guides cleanup after the first
+   Anvil run in an existing Rust repository. It compares legacy behavior,
+   defaults migrations to the Anvil catalog, and retains a customization only
+   for a documented requirement the catalog cannot satisfy.
+7. **Deterministic ordinary-check compiler selection**: use the caller's
+   `RUSTUP_TOOLCHAIN`, otherwise defer to either root toolchain-file spelling,
+   otherwise use the root manifest MSRV explicitly. Never inherit a
+   runner-default compiler when none of those sources exists.
+8. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
+   `cargo-anvil`) can still build and run tests.
+9. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
+   modified it, and updates only the unmodified bits.
+10. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
+   crates.io. The binary contains no Microsoft-internal dependencies; everything it can install
+   on the user's behalf comes from crates.io.
 
-1. Finds the Cargo workspace root and loads `.anvil.lock`.
-2. Enforces the single-tool guard before parsing workspace members.
-3. Loads the workspace and resolves the selected cloud backends.
-4. Expands catalog host selectors and plans artifacts in catalog order.
-   Regions sharing a host use accumulated in-memory text, not independent
-   copies of the original file.
-5. Plans retirement of previously tracked artifacts no longer selected.
-6. Projects the next manifest, including tool identity, tool version and catalog
-   checksum. Dry-run reports this plan without writing; a normal run applies
-   files and then saves the manifest.
+## 3. Non-Goals
 
-This is not a repository-wide transaction. Unsafe region operations are normally
-refused individually while safe operations remain eligible to apply. Fatal
-discovery, catalog or I/O failures still abort. The [update protocol](./updates.md)
-defines the exact outcomes and exit behavior.
+- Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline. anvil's
+  emitted templates contain no references to those harnesses; users wrap anvil's stages
+  template in their compliance-extending pipeline themselves. See [ado.md](./ado.md).
+- Building a general-purpose cloud workflows compiler/IR. We share **check semantics**, not cloud workflows features.
+- Owning `.cargo/config.toml`, `rust-toolchain`, `rust-toolchain.toml`, or workspace layout in
+  `Cargo.toml`.
+- Owning how private or path toolchains are provisioned. Anvil deterministically selects an
+  existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
+  container construction install a missing public channel through rustup; caller-provisioned
+  and path toolchains remain the execution environment's responsibility.
+- Provisioning a separate compiler for Cargo-installed tools or stable analyzers. They use the
+  same repository-selected compiler as ordinary checks; nightly-only checks retain their
+  catalog pins.
+- Managing exact tool versions on the user's behalf — we enforce minimums only. See
+  [local.md §3](./local.md#3-tool-versions-and-installation).
+- Hosting a service. The tool is a CLI binary; updates ship via crates.io.
+- Acting as a runtime: the tool emits `just` recipes and cloud-workflow building blocks, then exits.
+  It is **not** invoked at build/test/cloud workflows time. `just` is the runtime. (A narrow exception
+  may be made in the future for runtime subcommands tightly coupled to cloud workflows execution —
+  e.g. coverage gating — but the generator stance remains the default.)
+- Destructive operations: `cargo anvil` never deletes files. Removing a previously
+  configured cloud-workflow backend is a manual `rm -rf` by the user.
 
-## CLI and backend selection
+## 4. Guiding Principle
 
-There is one update operation: `cargo anvil`, not an `update` subcommand.
-`--dry-run` checks drift; `--force` permits switching the tool recorded in the
-lock and does **not** bypass content protection.
+> **`cargo-anvil` writes files. `just` runs them. The repo composes everything.**
 
-Explicit repeated `--backend github` / `--backend ado` flags select cloud output.
-`--no-backends` selects local-only output. Otherwise
-[backend resolution](../../src/backend.rs) inspects `origin`; a missing or
-unrecognized remote is an error with explicit selection as the escape hatch.
-Local recipes and shared configuration are independent of backend selection.
-Deselected cloud files follow retirement rules, rather than being left behind
-unconditionally.
+Corollaries that drive every section below:
 
-## Ownership model
+- The tool's only job is to author and update files. It is not on the local-build hot path or in
+  the cloud-workflow graph at runtime.
+- The local daily-driver is `just anvil` (and friends). Those recipes call `cargo …` directly. cloud workflows
+  jobs invoke the same `just` recipes. Local and cloud-workflow runs are bit-identical because they share one
+  implementation in the imported `.just` files.
+- Drift detection lives inside the files themselves (per-file checksums and per-managed-region
+  checksums). There is no parallel metadata file. See [updates.md](./updates.md).
+- The tool inserts managed sections into the user's `Justfile` and into a small set of shared
+  config files (`deny.toml`, separate `[workspace.lints.<namespace>]` regions in the workspace
+  `Cargo.toml`, and `[lints]` in each member crate's `Cargo.toml`, plus `.delta.toml` and
+  `rustfmt.toml`). Outside those sections,
+  the user's content is preserved verbatim. Everything else is in tool-owned files under
+  `justfiles/anvil/` and the backend-specific cloud workflows directories.
 
-There are two artifact kinds, not a single “generated file” policy:
+## 5. User Experience
 
-- **Owned file:** the whole file is compared with the previous and current
-  template checksums. Pristine files update automatically. Customized files are
-  preserved; a changed template is offered as a `.anvil-proposed` sibling.
-- **Managed region:** only the sentinel-delimited body belongs to the catalog.
-  Nonempty edits inside it refuse reconciliation; an empty body requests
-  regeneration. Repository settings belong outside the sentinels.
+### 5.1 Installation (maintainer)
 
-`.anvil.lock` is the checksum/provenance store. Generated banners are explanatory,
-not in-file checksum records. Exact template matches can be adopted even without
-previous tracking; conflicting existing content is not blindly replaced.
+```sh
+cargo install --locked cargo-anvil
+```
 
-TOML regions need semantic handling as well as byte boundaries. Ordinary regions
-can adopt compatible hand-written tables without discarding repository-only
-settings. Array-entry regions own selected entries, not the array assignment or
-its brackets. Both use parser validation and explicit refusals when ownership
-cannot be separated safely. See [TOML array entries](./updates.md#toml-array-entries).
+Only the repo maintainer who runs updates needs the binary installed. Everyone else uses
+`just` (or plain `cargo`).
 
-## 6. Repo layout
+### 5.2 The single command
 
-| Generated location | Ownership and purpose |
-|---|---|
-| `.anvil.lock` | Engine state; commit alongside generated artifacts |
-| `justfiles/anvil/` | Owned `.just` files: entry point, helpers, tools, checks, groups and tiers |
-| Root `Justfile` | Managed import region; repository recipes remain outside it |
-| Root/member `Cargo.toml` | Managed lint regions selected for workspace or single-crate shape |
-| `deny.toml`, `rustfmt.toml`, `clippy.toml`, `spellcheck.toml`, `.delta.toml`, `.gitattributes` | Shared hosts with managed regions |
-| `.github/workflows/`, `.github/actions/` | GitHub-gated owned workflow/action files |
-| `.pipelines/` | ADO-gated roots, implementation templates and customization stubs |
-| `.anvil/container/Dockerfile` | Ordered managed regions with repository-owned gaps |
-| `.anvil/container/Dockerfile.dockerignore` | Owned build-context filter |
+```text
+cargo anvil [--backend <name>]... [--no-backends] [--dry-run] [--force]
+```
 
-The [artifact registry](../../src/anvil/artifacts/mod.rs) is the complete inventory,
-including generated agent instructions and adoption/review skills. The table
-above describes ownership boundaries rather than mirroring every registry entry.
+That is the entire CLI surface. There is intentionally no `init`, `migrate`, `check`, `run`,
+`doctor`, `diff`, `explain`, `disable`, `enable`, or `versions` subcommand.
 
-Paths normally follow existing on-disk casing. Ambiguous case-insensitive matches
-refuse resolution. The composed Dockerfile is an exception: its exact spelling is
-required to pair with `Dockerfile.dockerignore`.
+The algorithm is uniform — there is no distinction between "first run" and "subsequent run."
+The full per-item decision table lives in [updates.md](./updates.md).
+
+`--dry-run` performs the same analysis but writes nothing. Exit code 0 means "everything is in
+sync with the binary's current templates and all managed content matched, ignoring disabled
+items, and every artifact was safely inspected"; exit code 1 means "something would change on
+disk, or Anvil refused to manage an artifact it could not safely inspect."
+
+`--version` prints the build's version **and its catalog checksum** — a `sha256` over the entire
+compiled-in catalog — on a second line, e.g.:
+
+```text
+cargo-anvil 0.4.1
+catalog: sha256:5e9d…
+```
+
+The checksum tells apart two builds that report the same version but carry different catalogs (a
+development-time situation); the same value is recorded as `catalog_checksum` in `.anvil.lock`
+(see [updates.md §1](./updates.md#1-the-manifest)). The `--version` help text notes that the
+second line is the catalog checksum.
+
+`--backend <name>` is a repeatable flag controlling which cloud-workflow backend(s) get emitted. Valid
+backend names today are `github` and `ado`; the flag is repeatable (`--backend github
+--backend ado`) so that adding a third backend in the future doesn't require new CLI
+syntax. If `--backend` is omitted, the tool autodetects from the `origin` git remote URL
+(`github.com` → `github`; `dev.azure.com` / `*.visualstudio.com` → `ado`). `--no-backends`
+is valid and useful for repos that want only the local `just` setup with no cloud workflows files.
+`update` never deletes files; to stop using a backend the user removes its directory by
+hand and reruns without that backend.
+
+**Single-tool guard.** A repository is managed by exactly one anvil-family tool (the base
+`cargo-anvil` or a downstream tool built on the same engine — see
+[extensibility.md](./extensibility.md)). Each run checks the `tool` field recorded in
+`.anvil.lock`; if it names a *different* tool, the run refuses immediately and writes nothing
+(including under `--dry-run`). `--force` overrides the guard for that run and switches ownership:
+the tool proceeds and rewrites the lock's `tool` (and `tool_version` / `catalog_checksum`) to
+itself. Without `--force`, switching tools is otherwise a manual step. See
+[updates.md §1](./updates.md#the-single-tool-guard).
+
+### 5.3 Daily driver
+
+The local UX is plain `just`:
+
+```text
+$ just anvil
+[just] running anvil-validate-prereqs
+[just] running anvil-pr-fast
+[just] running anvil-pr-slow
+anvil OK
+```
+
+`anvil` is an alias for `anvil-pr`. Both are plain `just` recipes (not wrappers around
+`cargo anvil`). The PR tier is made up of a small set of *check groups* — each group is a
+`just` recipe that runs the individual checks belonging to it. Groups are the level at which
+cloud workflows parallelizes. See [checks.md](./checks.md) for the group → check mapping and
+[local.md](./local.md) for the recipe tree.
+
+Other tier entry points:
+
+- `just anvil-pr` — fast checks suitable for every PR.
+- `just anvil-scheduled` — slow checks: miri, full mutants, feature-powerset, bench, etc.
+- `just anvil-full` — both tiers, run sequentially.
+
+A user with only `just` installed (no `cargo-anvil`) can run any check, any group, or any tier
+without ever invoking the tool. `cargo-anvil` is only required by the maintainer who wants to
+update the recipes or cloud-workflow building blocks.
+
+### 5.4 No-tooling fallback
+
+A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
+
+```sh
+cargo test   --workspace --tests --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo fmt --check
+```
+
+The same commands appear as the body of the corresponding `just` recipes under
+`justfiles/anvil/checks/`, so they are discoverable by reading that check's file. The fallback
+covers core hygiene only — coverage, miri, mutants, etc. still require their respective tools.
+
+## 6. Repo Layout
+
+The tool produces a small set of files. They fall into three categories:
+
+- **owned** — the tool fully writes the file. There is no in-file checksum line; anvil
+  tracks ownership and last-rendered content in a sidecar manifest at the repo root
+  (`.anvil.lock`). An advisory one-line `# Managed by cargo-anvil` comment may appear
+  at the top of each owned file, but it carries no metadata. Updates apply
+  automatically when the user hasn't touched the file. If the user edits the file, the
+  next `update` writes a `.anvil-proposed` sibling **only if the template has changed
+  since the last render** — claiming a file with no upstream churn produces zero
+  noise.
+- **managed-region** — a user-composed file with one or more tool-managed sections
+  bracketed by sentinel comments. The sentinel pair (`# >>> anvil-managed: <id>` …
+  `# <<< anvil-managed: <id>`) delimits the region body and identifies it by stable ID;
+  the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
+  sentinels, the user's content is preserved byte-for-byte — except that first
+  adoption into a TOML host may relocate compatible hand-written settings, see
+  [updates.md](./updates.md#adopting-a-hand-written-table).
+- **user-authored** — files the user owns; the tool only reads them.
+  `rust-toolchain.toml` and `.cargo/config.toml` fall in this category.
+
+Managed-region edits are refused and stay tracked until reconciled; empty or
+whitespace-only bodies regenerate. Only owned files retain empty-file opt-out
+semantics and proposals. See [updates.md](./updates.md#strict-ownership).
+
+```text
+repo/
+├── .anvil.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
+├── Justfile                                       managed-region: anvil-imports
+├── justfiles/anvil/                               owned (see local.md)
+├── .anvil/container/                              owned — the container image definition (see containers.md)
+├── Cargo.toml                                     managed-regions: anvil-{workspace-,}{rust,rustdoc,clippy}-lints
+├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
+├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
+├── rustfmt.toml                                   managed-region: anvil-rustfmt
+├── spellcheck.toml                                managed-regions: anvil-spellcheck-{root,hunspell,quirks}
+├── .delta.toml                                    managed-region: anvil-delta (points to owned cloud config)
+├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
+├── rust-toolchain[.toml]                          optional, user-authored (read only)
+├── .cargo/config.toml                             user-authored (read only)
+│
+├── .github/
+│   ├── instructions/cargo-anvil.instructions.md    owned, emitted for every backend
+│   ├── skills/cargo-anvil-adoption/SKILL.md        owned, emitted for every backend
+│   │
+│   ├── actions/ and workflows/                    only if --backend github (or autodetected) — see github.md
+│   ├── actions/anvil-setup/                         owned   (setup action and Just problem matcher)
+│   ├── actions/anvil-run-group/                     owned   (shared group action and capture script)
+│   ├── actions/anvil-report-status/                 owned   (supplemental commit-status reporter)
+│   ├── actions/anvil-impact/                        owned   (impact analysis action)
+│   ├── workflows/anvil-pr-impl.yml                  owned   (reusable workflow doing the wiring)
+│   ├── workflows/anvil-scheduled-impl.yml             owned
+│   ├── workflows/anvil-pr.yml                       owned   (root workflow: triggers/permissions/runner)
+│   ├── workflows/anvil-scheduled.yml                  owned
+│   ├── skills/code-review/SKILL.md                  owned   (GitHub PR review guidance)
+│   └── skills/code-review/test-review.md            owned   (test review rules linked from the skill)
+│
+└── .pipelines/                                    only if --backend ado (or autodetected) — see ado.md
+    ├── anvil/pr.yml                                 owned   (stages template doing the wiring)
+    ├── anvil/scheduled.yml                            owned
+    ├── anvil/steps/*.yml                            owned   (per-group step templates)
+    ├── anvil-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)
+    └── anvil-scheduled.yml                            owned
+```
+
+Detail on each host:
+
+- **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
+- **`.anvil/container/`** — the container image definition: a `Dockerfile` and
+  its build-context ignore file, plus an optional `hooks.ps1` supplying
+  credentials. `justfiles/` holds `.just` recipes and nothing else, so these
+  live in a tool-owned directory of their own; see
+  [containers.md](./containers.md).
+- **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries separate
+  `anvil-workspace-rust-lints`, `anvil-workspace-rustdoc-lints`, and
+  `anvil-workspace-clippy-lints` regions. Each opens its explicit
+  `[workspace.lints.<namespace>]` table and contains bare lint names. Users append
+  repository-specific bare lint keys immediately after the corresponding closing
+  sentinel, before the next table header. This gives `cargo sort --grouped` a stable
+  sorting unit for each namespace without mixing managed and repository-owned keys.
+  Each member `Cargo.toml` carries an `anvil-lints` region with exactly
+  `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
+  manipulation. In a single-crate repo (no `[workspace]` table), the root manifest
+  instead carries `anvil-rust-lints`, `anvil-rustdoc-lints`, and
+  `anvil-clippy-lints` regions under `[lints.<namespace>]`. The catalog favors broadly
+  applicable, low-false-positive diagnostics. It warns on empty braced structs whose unit form is clearer
+  (`empty_structs_with_brackets`) and allows literal strings with formatting-like
+  braces because templates and structured-logging messages legitimately carry such
+  text. Documentation completeness, whether production code may panic, and whether
+  crate-internal APIs may use `pub` remain repository policy: `missing_docs`,
+  `clippy::panic`, and `unreachable_pub` are not catalog defaults and adopters can
+  add them outside the managed region.
+- **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
+  `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. The bans baseline
+  rejects wildcard registry requirements while allowing versionless path or Git
+  dev-dependencies, which Cargo omits from published packages. Splitting the sections into
+  separate regions lets users add their own keys in the gaps between them (the engine composes
+  the co-hosted regions into one file). Users may also add keys
+  outside the regions. Created if absent. Content detailed in [checks.md](./checks.md).
+- **`rustfmt.toml`** — created with the opinionated baseline if absent. User-only
+  root settings can remain outside the block; conflicting managed values require
+  reconciliation, not an empty-stub override.
+- **`spellcheck.toml`** — separate root, Hunspell, and quirks regions preserve
+  user-only Hunspell settings in their own table. The untouched old combined
+  spellcheck region retires automatically during migration.
+- **`.delta.toml`** — managed trip-wire patterns for conservative impact analysis.
+  Repository-specific parser, exclusion, and fixed comparison-branch policy remains
+  user-owned outside the region. Cloud workflows explicitly load this same file, so
+  local and cloud impact analysis share one configuration. When adopting an existing
+  valid top-level `trip_wire_patterns` key, cargo-anvil preserves it and emits an empty
+  managed body with a preservation note rather than creating a duplicate TOML key. See
+  [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+  [github.md](./github.md) / [ado.md](./ado.md).
+- **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
+  line endings on every platform (rustfmt and other tools assume LF). Created if absent;
+  users add their own attribute rules outside the region.
+- **`rust-toolchain`**, **`rust-toolchain.toml`**, and **`.cargo/config.toml`** — never
+  touched. Toolchain files are optional read-only inputs to stable-toolchain selection.
+  When neither root spelling exists, Anvil selects the root manifest's
+  `[workspace.package].rust-version` or `[package].rust-version`. GitHub setup installs a
+  missing public selection through rustup. ADO callers provide their Rust bootstrap before
+  Anvil runs. The caller's `RUSTUP_TOOLCHAIN` is an input override only and is inherited by
+  child commands rather than rewritten or exported by Anvil.
+
+The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
+manifest tracking last-rendered checksums per owned file and per managed region. See
+[updates.md §1](./updates.md#1-the-manifest). All other state — including owned-file stubs —
+lives in the affected file itself; see [updates.md](./updates.md).
 
 ## 7. Customization
 
-Prefer the narrowest boundary that expresses the change:
+Four escape valves, in increasing severity:
 
-1. Put repository recipes and nonconflicting configuration outside managed
-   regions.
-2. Change documented workflow inputs or customization stubs, such as runner
-   labels, ADO pools/hooks or the ADO job wrapper.
-3. Take ownership of an owned file when its behavior really must diverge.
-   Reconcile future `.anvil-proposed` files intentionally.
-4. Compose a downstream catalog when policy should be shared across repositories.
-   Replace artifacts by identity, add artifacts, or remove them using the
-   [catalog API](./extensibility.md).
+1. **Compose around the tool**: add your own `.just` files and import them from your `Justfile`
+   alongside the `anvil/*` imports. Add your own `.github/workflows/*.yml` files (anything not
+   prefixed `anvil-` is left alone). Add your own `.pipelines/` templates and root pipelines.
+   The path of least resistance and the recommended approach for project-specific checks.
+2. **Edit a managed-region host file outside the sentinels**: extra recipes in your
+   `Justfile`, extra rules in `deny.toml` outside the managed regions (or in the gaps
+   between its per-section regions), and extra lint keys written in bare form immediately
+   after the matching namespace sentinel (for example, `pedantic = "warn"` after
+   `anvil-workspace-clippy-lints`). The tool preserves everything outside the
+   sentinels verbatim. Note that TOML forbids redeclaring a table header
+   (`[workspace.lints.clippy]` etc.), so user extensions continue the table opened by
+   the managed region. Repeating a managed key is invalid TOML; editing it inside the block
+   causes a refusal, even if the template has not changed.
+3. **Disable an owned file by emptying it.** An unchanged template leaves it alone;
+   a changed template can produce a `.anvil-proposed` sibling. Emptying a managed
+   region instead requests regeneration.
+4. **Customize an owned file by editing it.** Updates preserve it and propose
+   changed templates. This does not transfer ownership of a managed block:
+   nonempty region edits, including retired blocks, remain tracked and refused.
+   Restore generated content or empty the block to reconcile.
 
-Editing a managed region is not another customization tier: the next run refuses
-that region. Removing an owned file recreates it while selected; emptying it
-preserves a local opt-out under owned-file rules. Emptying a region instead asks
-the generator to restore it.
+What the tool deliberately does **not** do:
 
-## Execution boundaries
+- Modify unrelated `Cargo.toml` settings; compatible lint assignments may be adopted.
+- Modify `.cargo/config.toml` or `rust-toolchain.toml`.
+- Replace existing workflows, root pipelines, or any file it didn't create.
 
-Checks live in generated Just recipes. Cloud backends arrange checkout, setup,
-impact transfer, matrices, credentials and reporting around those recipes. Local
-and cloud runs share implementations, but are not bit-identical executions:
-local runs use one host, cloud runs fan out, scheduled runs disable impact, and
-developer recipes expose explicit narrowing/fix options.
+The intentional consequence: there is exactly one place to look for "what does this repo do
+differently from the default?" — the working tree itself, plus the `--dry-run` summary listing
+outstanding owned-file proposals and managed-region refusals.
 
-PR validation is impact-scoped; scheduled validation is a full-workspace
-backstop, also covering expensive or externally changing checks. A broken impact
-computation fails rather than silently skipping the dependent groups. An
-intentionally empty tier skips at the recipe boundary, so cloud jobs still have
-terminal results.
+## 8. Cross-Cutting Concerns
 
-### Tool policy
+### 8.1 Security
 
-Tool versions and nightly pins live in generated
-[`versions.just`](../../templates/justfiles/anvil/versions.just). Installation
-uses catalog pins, while version checks generally accept an already installed
-compatible newer version. Setup and validation are separate: running a check does
-not silently install its missing tools. GitHub can use `cargo-binstall`; ADO uses
-source installation. [Local execution](./local.md) defines this contract.
+- Generated GH composite actions and ADO step templates do nothing privileged on their own;
+  they just invoke `just` recipes. The user's workflow / pipeline file controls permissions
+  and secrets.
+- All cargo-tool installs done by the setup building blocks use `--locked`. No
+  `cargo-binstall`.
+- The tool never sources or executes content from any user-edited file at runtime;
+  everything executable in the repo is plain `just` recipes the user can read.
+- Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
+  `pull-requests: read` only on the pr-fast job (the static-analysis group that runs the
+  PR-title check; see [checks.md](./checks.md) for the full group definition).
+  Scheduled-tier secrets, if any, live on the scheduled workflow only — never on the
+  PR workflow. See the snippets in [github.md](./github.md) and [ado.md](./ado.md).
+
+### 8.2 Monorepo / multi-workspace
+
+Out of scope for v1. `anvil-*` recipes target a **single** cargo workspace rooted at the
+repo (they invoke cargo from the repo root). This is about *which workspace* anvil drives,
+not *how many packages within it* a given check runs: on a clean PR, impact scoping (§4 of
+the local design, and the per-backend impact sections) may narrow an individual check to the
+modified/affected/required packages of that one workspace, while unscoped checks,
+scheduled/full runs, and the dirty-tree safety net still cover the whole `--workspace`.
+Repos with multiple workspaces (uncommon in the surveyed set) compose by having a separate
+anvil tree per workspace root, each with its own `cargo anvil`. Revisit after first
+adopters report friction.
 
 ### 8.3 Cross-OS test matrices
 
-GitHub's default PR groups cover Linux and Windows on x86_64 and ARM64. Scheduled
-exhaustive checks use x86_64 Linux/Windows; the other scheduled groups also cover
-ARM64. ADO uses x86_64 Linux/Windows. These are backend topology decisions, not
-per-recipe duplicate implementations. Unsupported checks can explicitly skip
-within a host job; for example, Bolero is Linux-only.
+cloud workflows fans out the catalog across operating systems and architectures. The default matrix
+differs by backend:
 
-Runner labels/pools are configurable; changing the OS-axis shape requires
-customizing implementation workflows/stages. macOS is not a default CI leg.
-Impact is computed once per OS family, with ARM64 jobs reusing their OS-family
-projection. Architecture-specific dependency differences are consequently a
-limitation of the default impact topology.
+**GitHub backend (default: four legs).** GH ships Microsoft-hosted ARM runners
+(`ubuntu-24.04-arm`, `windows-11-arm`), so the default matrix covers Linux/Windows ×
+x86_64/aarch64 for every group except groups with no cfg-sensitivity (none currently).
+Matches `oxidizer-github`'s `extended-analysis` matrix.
 
-### Caches and reproducibility
+**ADO backend (default: two legs).** ADO has no Microsoft-hosted ARM agents. The default
+matrix is x86_64 Linux + x86_64 Windows. Matches the platforms list in `oxidizer`'s root
+pipelines. Adopters with self-hosted ARM pools extend the stages template in their root
+pipeline.
 
-Caches accelerate installation and impact analysis; they do not establish
-ownership or substitute for validation. Cloud tool caches exclude `target/`,
-and scheduled checks explicitly ignore impact caches. Container image tags
-identify their declared source inputs, not a hermetic build or a cryptographic
-attestation. Tool downloads, registries and executing repository code remain
-part of the trust model.
+| Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
+|-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
+| `pr-test`, `pr-msrv`, `pr-runtime-analysis`, `scheduled-test`          | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. `pr-msrv` runs the affected test suite under the minimum supported compiler. The slow PR groups run as parallel cloud-workflow jobs for shorter wall-clock per leg. |
+| `pr-mutants`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
+| `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |
 
-## Maintaining the design
+macOS is not in the default matrix — adopters who need it fork the owned reusable
+workflow (GH) or override `testPools` (ADO). The GH-side knob set is intentionally
+limited to per-leg runner labels; the OS axis shape itself is part of the workflow's
+identity. See [github.md §4](./github.md#4-owned-reusable-workflows) and
+[ado.md §4](./ado.md#4-owned-stages-templates) for full details.
 
-Keep durable contracts here and executable details in source/templates. Changes
-to identity, ownership, impact modes, required-check names, wrapper parameters or
-secret handling need corresponding design updates. A template version bump does
-not require reproducing the new pin in these documents.
+Locally there is no matrix — `just anvil-pr-slow` runs against whatever OS the developer
+is on. cloud workflows fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
+template), so users don't write per-OS jobs.
+
+cargo-delta impact runs **per OS family** (one stage on Linux, one on Windows) and
+each downstream matrix leg consumes the impact set from its own OS. This way, an
+OS-conditional dep change (under `[target.'cfg(target_os = ...)'.dependencies]`) is
+correctly reflected in the per-OS depgraph cargo-delta walks. Arm legs reuse their OS
+counterpart's impact set — cfg(target_arch) gates are rare enough that paying for four
+impact jobs isn't justified; if a repo finds the gap matters, splitting further is a
+local catalog override. Caching keys already include OS (see
+[github.md §8](./github.md#8-caching) and [ado.md §7](./ado.md#7-caching)).
+
+**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Generated command
+recipes use `[script("pwsh", "-NoProfile")]`, so user and system startup profiles
+cannot inject output, alter inputs, or change exit behavior. This keeps the same recipe
+contract on Windows, Linux, and macOS. `pwsh` is preinstalled on GH-hosted runners
+(`ubuntu-latest` included) and Microsoft-hosted ADO Linux agents; Linux/macOS
+developers install it from
+<https://github.com/PowerShell/PowerShell> as a one-time prerequisite. The
+`anvil-tool-pwsh-validate-prereqs` recipe enforces this with a clean failure message and a per-OS
+install hint.
+
+### 8.4 Internal vs OSS
+
+The crate ships from `github.com/microsoft/ox-tools` (alongside the existing tools published
+from that repo) and from crates.io. The binary contains:
+
+- The full check catalog (see [checks.md](./checks.md)), including `cargo aprz`, which is
+  itself published to crates.io.
+- All emitters (GH, ADO).
+
+There is no overlay system, no internal-only check, and no proprietary content. ADO
+templates are plain ADO templates — they happen to be shaped to compose cleanly with
+SubstratePT/1ESPT, but they are freely usable in any ADO environment.

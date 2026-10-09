@@ -208,8 +208,8 @@ Three layers guard different parts of the subsystem:
 Impact scoping lets a clean PR run each check against only the cargo packages its committed
 diff touches, while unscoped checks, scheduled/full runs, and a dirty working tree still cover
 the whole workspace. The *user-visible* contract for this — commands, `ANVIL_IMPACT` values,
-per-check policy, and CI shape — lives in the design chapters ([local impact protocol](./design/local.md#4-impact-scoping-via-the-anvil-impact-recipe),
-[check scoping](./design/checks.md#5-impact-scoping-check--include-mapping), [github](./design/github.md), [ado](./design/ado.md),
+per-check policy, and CI shape — lives in the design chapters ([local](./design/local.md) §4,
+[checks](./design/checks.md) §5, [github](./design/github.md), [ado](./design/ado.md),
 [containers](./design/containers.md)). This section records only the internal architecture and
 the synchronization boundaries that keep those promises true across the three backends.
 

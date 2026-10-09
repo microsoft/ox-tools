@@ -59,13 +59,6 @@ impl HostScanner {
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Toml => "toml",
-            Self::Lines => "lines",
-        }
-    }
-
     pub(crate) fn find<'a>(self, text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
         match self {
             Self::Toml => find_toml_region(text, id, syntax),
