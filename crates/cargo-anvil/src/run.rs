@@ -2220,6 +2220,115 @@ mod tests {
     }
 
     #[test]
+    fn mutation_empty_array_insertion_maps_the_original_closing_delimiter() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"managed\",\n".to_owned(),
+                    syntax: CommentSyntax::Hash,
+                },
+                path: vec!["items".to_owned()],
+            })
+            .build()
+            .unwrap();
+        for newline in ["\n", "\r\n"] {
+            for (source, expected) in [
+                (
+                    "items=[]\n",
+                    "items=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n",
+                ),
+                (
+                    "items=[\n  ]\n",
+                    "items=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n  ]\n",
+                ),
+            ] {
+                let mut hosts = HostTextCache::default();
+                hosts.set("config.toml", source.replace('\n', newline));
+                let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+                let expected = expected.replace('\n', newline);
+                assert_eq!(plan.refusals(), &[] as &[String]);
+                assert_eq!(plan.items().len(), 1);
+                assert_eq!(plan.items()[0].decision, Decision::Write);
+                assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(expected.as_str()));
+                assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
+                let manifest = plan.projected_manifest(&Manifest::default());
+                assert_eq!(
+                    manifest.region_checksum("config.toml", "entries"),
+                    Some(checksum_str(&format!("  \"managed\",{newline}")).as_str())
+                );
+                let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+                assert_eq!(rerun.refusals(), &[] as &[String]);
+                assert_eq!(rerun.items()[0].decision, Decision::InSync);
+                assert_eq!(rerun.items()[0].spliced_host, None);
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_neighbor_cannot_replace_only_the_array_closing_delimiter() {
+        let root = Path::new("__anvil_in_memory_repository__");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        for newline in ["\n", "\r\n"] {
+            let source = concat!(
+                "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n",
+                "# >>> anvil-managed: cfg\n1,\n# <<< anvil-managed: cfg\n2,\n]\n"
+            )
+            .replace('\n', newline);
+            let mut manifest = Manifest::default();
+            manifest.set_region("config.toml", "cfg", checksum_str(&format!("1,{newline}")));
+            manifest.set_region("config.toml", "entries", checksum_str(&format!("  \"managed\",{newline}")));
+            let catalog = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("cfg"),
+                    body: "1,\n]\nother = [\n".to_owned(),
+                    syntax: CommentSyntax::Hash,
+                }))
+                .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                    region: RegionSpec {
+                        host: HostSelector::Path("config.toml".to_owned()),
+                        id: RegionId::new("entries"),
+                        body: "\"managed\",\n".to_owned(),
+                        syntax: CommentSyntax::Hash,
+                    },
+                    path: vec!["items".to_owned()],
+                })
+                .build()
+                .unwrap();
+            let mut hosts = HostTextCache::default();
+            hosts.set("config.toml", source.clone());
+            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+            assert_eq!(
+                plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
+                [Decision::LeaveAlone, Decision::InSync]
+            );
+            assert_eq!(plan.items()[0].spliced_host, None);
+            assert_eq!(hosts.cached("config.toml"), Some(source));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+            assert_eq!(
+                plan.refusals(),
+                &[concat!(
+                    "Refused to manage config.toml [cfg]: this change would remove or rebind the live TOML array selector [\"items\"]. ",
+                    "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
+                    "Preserve the selected array's table headers, key, and brackets outside the changing region, ",
+                    "or retire its array-entry ownership first. This dependent change was not applied."
+                )
+                .to_owned()]
+            );
+        }
+    }
+
+    #[test]
     fn toml_array_regions_compose_with_an_ordinary_region_in_the_production_plan() {
         let root = Path::new("__anvil_in_memory_repository__");
         let workspace = Workspace {
@@ -2646,6 +2755,21 @@ mod tests {
                 "Scaffolding never rewrites existing repository or retiring-region bytes."
             )
             .to_owned()]
+        );
+        let corrected = format!("plugins.default=[]\n{text}");
+        hosts.set("config.toml", corrected);
+        let repaired = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
+        let expected =
+            format!("plugins.default=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n{text}");
+        assert_eq!(repaired.refusals(), &[] as &[String]);
+        assert_eq!(
+            repaired.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
+            [Decision::InSync, Decision::Write]
+        );
+        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            repaired.projected_manifest(&manifest).region_checksum("config.toml", "cfg"),
+            manifest.region_checksum("config.toml", "cfg")
         );
     }
 
