@@ -41,7 +41,7 @@ free() {
 }
 df() { printf 'fixture disk\n'; }
 ps() { printf 'fixture process\n'; }
-sysctl() { printf '|fixture-crash-handler\n'; }
+sysctl() { printf '%s\n' "$ORIGINAL_CORE_PATTERN"; }
 sudo() {
   printf '%s\n' "$*" >> "$SYSCTL_LOG"
   if [[ "$FAKE_FAILURE" == "core-setup" && "$*" == "-n sysctl -w kernel.core_pattern=core" ]]; then
@@ -107,6 +107,14 @@ fn run_group(group: &str, runner_os: &str, runner_environment: &str, exit_code: 
         .env("GITHUB_OUTPUT", root.join("outputs"))
         .env("CORE_LOG", root.join("core-limit"))
         .env("SYSCTL_LOG", root.join("core-routing"))
+        .env(
+            "ORIGINAL_CORE_PATTERN",
+            if failure == "empty-core-pattern" {
+                ""
+            } else {
+                "|fixture-crash-handler"
+            },
+        )
         .env("FAKE_JUST_EXIT", exit_code.to_string())
         .env("FAKE_FAILURE", failure)
         .env("REQUIRED_SAMPLES", required_samples.to_string())
@@ -122,9 +130,14 @@ fn run_group(group: &str, runner_os: &str, runner_environment: &str, exit_code: 
     let resources = root.join(format!("anvil-{group}-resources.log"));
     let core_routing = root.join("core-routing");
     if group == "pr-mutants" && runner_os == "Linux" && runner_environment == "github-hosted" {
+        let original = if failure == "empty-core-pattern" {
+            ""
+        } else {
+            "|fixture-crash-handler"
+        };
         assert_eq!(
             fs::read_to_string(core_routing).unwrap(),
-            "-n sysctl -w kernel.core_pattern=core\n-n sysctl -w kernel.core_pattern=|fixture-crash-handler\n"
+            format!("-n sysctl -w kernel.core_pattern=core\n-n sysctl -w kernel.core_pattern={original}\n")
         );
     } else {
         assert!(!core_routing.exists());
@@ -148,7 +161,7 @@ fn run_group(group: &str, runner_os: &str, runner_environment: &str, exit_code: 
             fs::read_to_string(resources).unwrap().matches("[anvil-resources]").count(),
             stored_samples
         );
-        if !failure.is_empty() {
+        if matches!(failure, "probe" | "log" | "core-restore") {
             assert!(stdout.contains("::warning::"));
         }
     } else {
@@ -199,4 +212,9 @@ fn failed_core_routing_restore_preserves_recipe_failure() {
 #[test]
 fn failed_core_routing_setup_does_not_start_recipe() {
     run_group("pr-mutants", "Linux", "github-hosted", 23, "core-setup");
+}
+
+#[test]
+fn empty_original_core_routing_is_restored() {
+    run_group("pr-mutants", "Linux", "github-hosted", 0, "empty-core-pattern");
 }
