@@ -25,9 +25,9 @@ use crate::decision::Decision;
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
-    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_host_region, insert_after_host_region,
-    legacy_lint_region_id, lint_region_placement, mask_retiring_toml_regions as mask_retiring_managed_regions, start_region_offset,
-    text_newline, toml_region_ids as managed_region_ids, upsert_located_region_with_newline,
+    CommentSyntax, HostScanner, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, legacy_lint_region_id, lint_region_placement,
+    mask_retiring_toml_regions as mask_retiring_managed_regions, start_region_offset, text_newline, toml_region_ids as managed_region_ids,
+    upsert_located_region_with_newline,
 };
 
 /// What the reader should do about a refused region.
@@ -154,16 +154,8 @@ pub fn plan_managed_region(
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
-    plan_region_with_splice(manifest, host_text, request, || {
-        splice(
-            request.host_relpath,
-            host_text,
-            request.region_id,
-            request.rendered_body,
-            request.syntax,
-            request.placement,
-            request.newline,
-        )
+    plan_region_with_splice(manifest, host_text, request, manifest.scanner(request.host_relpath), || {
+        splice(manifest.scanner(request.host_relpath), host_text, request)
     })
 }
 
@@ -171,6 +163,7 @@ pub(crate) fn plan_region_with_splice(
     manifest: &Manifest,
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
+    scanner: HostScanner,
     splice: impl FnOnce() -> Result<String, ManagedRegionRefusal>,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
     let ManagedRegionRequest {
@@ -191,7 +184,8 @@ pub(crate) fn plan_region_with_splice(
 
     let disk_region = match host_text {
         None => None,
-        Some(text) => crate::region::find_host_region(text, region_id, syntax, host_relpath)
+        Some(text) => scanner
+            .find(text, region_id, syntax)
             .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?,
     };
     let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
@@ -222,7 +216,8 @@ pub(crate) fn plan_region_with_splice(
     }
     if let Some(legacy_id) = legacy_lint_region_id(region_id)
         && let Some(text) = host_text
-        && let Some(legacy_region) = find_host_region(text, legacy_id, syntax, host_relpath)
+        && let Some(legacy_region) = scanner
+            .find(text, legacy_id, syntax)
             .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?
     {
         let recorded_checksum = manifest.region_checksum(host_relpath, legacy_id);
@@ -283,29 +278,38 @@ pub(crate) fn plan_region_with_splice(
 /// Returns `None` for a host that is not TOML and for a splice whose result
 /// parses.
 #[must_use]
+#[cfg(test)]
 pub fn toml_introduction_refusal(
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
     retiring: &BTreeSet<String>,
+) -> Option<TomlHostRefusal> {
+    toml_introduction_refusal_with_scanner(host_text, request, retiring, HostScanner::for_path(request.host_relpath))
+}
+
+pub(crate) fn toml_introduction_refusal_with_scanner(
+    host_text: Option<&str>,
+    request: ManagedRegionRequest<'_>,
+    retiring: &BTreeSet<String>,
+    scanner: HostScanner,
 ) -> Option<TomlHostRefusal> {
     let ManagedRegionRequest {
         host_relpath,
         region_id,
         rendered_body,
         syntax,
-        placement,
-        newline,
+        ..
     } = request;
-    if !is_toml_host(host_relpath) {
+    if scanner != HostScanner::Toml {
         return None;
     }
     let base = host_text.unwrap_or("");
     // A malformed region is a separate diagnosis, raised by the planner.
-    if find_host_region(base, region_id, syntax, host_relpath).is_err() {
+    if scanner.find(base, region_id, syntax).is_err() {
         return None;
     }
 
-    let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline) {
+    let spliced = match splice(scanner, host_text, request) {
         Err(refusal) => {
             return Some(TomlHostRefusal {
                 reason: refusal.reason.to_string(),
@@ -365,21 +369,15 @@ fn classify_refusal(
     }
 }
 
-fn is_toml_host(host_relpath: &str) -> bool {
-    std::path::Path::new(host_relpath)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
-}
-
-fn splice(
-    host_relpath: &str,
-    host_text: Option<&str>,
-    region_id: &str,
-    rendered_body: &str,
-    syntax: CommentSyntax,
-    placement: RegionPlacement,
-    newline: Option<&str>,
-) -> Result<String, ManagedRegionRefusal> {
+fn splice(scanner: HostScanner, host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Result<String, ManagedRegionRefusal> {
+    let ManagedRegionRequest {
+        host_relpath,
+        region_id,
+        rendered_body,
+        syntax,
+        placement,
+        newline,
+    } = request;
     let base = host_text.unwrap_or("");
     let newline = newline.unwrap_or_else(|| text_newline(base));
 
@@ -399,7 +397,7 @@ fn splice(
     // already owns are invisible and it returns `Unchanged`.
     let adopted;
     let mut residue = String::new();
-    let base = if is_toml_host(host_relpath) {
+    let base = if scanner == HostScanner::Toml {
         match adopt_unmanaged_toml_tables(base, rendered_body, syntax) {
             TomlAdoption::Unchanged => base,
             TomlAdoption::Adopted { text, residue: kept } => {
@@ -439,10 +437,12 @@ fn splice(
     };
 
     let placement = lint_region_placement(region_id, Some(base)).unwrap_or(placement);
-    let region = find_host_region(base, region_id, syntax, host_relpath)
+    let region = scanner
+        .find(base, region_id, syntax)
         .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?;
     let spliced = upsert_located_region_with_newline(base, region_id, rendered_body, syntax, placement, newline, region);
-    insert_after_host_region(&spliced, region_id, &residue, syntax, host_relpath)
+    scanner
+        .insert_after(&spliced, region_id, &residue, syntax)
         .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))
 }
 
@@ -1231,13 +1231,9 @@ yanked = \"deny\"
     #[test]
     fn splice_propagates_an_unpaired_marker_error() {
         let refusal = splice(
-            "Justfile",
+            HostScanner::Lines,
             Some("# >>> anvil-managed: r\nbody\n"),
-            "r",
-            "new body\n",
-            SYN,
-            RegionPlacement::End,
-            None,
+            request("Justfile", "r", "new body\n"),
         )
         .expect_err("an unpaired marker must be returned as a planning refusal");
 

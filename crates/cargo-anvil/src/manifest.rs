@@ -9,10 +9,8 @@
 //! compares this against the current on-disk content and the current
 //! template content.
 //!
-//! Schema is documented in [`updates.md §1`](../../docs/design/updates.md).
-//! The schema version is `1`. Newer schemas cause the tool to refuse
-//! running; older schemas are migrated automatically (no older schemas
-//! exist today).
+//! Schema 2 preserves host scanner provenance. Schema 1 remains readable;
+//! newer schemas are refused rather than losing safety metadata.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -20,11 +18,13 @@ use std::path::{Component, Path, PathBuf};
 use ohno::{AppError, IntoAppError as _, app_err, bail};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
+use crate::region::HostScanner;
+
 /// File name of the manifest at the repo root.
 pub const MANIFEST_FILE_NAME: &str = ".anvil.lock";
 
 /// Current schema version we read/write.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The full parsed manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -50,6 +50,10 @@ pub struct Manifest {
     /// Last-rendered checksum per managed region, keyed by `(host_path,
     /// region_id)`.
     pub regions: BTreeMap<RegionKey, String>,
+
+    /// Explicit ownership scanner per host. Missing entries are legacy state,
+    /// not permission to infer TOML just because its contents can be parsed.
+    pub host_scanners: BTreeMap<String, HostScanner>,
 }
 
 /// Composite key identifying one managed region.
@@ -131,6 +135,20 @@ fn path_names_no_file(names: usize, last: &str) -> bool {
 }
 
 impl Manifest {
+    pub(crate) fn validate_host_scanners(&self) -> Result<(), AppError> {
+        let mut paths = std::collections::BTreeSet::new();
+        for (path, scanner) in &self.host_scanners {
+            ensure_contained(path, "[[host]] path")?;
+            if !paths.insert(path.to_ascii_lowercase()) {
+                bail!("duplicate or case-aliased [[host]] entry for '{path}'");
+            }
+            if *scanner != HostScanner::Toml && HostScanner::for_path(path) == HostScanner::Toml {
+                bail!("[[host]] '{path}' conflicts with its TOML path declaration");
+            }
+        }
+        Ok(())
+    }
+
     /// Path the manifest should be saved at, given a workspace root.
     #[must_use]
     pub fn path_for(repo_root: &Path) -> PathBuf {
@@ -167,6 +185,9 @@ impl Manifest {
             .ok_or_else(|| app_err!("manifest is missing a top-level `version` integer"))?;
         if version > SCHEMA_VERSION {
             bail!("manifest schema version {version} is newer than supported ({SCHEMA_VERSION}); upgrade cargo-anvil");
+        }
+        if version < 1 {
+            bail!("unsupported manifest schema version {version}");
         }
 
         let tool = doc.get("tool").and_then(Item::as_str).map(str::to_owned);
@@ -228,12 +249,42 @@ impl Manifest {
             }
         }
 
+        let mut host_scanners = BTreeMap::new();
+        if let Some(item) = doc.get("host") {
+            if version < 2 {
+                bail!("host scanner provenance requires manifest schema version 2");
+            }
+            let tables = item
+                .as_array_of_tables()
+                .ok_or_else(|| app_err!("`host` must contain [[host]] entries"))?;
+            for table in tables {
+                let path = table
+                    .get("path")
+                    .and_then(Item::as_str)
+                    .ok_or_else(|| app_err!("[[host]] is missing `path`"))?;
+                ensure_contained(path, "[[host]] path")?;
+                let scanner = match table.get("scanner").and_then(Item::as_str) {
+                    Some("toml") => HostScanner::Toml,
+                    Some("lines") => HostScanner::Lines,
+                    _ => bail!("[[host]] '{path}' has an unsupported or missing `scanner`"),
+                };
+                if host_scanners.keys().any(|existing: &String| existing.eq_ignore_ascii_case(path)) {
+                    bail!("duplicate or case-aliased [[host]] entry for '{path}'");
+                }
+                if scanner != HostScanner::Toml && HostScanner::for_path(path) == HostScanner::Toml {
+                    bail!("[[host]] '{path}' conflicts with its TOML path declaration");
+                }
+                host_scanners.insert(path.to_owned(), scanner);
+            }
+        }
+
         Ok(Self {
             tool,
             tool_version,
             catalog_checksum,
             files,
             regions,
+            host_scanners,
         })
     }
 
@@ -274,6 +325,15 @@ impl Manifest {
             region_tables.push(table);
         }
         doc.insert("region", Item::ArrayOfTables(region_tables));
+
+        let mut host_tables = ArrayOfTables::new();
+        for (path, scanner) in &self.host_scanners {
+            let mut table = Table::new();
+            table.insert("path", value(path.as_str()));
+            table.insert("scanner", value(scanner.name()));
+            host_tables.push(table);
+        }
+        doc.insert("host", Item::ArrayOfTables(host_tables));
 
         // Normalize to exactly one trailing newline regardless of how
         // toml_edit serialized the document — `trim_end_matches` collapses
@@ -361,6 +421,19 @@ impl Manifest {
         self.regions.keys().any(|key| key.host.as_str().eq_ignore_ascii_case(path))
     }
 
+    /// Recorded scanner, tolerating the resolved on-disk casing of the host.
+    #[must_use]
+    pub fn host_scanner(&self, host: &str) -> Option<HostScanner> {
+        self.host_scanners
+            .iter()
+            .find(|(path, _)| path.eq_ignore_ascii_case(host))
+            .map(|(_, scanner)| *scanner)
+    }
+
+    pub(crate) fn scanner(&self, host: &str) -> HostScanner {
+        self.host_scanner(host).unwrap_or_else(|| HostScanner::for_path(host))
+    }
+
     /// The checksum recorded for one managed region, tolerating a case-only
     /// difference in the host for the reason [`Self::file_checksum`] gives.
     ///
@@ -418,10 +491,62 @@ mod tests {
     }
 
     #[test]
+    fn provenance_schema_round_trip_and_legacy_compatibility() {
+        let legacy = "version = 1\n[[region]]\nhost = \"config\"\nid = \"entries\"\nchecksum = \"sha256:old\"\n";
+        let mut manifest = Manifest::parse(legacy).unwrap();
+        assert_eq!(manifest.host_scanner("config"), None);
+        manifest.host_scanners.insert("config".to_owned(), HostScanner::Toml);
+        let serialized = manifest.to_toml();
+        assert_eq!(
+            serialized,
+            concat!(
+                "version = 2\n\n[[region]]\nhost = \"config\"\nid = \"entries\"\nchecksum = \"sha256:old\"\n",
+                "\n[[host]]\npath = \"config\"\nscanner = \"toml\"\n"
+            )
+        );
+        assert_eq!(Manifest::parse(&serialized).unwrap(), manifest);
+        assert_eq!(manifest.host_scanner("CONFIG"), Some(HostScanner::Toml));
+        let error = Manifest::parse(&serialized.replacen("version = 2", "version = 1", 1)).unwrap_err();
+        assert_eq!(error.to_string(), "host scanner provenance requires manifest schema version 2");
+    }
+
+    #[test]
+    fn provenance_rejects_unknown_malformed_and_conflicting_metadata() {
+        for (source, message) in [
+            ("version = 0\n", "unsupported manifest schema version 0"),
+            ("version = 2\nhost = \"toml\"\n", "`host` must contain [[host]] entries"),
+            ("version = 2\n[[host]]\nscanner = \"toml\"\n", "[[host]] is missing `path`"),
+            (
+                "version = 2\n[[host]]\npath = \"config\"\n",
+                "[[host]] 'config' has an unsupported or missing `scanner`",
+            ),
+            (
+                "version = 2\n[[host]]\npath = \"config\"\nscanner = \"future\"\n",
+                "[[host]] 'config' has an unsupported or missing `scanner`",
+            ),
+            (
+                "version = 2\n[[host]]\npath = \"Cargo.toml\"\nscanner = \"lines\"\n",
+                "[[host]] 'Cargo.toml' conflicts with its TOML path declaration",
+            ),
+            (
+                "version = 2\n[[host]]\npath = \"../config\"\nscanner = \"toml\"\n",
+                "[[host]] path '../config' must be a relative path inside the repository",
+            ),
+            (
+                "version = 2\n[[host]]\npath = \"config\"\nscanner = \"toml\"\n[[host]]\npath = \"CONFIG\"\nscanner = \"lines\"\n",
+                "duplicate or case-aliased [[host]] entry for 'CONFIG'",
+            ),
+        ] {
+            let error = Manifest::parse(source).unwrap_err();
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
     fn empty_manifest_round_trip() {
         let m1 = Manifest::default();
         let text = m1.to_toml();
-        assert_eq!(text, "version = 1\n");
+        assert_eq!(text, "version = 2\n");
         let m2 = Manifest::parse(&text).unwrap();
         assert_eq!(m1, m2);
     }

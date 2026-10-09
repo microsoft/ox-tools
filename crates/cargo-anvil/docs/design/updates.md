@@ -23,6 +23,42 @@ Checksum input normalizes line endings, so a CRLF checkout is not interpreted as
 a policy edit. Region checksums exclude sentinels and repository-owned text.
 Catalog checksum describes catalog content, not the repository state.
 
+Schema 2 also records `[[host]]` entries with a relative `path` and a `scanner`
+of `toml` (actual TOML comment tokens) or `lines` (line-oriented comment syntax).
+Array registration declares TOML for the entire host, even without a `.toml`
+suffix. Ordinary neighbors share this scanner. The lock retains it while any
+region in the host remains tracked, including refused or interrupted retirement;
+only successful retirement of the last tracked region drops it. A fresh catalog
+and a fresh process therefore retire the last array using the same boundaries
+that introduction used.
+
+Schema 1 locks remain readable. `.toml` paths keep their TOML interpretation.
+For legacy non-`.toml` hosts with tracked regions, migration requires the line
+and TOML scanners to agree on every tracked region's boundaries and marker
+repairs before any bytes are changed. Live regions use their declared comment
+syntax; a live non-hash declaration explicitly excludes TOML and keeps the line
+scanner without interpreting unrelated hash markers. This is a boundary check, not a guess
+from whether the document parses. An active array then establishes TOML;
+otherwise the historical line scanner remains in use. If the scanners disagree,
+the entire plan refuses before repairs or writes. After checking the file's
+actual format and ownership boundaries against version control, the repository
+can explicitly confirm provenance by setting `version = 2` and adding, for example:
+
+```toml
+[[host]]
+path = "config"
+scanner = "toml"
+```
+
+Use `lines` only for a genuinely line-oriented host; parseable TOML bytes alone
+do not establish that choice. Explicit recorded `lines` conflicts with a later
+array/TOML declaration: retire existing regions with the previous catalog first,
+then introduce the new format. TOML hosts reject non-hash region comment syntax
+and non-TOML composed-host declarations. Case-aliased host entries, invalid paths,
+unknown scanner values and unsupported schema versions refuse rather than
+discarding safety state. Writers always emit schema 2; older schema-1 binaries
+already reject newer versions and must be upgraded before using this lock.
+
 ### The single-tool guard
 
 After finding the root and loading the lock, the driver compares its recorded
