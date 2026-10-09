@@ -695,7 +695,8 @@ three-day retention. Artifact publication is supplemental and cannot override
 the mutation exit status. A runner that disappears before publication can still
 lose its local files; streamed samples improve diagnosis but do not guarantee
 recovery after runner loss. The resource sampler is stopped when the run step
-exits, including on a failed mutation check.
+exits, including on a failed mutation check. Probe and resource-log write failures
+emit warnings without preventing later samples or changing the group's result.
 
 GitHub fixes workflow job names before a job runs, so a matrix check named
 `PR Job / Check Group: Fast Checks (linux)` cannot rename itself after

@@ -514,14 +514,15 @@ runs:
             trap 'if [[ -n "$sleep_pid" ]]; then kill "$sleep_pid"; fi; exit 143' TERM
             while true; do
               {
-                echo "[anvil-resources] $(date -u +%FT%TZ)"
-                free -m
-                df -m .
-                ps -eo pid,ppid,rss,pcpu,comm --sort=-rss | sed -n '1,12p'
+                sample_time="$(date -u +%FT%TZ)" || echo "::warning::Mutation clock probe failed"
+                echo "[anvil-resources] $sample_time"
+                free -m || echo "::warning::Mutation memory probe failed"
+                df -m . || echo "::warning::Mutation disk probe failed"
+                ps -eo pid,ppid,rss,pcpu,comm --sort=-rss | sed -n '1,12p' || echo "::warning::Mutation process probe failed"
                 if [[ -f mutants.out/debug.log ]]; then
-                  tail -n 1 mutants.out/debug.log
+                  tail -n 1 mutants.out/debug.log || echo "::warning::Mutation debug-log probe failed"
                 fi
-              } 2>&1 | tee -a "$RUNNER_TEMP/anvil-$ANVIL_GROUP-resources.log"
+              } 2>&1 | tee -a "$RUNNER_TEMP/anvil-$ANVIL_GROUP-resources.log" || echo "::warning::Mutation resource log write failed"
               sleep 30 &
               sleep_pid=$!
               wait "$sleep_pid"
