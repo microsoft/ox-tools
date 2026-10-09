@@ -683,6 +683,27 @@ workflows. Anvil does not emit or support public per-group action paths.
 
 ### Failure attribution and commit statuses
 
+PR mutation jobs print caught and unviable mutations as they complete. On Linux,
+the shared action also streams memory, disk, process-resource usage and the
+latest cargo-mutants debug record every 30 seconds. It disables core dumps for
+the mutation group: intentionally crashing mutations still fail normally, but
+do not generate unused core files. On ephemeral GitHub-hosted Linux runners it
+also temporarily replaces piped crash-handler routing with file routing:
+Linux ignores the core-size limit for piped handlers, and repeated aborts can
+exhaust memory with Ubuntu's `apport` processes. The original routing is
+restored on exit. Configuration failure stops the group; restoration failure
+emits a warning without changing the test result. Self-hosted runners do not
+change this host-wide setting. Other groups retain their existing limits.
+
+After success or failure, mutation jobs attempt to upload the group log,
+resource samples and `mutants.out` as an OS/architecture-specific artifact with
+three-day retention. Artifact publication is supplemental and cannot override
+the mutation exit status. A runner that disappears before publication can still
+lose its local files; streamed samples improve diagnosis but do not guarantee
+recovery after runner loss. The resource sampler is stopped when the run step
+exits, including on a failed mutation check. Probe and resource-log write failures
+emit warnings without preventing later samples or changing the group's result.
+
 GitHub fixes workflow job names before a job runs, so a matrix check named
 `PR Job / Check Group: Fast Checks (linux)` cannot rename itself after
 discovering that `anvil-license-headers` failed. The checks UI groups that name
