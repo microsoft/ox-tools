@@ -27,19 +27,8 @@ fn run_script() -> String {
         .join("\n")
 }
 
-fn run_group(group: &str, runner_os: &str, exit_code: i32, failure: &str) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
-    assert!(
-        Command::new("mkfifo")
-            .args([root.join("sample-ready"), root.join("sample-continue")])
-            .status()
-            .unwrap()
-            .success()
-    );
-    // Execute the Bash contract with scripted probes and a FIFO-driven clock,
-    // not host process statistics or a sleep racing the sampler.
-    let fixture = r#"
+// Scripted probes and a FIFO-driven clock avoid host statistics and sampler races.
+const FIXTURE: &str = r#"
 exec 3<>sample-ready
 exec 4<>sample-continue
 date() { printf 'fixture-time\n'; }
@@ -52,6 +41,16 @@ free() {
 }
 df() { printf 'fixture disk\n'; }
 ps() { printf 'fixture process\n'; }
+sysctl() { printf '|fixture-crash-handler\n'; }
+sudo() {
+  printf '%s\n' "$*" >> "$SYSCTL_LOG"
+  if [[ "$FAKE_FAILURE" == "core-setup" && "$*" == "-n sysctl -w kernel.core_pattern=core" ]]; then
+    return 23
+  fi
+  if [[ "$FAKE_FAILURE" == "core-restore" && "$*" != "-n sysctl -w kernel.core_pattern=core" ]]; then
+    return 23
+  fi
+}
 sleep() {
   printf 'sampled\n' >&3
   read -r -t 10 -u 4
@@ -85,16 +84,29 @@ just() {
   return "$FAKE_JUST_EXIT"
 }
 "#;
+
+fn run_group(group: &str, runner_os: &str, runner_environment: &str, exit_code: i32, failure: &str) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    assert!(
+        Command::new("mkfifo")
+            .args([root.join("sample-ready"), root.join("sample-continue")])
+            .status()
+            .unwrap()
+            .success()
+    );
     let required_samples = if failure.is_empty() { 1 } else { 2 };
-    let run = format!("{fixture}\n{}", run_script());
+    let run = format!("{FIXTURE}\n{}", run_script());
     let output = Command::new("bash")
         .args(["-e", "-o", "pipefail", "-c", &run])
         .current_dir(root)
         .env("ANVIL_GROUP", group)
         .env("RUNNER_OS", runner_os)
+        .env("RUNNER_ENVIRONMENT", runner_environment)
         .env("RUNNER_TEMP", root)
         .env("GITHUB_OUTPUT", root.join("outputs"))
         .env("CORE_LOG", root.join("core-limit"))
+        .env("SYSCTL_LOG", root.join("core-routing"))
         .env("FAKE_JUST_EXIT", exit_code.to_string())
         .env("FAKE_FAILURE", failure)
         .env("REQUIRED_SAMPLES", required_samples.to_string())
@@ -107,12 +119,26 @@ just() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let resources = root.join(format!("anvil-{group}-resources.log"));
+    let core_routing = root.join("core-routing");
+    if group == "pr-mutants" && runner_os == "Linux" && runner_environment == "github-hosted" {
+        assert_eq!(
+            fs::read_to_string(core_routing).unwrap(),
+            "-n sysctl -w kernel.core_pattern=core\n-n sysctl -w kernel.core_pattern=|fixture-crash-handler\n"
+        );
+    } else {
+        assert!(!core_routing.exists());
+    }
+    if failure == "core-setup" {
+        assert!(!root.join("core-limit").exists(), "recipe must not run after setup fails");
+        assert!(!root.join("outputs").exists());
+        return;
+    }
     let outputs = fs::read_to_string(root.join("outputs")).unwrap();
     assert!(outputs.contains(&format!("exit_code={exit_code}\n")));
     if exit_code != 0 {
         assert!(outputs.contains("failed_recipe=anvil-mutants-diff\n"));
     }
-    let resources = root.join(format!("anvil-{group}-resources.log"));
     if group == "pr-mutants" && runner_os == "Linux" {
         assert_eq!(fs::read_to_string(root.join("core-limit")).unwrap().trim(), "0");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -132,30 +158,45 @@ just() {
 
 #[test]
 fn mutation_diagnostics_preserve_success() {
-    run_group("pr-mutants", "Linux", 0, "");
+    run_group("pr-mutants", "Linux", "github-hosted", 0, "");
 }
 
 #[test]
 fn mutation_diagnostics_preserve_recipe_failure() {
-    run_group("pr-mutants", "Linux", 23, "");
+    run_group("pr-mutants", "Linux", "github-hosted", 23, "");
 }
 
 #[test]
 fn other_groups_do_not_start_mutation_diagnostics() {
-    run_group("pr-test", "Linux", 0, "");
+    run_group("pr-test", "Linux", "github-hosted", 0, "");
 }
 
 #[test]
 fn non_linux_mutation_groups_do_not_start_resource_sampling() {
-    run_group("pr-mutants", "Windows", 23, "");
+    run_group("pr-mutants", "Windows", "github-hosted", 23, "");
 }
 
 #[test]
 fn failed_probe_does_not_stop_later_samples() {
-    run_group("pr-mutants", "Linux", 0, "probe");
+    run_group("pr-mutants", "Linux", "github-hosted", 0, "probe");
 }
 
 #[test]
 fn failed_log_write_does_not_stop_later_samples() {
-    run_group("pr-mutants", "Linux", 0, "log");
+    run_group("pr-mutants", "Linux", "github-hosted", 0, "log");
+}
+
+#[test]
+fn self_hosted_mutation_groups_do_not_change_host_core_routing() {
+    run_group("pr-mutants", "Linux", "self-hosted", 0, "");
+}
+
+#[test]
+fn failed_core_routing_restore_preserves_recipe_failure() {
+    run_group("pr-mutants", "Linux", "github-hosted", 23, "core-restore");
+}
+
+#[test]
+fn failed_core_routing_setup_does_not_start_recipe() {
+    run_group("pr-mutants", "Linux", "github-hosted", 23, "core-setup");
 }

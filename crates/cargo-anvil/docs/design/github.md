@@ -687,7 +687,13 @@ PR mutation jobs print caught and unviable mutations as they complete. On Linux,
 the shared action also streams memory, disk, process-resource usage and the
 latest cargo-mutants debug record every 30 seconds. It disables core dumps for
 the mutation group: intentionally crashing mutations still fail normally, but
-do not generate unused core files. Other groups retain their existing limits.
+do not generate unused core files. On ephemeral GitHub-hosted Linux runners it
+also temporarily replaces piped crash-handler routing with file routing:
+Linux ignores the core-size limit for piped handlers, and repeated aborts can
+exhaust memory with Ubuntu's `apport` processes. The original routing is
+restored on exit. Configuration failure stops the group; restoration failure
+emits a warning without changing the test result. Self-hosted runners do not
+change this host-wide setting. Other groups retain their existing limits.
 
 After success or failure, mutation jobs attempt to upload the group log,
 resource samples and `mutants.out` as an OS/architecture-specific artifact with
