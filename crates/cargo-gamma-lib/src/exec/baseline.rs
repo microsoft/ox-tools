@@ -57,6 +57,7 @@ pub(super) struct Baseline {
 /// Generous rather than calibrated, because there is nothing to calibrate from yet: this is the
 /// measurement every later budget is derived from. It only ever fires on a suite that has hung.
 const BASELINE_BUDGET: Duration = Duration::from_mins(10);
+const MIN_MEASURED_DURATION: Duration = Duration::from_nanos(1);
 const MAX_RECORDED_FAILED_TESTS: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -320,7 +321,8 @@ where
 
                     // A closed receiver means the calling thread is gone, which cannot happen while
                     // the scope is open.
-                    let _sent = sender.send((index, began.elapsed(), observation));
+                    let took = measured_duration(began.elapsed());
+                    let _sent = sender.send((index, took, observation));
                 }
             });
         }
@@ -338,6 +340,12 @@ where
     });
 
     measured
+}
+
+/// Zero means no baseline was measured, so a completed observation is always positive even when
+/// the platform clock cannot distinguish its start and end.
+fn measured_duration(elapsed: Duration) -> Duration {
+    elapsed.max(MIN_MEASURED_DURATION)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1583,5 +1591,11 @@ mod tests {
         assert_eq!(binaries[0].peak, Some(100));
         assert_eq!(binaries[1].peak, Some(300));
         assert!(binaries.iter().all(|binary| binary.baseline > Duration::ZERO));
+    }
+
+    #[test]
+    fn completed_measurements_are_distinct_from_missing_baselines() {
+        assert_eq!(measured_duration(Duration::ZERO), MIN_MEASURED_DURATION);
+        assert_eq!(measured_duration(Duration::from_millis(1)), Duration::from_millis(1));
     }
 }
