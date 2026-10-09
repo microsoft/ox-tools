@@ -570,7 +570,24 @@ pub fn remove_region(text: &str, id: &str, syntax: CommentSyntax) -> Result<Stri
 }
 
 pub(crate) fn remove_toml_region(text: &str, id: &str, syntax: CommentSyntax) -> Result<String, AppError> {
-    Ok(remove_located_region(text, find_toml_region(text, id, syntax)?))
+    fn inside_array(item: &Item, offset: usize) -> bool {
+        item.as_array()
+            .and_then(toml_edit::Array::span)
+            .is_some_and(|span| span.contains(&offset))
+            || item
+                .as_table()
+                .is_some_and(|table| table.iter().any(|(_, child)| inside_array(child, offset)))
+    }
+    let region = find_toml_region(text, id, syntax)?;
+    if let Some(region) = &region
+        && toml_edit::Document::parse(text)
+            .ok()
+            .is_some_and(|document| inside_array(document.as_item(), region.start_line.start))
+    {
+        // Array insertion adds no separator blank line: all adjacent whitespace is repository-owned.
+        return Ok(format!("{}{}", &text[..region.start_line.start], &text[region.end_line.end..]));
+    }
+    Ok(remove_located_region(text, region))
 }
 
 fn remove_located_region(text: &str, region: Option<Region<'_>>) -> String {

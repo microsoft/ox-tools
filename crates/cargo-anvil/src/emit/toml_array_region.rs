@@ -359,7 +359,7 @@ pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<S
         let remaining = lookup(updated.as_item(), path).and_then(Item::as_array).and_then(Array::span);
         if mapped
             .zip(remaining)
-            .is_none_or(|((start, end), remaining)| remaining.start != start || remaining.end != end + 1)
+            .is_none_or(|((start, end), remaining)| remaining != (start..end + 1))
         {
             return Err(refusal(
                 format!("this change would remove or rebind the live TOML array selector {path:?}"),
@@ -446,10 +446,12 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
         let candidate = values.iter().enumerate().find(|(index, value)| {
             let span = value.span().expect("parsed array values retain source spans");
             !used.contains(index)
+                && value.as_str() == Some(generated)
+                // A string cannot straddle a real comment sentinel; marker-looking
+                // lines inside multiline strings are excluded by the lexical scanner.
                 && !protected
                     .iter()
-                    .any(|region| span.start < region.end_line.end && region.start_line.start < span.end)
-                && value.as_str() == Some(generated)
+                    .any(|region| (region.start_line.start..region.end_line.end).contains(&span.start))
         });
         if let Some((index, value)) = candidate {
             used.insert(index);
@@ -525,6 +527,17 @@ mod tests {
             },
             path: vec!["plugins".to_owned(), "default".to_owned()],
         }
+    }
+
+    #[test]
+    fn array_splice_maps_only_unchanged_bytes_at_both_boundaries() {
+        let map = splice_offset_map("α[old]ω", "α[newer]ω");
+        assert_eq!(
+            (0.."α[old]ω".len()).map(map).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2), None, None, None, Some(8), Some(9), Some(10)]
+        );
+        let insert = splice_offset_map("[]", "[x]");
+        assert_eq!((0..2).map(insert).collect::<Vec<_>>(), vec![Some(0), Some(2)]);
     }
 
     #[test]
