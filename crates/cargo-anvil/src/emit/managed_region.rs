@@ -65,8 +65,6 @@ pub enum RefusalRemedy {
     ArrayDependency,
     /// Paired markers are outside the selected array or split one of its values.
     MisplacedArrayMarkers,
-    /// Adopting a compound value would discard repository-owned interior comments.
-    CommentedArrayEntry,
     /// The selected item or one of its parents has an incompatible TOML type.
     ArrayShape,
     /// Creating a missing array would replace existing source bytes rather than insert.
@@ -154,8 +152,8 @@ pub fn plan_managed_region(
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
-    plan_region_with_splice(manifest, host_text, request, manifest.scanner(request.host_relpath), || {
-        splice(manifest.scanner(request.host_relpath), host_text, request)
+    plan_region_with_splice(manifest, host_text, request, HostScanner::for_path(request.host_relpath), || {
+        splice(HostScanner::for_path(request.host_relpath), host_text, request)
     })
 }
 
@@ -278,7 +276,6 @@ pub(crate) fn plan_region_with_splice(
 /// Returns `None` for a host that is not TOML and for a splice whose result
 /// parses.
 #[must_use]
-#[cfg(test)]
 pub fn toml_introduction_refusal(
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,

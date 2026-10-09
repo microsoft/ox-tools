@@ -4,15 +4,15 @@
 //! Source-span-based placement of regions inside TOML arrays.
 
 use ohno::app_err;
-use toml_edit::{Array, Document, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, Document, DocumentMut, Item, Table};
 
 use crate::catalog::TomlArrayRegionSpec;
 use crate::emit::managed_region::{ManagedRegionRefusal, ManagedRegionRequest, RefusalRemedy, plan_region_with_splice};
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
 use crate::region::{
-    CommentSyntax, Region, RegionPlacement, canonical_value, find_toml_region as find_region,
-    mask_retiring_toml_regions as mask_retiring_managed_regions, remove_toml_region as remove_region, text_newline, toml_comment_lines,
+    CommentSyntax, Region, RegionPlacement, find_toml_region as find_region, remove_toml_region as remove_region, text_newline,
+    toml_comment_lines,
 };
 
 fn refusal(reason: impl std::fmt::Display, remedy: RefusalRemedy) -> ManagedRegionRefusal {
@@ -28,6 +28,11 @@ fn lookup<'a>(mut item: &'a Item, path: &[String]) -> Option<&'a Item> {
 
 /// Validate the template independently of repository state.
 pub(crate) fn validate_spec(spec: &TomlArrayRegionSpec) -> Result<(), ManagedRegionRefusal> {
+    if let crate::catalog::HostSelector::Path(host) = &spec.region.host
+        && !host.to_ascii_lowercase().ends_with(".toml")
+    {
+        return Err(refusal("TOML array hosts must have a .toml suffix", RefusalRemedy::ArrayShape));
+    }
     if spec.path.is_empty() || spec.region.syntax != CommentSyntax::Hash {
         return Err(refusal(
             "a TOML array region requires a nonempty key path and hash comment syntax",
@@ -64,6 +69,12 @@ fn body_array(body: &str) -> Result<Array, ManagedRegionRefusal> {
     if !array.is_empty() && !array.trailing_comma() {
         return Err(refusal(
             "TOML array-entry bodies must end with a trailing comma",
+            RefusalRemedy::InvalidGeneratedToml,
+        ));
+    }
+    if array.iter().any(|value| value.as_str().is_none()) {
+        return Err(refusal(
+            "generated array entries must be strings",
             RefusalRemedy::InvalidGeneratedToml,
         ));
     }
@@ -106,14 +117,14 @@ fn contains_interior(span: &std::ops::Range<usize>, offset: usize) -> bool {
 }
 
 /// Create only missing table/array scaffolding, leaving existing items intact.
-fn scaffold(text: &str, path: &[String], retiring: &std::collections::BTreeSet<String>) -> Result<String, ManagedRegionRefusal> {
-    let normalized = mask_retiring_managed_regions(text, CommentSyntax::Hash, retiring).replace("\r\n", "\n");
+fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal> {
+    let normalized = text.replace("\r\n", "\n");
     let mut document = normalized
         .parse::<DocumentMut>()
         .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let mut item = document.as_item_mut();
     for (index, key) in path.iter().enumerate() {
-        let table = item.as_table_like_mut().ok_or_else(|| {
+        let table = item.as_table_mut().ok_or_else(|| {
             refusal(
                 format!("the parent of TOML array {path:?} is not a table"),
                 RefusalRemedy::ArrayShape,
@@ -157,60 +168,22 @@ fn scaffold(text: &str, path: &[String], retiring: &std::collections::BTreeSet<S
     }
     let inserted = edited[prefix..edited.len() - suffix].replace('\n', text_newline(text));
     let scaffolded = format!("{}{inserted}{}", &text[..before], &text[after..]);
-    let document = Document::parse(mask_retiring_managed_regions(&scaffolded, CommentSyntax::Hash, retiring))
-        .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let document = Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let array = lookup(document.as_item(), path)
         .and_then(Item::as_array)
         .expect("the scaffold inserted or validated an array");
     let span = array.span().expect("parsed array retains its span");
     let regions = validated_regions(&scaffolded)?;
-    let Some(owner) = regions
+    if regions
         .iter()
-        .find(|region| (region.body.start..region.body.end).contains(&span.start))
-    else {
-        return Ok(scaffolded);
-    };
-    // toml_edit inserts ahead of a following closing sentinel. Move the whole
-    // scaffold delta, including any new parent headers, but no existing bytes.
-    let (_, parent_path) = path.split_last().expect("the array selector was validated as nonempty");
-    let parent = lookup(document.as_item(), parent_path).expect("the scaffold created the parent table");
-    if parent.as_inline_table().is_some() {
+        .any(|region| (region.body.start..region.body.end).contains(&span.start))
+    {
         return Err(refusal(
-            "the array's inline parent belongs to a managed region",
+            "creating the missing array would overlap another managed region; scaffold relocation is not supported",
             RefusalRemedy::EnclosingOwnership,
         ));
     }
-    let end = before + inserted.len();
-    let owned_offsets = before.checked_sub(owner.body.start).zip(end.checked_sub(owner.body.start));
-    let Some(owned_delta) = owned_offsets.and_then(|(start, end)| owner.body_str().get(start..end)) else {
-        return Err(refusal(
-            "the missing array cannot be scaffolded without changing existing managed content",
-            RefusalRemedy::EnclosingOwnership,
-        ));
-    };
-    let separator = if scaffolded[..owner.end_line.end].ends_with('\n') {
-        ""
-    } else {
-        text_newline(text)
-    };
-    let moved = format!(
-        "{}{}{separator}{}{}",
-        &scaffolded[..before],
-        &scaffolded[end..owner.end_line.end],
-        owned_delta,
-        &scaffolded[owner.end_line.end..]
-    );
-    let moved_document = Document::parse(mask_retiring_managed_regions(&moved, CommentSyntax::Hash, retiring))
-        .map_err(|error| refusal(error, RefusalRemedy::EnclosingOwnership))?;
-    let moved_array = lookup(moved_document.as_item(), path).and_then(Item::as_array);
-    let expected_start = owner.end_line.end - inserted.len() + separator.len() + (span.start - before);
-    if moved_array.and_then(Array::span).is_none_or(|span| span.start != expected_start) {
-        return Err(refusal(
-            "the missing array cannot be scaffolded outside managed ownership while remaining in its parent table",
-            RefusalRemedy::EnclosingOwnership,
-        ));
-    }
-    Ok(moved)
+    Ok(scaffolded)
 }
 
 fn source_offset(text: &str, normalized_offset: usize) -> usize {
@@ -230,7 +203,7 @@ fn source_offset(text: &str, normalized_offset: usize) -> usize {
 ///
 /// Include every comment sentinel, not only the successfully paired regions returned
 /// by `managed_region_ids`. A malformed boundary anywhere makes adoption unsafe.
-fn validated_regions(text: &str) -> Result<Vec<Region<'_>>, ManagedRegionRefusal> {
+pub(crate) fn validated_regions(text: &str) -> Result<Vec<Region<'_>>, ManagedRegionRefusal> {
     let mut regions = Vec::new();
     let mut open = None;
     let mut seen = std::collections::BTreeSet::new();
@@ -267,42 +240,32 @@ fn validated_regions(text: &str) -> Result<Vec<Region<'_>>, ManagedRegionRefusal
 }
 
 /// Plan through the ordinary checksum/edited-body policy with an array splice.
-#[cfg(test)]
 pub(crate) fn plan_toml_array_region(
     manifest: &Manifest,
     host_text: Option<&str>,
     host: &str,
     spec: &TomlArrayRegionSpec,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
-    plan_toml_array_region_with_retirements(manifest, host_text, host, spec, &std::collections::BTreeSet::new())
-}
-
-/// Plan an array-entry region with pending retirements.
-///
-/// Parse the pending-retirement projection, but splice original bytes. Masking
-/// preserves offsets; ownership and marker validation still see the raw host.
-pub(crate) fn plan_toml_array_region_with_retirements(
-    manifest: &Manifest,
-    host_text: Option<&str>,
-    host: &str,
-    spec: &TomlArrayRegionSpec,
-    retiring: &std::collections::BTreeSet<String>,
-) -> Result<PlanItem, ManagedRegionRefusal> {
     validate_spec(spec)?;
     let original = host_text.unwrap_or("");
     let regions = validated_regions(original)?;
-    let document = Document::parse(mask_retiring_managed_regions(original, CommentSyntax::Hash, retiring))
-        .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let document = Document::parse(original).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let scaffolded;
     let (base, document, regions) = if lookup(document.as_item(), &spec.path).is_some() {
         (original, document, regions)
     } else {
-        scaffolded = scaffold(original, &spec.path, retiring)?;
-        let document = Document::parse(mask_retiring_managed_regions(&scaffolded, CommentSyntax::Hash, retiring))
-            .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+        scaffolded = scaffold(original, &spec.path)?;
+        let document = Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
         let regions = validated_regions(&scaffolded)?;
         (scaffolded.as_str(), document, regions)
     };
+    let mut parent = document.as_item();
+    for key in &spec.path[..spec.path.len() - 1] {
+        parent = parent.get(key).expect("the selected path exists after scaffolding");
+        if parent.as_table().is_none() {
+            return Err(refusal("array parents must be normal TOML tables", RefusalRemedy::ArrayShape));
+        }
+    }
     let array = lookup(document.as_item(), &spec.path).and_then(Item::as_array).ok_or_else(|| {
         refusal(
             format!("the selected TOML item {:?} is not an array", spec.path),
@@ -325,6 +288,8 @@ pub(crate) fn plan_toml_array_region_with_retirements(
                 RefusalRemedy::EnclosingOwnership,
             ));
         }
+        let without = remove_region(base, id, CommentSyntax::Hash).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
+        validate_neighbor_splice(base, &without, std::slice::from_ref(&spec.path))?;
     }
     let region =
         find_region(base, spec.region.id.as_str(), CommentSyntax::Hash).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
@@ -371,8 +336,7 @@ pub(crate) fn plan_toml_array_region_with_retirements(
             let rest = rest.strip_prefix(newline).unwrap_or(rest);
             format!("{}{newline}{rendered}{rest}", &adopted[..at])
         };
-        Document::parse(mask_retiring_managed_regions(&spliced, CommentSyntax::Hash, retiring))
-            .map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
+        Document::parse(&spliced).map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
         validated_regions(&spliced)?;
         Ok(spliced)
     })
@@ -382,61 +346,64 @@ pub(crate) fn plan_toml_array_region_with_retirements(
 ///
 /// A neighboring region must not remove array delimiters or rebind an existing
 /// selector to a different source location, even when the result still parses.
-pub(crate) fn validate_neighbor_splice(
-    before: &str,
-    after: &str,
-    paths: &[Vec<String>],
-    id: &str,
-    syntax: CommentSyntax,
-    retiring: &std::collections::BTreeSet<String>,
-) -> Result<(), ManagedRegionRefusal> {
-    let masked_before = mask_retiring_managed_regions(before, syntax, retiring);
-    let original = if retiring.is_empty() {
-        None
-    } else {
-        // Earlier writes can temporarily duplicate a table whose independently
-        // validated retirement is still pending in this same pass. The projected
-        // document below must still parse; an invalid raw intermediate alone is
-        // not sufficient to refuse a migration.
-        Document::parse(before).ok()
-    };
-    let projected_original =
-        Document::parse(masked_before.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
-    let masked_after = mask_retiring_managed_regions(after, syntax, retiring);
-    let updated = Document::parse(masked_after.as_str()).map_err(|error| refusal(error, RefusalRemedy::BetweenManagedRegions))?;
-    // A relocation is a removal followed by an insertion, not one replacement
-    // that claims every byte between the old and new region positions.
-    let intermediate = remove_region(before, id, syntax).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
-    let remove_offset = splice_offset_map(before, &intermediate);
-    let insert_offset = splice_offset_map(&intermediate, after);
+pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<String>]) -> Result<(), ManagedRegionRefusal> {
+    let original = Document::parse(before).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let updated = Document::parse(after).map_err(|error| refusal(error, RefusalRemedy::BetweenManagedRegions))?;
+    let map_offset = splice_offset_map(before, after);
     for path in paths {
-        // A parseable intermediate can temporarily rebind a key too. Protect
-        // dependencies present in either the raw or retirement-projected host.
-        for document in original.iter().chain(std::iter::once(&projected_original)) {
-            let Some(array) = lookup(document.as_item(), path).and_then(Item::as_array) else {
-                continue;
-            };
-            let span = array.span().expect("parsed arrays retain source spans");
-            let map_offset = |offset| remove_offset(offset).and_then(&insert_offset);
-            let mapped = map_offset(span.start).zip(map_offset(span.end - 1));
-            let remaining = lookup(updated.as_item(), path).and_then(Item::as_array).and_then(Array::span);
-            if mapped
-                .zip(remaining)
-                .is_none_or(|((start, end), remaining)| remaining.start != start || remaining.end != end + 1)
-            {
-                return Err(refusal(
-                    format!("this change would remove or rebind the live TOML array selector {path:?}"),
-                    RefusalRemedy::ArrayDependency,
-                ));
-            }
+        let Some(array) = lookup(original.as_item(), path).and_then(Item::as_array) else {
+            continue;
+        };
+        let span = array.span().expect("parsed arrays retain source spans");
+        let mapped = map_offset(span.start).zip(map_offset(span.end - 1));
+        let remaining = lookup(updated.as_item(), path).and_then(Item::as_array).and_then(Array::span);
+        if mapped
+            .zip(remaining)
+            .is_none_or(|((start, end), remaining)| remaining.start != start || remaining.end != end + 1)
+        {
+            return Err(refusal(
+                format!("this change would remove or rebind the live TOML array selector {path:?}"),
+                RefusalRemedy::ArrayDependency,
+            ));
         }
     }
     Ok(())
 }
 
-/// Map only common-prefix/suffix offsets; the changed interval intentionally has no
-/// identity, so replacement delimiters cannot stand in for original ones. Relocation
-/// composes separate removal and insertion maps in the caller.
+/// Recover only selectors from existing array-contained markers, not ownership metadata.
+/// This also protects an array's repository-owned delimiters on its final retirement.
+pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, ManagedRegionRefusal> {
+    fn visit(item: &Item, path: &mut Vec<String>, markers: &[usize], paths: &mut Vec<Vec<String>>) {
+        if let Some(array) = item.as_array()
+            && let Some(span) = array.span()
+            && markers.iter().any(|offset| span.contains(offset))
+        {
+            paths.push(path.clone());
+        }
+        if let Some(table) = item.as_table() {
+            for (key, child) in table {
+                path.push(key.to_owned());
+                visit(child, path, markers, paths);
+                path.pop();
+            }
+        }
+    }
+    let document = Document::parse(text).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    // Discovery must not depend on well-formed neighbors: otherwise a stray
+    // sentinel would disable array protection on the final retirement.
+    let markers: Vec<_> = toml_comment_lines(text)
+        .filter_map(|line| {
+            let comment = text[line.start..line.end].trim();
+            (comment.starts_with("# >>> anvil-managed:") || comment.starts_with("# <<< anvil-managed:")).then_some(line.start)
+        })
+        .collect();
+    let mut paths = Vec::new();
+    visit(document.as_item(), &mut Vec::new(), &markers, &mut paths);
+    Ok(paths)
+}
+
+/// Map only common-prefix/suffix offsets; replacement delimiters do not inherit
+/// the identity of delimiters in the changed interval.
 fn splice_offset_map(before: &str, after: &str) -> impl Fn(usize) -> Option<usize> + use<> {
     let prefix: usize = before
         .chars()
@@ -472,26 +439,19 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
     let generated = body_array(body)?;
     let protected = validated_regions(text)?;
     let values: Vec<_> = array.iter().collect();
-    let canonical: Vec<_> = values.iter().map(|value| canonical_value(value)).collect();
     let mut removals = Vec::new();
     let mut used = std::collections::BTreeSet::new();
     for generated in &generated {
-        let generated = canonical_value(generated);
+        let generated = generated.as_str().expect("generated entries were validated as strings");
         let candidate = values.iter().enumerate().find(|(index, value)| {
             let span = value.span().expect("parsed array values retain source spans");
             !used.contains(index)
                 && !protected
                     .iter()
                     .any(|region| span.start < region.end_line.end && region.start_line.start < span.end)
-                && generated == canonical[*index]
+                && value.as_str() == Some(generated)
         });
         if let Some((index, value)) = candidate {
-            if has_interior_comments(text, value) {
-                return Err(refusal(
-                    "a matching compound array entry contains repository-owned comments",
-                    RefusalRemedy::CommentedArrayEntry,
-                ));
-            }
             used.insert(index);
             let span = value.span().expect("parsed array values retain source spans");
             let next = values
@@ -526,16 +486,6 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
     Ok(adopted)
 }
 
-fn has_interior_comments(text: &str, value: &Value) -> bool {
-    let span = value.span().expect("parsed values retain source spans");
-    // The outer entry is a real source value. Dotted inline keys create implicit
-    // table proxies whose spans do not enclose their children; do not recurse into
-    // those proxies. Lexing the actual container also distinguishes quoted '#'.
-    toml_parser::Source::new(&text[span])
-        .lex()
-        .any(|token| token.kind() == toml_parser::lexer::TokenKind::Comment)
-}
-
 fn separator_comma(gap: &str) -> Option<usize> {
     let mut comment = false;
     for (index, character) in gap.char_indices() {
@@ -552,6 +502,8 @@ fn separator_comma(gap: &str) -> Option<usize> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use toml_edit::Value;
+
     use super::*;
     use crate::catalog::{Artifact, Catalog, HostSelector, RegionId, RegionSpec};
     use crate::checksum::checksum_str;
@@ -575,6 +527,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_toml_suffixes_are_accepted_without_persisted_scanner_metadata() {
+        for host in ["config", "config.conf", "config.toml.backup"] {
+            let mut array = spec();
+            array.region.host = HostSelector::Path(host.to_owned());
+            let error = Catalog::builder(Catalog::anvil().cli().clone())
+                .with_toml_array_region(array)
+                .build()
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "invalid catalog for 'anvil':\n  - TOML array region 'entries': TOML array hosts must have a .toml suffix"
+            );
+        }
+        for host in ["config.toml", "config.ToML"] {
+            let mut array = spec();
+            array.region.host = HostSelector::Path(host.to_owned());
+            Catalog::builder(Catalog::anvil().cli().clone())
+                .with_toml_array_region(array)
+                .build()
+                .unwrap();
+        }
+    }
     fn plan(text: Option<&str>) -> PlanItem {
         plan_toml_array_region(&Manifest::default(), text, "config.toml", &spec()).unwrap()
     }
@@ -641,31 +616,20 @@ mod tests {
                 &mutation_spec(&["a", "b", "items"]),
             )
             .unwrap_err();
-            assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
-            assert_eq!(error.reason.to_string(), "the array's inline parent belongs to a managed region");
+            assert_eq!(error.remedy, RefusalRemedy::ArrayShape);
+            assert_eq!(
+                error.reason.to_string(),
+                "the parent of TOML array [\"a\", \"b\", \"items\"] is not a table"
+            );
         }
     }
 
     #[test]
-    fn mutation_scaffold_relocation_preserves_owned_trailing_trivia() {
+    fn scaffold_relocation_is_refused() {
         for newline in ["\n", "\r\n"] {
             let host = "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n\n# <<< anvil-managed: cfg\n".replace('\n', newline);
-            let expected = concat!(
-                "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n\n# <<< anvil-managed: cfg\n",
-                "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
-            )
-            .replace('\n', newline);
-            assert_mutation_write(
-                &host,
-                &expected,
-                &mutation_spec(&["plugins", "default"]),
-                &Manifest::default(),
-                newline,
-            );
-            assert_eq!(
-                find_region(&expected, "cfg", CommentSyntax::Hash).unwrap().unwrap().body_str(),
-                format!("[plugins]{newline}mode = true{newline}{newline}")
-            );
+            let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec()).unwrap_err();
+            assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
         }
     }
 
@@ -732,11 +696,6 @@ mod tests {
                     vec!["items"],
                 ),
                 (
-                    "cfg = { items = [\"managed\"], user = 1 }\n",
-                    "cfg = { items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n], user = 1 }\n",
-                    vec!["cfg", "items"],
-                ),
-                (
                     "items = [\"managed\"\n# >>> anvil-managed: other\n# keep\n# <<< anvil-managed: other\n,\n\"user\"]\n",
                     "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n# >>> anvil-managed: other\n# keep\n# <<< anvil-managed: other\n\n\"user\"]\n",
                     vec!["items"],
@@ -748,26 +707,15 @@ mod tests {
                 let document = Document::parse(expected.as_str()).unwrap();
                 let path: Vec<_> = path.iter().map(|key| (*key).to_owned()).collect();
                 let array = lookup(document.as_item(), &path).unwrap().as_array().unwrap();
+                assert_eq!(array.iter().filter_map(Value::as_str).collect::<Vec<_>>(), vec!["managed", "user"]);
                 assert_eq!(
-                    array.iter().filter_map(Value::as_str).collect::<Vec<_>>(),
-                    if path.len() == 1 {
-                        vec!["managed", "user"]
+                    find_region(&expected, "other", CommentSyntax::Hash).unwrap().unwrap().body_str(),
+                    if source.contains("# keep") {
+                        format!("# keep{newline}")
                     } else {
-                        vec!["managed"]
+                        format!("\"user\",{newline}")
                     }
                 );
-                if path.len() == 2 {
-                    assert_eq!(document["cfg"]["user"].as_integer(), Some(1));
-                } else {
-                    assert_eq!(
-                        find_region(&expected, "other", CommentSyntax::Hash).unwrap().unwrap().body_str(),
-                        if source.contains("# keep") {
-                            format!("# keep{newline}")
-                        } else {
-                            format!("\"user\",{newline}")
-                        }
-                    );
-                }
             }
         }
     }
@@ -822,7 +770,7 @@ mod tests {
     fn review_catalog_rejects_generated_ownership_comments() {
         for (host, region_id, path) in [
             ("config.toml", "entries", vec!["plugins".to_owned(), "default".to_owned()]),
-            ("settings.conf", "catalog-entries", vec!["items".to_owned()]),
+            ("settings.TOML", "catalog-entries", vec!["items".to_owned()]),
         ] {
             let mut original = spec();
             original.region.host = HostSelector::Path(host.to_owned());
@@ -878,7 +826,6 @@ mod tests {
             for newline in ["\n", "\r\n"] {
                 let body = format!(
                     "# Guidance.\n{quote}\n# >>> anvil-managed: entries\n# <<< anvil-managed: foreign\n{quote},\n\
-                     {{ \"# >>> anvil-managed: entries\" = '# <<< anvil-managed: entries' }},\n\
                      \"last\", # >>> anvil-managed: inline-comment\n"
                 );
                 let mut valid = spec();
@@ -891,7 +838,6 @@ mod tests {
                 let expected = format!(
                     "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  # Guidance.\n  {quote}\n\
                      # >>> anvil-managed: entries\n# <<< anvil-managed: foreign\n{quote},\n\
-                     \x20\x20{{ \"# >>> anvil-managed: entries\" = '# <<< anvil-managed: entries' }},\n\
                      \x20\x20\"last\", # >>> anvil-managed: inline-comment\n  # <<< anvil-managed: entries\n]\n\n"
                 )
                 .replace('\n', newline);
@@ -909,17 +855,13 @@ mod tests {
         for newline in ["\n", "\r\n"] {
             for old in ["", "# >>> anvil-managed: old\nobsolete = \"café\"\n# <<< anvil-managed: old\n"] {
                 let host = format!("{old}plugins.a=true\nother=true\nplugins.b=true\n").replace('\n', newline);
-                let retiring = std::collections::BTreeSet::from(["old".to_owned()]);
-                let error = plan_toml_array_region_with_retirements(&Manifest::default(), Some(&host), "config.toml", &spec(), &retiring)
-                    .unwrap_err();
+                let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec()).unwrap_err();
                 assert_eq!(
                     error.reason.to_string(),
                     "the missing TOML array [\"plugins\", \"default\"] cannot be scaffolded by insertion alone"
                 );
                 let corrected = format!("{host}plugins.default=[]{newline}");
-                let item =
-                    plan_toml_array_region_with_retirements(&Manifest::default(), Some(&corrected), "config.toml", &spec(), &retiring)
-                        .unwrap();
+                let item = plan_toml_array_region(&Manifest::default(), Some(&corrected), "config.toml", &spec()).unwrap();
                 assert_eq!(
                     item.spliced_host.unwrap(),
                     format!("{}plugins.default=[{newline}{}]{newline}", host, REGION.replace('\n', newline))
@@ -932,7 +874,7 @@ mod tests {
     fn review_actual_comment_markers_cannot_split_a_nested_array_value() {
         let mut spec = spec();
         spec.path = vec!["items".to_owned()];
-        spec.region.body = "[1],\n".to_owned();
+        spec.region.body = "\"managed\",\n".to_owned();
         let host = "items = [[\n# >>> anvil-managed: entries\n1,\n# <<< anvil-managed: entries\n]]\n";
         let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec).unwrap_err();
         assert_eq!(error.remedy, RefusalRemedy::MisplacedArrayMarkers);
@@ -940,84 +882,26 @@ mod tests {
     }
 
     #[test]
-    fn review_dotted_inline_proxy_adoption_uses_real_container() {
-        for (body, entry) in [
-            ("{ a.b = 1 },\n", "{ a.b = 1 }"),
-            (
-                "{ \"a#\".'b#' = [1, { c.d = \"#data\" }] },\n",
-                "{ \"a#\".'b#' = [1, { c.d = \"#data\" }] }",
-            ),
-        ] {
+    fn compound_generated_entries_are_rejected_without_adoption() {
+        for body in ["{ a.b = 1 },\n", "[1, 2],\n", "true,\n", "123,\n"] {
             let mut spec = spec();
             spec.path = vec!["items".to_owned()];
             spec.region.body = body.to_owned();
-            let host = format!("items = [{entry}]\n");
-            let item = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec).unwrap();
-            assert_eq!(item.decision, Decision::Write);
-            let output = item.spliced_host.as_ref().unwrap();
-            assert_eq!(
-                output,
-                &format!("items = [\n  # >>> anvil-managed: entries\n  {entry},\n  # <<< anvil-managed: entries\n]\n")
-            );
-            let document = Document::parse(&output).unwrap();
-            assert_eq!(document["items"].as_array().unwrap().len(), 1);
-            assert_eq!(
-                canonical_value(document["items"].as_array().unwrap().get(0).unwrap()),
-                canonical_value(body_array(body).unwrap().get(0).unwrap())
-            );
-            assert_eq!(
-                plan_toml_array_region(&Manifest::default(), Some(output), "config.toml", &spec)
-                    .unwrap()
-                    .decision,
-                Decision::InSync
-            );
+            let error = plan_toml_array_region(&Manifest::default(), Some("items = []\n"), "config.toml", &spec).unwrap_err();
+            assert_eq!(error.remedy, RefusalRemedy::InvalidGeneratedToml);
+            assert_eq!(error.reason.to_string(), "generated array entries must be strings");
         }
-        let mut spec = spec();
-        spec.path = vec!["items".to_owned()];
-        spec.region.body = "{ a.b = [1, 2] },\n".to_owned();
-        let host = "items = [{ a.b = [1, # repository guidance\n2] }]\n";
-        let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec).unwrap_err();
-        assert_eq!(error.remedy, RefusalRemedy::CommentedArrayEntry);
-        assert_eq!(
-            error.reason.to_string(),
-            "a matching compound array entry contains repository-owned comments"
-        );
     }
 
     #[test]
-    fn pending_retirement_projection_preserves_original_bytes_and_scaffold_offsets() {
+    fn invalid_partial_migrations_are_not_reconstructed() {
         for newline in ["\n", "\r\n"] {
             for prefix in ["# Repository comment: café\n", "plugins.default = [\"user\"]\n"] {
                 let old = "# >>> anvil-managed: old\n[settings]\nmode = \"café\"\n# <<< anvil-managed: old\n";
                 let new = "# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n";
                 let host = format!("{prefix}{old}{new}").replace('\n', newline);
-                let retiring = std::collections::BTreeSet::from(["old".to_owned()]);
-                let item =
-                    plan_toml_array_region_with_retirements(&Manifest::default(), Some(&host), "config.toml", &spec(), &retiring).unwrap();
-                assert_eq!(item.decision, Decision::Write);
-                let spliced = item.spliced_host.unwrap();
-                let expected = if prefix.starts_with("plugins") {
-                    format!("plugins.default = [\n{REGION}\"user\"]\n{old}{new}").replace('\n', newline)
-                } else {
-                    format!("{prefix}{old}{new}\n[plugins]\ndefault = [\n{REGION}]\n").replace('\n', newline)
-                };
-                assert_eq!(spliced, expected);
-                let retired = remove_region(&spliced, "old", CommentSyntax::Hash).unwrap();
-                let document = Document::parse(&retired).unwrap();
-                let array = document["plugins"]["default"].as_array().unwrap();
-                assert_eq!(
-                    array.iter().filter_map(Value::as_str).collect::<Vec<_>>(),
-                    if prefix.starts_with("plugins") {
-                        vec!["managed", "user"]
-                    } else {
-                        vec!["managed"]
-                    }
-                );
-                assert_eq!(document["settings"]["mode"].as_bool(), Some(false));
-                assert_eq!(
-                    find_region(&spliced, "old", CommentSyntax::Hash).unwrap().unwrap().body_str(),
-                    format!("[settings]{newline}mode = \"café\"{newline}")
-                );
+                let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec()).unwrap_err();
+                assert_eq!(error.remedy, RefusalRemedy::HostAlreadyUnparsable);
             }
         }
     }
@@ -1083,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_array_is_scaffolded_after_the_parent_keys_managed_region() {
+    fn missing_array_cannot_use_another_regions_parent_header() {
         let cfg = crate::emit::managed_region::plan_managed_region(
             &Manifest::default(),
             None,
@@ -1098,33 +982,19 @@ mod tests {
         )
         .unwrap();
         let host = format!("{}\n[settings]\nvalue = 1\n", cfg.spliced_host.as_deref().unwrap());
-        let generated = output(&host);
-        assert_eq!(
-            generated,
-            format!(
-                "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n# <<< anvil-managed: cfg\ndefault = [\n{REGION}]\n\n[settings]\nvalue = 1\n"
-            )
-        );
-        assert_eq!(plan(Some(&generated)).decision, Decision::InSync);
-        assert_eq!(
-            remove_region(&generated, "entries", CommentSyntax::Hash).unwrap(),
-            "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n# <<< anvil-managed: cfg\ndefault = [\n]\n\n[settings]\nvalue = 1\n"
-        );
+        let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec()).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
     }
 
     #[test]
-    fn scaffolding_refuses_to_move_a_key_into_another_table_or_out_of_an_inline_parent() {
-        for host in [
-            "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n[settings]\nvalue = 1\n# <<< anvil-managed: cfg\n",
-            "# >>> anvil-managed: cfg\nplugins = { mode = true }\n# <<< anvil-managed: cfg\n",
-        ] {
-            assert_eq!(
-                plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec())
-                    .unwrap_err()
-                    .remedy,
-                RefusalRemedy::EnclosingOwnership
-            );
-        }
+    fn scaffolding_refuses_to_move_a_key_into_another_table() {
+        let host = "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n[settings]\nvalue = 1\n# <<< anvil-managed: cfg\n";
+        assert_eq!(
+            plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec())
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::EnclosingOwnership
+        );
     }
 
     #[test]
@@ -1146,25 +1016,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_array_after_managed_parent_preserves_crlf_and_unterminated_closer() {
+    fn missing_array_after_managed_parent_refuses_with_any_line_ending() {
         for newline in ["\n", "\r\n"] {
             let host = "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n# <<< anvil-managed: cfg".replace('\n', newline);
-            let generated = output(&host);
-            assert_eq!(
-                generated,
-                format!("{}{newline}default = [{newline}{}]{newline}", host, REGION.replace('\n', newline))
-            );
+            let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &spec()).unwrap_err();
+            assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
         }
     }
 
     #[test]
     fn missing_array_preserves_mixed_endings_and_multiline_string_bytes() {
-        let owned = concat!(
-            "# >>> anvil-managed: cfg\r\n",
-            "[plugins]\n",
-            "mode = '''café\r\nsecond line\n'''\r\n",
-            "# <<< anvil-managed: cfg\n"
-        );
+        let owned = concat!("# Repository comment\r\n", "[plugins]\n", "mode = '''café\r\nsecond line\n'''\r\n",);
         let unrelated = "\n[settings]\r\nvalue = 'untouched'\n";
         assert_eq!(
             output(&format!("{owned}{unrelated}")),
@@ -1198,12 +1060,12 @@ mod tests {
             plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec())
                 .unwrap_err()
                 .remedy,
-            RefusalRemedy::EnclosingOwnership
+            RefusalRemedy::BetweenManagedRegions
         );
     }
 
     #[test]
-    fn adoption_refuses_interior_comments_in_nested_arrays_and_inline_tables() {
+    fn nonstring_templates_refuse_even_when_matching_repository_values() {
         let mut spec = spec();
         for (body, host) in [
             (
@@ -1224,22 +1086,17 @@ mod tests {
                 plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec)
                     .unwrap_err()
                     .remedy,
-                RefusalRemedy::CommentedArrayEntry
+                RefusalRemedy::InvalidGeneratedToml
             );
         }
     }
 
     #[test]
-    fn hash_in_string_tokens_and_quoted_keys_is_not_an_interior_comment() {
-        let mut spec = spec();
-        spec.region.body = "{ \"#key\" = [\"#data\", '''\n# multiline string data\n'''] },\n".to_owned();
+    fn repository_compounds_and_their_comments_are_preserved() {
         let host = "plugins.default = [{ '#key' = ['#data', '''\n# multiline string data\n'''] }, \"user\"]\n";
         assert_eq!(
-            plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec)
-                .unwrap()
-                .spliced_host
-                .unwrap(),
-            "plugins.default = [\n  # >>> anvil-managed: entries\n  { \"#key\" = [\"#data\", '''\n# multiline string data\n'''] },\n  # <<< anvil-managed: entries\n \"user\"]\n"
+            output(host),
+            format!("plugins.default = [\n{REGION}{{ '#key' = ['#data', '''\n# multiline string data\n'''] }}, \"user\"]\n")
         );
     }
 
@@ -1305,14 +1162,13 @@ mod tests {
         let host = "items = [[\n# >>> anvil-managed: other\n\"x\",\n# <<< anvil-managed: other\n], \"user\"]\n";
         let mut spec = spec();
         spec.path = vec!["items".to_owned()];
-        spec.region.body = "[\"x\"],\n".to_owned();
         let output = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec)
             .unwrap()
             .spliced_host
             .unwrap();
         assert_eq!(
             output,
-            "items = [\n  # >>> anvil-managed: entries\n  [\"x\"],\n  # <<< anvil-managed: entries\n[\n# >>> anvil-managed: other\n\"x\",\n# <<< anvil-managed: other\n], \"user\"]\n"
+            format!("items = [\n{REGION}[\n# >>> anvil-managed: other\n\"x\",\n# <<< anvil-managed: other\n], \"user\"]\n")
         );
         assert_eq!(Document::parse(&output).unwrap()["items"].as_array().unwrap().len(), 3);
         let other = find_region(&output, "other", CommentSyntax::Hash).unwrap().unwrap();
@@ -1320,20 +1176,12 @@ mod tests {
     }
 
     #[test]
-    fn partially_overlapping_candidate_is_skipped_in_favor_of_unmanaged_match() {
+    fn partially_overlapping_ownership_refuses() {
         let host = "items = [[\n# >>> anvil-managed: other\n\"x\"],\n# <<< anvil-managed: other\n[\"x\"], \"user\"]\n";
         let mut spec = spec();
         spec.path = vec!["items".to_owned()];
-        spec.region.body = "[\"x\"],\n".to_owned();
-        let output = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec)
-            .unwrap()
-            .spliced_host
-            .unwrap();
-        assert_eq!(
-            output,
-            "items = [\n  # >>> anvil-managed: entries\n  [\"x\"],\n  # <<< anvil-managed: entries\n[\n# >>> anvil-managed: other\n\"x\"],\n# <<< anvil-managed: other\n \"user\"]\n"
-        );
-        assert_eq!(Document::parse(&output).unwrap()["items"].as_array().unwrap().len(), 3);
+        let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::BetweenManagedRegions);
     }
 
     #[test]
@@ -1347,26 +1195,23 @@ mod tests {
         );
     }
     #[test]
-    fn selector_can_use_quoted_keys_and_nested_inline_table_arrays() {
+    fn selector_can_use_quoted_keys() {
         let mut spec = spec();
         spec.path = vec!["a.b".to_owned(), "x".to_owned()];
         let item = plan_toml_array_region(
             &Manifest::default(),
-            Some("\"a.b\" = { x = [\"other\"], y = 1 }\n"),
+            Some("[\"a.b\"]\nx = [\"other\"]\ny = 1\n"),
             "config.toml",
             &spec,
         )
         .unwrap();
-        assert_eq!(
-            item.spliced_host.unwrap(),
-            format!("\"a.b\" = {{ x = [\n{REGION}\"other\"], y = 1 }}\n")
-        );
+        assert_eq!(item.spliced_host.unwrap(), format!("[\"a.b\"]\nx = [\n{REGION}\"other\"]\ny = 1\n"));
     }
 
     #[test]
-    fn multiple_generated_entries_adopt_semantically_identical_nested_values() {
+    fn matching_strings_are_adopted_but_repository_compounds_are_not() {
         let mut spec = spec();
-        spec.region.body = "\"managed\",\n{ x = 1, y = [true] },\n".to_owned();
+        spec.region.body = "\"managed\",\n".to_owned();
         let item = plan_toml_array_region(
             &Manifest::default(),
             Some("plugins.default = ['managed', { y=[true], x=1 }, \"other\"]\n"),
@@ -1376,7 +1221,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             item.spliced_host.unwrap(),
-            "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  { x = 1, y = [true] },\n  # <<< anvil-managed: entries\n  \"other\"]\n"
+            "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n { y=[true], x=1 }, \"other\"]\n"
         );
     }
 
@@ -1452,12 +1297,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_managed_body_is_regenerated_and_missing_inline_table_array_is_scaffolded() {
+    fn empty_managed_body_is_regenerated_but_inline_table_scaffolding_refuses() {
         let empty = "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  # <<< anvil-managed: entries\n\"other\"\n]\n";
         assert_eq!(output(empty), format!("[plugins]\ndefault = [\n{REGION}\"other\"\n]\n"));
         assert_eq!(
-            output("plugins = { mode = true }\n"),
-            format!("plugins = {{ mode = true , default = [\n{REGION}] }}\n")
+            plan_toml_array_region(&Manifest::default(), Some("plugins = { mode = true }\n"), "config.toml", &spec())
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::ArrayShape
         );
     }
 

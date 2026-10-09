@@ -559,8 +559,6 @@ fn refusing_a_composed_host_leaves_its_lock_entry_intact() {
         .files
         .insert(".anvil/container/Dockerfile".to_owned(), checksum_str(previous_render));
     manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
-    // Legacy whole-file ownership has no scanner left from composed regions.
-    manifest.host_scanners.remove(".anvil/container/Dockerfile");
     manifest.save(root).unwrap();
     let lock_before = std::fs::read_to_string(root.join(".anvil.lock")).unwrap();
 

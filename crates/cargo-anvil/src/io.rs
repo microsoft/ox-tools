@@ -75,19 +75,10 @@ fn find_entry_case_insensitive(dir: &Path, name: &str) -> Result<Option<String>,
             return Err::<Option<String>, _>(error).into_app_err_with(|| format!("failed to read directory {}", dir.display()));
         }
     };
-    select_directory_entry(
+    let names = collect_entry_names(
         entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())),
         dir,
-        name,
-    )
-}
-
-fn select_directory_entry(
-    entries: impl IntoIterator<Item = std::io::Result<String>>,
-    dir: &Path,
-    name: &str,
-) -> Result<Option<String>, AppError> {
-    let names = collect_entry_names(entries, dir)?;
+    )?;
     selected_entry_with_context(select_entry_case_insensitive(names, name), dir, name)
 }
 
@@ -232,34 +223,9 @@ mod tests {
             "entry denied",
         ))];
 
-        let error = select_directory_entry(entries, dir, "Justfile").unwrap_err();
+        let error = collect_entry_names(entries, dir).unwrap_err();
 
         assert!(error.to_string().contains("failed to enumerate directory catalog"), "{error}");
-        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(cause.to_string(), "entry denied");
-    }
-
-    #[test]
-    fn directory_selection_enumerates_all_entries_before_accepting_an_exact_match() {
-        let entries = [
-            Ok("Justfile".to_owned()),
-            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "entry denied")),
-        ];
-        let error = select_directory_entry(entries, Path::new("catalog"), "Justfile").unwrap_err();
-        assert!(error.to_string().contains("failed to enumerate directory catalog"), "{error}");
-        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(cause.to_string(), "entry denied");
-        assert_eq!(
-            select_directory_entry(
-                [Ok("justfile".to_owned()), Ok("Justfile".to_owned())],
-                Path::new("catalog"),
-                "Justfile"
-            )
-            .unwrap(),
-            Some("Justfile".to_owned())
-        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

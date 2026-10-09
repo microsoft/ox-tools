@@ -21,13 +21,15 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file};
+use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
-use crate::region::{CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement};
 #[cfg(test)]
-use crate::region::{remove_region, upsert_region};
+use crate::region::upsert_region;
+use crate::region::{
+    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, remove_region,
+};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -160,19 +162,19 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 /// Computed before anything is planned, because the validity check each region
 /// runs has to know which of the regions already in its host are on their way
 /// out — and removals are not planned until every region has been visited.
-fn live_region_keys(
-    repo_root: &Path,
-    workspace: &Workspace,
-    catalog: &Catalog,
-    hosts: &HostTextCache,
-) -> Result<BTreeSet<(String, String)>, AppError> {
+fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> Result<BTreeSet<(String, String)>, AppError> {
     let mut keys = BTreeSet::new();
+    let mut identities = BTreeSet::new();
     for artifact in catalog.artifacts() {
-        let Some(spec) = artifact.region_spec() else {
+        let Artifact::Region(spec) = artifact else {
             continue;
         };
         for host in region_host_paths(workspace, spec) {
-            keys.insert((hosts.resolve_host(repo_root, host)?, spec.id.as_str().to_owned()));
+            let host = resolve_existing_case_insensitive(repo_root, host)?;
+            if !identities.insert((host.to_ascii_lowercase(), spec.id.as_str().to_owned())) {
+                bail!("duplicate resolved region identity: {host} [{}]", spec.id);
+            }
+            keys.insert((host, spec.id.as_str().to_owned()));
         }
     }
     Ok(keys)
@@ -201,26 +203,22 @@ fn build_plan_with_hosts(
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
     let mut composed = ComposedHosts {
-        live: live_region_keys(repo_root, workspace, catalog, hosts)?,
+        live: live_region_keys(repo_root, workspace, catalog)?,
         ..ComposedHosts::default()
     };
-    for artifact in catalog.artifacts() {
-        if let Artifact::Region(spec) = artifact {
-            for host in region_host_paths(workspace, spec) {
-                let host = hosts.resolve_host(repo_root, host)?;
-                if let Some(path) = catalog.toml_array_path(spec) {
-                    composed.array_paths.entry(host).or_default().push(path.to_vec());
-                } else {
-                    composed.ordinary_regions.entry(host).or_default().push(spec.clone());
-                }
+    let (array_paths, mut original_hosts) = array_host_inputs(repo_root, workspace, manifest, catalog, hosts)?;
+    for host in array_paths.keys() {
+        for other in composed
+            .live
+            .iter()
+            .map(|(host, _)| host)
+            .chain(manifest.regions.keys().map(|key| &key.host))
+        {
+            let other = resolve_existing_case_insensitive(repo_root, other)?;
+            if host != &other && host.eq_ignore_ascii_case(&other) {
+                bail!("ambiguous casing for TOML array host: {host} and {other}");
             }
         }
-    }
-    let resolved_manifest = resolve_host_scanners(repo_root, manifest, hosts, &composed)?;
-    let manifest = &resolved_manifest;
-    composed.host_scanners.clone_from(&hosts.scanners);
-    for (host, scanner) in &manifest.host_scanners {
-        plan.record_host_scanner(host.clone(), *scanner);
     }
     // Adoption, validation, and retirement must see the same repaired text.
     // Extra complete pairs retain their bodies as unmanaged settings.
@@ -229,7 +227,7 @@ fn build_plan_with_hosts(
     // by `push_region_at` when it plans the region, with that region's own
     // comment syntax rather than the `Hash` assumed below.
     for key in manifest.regions.keys() {
-        let host = hosts.resolve_host(repo_root, &key.host)?;
+        let host = resolve_existing_case_insensitive(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
@@ -247,49 +245,29 @@ fn build_plan_with_hosts(
                 }
             }
             Artifact::Region(spec) => {
-                let Some(path) = catalog.toml_array_path(spec) else {
-                    push_region(repo_root, workspace, manifest, &mut plan, hosts, &mut composed, spec)?;
-                    continue;
-                };
-                let spec = crate::catalog::TomlArrayRegionSpec {
-                    region: spec.clone(),
-                    path: path.to_vec(),
-                };
-                for host in region_host_paths(workspace, &spec.region) {
-                    let host = hosts.resolve_host(repo_root, host)?;
-                    let current = hosts.get_or_read(repo_root, &host)?;
-                    let retiring = current
-                        .as_deref()
-                        .map(|text| composed.retiring_regions(manifest, &host, text, spec.region.syntax))
-                        .unwrap_or_default();
-                    composed.pending_retirements.entry(host.clone()).or_default().extend(retiring);
-                    let retiring = composed.pending_retirements.get(&host).cloned().unwrap_or_default();
-                    match crate::emit::toml_array_region::plan_toml_array_region_with_retirements(
-                        manifest,
-                        current.as_deref(),
-                        &host,
-                        &spec,
-                        &retiring,
-                    ) {
-                        Ok(item) => {
-                            if let Some(spliced) = &item.spliced_host {
-                                if composed.pending_retirements.get(&host).is_some_and(|retiring| !retiring.is_empty())
-                                    && !composed.allow_array_splice(&mut plan, &host, spec.region.id.as_str(), current.as_deref(), spliced)
-                                {
-                                    continue;
+                if let Some(path) = catalog.toml_array_path(spec) {
+                    let array = crate::catalog::TomlArrayRegionSpec {
+                        region: spec.clone(),
+                        path: path.to_vec(),
+                    };
+                    for host in region_host_paths(workspace, spec) {
+                        let host = resolve_existing_case_insensitive(repo_root, host)?;
+                        let current = hosts.get_or_read(repo_root, &host)?;
+                        match crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array) {
+                            Ok(item) => {
+                                if let Some(text) = &item.spliced_host {
+                                    hosts.set(&host, text.clone());
                                 }
-                                hosts.set(&host, spliced.clone());
+                                plan.push(item);
                             }
-                            plan.push(item);
+                            Err(refusal) => {
+                                // No partially composed host is returned for application.
+                                bail!("refused TOML array region {host} [{}]: {}", spec.id, refusal.reason);
+                            }
                         }
-                        Err(refusal) => refuse_region(
-                            &mut plan,
-                            host,
-                            spec.region.id.as_str(),
-                            &refusal.reason.to_string(),
-                            refusal.remedy,
-                        ),
                     }
+                } else {
+                    push_region(repo_root, workspace, manifest, &mut plan, hosts, &mut composed, spec)?;
                 }
             }
         }
@@ -297,84 +275,85 @@ fn build_plan_with_hosts(
 
     plan_removals(repo_root, manifest, &mut plan, hosts, &composed)?;
 
+    // Validate every write in application order, not only the final projection.
+    // An interrupted apply must not leave a temporarily invalid array host.
+    for item in plan.items() {
+        if let Target::Region { host, .. } = &item.target
+            && let Some(after) = &item.spliced_host
+        {
+            let host = resolve_existing_case_insensitive(repo_root, host)?;
+            if let Some(paths) = array_paths.get(&host) {
+                let before = original_hosts.get(&host).expect("array hosts were captured before planning");
+                crate::emit::toml_array_region::validate_neighbor_splice(before, after, paths).map_err(|refusal| refusal.reason)?;
+                original_hosts.insert(host, after.clone());
+            }
+        }
+    }
+
     Ok(plan)
 }
 
-/// Resolve one scanner before any repair or splice can change a host.
-fn resolve_host_scanners(
+type ArrayHostPaths = HashMap<String, Vec<Vec<String>>>;
+
+fn array_host_inputs(
     repo_root: &Path,
-    previous: &Manifest,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    catalog: &Catalog,
     hosts: &mut HostTextCache,
-    composed: &ComposedHosts,
-) -> Result<Manifest, AppError> {
-    previous.validate_host_scanners()?;
-    let mut manifest = previous.clone();
-    let mut paths: BTreeSet<String> = composed.live.iter().map(|(host, _)| host.clone()).collect();
-    for key in previous.regions.keys() {
-        paths.insert(hosts.resolve_host(repo_root, &key.host)?);
-    }
-    hosts.scanners.clear();
-    for host in paths {
-        let declared_toml = HostScanner::for_path(&host) == HostScanner::Toml || composed.array_paths.contains_key(&host);
-        let recorded = previous.host_scanner(&host);
-        if declared_toml && recorded == Some(HostScanner::Lines) {
-            bail!(
-                "host '{host}' declares TOML ownership but .anvil.lock records the lines scanner; \
-                   retire its existing regions with the previous catalog before changing the host format"
-            );
-        }
-        if composed_host_spec(&host).is_some() && (declared_toml || recorded == Some(HostScanner::Toml)) {
-            bail!("host '{host}' has a non-TOML composed-host declaration that conflicts with TOML ownership");
-        }
-        let scanner = recorded.unwrap_or(if declared_toml { HostScanner::Toml } else { HostScanner::Lines });
-        if scanner == HostScanner::Toml
-            && composed
-                .ordinary_regions
-                .get(&host)
-                .into_iter()
-                .flatten()
-                .any(|spec| spec.syntax != CommentSyntax::Hash)
+) -> Result<(ArrayHostPaths, HashMap<String, String>), AppError> {
+    let mut paths = ArrayHostPaths::new();
+    for artifact in catalog.artifacts() {
+        if let Artifact::Region(spec) = artifact
+            && let Some(path) = catalog.toml_array_path(spec)
         {
-            bail!("host '{host}' uses the TOML scanner but an ordinary region declares non-TOML comment syntax");
-        }
-        if recorded.is_none()
-            && HostScanner::for_path(&host) == HostScanner::Lines
-            && previous.has_region_host(&host)
-            && let Some(text) = hosts.get_or_read(repo_root, &host)?
-        {
-            for key in previous.regions.keys().filter(|key| key.host.eq_ignore_ascii_case(&host)) {
-                let live_syntax = composed
-                    .ordinary_regions
-                    .get(&host)
-                    .into_iter()
-                    .flatten()
-                    .find(|spec| spec.id.as_str() == key.id)
-                    .map(|spec| spec.syntax);
-                // A live non-hash declaration already rules out TOML ownership.
-                // Do not inspect unrelated hash markers with the same id.
-                if live_syntax == Some(CommentSyntax::SlashSlash) {
-                    continue;
-                }
-                let syntax = CommentSyntax::Hash;
-                let same_repair = HostScanner::Lines.repair(&text, &key.id, syntax) == HostScanner::Toml.repair(&text, &key.id, syntax);
-                let same_region = HostScanner::Lines.find(&text, &key.id, syntax).map_err(|error| error.to_string())
-                    == HostScanner::Toml.find(&text, &key.id, syntax).map_err(|error| error.to_string());
-                if !same_repair || !same_region {
-                    bail!(
-                        "legacy host '{host}' has ambiguous scanner provenance for region '{}'; \
-                           no host bytes were changed. After verifying its format and sentinel boundaries, \
-                           set version = 2 and add [[host]] with path = \"{host}\" and scanner = \"toml\" or \"lines\" \
-                           in .anvil.lock, then retry",
-                        key.id
-                    );
-                }
+            for host in region_host_paths(workspace, spec) {
+                let host = resolve_existing_case_insensitive(repo_root, host)?;
+                paths.entry(host).or_default().push(path.to_vec());
             }
         }
-        hosts.scanners.insert(host.clone(), scanner);
-        manifest.host_scanners.retain(|path, _| !path.eq_ignore_ascii_case(&host));
-        manifest.host_scanners.insert(host, scanner);
     }
-    Ok(manifest)
+    let mut candidates: BTreeSet<String> = paths.keys().cloned().collect();
+    for key in manifest.regions.keys() {
+        if HostScanner::for_path(&key.host) == HostScanner::Toml {
+            candidates.insert(resolve_existing_case_insensitive(repo_root, &key.host)?);
+        }
+    }
+    let mut originals = HashMap::new();
+    let live = live_region_keys(repo_root, workspace, catalog)?;
+    for host in candidates {
+        let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
+        match crate::emit::toml_array_region::existing_array_paths(&text) {
+            Ok(existing) if !existing.is_empty() || paths.contains_key(&host) => {
+                crate::emit::toml_array_region::validated_regions(&text).map_err(|refusal| refusal.reason)?;
+                paths.entry(host.clone()).or_default().extend(existing);
+                originals.insert(host, text);
+            }
+            Err(refusal)
+                if paths.contains_key(&host)
+                    || manifest
+                        .regions
+                        .keys()
+                        .any(|key| key.host.eq_ignore_ascii_case(&host) && !live.contains(&(host.clone(), key.id.clone()))) =>
+            {
+                return Err(refusal.reason);
+            }
+            _ => {}
+        }
+    }
+    for artifact in catalog.artifacts() {
+        if let Artifact::OwnedFile(spec) = artifact
+            && paths.keys().any(|host| host.eq_ignore_ascii_case(spec.path))
+        {
+            bail!("a TOML array host cannot also be an owned file: {}", spec.path);
+        }
+    }
+    for file in manifest.files.keys() {
+        if paths.keys().any(|host| host.eq_ignore_ascii_case(file)) {
+            bail!("retire whole-file ownership separately before managing TOML array entries: {file}");
+        }
+    }
+    Ok((paths, originals))
 }
 
 /// In-memory accumulator of host-file text, shared across every region
@@ -389,27 +368,14 @@ fn resolve_host_scanners(
 /// but the last). Instead, the first region to touch a host seeds the
 /// cache from disk; every subsequent region splices against — and, when it
 /// writes, updates — the accumulated in-memory text, so the composed
-/// result preserves every region.
+/// result preserves every region. See `updates.md §4`.
 #[derive(Default)]
 struct HostTextCache {
     texts: HashMap<String, Option<String>>,
     newlines: HashMap<String, &'static str>,
-    scanners: HashMap<String, HostScanner>,
 }
 
 impl HostTextCache {
-    fn scanner(&self, host: &str) -> HostScanner {
-        self.scanners.get(host).copied().unwrap_or_else(|| HostScanner::for_path(host))
-    }
-    /// Cached hosts already carry their resolved spelling. Reuse it instead of
-    /// consulting the filesystem again, including for fully in-memory plans.
-    fn resolve_host(&self, repo_root: &Path, host: &str) -> Result<String, AppError> {
-        if self.texts.contains_key(host) {
-            return Ok(host.to_owned());
-        }
-        resolve_existing_case_insensitive(repo_root, host)
-    }
-
     /// The current in-memory text for `host`, reading from disk on first
     /// access. `None` means the host file does not (yet) exist on disk and
     /// no in-memory write has created it.
@@ -514,7 +480,7 @@ fn push_region_at(
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
-    let host = hosts.resolve_host(repo_root, host)?;
+    let host = resolve_existing_case_insensitive(repo_root, host)?;
     if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
         return Ok(());
     }
@@ -585,7 +551,7 @@ fn push_region_at(
             if legacy_lint_region_id(spec.id.as_str()).is_some_and(|legacy_id| {
                 current
                     .as_deref()
-                    .is_some_and(|text| matches!(hosts.scanner(&host).find(text, legacy_id, spec.syntax), Ok(Some(_))))
+                    .is_some_and(|text| matches!(find_region(text, legacy_id, spec.syntax), Ok(Some(_))))
             }) {
                 composed.states.insert(host.clone(), ComposedHostState::Unsafe(reason.clone()));
                 composed.reported.insert(host.clone());
@@ -599,22 +565,15 @@ fn push_region_at(
         .map(|text| composed.retiring_regions(manifest, &host, text, spec.syntax))
         .unwrap_or_default();
     if item.decision == Decision::Write
-        && let Some(refusal) = crate::emit::managed_region::toml_introduction_refusal_with_scanner(
-            current.as_deref(),
-            request,
-            &retiring,
-            hosts.scanner(&host),
-        )
+        && let Some(refusal) = toml_introduction_refusal(current.as_deref(), request, &retiring)
     {
         refuse_region(plan, host, spec.id.as_str(), &refusal.reason, refusal.remedy);
         return Ok(());
     }
-    composed.pending_retirements.entry(host.clone()).or_default().extend(retiring);
     // Fold actual writes into the accumulator so later regions compose.
-    if let Some(spliced) = &item.spliced_host {
-        if !composed.allow_array_splice(plan, &host, spec.id.as_str(), current.as_deref(), spliced) {
-            return Ok(());
-        }
+    if item.decision == Decision::Write
+        && let Some(spliced) = &item.spliced_host
+    {
         hosts.set(&host, spliced.clone());
     }
     plan.push(item);
@@ -688,15 +647,14 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
     // written one.
     let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
     let remedy = match remedy {
+        RefusalRemedy::EnclosingOwnership
+        | RefusalRemedy::ArrayDependency
+        | RefusalRemedy::MisplacedArrayMarkers
+        | RefusalRemedy::ArrayShape
+        | RefusalRemedy::ArrayScaffold => {
+            "Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported."
+        }
         RefusalRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
-        RefusalRemedy::ArrayShape => {
-            "Correct the catalog selector or the conflicting repository setting: the selected item must be an array \
-             and every parent must be table-like. Retrying unchanged input cannot resolve this type conflict."
-        }
-        RefusalRemedy::ArrayScaffold => {
-            "Add the selected empty array explicitly outside managed sentinels before retrying. \
-             Scaffolding never rewrites existing repository or retiring-region bytes."
-        }
         RefusalRemedy::InvalidGeneratedToml => {
             "The generated region is invalid TOML even without repository content. Repair the catalog template \
              that renders this region before retrying."
@@ -741,23 +699,6 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
              so anvil will not write this region rather than risk appending a second copy of it. Restore the \
              missing sentinel around the body anvil generated, or delete the stray one together with the \
              body it was meant to enclose."
-        }
-        RefusalRemedy::EnclosingOwnership => {
-            "Retire the existing ownership before managing these array entries, preserving any repository \
-             settings outside its sentinels. Retrying without changing that ownership cannot resolve this refusal."
-        }
-        RefusalRemedy::ArrayDependency => {
-            "Preserve the selected array's table headers, key, and brackets outside the changing region, \
-             or retire its array-entry ownership first. This dependent change was not applied."
-        }
-        RefusalRemedy::MisplacedArrayMarkers => {
-            "Keep both sentinels together around complete entries in the selected array. If the selector changed, \
-             restore the old selector and retire its region before registering the new selector, or explicitly \
-             reconcile the old marked entries with the new array. Do not delete only one sentinel."
-        }
-        RefusalRemedy::CommentedArrayEntry => {
-            "Move the repository comments outside the matching compound entry before adopting it. Anvil will \
-             not discard interior comments or silently duplicate the entry."
         }
     };
     plan.refusal(format!(
@@ -840,7 +781,7 @@ fn repair_or_refuse(
 /// Persist cheap marker repairs independently of adopting or updating the body.
 ///
 /// Reports whether the region's markers can be worked with at all. Unpaired
-/// markers are left exactly as found: see [`crate::region::repair_markers`] for why removing
+/// markers are left exactly as found: see [`repair_markers`] for why removing
 /// them is the corrupting answer.
 fn repair_host_markers(
     repo_root: &Path,
@@ -853,7 +794,7 @@ fn repair_host_markers(
     let Some(text) = hosts.get_or_read(repo_root, host)? else {
         return Ok(MarkerRepair::Repaired(String::new()));
     };
-    let outcome = hosts.scanner(host).repair(&text, id, syntax);
+    let outcome = HostScanner::for_path(host).repair(&text, id, syntax);
     if let MarkerRepair::Repaired(repaired) = &outcome
         && repaired != &text
     {
@@ -922,11 +863,7 @@ fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
         return RegionPlacement::Start;
     }
     if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
-        && let Some(old) = current.and_then(|text| {
-            crate::region::find_toml_region(text, "anvil-spellcheck", CommentSyntax::Hash)
-                .ok()
-                .flatten()
-        })
+        && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
         && crate::region::ends_in_toml_table(old.body_str(), &["Hunspell", "quirks"])
     {
         // Install the replacement tables before retiring the combined block:
@@ -987,30 +924,9 @@ struct ComposedHosts {
     /// to remove it, in which case the tables it declares must not be held
     /// against the region being written.
     live: BTreeSet<(String, String)>,
-    /// Live selector dependencies, including array regions that refuse this pass.
-    array_paths: HashMap<String, Vec<Vec<String>>>,
-    /// Ordinary templates used to reconstruct the pre-write view after an interrupted update.
-    ordinary_regions: HashMap<String, Vec<RegionSpec>>,
-    /// Safe retirements discovered for neighboring writes or in-sync regions.
-    pending_retirements: HashMap<String, BTreeSet<String>>,
-    host_scanners: HashMap<String, HostScanner>,
 }
 
 impl ComposedHosts {
-    fn allow_array_splice(&self, plan: &mut Plan, host: &str, id: &str, before: Option<&str>, after: &str) -> bool {
-        let Some(paths) = self.array_paths.get(host) else {
-            return true;
-        };
-        let retiring = self.pending_retirements.get(host).cloned().unwrap_or_default();
-        if let Err(refusal) =
-            crate::emit::toml_array_region::validate_neighbor_splice(before.unwrap_or(""), after, paths, id, CommentSyntax::Hash, &retiring)
-        {
-            refuse_region(plan, host.to_owned(), id, &refusal.reason.to_string(), refusal.remedy);
-            return false;
-        }
-        true
-    }
-
     /// The managed regions of `host_text` this pass will actually remove.
     ///
     /// A region is retiring only if the catalog no longer declares it *and* the
@@ -1020,13 +936,9 @@ impl ComposedHosts {
     /// writes a duplicate header, and treating a removed one as staying refuses
     /// a migration that is about to become valid.
     fn retiring_regions(&self, manifest: &Manifest, host_relpath: &str, host_text: &str, syntax: CommentSyntax) -> BTreeSet<String> {
-        let scanner = self
-            .host_scanners
-            .get(host_relpath)
-            .copied()
-            .unwrap_or_else(|| manifest.scanner(host_relpath));
-        let ids = scanner.ids(host_text, syntax);
-        ids.into_iter()
+        HostScanner::for_path(host_relpath)
+            .ids(host_text, syntax)
+            .into_iter()
             .filter(|id| !self.live.contains(&(host_relpath.to_owned(), id.clone())))
             .filter(|id| {
                 let Some(last) = manifest.region_checksum(host_relpath, id) else {
@@ -1044,60 +956,8 @@ impl ComposedHosts {
                     // a duplicate of a region that is on its way out.
                     return false;
                 };
-                let region = scanner.find(host_text, id, syntax).ok().flatten();
+                let region = HostScanner::for_path(host_relpath).find(host_text, id, syntax).ok().flatten();
                 region.is_some_and(|region| region.is_empty() || checksum_str(region.body_str()) == *last)
-            })
-            .filter(|id| {
-                let Some(paths) = self.array_paths.get(host_relpath) else {
-                    return true;
-                };
-                let spliced = scanner
-                    .remove(host_text, id, syntax)
-                    .expect("the preceding filter established paired region markers");
-                let mut retiring = self.pending_retirements.get(host_relpath).cloned().unwrap_or_default();
-                retiring.insert(id.clone());
-                if crate::emit::toml_array_region::validate_neighbor_splice(host_text, &spliced, paths, id, syntax, &retiring).is_err() {
-                    return false;
-                }
-                if toml_edit::Document::parse(host_text).is_ok() {
-                    return true;
-                }
-                // A write-before-removal partial apply can already contain the
-                // replacement table. Also check the pre-write view: masking the
-                // orphan alone would otherwise hide array brackets or table
-                // bindings that the orphan still supplies. Only complete live
-                // ordinary regions matching their current templates *after* the
-                // orphan can be rolled back. A preceding region may supply the
-                // orphan's table context, even when its template is in sync.
-                // Keeping that prefix intact preserves selectors owned by the
-                // orphan; the first validation protects selectors in the suffix
-                // with the live regions still present. Repository edits stay visible.
-                let candidate = scanner
-                    .find(host_text, id, syntax)
-                    .expect("the preceding filter established paired region markers")
-                    .expect("the preceding filter established a present region");
-                let synchronized = self
-                    .ordinary_regions
-                    .get(host_relpath)
-                    .into_iter()
-                    .flatten()
-                    .filter(|spec| {
-                        scanner
-                            .find(host_text, spec.id.as_str(), syntax)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|region| {
-                                region.start_line.start >= candidate.end_line.end
-                                    && checksum_str(region.body_str()) == checksum_str(&spec.body)
-                            })
-                    })
-                    .map(|spec| spec.id.as_str().to_owned())
-                    .collect();
-                let restored = crate::region::mask_retiring_toml_regions(host_text, syntax, &synchronized);
-                let restored_splice = crate::region::remove_toml_region(&restored, id, syntax)
-                    .expect("masking bodies preserves the previously validated paired markers");
-                retiring.remove(id);
-                crate::emit::toml_array_region::validate_neighbor_splice(&restored, &restored_splice, paths, id, syntax, &retiring).is_ok()
             })
             .collect()
     }
@@ -1213,7 +1073,7 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
     let Some(host_text) = host_text else {
         return DeltaRegionBody::Managed;
     };
-    let without_region = match crate::region::remove_toml_region(host_text, spec.id.as_str(), spec.syntax) {
+    let without_region = match remove_region(host_text, spec.id.as_str(), spec.syntax) {
         Ok(without_region) => without_region,
         Err(error) => return DeltaRegionBody::Malformed(format!("managed-region markers are malformed: {error}")),
     };
@@ -1327,7 +1187,7 @@ fn plan_removals(
         // No `resolved_host != key.host` guard: the `continue` above has
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
-        let resolved_host = hosts.resolve_host(repo_root, &key.host)?;
+        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host)?;
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
         // owned-file loop above keeps. A lock entry naming a region the catalog
@@ -1356,8 +1216,7 @@ fn plan_removals(
             // When that assumption changes, the manifest will need to
             // record the syntax used.
             let syntax = CommentSyntax::Hash;
-            let region = hosts
-                .scanner(&resolved_host)
+            let region = HostScanner::for_path(&resolved_host)
                 .find(&host_text, &key.id, syntax)
                 .expect("repair_or_refuse above established that this host has well-formed region markers");
             let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
@@ -1375,13 +1234,9 @@ fn plan_removals(
                     // cache is keyed by the resolved spelling, which is what
                     // the writes used; reading under the recorded spelling
                     // would miss it and splice into the pre-pass text.
-                    let spliced = hosts
-                        .scanner(&resolved_host)
+                    let spliced = HostScanner::for_path(&resolved_host)
                         .remove(&host_text, &key.id, syntax)
                         .expect("the region markers were validated by repair_or_refuse above");
-                    if !composed.allow_array_splice(plan, &resolved_host, &key.id, Some(&host_text), &spliced) {
-                        continue;
-                    }
                     hosts.set(&resolved_host, spliced.clone());
                     plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
                 }
@@ -1433,7 +1288,6 @@ fn live_files(plan: &Plan) -> BTreeSet<String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
 
     use tempfile::TempDir;
@@ -1442,1934 +1296,259 @@ mod tests {
     use crate::anvil::artifacts::region;
     use crate::{CliMeta, RegionId};
 
-    fn provenance_workspace() -> Workspace {
-        Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        }
-    }
-
-    fn provenance_array(body: &str) -> crate::catalog::TomlArrayRegionSpec {
-        crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
-                id: RegionId::new("entries"),
-                body: body.to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        }
-    }
-
-    #[test]
-    fn provenance_refused_retirement_retains_scanner_and_recovers() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        for quote in ["'''", "\"\"\""] {
-            for newline in ["\n", "\r\n"] {
-                let prefix = format!("message = {quote}\n# >>> anvil-managed: entries\nfake\n# <<< anvil-managed: entries\n{quote}\n")
-                    .replace('\n', newline);
-                let paired = "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
-                    .replace('\n', newline);
-                let mut manifest = Manifest::default();
-                manifest.set_region("config", "entries", checksum_str("  \"managed\",\n"));
-                manifest.host_scanners.insert("CONFIG".to_owned(), HostScanner::Toml);
-                let manifest = Manifest::parse(&manifest.to_toml()).unwrap();
-                for broken in [
-                    paired.replace("\"managed\"", "\"edited\""),
-                    paired.replace(&format!("  # <<< anvil-managed: entries{newline}"), ""),
-                ] {
-                    let original = format!("{prefix}{broken}");
-                    let mut hosts = HostTextCache::default();
-                    hosts.set("config", original.clone());
-                    let plan = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &empty, &mut hosts).unwrap();
-                    assert_eq!(plan.items().len(), 1);
-                    assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
-                    assert_eq!(plan.refusals().len(), 1);
-                    assert_eq!(hosts.cached("config").as_deref(), Some(original.as_str()));
-                    let persisted = Manifest::parse(&plan.projected_manifest(&manifest).to_toml()).unwrap();
-                    assert_eq!(persisted.regions, manifest.regions);
-                    assert_eq!(persisted.host_scanners, BTreeMap::from([("config".to_owned(), HostScanner::Toml)]));
-
-                    let mut fresh = HostTextCache::default();
-                    fresh.set("config", format!("{prefix}{paired}"));
-                    let retirement = build_plan_with_hosts(root, &provenance_workspace(), &persisted, &[], &empty, &mut fresh).unwrap();
-                    assert_eq!(retirement.refusals(), &[] as &[String]);
-                    assert_eq!(
-                        fresh.cached("config").as_deref(),
-                        Some(format!("{prefix}plugins.default = [{newline}]{newline}").as_str())
-                    );
-                    assert_eq!(retirement.projected_manifest(&persisted), Manifest::default());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn provenance_ordinary_adoption_update_and_repair_share_persisted_scanner() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let prefix = "message = '''\n# >>> anvil-managed: policy\nfake\n# <<< anvil-managed: policy\n'''\n";
-        let build_catalog = |body: &str| {
-            Catalog::builder(CliMeta::new("anvil"))
-                .with_artifact(Artifact::region(RegionSpec {
-                    host: HostSelector::Path("config".to_owned()),
-                    id: RegionId::new("policy"),
-                    body: body.to_owned(),
-                    syntax: CommentSyntax::Hash,
-                }))
-                .build()
-                .unwrap()
-        };
-        let mut manifest = Manifest::default();
-        manifest.host_scanners.insert("config".to_owned(), HostScanner::Toml);
-        let mut hosts = HostTextCache::default();
-        hosts.set("config", format!("{prefix}[policy]\nflag = true\nextra = \"keep\"\n"));
-        let catalog = build_catalog("[policy]\nflag = true\n");
-        let introduction = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(introduction.refusals(), &[] as &[String]);
-        let expected =
-            format!("{prefix}\n# >>> anvil-managed: policy\n[policy]\nflag = true\n# <<< anvil-managed: policy\nextra = \"keep\"\n");
-        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-        let manifest = Manifest::parse(&introduction.projected_manifest(&manifest).to_toml()).unwrap();
-        let duplicate = expected.replacen(
-            "\n# >>> anvil-managed: policy\n[policy]",
-            "\n# >>> anvil-managed: policy\n# >>> anvil-managed: policy\n[policy]",
-            1,
-        );
-        let mut fresh = HostTextCache::default();
-        fresh.set("config", duplicate);
-        let repair = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &catalog, &mut fresh).unwrap();
-        assert_eq!(repair.refusals(), &[] as &[String]);
-        assert_eq!(fresh.cached("config").as_deref(), Some(expected.as_str()));
-        let changed = build_catalog("[policy]\nflag = false\n");
-        let update = build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &changed, &mut fresh).unwrap();
-        assert_eq!(update.refusals(), &[] as &[String]);
-        assert_eq!(
-            fresh.cached("config").as_deref(),
-            Some(expected.replace("flag = true", "flag = false").as_str())
-        );
-    }
-
-    #[test]
-    fn provenance_partial_apply_recovery_keeps_string_data_on_extensionless_host() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let prefix = "message = '''\n# >>> anvil-managed: old\nfake\n# <<< anvil-managed: old\n'''\n";
-        let old = "[settings]\nmode = true\n";
-        let new = "[settings]\nmode = false\n";
-        let interrupted = format!(
-            "{prefix}plugins.default = [\"user\"]\n\n# >>> anvil-managed: old\n{old}# <<< anvil-managed: old\n\n# >>> anvil-managed: new\n{new}# <<< anvil-managed: new\n"
-        );
-        let mut previous = Manifest::default();
-        previous.set_region("config", "old", checksum_str(old));
-        previous.host_scanners.insert("config".to_owned(), HostScanner::Toml);
-        let previous = Manifest::parse(&previous.to_toml()).unwrap();
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
-                id: RegionId::new("new"),
-                body: new.to_owned(),
-                syntax: CommentSyntax::Hash,
-            }))
-            .with_toml_array_region(provenance_array("\"managed\",\n"))
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config", interrupted);
-        let plan = build_plan_with_hosts(root, &provenance_workspace(), &previous, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        let expected = format!(
-            "{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: new\n{new}# <<< anvil-managed: new\n"
-        );
-        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-        let mut expected_manifest = Manifest::default();
-        expected_manifest.set_region("config", "entries", checksum_str("  \"managed\",\n"));
-        expected_manifest.set_region("config", "new", checksum_str(new));
-        expected_manifest.host_scanners.insert("config".to_owned(), HostScanner::Toml);
-        assert_eq!(plan.projected_manifest(&previous), expected_manifest);
-    }
-
-    #[test]
-    fn provenance_programmatic_metadata_and_declaration_conflicts_refuse_before_repairs() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let ordinary = |host: &str, syntax| {
-            Catalog::builder(CliMeta::new("anvil"))
-                .with_artifact(Artifact::region(RegionSpec {
-                    host: HostSelector::Path(host.to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "setting = true\n".to_owned(),
-                    syntax,
-                }))
-                .build()
-                .unwrap()
-        };
-        for (entries, host, syntax, diagnostic) in [
-            (
-                vec![("config", HostScanner::Lines), ("CONFIG", HostScanner::Toml)],
-                "config",
-                CommentSyntax::Hash,
-                "duplicate or case-aliased [[host]] entry for 'config'",
-            ),
-            (
-                vec![("config.toml", HostScanner::Lines)],
-                "config.toml",
-                CommentSyntax::Hash,
-                "[[host]] 'config.toml' conflicts with its TOML path declaration",
-            ),
-            (
-                vec![("../config", HostScanner::Toml)],
-                "config",
-                CommentSyntax::Hash,
-                "[[host]] path '../config' must be a relative path inside the repository",
-            ),
-            (
-                vec![("config", HostScanner::Toml)],
-                "config",
-                CommentSyntax::SlashSlash,
-                "host 'config' uses the TOML scanner but an ordinary region declares non-TOML comment syntax",
-            ),
-            (
-                vec![(".anvil/container/Dockerfile", HostScanner::Toml)],
-                ".anvil/container/Dockerfile",
-                CommentSyntax::Hash,
-                "host '.anvil/container/Dockerfile' has a non-TOML composed-host declaration that conflicts with TOML ownership",
-            ),
-        ] {
-            let manifest = Manifest {
-                host_scanners: entries.into_iter().map(|(path, scanner)| (path.to_owned(), scanner)).collect(),
-                ..Manifest::default()
-            };
-            let original = "# >>> anvil-managed: entries\n# >>> anvil-managed: entries\nsetting = true\n# <<< anvil-managed: entries\n";
-            let mut hosts = HostTextCache::default();
-            hosts.set(host, original.to_owned());
-            let error =
-                build_plan_with_hosts(root, &provenance_workspace(), &manifest, &[], &ordinary(host, syntax), &mut hosts).unwrap_err();
-            assert_eq!(error.to_string(), diagnostic);
-            assert_eq!(hosts.cached(host).as_deref(), Some(original));
-        }
-    }
-
-    #[test]
-    fn provenance_mixed_neighbors_keep_toml_after_last_array_retirement() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = provenance_workspace();
-        let prefix = "message = '''\n# >>> anvil-managed: policy\nfake\n# <<< anvil-managed: policy\n'''\n";
-        for array_first in [false, true] {
-            let ordinary = Artifact::region(RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
-                id: RegionId::new("policy"),
-                body: "[policy]\nflag = true\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            });
-            let builder = Catalog::builder(CliMeta::new("anvil"));
-            let catalog = if array_first {
-                builder
-                    .with_toml_array_region(provenance_array("\"managed\",\n"))
-                    .with_artifact(ordinary.clone())
-            } else {
-                builder
-                    .with_artifact(ordinary.clone())
-                    .with_toml_array_region(provenance_array("\"managed\",\n"))
-            }
-            .build()
-            .unwrap();
-            let mut hosts = HostTextCache::default();
-            hosts.set("config", format!("{prefix}plugins.default = []\n"));
-            let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-            assert_eq!(plan.refusals(), &[] as &[String]);
-            let expected = format!(
-                "{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  \
-                # <<< anvil-managed: entries\n]\n\n# >>> anvil-managed: policy\n[policy]\nflag = true\n# <<< anvil-managed: policy\n"
-            );
-            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-            let manifest = Manifest::parse(&plan.projected_manifest(&Manifest::default()).to_toml()).unwrap();
-            assert_eq!(manifest.host_scanner("CONFIG"), Some(HostScanner::Toml));
-            let ordinary_catalog = Catalog::builder(CliMeta::new("anvil")).with_artifact(ordinary).build().unwrap();
-            let retirement = build_plan_with_hosts(root, &workspace, &manifest, &[], &ordinary_catalog, &mut hosts).unwrap();
-            assert_eq!(retirement.refusals(), &[] as &[String]);
-            let expected = format!(
-                "{prefix}plugins.default = [\n]\n\n# >>> anvil-managed: policy\n[policy]\nflag = true\n# <<< anvil-managed: policy\n"
-            );
-            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-            let manifest = Manifest::parse(&retirement.projected_manifest(&manifest).to_toml()).unwrap();
-            assert_eq!(manifest.host_scanner("config"), Some(HostScanner::Toml));
-            let insync = build_plan_with_hosts(root, &workspace, &manifest, &[], &ordinary_catalog, &mut hosts).unwrap();
-            assert_eq!(insync.refusals(), &[] as &[String]);
-            assert_eq!(insync.items()[0].decision, Decision::InSync);
-            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-            let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty, &mut hosts).unwrap();
-            assert_eq!(plan.refusals(), &[] as &[String]);
-            assert_eq!(
-                hosts.cached("config").as_deref(),
-                Some(format!("{prefix}plugins.default = [\n]\n").as_str())
-            );
-            assert!(plan.projected_manifest(&manifest).host_scanners.is_empty());
-        }
-    }
-
-    #[test]
-    fn provenance_legacy_ambiguity_diagnostic_and_explicit_recovery() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = provenance_workspace();
-        let prefix = "message = '''\n# >>> anvil-managed: entries\n  \"managed\",\n# <<< anvil-managed: entries\n'''\n";
-        let original =
-            format!("{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n");
-        let mut legacy = Manifest::default();
-        legacy.set_region("config", "entries", checksum_str("  \"managed\",\n"));
-        let legacy = Manifest::parse(&legacy.to_toml().replacen("version = 2", "version = 1", 1)).unwrap();
-        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        let active = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(provenance_array("\"managed\",\n"))
-            .build()
-            .unwrap();
-        for catalog in [&empty, &active] {
-            let mut hosts = HostTextCache::default();
-            hosts.set("config", original.clone());
-            let error = build_plan_with_hosts(root, &workspace, &legacy, &[], catalog, &mut hosts).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                concat!(
-                    "legacy host 'config' has ambiguous scanner provenance for region 'entries'; no host bytes were changed. ",
-                    "After verifying its format and sentinel boundaries, set version = 2 and add [[host]] with path = \"config\" ",
-                    "and scanner = \"toml\" or \"lines\" in .anvil.lock, then retry"
-                )
-            );
-            assert_eq!(hosts.cached("config").as_deref(), Some(original.as_str()));
-            let repaired = Manifest::parse(&format!("{}[[host]]\npath = \"config\"\nscanner = \"toml\"\n", legacy.to_toml())).unwrap();
-            let plan = build_plan_with_hosts(root, &workspace, &repaired, &[], catalog, &mut hosts).unwrap();
-            assert_eq!(plan.refusals(), &[] as &[String]);
-            let expected = if catalog.artifacts().is_empty() {
-                format!("{prefix}plugins.default = [\n]\n")
-            } else {
-                original.clone()
-            };
-            assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-        }
-    }
-
-    #[test]
-    fn provenance_legacy_retirement_ignores_unused_comment_syntax() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        for newline in ["\n", "\r\n"] {
-            let original = "// >>> anvil-managed: old\nbody\n// <<< anvil-managed: old\n".replace('\n', newline);
-            let mut legacy = Manifest::default();
-            legacy.set_region("tool.cfg", "old", checksum_str("body\n"));
-            let legacy = Manifest::parse(&legacy.to_toml().replacen("version = 2", "version = 1", 1)).unwrap();
-            let mut hosts = HostTextCache::default();
-            hosts.set("tool.cfg", original.clone());
-            let plan = build_plan_with_hosts(root, &provenance_workspace(), &legacy, &[], &empty, &mut hosts).unwrap();
-            assert_eq!(plan.refusals(), &[] as &[String]);
-            assert_eq!(hosts.cached("tool.cfg").as_deref(), Some(original.as_str()));
-            let projected = plan.projected_manifest(&legacy);
-            assert_eq!(projected.regions, BTreeMap::new());
-            assert_eq!(projected.host_scanners, BTreeMap::new());
-        }
-    }
-
-    #[test]
-    fn provenance_legacy_unambiguous_migration_and_lines_behavior() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = provenance_workspace();
-        let initial = "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n";
-        let mut legacy = Manifest::default();
-        legacy.set_region("config", "entries", checksum_str("  \"managed\",\n"));
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(provenance_array("\"managed\",\n"))
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config", initial.to_owned());
-        let plan = build_plan_with_hosts(root, &workspace, &legacy, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(plan.items()[0].decision, Decision::InSync);
-        assert_eq!(hosts.cached("config").as_deref(), Some(initial));
-        assert_eq!(plan.projected_manifest(&legacy).host_scanner("config"), Some(HostScanner::Toml));
-
-        let ordinary = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
-                id: RegionId::new("entries"),
-                body: "echo new\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            }))
-            .build()
-            .unwrap();
-        legacy.set_region("config", "entries", checksum_str("echo old\n"));
-        hosts.set(
-            "config",
-            "# >>> anvil-managed: entries\necho old\n# <<< anvil-managed: entries\n".to_owned(),
-        );
-        let plan = build_plan_with_hosts(root, &workspace, &legacy, &[], &ordinary, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(
-            hosts.cached("config").as_deref(),
-            Some("# >>> anvil-managed: entries\necho new\n# <<< anvil-managed: entries\n")
-        );
-        let mut known = plan.projected_manifest(&legacy);
-        assert_eq!(known.host_scanner("config"), Some(HostScanner::Lines));
-        known.set_region("config", "entries", checksum_str("echo new\n"));
-        hosts.set(
-            "config",
-            "message = '''\n# >>> anvil-managed: entries\necho new\n# <<< anvil-managed: entries\n'''\n".to_owned(),
-        );
-        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        let plan = build_plan_with_hosts(root, &workspace, &known, &[], &empty, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(hosts.cached("config").as_deref(), Some("message = '''\n'''\n"));
-    }
-
-    #[test]
-    fn provenance_format_conflict_recovery_retires_before_format_change() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = provenance_workspace();
-        let original = "# >>> anvil-managed: old\nsetting = true\n# <<< anvil-managed: old\nplugins.default = []\n";
-        let mut manifest = Manifest::default();
-        manifest.set_region("config", "old", checksum_str("setting = true\n"));
-        manifest.host_scanners.insert("config".to_owned(), HostScanner::Lines);
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(provenance_array("\"managed\",\n"))
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config", original.to_owned());
-        let error = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "host 'config' declares TOML ownership but .anvil.lock records the lines scanner; retire its existing regions with the previous catalog before changing the host format"
-        );
-        assert_eq!(hosts.cached("config").as_deref(), Some(original));
-        let previous = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        let retirement = build_plan_with_hosts(root, &workspace, &manifest, &[], &previous, &mut hosts).unwrap();
-        assert_eq!(retirement.refusals(), &[] as &[String]);
-        assert_eq!(hosts.cached("config").as_deref(), Some("plugins.default = []\n"));
-        let manifest = Manifest::parse(&retirement.projected_manifest(&manifest).to_toml()).unwrap();
-        assert!(manifest.host_scanners.is_empty());
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(
-            hosts.cached("config").as_deref(),
-            Some("plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n")
-        );
-    }
-
-    #[test]
-    fn provenance_extensionless_array_introduction_and_update() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let prefix = "message = '''\n# >>> anvil-managed: entries\nfake\n# <<< anvil-managed: entries\n'''\n";
-        let array = |body: &str| crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
-                id: RegionId::new("entries"),
-                body: body.to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(array("\"managed\",\n"))
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config", format!("{prefix}plugins.default = []\n"));
-        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        let expected =
-            format!("{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n");
-        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-        let manifest = Manifest::parse(&plan.projected_manifest(&Manifest::default()).to_toml()).unwrap();
-        let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(rerun.refusals(), &[] as &[String]);
-        assert_eq!(rerun.items()[0].decision, Decision::InSync);
-        let changed = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(array("\"new\",\n"))
-            .build()
-            .unwrap();
-        let update = build_plan_with_hosts(root, &workspace, &manifest, &[], &changed, &mut hosts).unwrap();
-        assert_eq!(update.refusals(), &[] as &[String]);
-        let expected = expected.replace("  \"managed\",", "  \"new\",");
-        assert_eq!(hosts.cached("config").as_deref(), Some(expected.as_str()));
-        let manifest = Manifest::parse(&update.projected_manifest(&manifest).to_toml()).unwrap();
-        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        let retirement = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty, &mut hosts).unwrap();
-        assert_eq!(retirement.refusals(), &[] as &[String]);
-        assert_eq!(
-            hosts.cached("config").as_deref(),
-            Some(format!("{prefix}plugins.default = [\n]\n").as_str())
-        );
-        assert!(retirement.projected_manifest(&manifest).regions.is_empty());
-    }
-
-    #[test]
-    fn provenance_extensionless_array_last_retirement_from_fresh_lock() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let prefix = "message = '''\n# >>> anvil-managed: entries\n  \"managed\",\n# <<< anvil-managed: entries\n'''\n";
-        let initial =
-            format!("{prefix}plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n");
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
-                region: RegionSpec {
-                    host: HostSelector::Path("config".to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "\"managed\",\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                },
-                path: vec!["plugins".to_owned(), "default".to_owned()],
-            })
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config", initial);
-        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        let manifest = Manifest::parse(&plan.projected_manifest(&Manifest::default()).to_toml()).unwrap();
-        let mut fresh_hosts = HostTextCache::default();
-        fresh_hosts.set("config", hosts.cached("config").unwrap());
-        let empty = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty, &mut fresh_hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(
-            fresh_hosts.cached("config").as_deref(),
-            Some(format!("{prefix}plugins.default = [\n]\n").as_str())
-        );
-        assert!(plan.projected_manifest(&manifest).regions.is_empty());
-    }
-
-    #[test]
-    fn review_toml_marker_data_survives_pipeline_retirement() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let entries = crate::catalog::TomlArrayRegionSpec {
+    fn array_catalog(ordinary: Option<RegionSpec>, array_first: bool) -> Catalog {
+        let array = crate::catalog::TomlArrayRegionSpec {
             region: RegionSpec {
                 host: HostSelector::Path("config.toml".to_owned()),
                 id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
+                body: "\"required\",\n".to_owned(),
                 syntax: CommentSyntax::Hash,
             },
             path: vec!["plugins".to_owned(), "default".to_owned()],
         };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(entries)
-            .build()
-            .unwrap();
-        for quote in ["\"\"\"", "'''"] {
-            for newline in ["\n", "\r\n"] {
-                for old in ["", "# >>> anvil-managed: old\nobsolete = true\n# <<< anvil-managed: old\n"] {
-                    let prefix = format!(
-                        "\"message#\" = {quote}\n# >>> anvil-managed: old\nobsolete = true\n# <<< anvil-managed: old\n\
-                         # >>> anvil-managed: note\n{quote}\n"
-                    )
-                    .replace('\n', newline);
-                    let old = old.replace('\n', newline);
-                    let host = format!("{prefix}{old}plugins.default = [\"managed\", \"user\"]{newline}");
-                    let mut manifest = Manifest::default();
-                    manifest.set_region("config.toml", "old", checksum_str("obsolete = true\n"));
-                    let mut hosts = HostTextCache::default();
-                    hosts.set("config.toml", host);
-                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    assert_eq!(plan.refusals(), &[] as &[String]);
-                    let expected = format!(
-                        "{prefix}plugins.default = [{newline}  # >>> anvil-managed: entries{newline}  \"managed\",{newline}  \
-                         # <<< anvil-managed: entries{newline} \"user\"]{newline}"
-                    );
-                    assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
-                    let manifest = plan.projected_manifest(&manifest);
-                    assert_eq!(manifest.region_checksum("config.toml", "old"), None);
-                    let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    assert_eq!(rerun.refusals(), &[] as &[String]);
-                    assert_eq!(rerun.items()[0].decision, Decision::InSync);
-                    assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
-                }
-            }
+        let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+        if array_first {
+            builder = builder.with_toml_array_region(array.clone());
         }
+        if let Some(ordinary) = ordinary {
+            builder = builder.with_artifact(Artifact::region(ordinary));
+        }
+        if !array_first {
+            builder = builder.with_toml_array_region(array);
+        }
+        builder.build().unwrap()
     }
 
-    #[test]
-    fn review_insertion_only_scaffold_diagnostic_and_recovery() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(entries)
-            .build()
-            .unwrap();
-        let host = "plugins.a=true\nother=true\nplugins.b=true\n";
+    fn array_plan(text: &str, manifest: &Manifest, catalog: &Catalog) -> Result<Plan, AppError> {
         let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", host.to_owned());
-        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[concat!(
-            "Refused to manage config.toml [entries]: the missing TOML array [\"plugins\", \"default\"] cannot be scaffolded by insertion alone. ",
-            "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-            "Add the selected empty array explicitly outside managed sentinels before retrying. ",
-            "Scaffolding never rewrites existing repository or retiring-region bytes."
-        ).to_owned()]);
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(host));
-        assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
-        assert_eq!(plan.items()[0].spliced_host, None);
-        hosts.set("config.toml", format!("{host}plugins.default=[]\n"));
-        let repaired = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(repaired.refusals(), &[] as &[String]);
-        assert_eq!(
-            hosts.cached("config.toml").as_deref(),
-            Some(concat!(
-                "plugins.a=true\nother=true\nplugins.b=true\nplugins.default=[\n",
-                "  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
-            ))
-        );
-    }
-
-    #[test]
-    fn review_insertion_only_scaffold_preserves_other_live_selectors_with_retirement() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let old = "[legacy]\nsetting = true\n";
-        let host = format!("# >>> anvil-managed: old\n{old}# <<< anvil-managed: old\n");
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("new"),
-                body: "other = [\"user\"]\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            }))
-            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
-                region: RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "\"managed\",\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                },
-                path: vec!["legacy".to_owned(), "other".to_owned()],
-            })
-            .build()
-            .unwrap();
-        let mut manifest = Manifest::default();
-        manifest.set_region("config.toml", "old", checksum_str(old));
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", host);
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.items()[1].decision, Decision::LeaveAlone);
-        assert_eq!(plan.items()[1].spliced_host, None);
-        assert_eq!(plan.refusals(), &[concat!(
-            "Refused to manage config.toml [entries]: this change would remove or rebind the live TOML array selector [\"legacy\", \"other\"]. ",
-            "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-            "Preserve the selected array's table headers, key, and brackets outside the changing region, ",
-            "or retire its array-entry ownership first. This dependent change was not applied."
-        ).to_owned(), concat!(
-            "Refused to manage config.toml [old]: this change would remove or rebind the live TOML array selector [\"legacy\", \"other\"]. ",
-            "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-            "Preserve the selected array's table headers, key, and brackets outside the changing region, ",
-            "or retire its array-entry ownership first. This dependent change was not applied."
-        ).to_owned()]);
-        assert_eq!(
-            hosts.cached("config.toml").as_deref(),
-            Some(concat!(
-                "# >>> anvil-managed: old\n[legacy]\nsetting = true\n# <<< anvil-managed: old\n\n",
-                "# >>> anvil-managed: new\nother = [\"user\"]\n# <<< anvil-managed: new\n"
-            ))
-        );
-        let projected = plan.projected_manifest(&manifest);
-        assert_eq!(projected.region_checksum("config.toml", "entries"), None);
-        assert_eq!(
-            projected.region_checksum("config.toml", "old"),
-            manifest.region_checksum("config.toml", "old")
-        );
-    }
-
-    #[test]
-    fn review_scalar_array_shapes_have_exact_diagnostics_and_recovery() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
+        hosts.set("config.toml", text.to_owned());
+        hosts.newlines.insert("config.toml".to_owned(), crate::region::text_newline(text));
+        build_plan_with_hosts(
+            Path::new("in-memory-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
             },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(entries)
-            .build()
-            .unwrap();
-        for scalar in ["1", "true", "\"value\""] {
-            for (key, reason) in [
-                (
-                    "plugins.default",
-                    "the selected TOML item [\"plugins\", \"default\"] is not an array",
-                ),
-                ("plugins", "the parent of TOML array [\"plugins\", \"default\"] is not a table"),
-            ] {
-                let host = format!("{key}={scalar}\n");
-                let mut hosts = HostTextCache::default();
-                hosts.set("config.toml", host.clone());
-                let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-                assert_eq!(
-                    plan.refusals(),
-                    &[format!(
-                        "Refused to manage config.toml [entries]: {reason}. This region was left unchanged; \
-                     other regions in the same file and other artifacts may still be updated. \
-                     Correct the catalog selector or the conflicting repository setting: the selected item must be an array \
-                     and every parent must be table-like. Retrying unchanged input cannot resolve this type conflict."
-                    )]
-                );
-                assert_eq!(hosts.cached("config.toml"), Some(host));
-                assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
-                assert_eq!(plan.items()[0].spliced_host, None);
-                hosts.set("config.toml", "plugins.default=[]\n".to_owned());
-                let repaired = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-                assert_eq!(repaired.refusals(), &[] as &[String]);
-                assert_eq!(
-                    hosts.cached("config.toml").as_deref(),
-                    Some("plugins.default=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n")
-                );
-            }
-        }
+            manifest,
+            &[],
+            catalog,
+            &mut hosts,
+        )
     }
 
     #[test]
-    fn review_ordinary_toml_pipeline_preserves_data_and_ownership() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        for newline in ["\n", "\r\n"] {
-            for quote in ["'''", "\"\"\""] {
-                for fake in [
-                    "# >>> anvil-managed: r\nrepository data\n# <<< anvil-managed: r\n",
-                    "# >>> anvil-managed: orphan\n# >>> anvil-managed: r\nrepository data\n# <<< anvil-managed: r\n",
-                    "# <<< anvil-managed: r\nrepository data\n",
-                ] {
-                    let data = format!("\"# >>> anvil-managed: key\" = {quote}\n{fake}{quote}\n").replace('\n', newline);
-                    let body = "enabled = true\n";
-                    let catalog = Catalog::builder(CliMeta::new("anvil"))
-                        .with_artifact(Artifact::region(RegionSpec {
-                            host: HostSelector::Path("config.toml".to_owned()),
-                            id: RegionId::new("r"),
-                            body: body.to_owned(),
-                            syntax: CommentSyntax::Hash,
-                        }))
-                        .build()
-                        .unwrap();
-                    for recorded in [false, true] {
-                        for actual in [false, true] {
-                            let old_body = format!("enabled = false{newline}");
-                            let host = if actual {
-                                format!("{data}{newline}# >>> anvil-managed: r{newline}{old_body}# <<< anvil-managed: r{newline}")
-                            } else {
-                                data.clone()
-                            };
-                            let mut manifest = Manifest::default();
-                            if recorded || actual {
-                                manifest.set_region("config.toml", "r", checksum_str(&old_body));
-                            }
-                            let mut hosts = HostTextCache::default();
-                            hosts.set("config.toml", host);
-                            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                            assert_eq!(plan.refusals(), &[] as &[String]);
-                            assert_eq!(plan.items()[0].decision, Decision::Write);
-                            let expected = format!(
-                                "{data}{newline}# >>> anvil-managed: r{newline}enabled = true{newline}# <<< anvil-managed: r{newline}"
-                            );
-                            assert_eq!(hosts.cached("config.toml"), Some(expected.clone()));
-                            let document = expected.parse::<toml_edit::DocumentMut>().unwrap();
-                            assert_eq!(document["enabled"].as_bool(), Some(true));
-                            assert_eq!(
-                                document["# >>> anvil-managed: key"].as_str(),
-                                Some(fake.replace('\n', newline).as_str())
-                            );
-                            manifest.set_region("config.toml", "r", checksum_str(&format!("enabled = true{newline}")));
-                            let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                            assert_eq!(rerun.refusals(), &[] as &[String]);
-                            assert_eq!(rerun.items()[0].decision, Decision::InSync);
-                            assert_eq!(hosts.cached("config.toml"), Some(expected));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn mutation_empty_array_insertion_maps_the_original_closing_delimiter() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
-                region: RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "\"managed\",\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                },
-                path: vec!["items".to_owned()],
-            })
-            .build()
-            .unwrap();
-        for newline in ["\n", "\r\n"] {
-            for (source, expected) in [
-                (
-                    "items=[]\n",
-                    "items=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n",
-                ),
-                (
-                    "items=[\n  ]\n",
-                    "items=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n  ]\n",
-                ),
-            ] {
-                let mut hosts = HostTextCache::default();
-                let old = "# >>> anvil-managed: old\nobsolete=true\n# <<< anvil-managed: old\n".replace('\n', newline);
-                let mut manifest = Manifest::default();
-                manifest.set_region("config.toml", "old", checksum_str(&format!("obsolete=true{newline}")));
-                hosts.set("config.toml", format!("{}{old}", source.replace('\n', newline)));
-                let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                let expected = expected.replace('\n', newline);
-                assert_eq!(plan.refusals(), &[] as &[String]);
-                assert_eq!(plan.items().len(), 2);
-                assert_eq!(plan.items()[0].decision, Decision::Write);
-                assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(format!("{expected}{old}").as_str()));
-                assert_eq!(plan.items()[1].decision, Decision::Remove);
-                assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
-                let manifest = plan.projected_manifest(&manifest);
-                assert_eq!(
-                    manifest.region_checksum("config.toml", "entries"),
-                    Some(checksum_str(&format!("  \"managed\",{newline}")).as_str())
-                );
-                let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                assert_eq!(rerun.refusals(), &[] as &[String]);
-                assert_eq!(rerun.items()[0].decision, Decision::InSync);
-                assert_eq!(rerun.items()[0].spliced_host, None);
-            }
-        }
-    }
-
-    #[test]
-    fn mutation_neighbor_cannot_replace_only_the_array_closing_delimiter() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        for newline in ["\n", "\r\n"] {
-            let source = concat!(
-                "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n",
-                "# >>> anvil-managed: cfg\n1,\n# <<< anvil-managed: cfg\n2,\n]\n"
-            )
-            .replace('\n', newline);
-            let mut manifest = Manifest::default();
-            manifest.set_region("config.toml", "cfg", checksum_str(&format!("1,{newline}")));
-            manifest.set_region("config.toml", "entries", checksum_str(&format!("  \"managed\",{newline}")));
-            let catalog = Catalog::builder(CliMeta::new("anvil"))
-                .with_artifact(Artifact::region(RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("cfg"),
-                    body: "1,\n]\nother = [\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                }))
-                .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
-                    region: RegionSpec {
-                        host: HostSelector::Path("config.toml".to_owned()),
-                        id: RegionId::new("entries"),
-                        body: "\"managed\",\n".to_owned(),
-                        syntax: CommentSyntax::Hash,
-                    },
-                    path: vec!["items".to_owned()],
-                })
-                .build()
-                .unwrap();
-            let mut hosts = HostTextCache::default();
-            hosts.set("config.toml", source.clone());
-            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-            assert_eq!(
-                plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-                [Decision::LeaveAlone, Decision::InSync]
-            );
-            assert_eq!(plan.items()[0].spliced_host, None);
-            assert_eq!(hosts.cached("config.toml"), Some(source));
-            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
-            assert_eq!(
-                plan.refusals(),
-                &[concat!(
-                    "Refused to manage config.toml [cfg]: this change would remove or rebind the live TOML array selector [\"items\"]. ",
-                    "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-                    "Preserve the selected array's table headers, key, and brackets outside the changing region, ",
-                    "or retire its array-entry ownership first. This dependent change was not applied."
-                )
-                .to_owned()]
-            );
-        }
-    }
-
-    #[test]
-    fn toml_array_regions_compose_with_an_ordinary_region_in_the_production_plan() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let cfg = Artifact::region(RegionSpec {
-            host: HostSelector::Path("config.toml".to_owned()),
-            id: RegionId::new("cfg"),
-            body: "[plugins]\nmode = true\n".to_owned(),
-            syntax: CommentSyntax::Hash,
-        });
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(cfg)
-            .with_toml_array_region(entries.clone())
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.texts.insert("config.toml".to_owned(), None);
-        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(plan.items().len(), 2);
-        assert_eq!(plan.items()[0].decision, Decision::Write);
-        assert_eq!(plan.items()[1].decision, Decision::Write);
-        let expected = concat!(
-            "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n# <<< anvil-managed: cfg\n",
-            "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
-        );
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-        assert_eq!(plan.items()[1].spliced_host.as_deref(), Some(expected));
-        let manifest = plan.projected_manifest(&Manifest::default());
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(
-            plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync, Decision::InSync]
-        );
-        let entries_only = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(entries.clone())
-            .build()
-            .unwrap();
-        let retired = build_plan_with_hosts(root, &workspace, &manifest, &[], &entries_only, &mut hosts).unwrap();
-        assert_eq!(
-            retired.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync, Decision::LeaveAlone]
-        );
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-        assert_eq!(retired.projected_manifest(&manifest).regions, manifest.regions);
-        let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &entries_only, &mut hosts).unwrap();
-        assert_eq!(
-            rerun
-                .items()
-                .iter()
-                .map(|item| (&item.target, item.decision, &item.spliced_host))
-                .collect::<Vec<_>>(),
-            retired
-                .items()
-                .iter()
-                .map(|item| (&item.target, item.decision, &item.spliced_host))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(rerun.refusals(), retired.refusals());
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-        let malformed = "plugins.default = [\n# >>> anvil-managed: other\n\"managed\",\n]\n";
-        hosts.set("config.toml", malformed.to_owned());
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(entries)
-            .build()
-            .unwrap();
-        let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+    fn toml_array_plan_lifecycle_preserves_repository_and_schema_one() {
+        let catalog = array_catalog(None, true);
+        let source = "# user\n[plugins]\ndefault = ['required', \"user\", { option = true }]\n";
+        let expected = "# user\n[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  \"required\",\n  # <<< anvil-managed: entries\n \"user\", { option = true }]\n";
+        let plan = array_plan(source, &Manifest::default(), &catalog).unwrap();
         assert_eq!(plan.items().len(), 1);
-        assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
-        assert_eq!(plan.items()[0].spliced_host, None);
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(malformed));
+        assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(expected));
+        assert_eq!(plan.dry_run_exit_code(), 1);
+        let manifest = plan.projected_manifest(&Manifest::default());
+        assert_eq!(crate::manifest::SCHEMA_VERSION, 1);
+        assert_eq!(manifest.regions.len(), 1);
+        let plan = array_plan(expected, &manifest, &catalog).unwrap();
+        assert_eq!(plan.items()[0].decision, Decision::InSync);
+        assert_eq!(plan.dry_run_exit_code(), 0);
+        let empty = Catalog::builder(catalog.cli().clone()).build().unwrap();
+        let plan = array_plan(expected, &manifest, &empty).unwrap();
         assert_eq!(
-            plan.refusals(),
-            &[concat!(
-                "Refused to manage config.toml [entries]: opening sentinel without its matching close. ",
-                "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-                "Without a matching pair of sentinels the boundary of the generated body cannot be established, ",
-                "so anvil will not write this region rather than risk appending a second copy of it. Restore the ",
-                "missing sentinel around the body anvil generated, or delete the stray one together with the ",
-                "body it was meant to enclose."
-            )
-            .to_owned()]
+            plan.items()[0].spliced_host.as_deref(),
+            Some("# user\n[plugins]\ndefault = [\n \"user\", { option = true }]\n")
         );
+        assert_eq!(plan.projected_manifest(&manifest).regions.len(), 0);
+        let edited = expected.replace("\"required\"", "\"edited\"");
+        array_plan(&edited, &manifest, &catalog).unwrap_err();
+        let plan = array_plan(&edited, &manifest, &empty).unwrap();
+        assert!(!plan.refusals().is_empty());
+        assert_eq!(plan.projected_manifest(&manifest), manifest);
+        assert!(plan.items().iter().all(|item| item.spliced_host.is_none()));
     }
 
     #[test]
-    fn toml_array_dependencies_guard_neighbor_updates_and_retirement() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
+    fn toml_array_plan_allows_independent_neighbors_in_either_order() {
+        let source =
+            "[plugins]\ndefault = [\"user\"]\n\n# >>> anvil-managed: settings\n[settings]\nmode = true\n# <<< anvil-managed: settings\n";
+        let expected = "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  \"required\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: settings\n[settings]\nmode = false\n# <<< anvil-managed: settings\n";
+        let neighbor = RegionSpec {
+            host: HostSelector::Path("config.toml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "[settings]\nmode = false\n".to_owned(),
+            syntax: CommentSyntax::Hash,
         };
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        for text in [
-            "# >>> anvil-managed: cfg\n[plugins]\ndefault = [\n# <<< anvil-managed: cfg\n\"managed\",\n]\n",
-            "[plugins]\ndefault = [\n\"managed\",\n# >>> anvil-managed: cfg\n]\n# <<< anvil-managed: cfg\n",
-            "# >>> anvil-managed: cfg\n[plugins]\ndefault = [\"managed\"]\n# <<< anvil-managed: cfg\n",
-            "# >>> anvil-managed: cfg\n[plugins]\n# <<< anvil-managed: cfg\ndefault = [\"managed\"]\n",
-            "# >>> anvil-managed: cfg\n[plugins]\n# <<< anvil-managed: cfg\ndefault = [\"managed\"]\n[other]\ndefault = [\"other\"]\n",
-        ] {
-            let cfg = find_region(text, "cfg", CommentSyntax::Hash).unwrap().unwrap();
-            let mut manifest = Manifest::default();
-            manifest.set_region("config.toml", "cfg", checksum_str(cfg.body_str()));
-            for replacement in [None, Some("# no table header\n"), Some("[other]\n")] {
-                let mut builder = Catalog::builder(CliMeta::new("anvil"));
-                if let Some(body) = replacement {
-                    builder = builder.with_artifact(Artifact::region(RegionSpec {
-                        host: HostSelector::Path("config.toml".to_owned()),
-                        id: RegionId::new("cfg"),
-                        body: body.to_owned(),
-                        syntax: CommentSyntax::Hash,
-                    }));
-                }
-                let catalog = builder
-                    .with_toml_array_region(entries.clone())
-                    .with_artifact(Artifact::region(RegionSpec {
-                        host: HostSelector::Path("config.toml".to_owned()),
-                        id: RegionId::new("safe"),
-                        body: "# independent comment\n".to_owned(),
-                        syntax: CommentSyntax::Hash,
-                    }))
-                    .build()
-                    .unwrap();
-                let mut hosts = HostTextCache::default();
-                hosts.set("config.toml", text.to_owned());
-                let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                let cfg_item = plan
-                    .items()
-                    .iter()
-                    .find(|item| {
-                        item.target
-                            == Target::Region {
-                                host: "config.toml".to_owned(),
-                                id: "cfg".to_owned(),
-                            }
-                    })
-                    .unwrap();
-                assert_eq!(cfg_item.decision, Decision::LeaveAlone);
-                assert_eq!(cfg_item.spliced_host, None);
-                assert_eq!(
-                    plan.items()
-                        .iter()
-                        .find(|item| item.target
-                            == Target::Region {
-                                host: "config.toml".to_owned(),
-                                id: "safe".to_owned(),
-                            })
-                        .unwrap()
-                        .decision,
-                    Decision::Write
-                );
-                assert_eq!(
-                    plan.projected_manifest(&manifest).region_checksum("config.toml", "cfg"),
-                    manifest.region_checksum("config.toml", "cfg")
-                );
-                let final_text = hosts.cached("config.toml").unwrap();
-                assert_eq!(
-                    toml_edit::Document::parse(&final_text).unwrap()["plugins"]["default"]
-                        .as_array()
-                        .unwrap()
-                        .len(),
-                    1
-                );
-            }
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "settings", checksum_str("[settings]\nmode = true\n"));
+        for array_first in [false, true] {
+            let catalog = array_catalog(Some(neighbor.clone()), array_first);
+            let plan = array_plan(source, &manifest, &catalog).unwrap();
+            assert_eq!(plan.refusals(), &[] as &[String]);
+            assert_eq!(
+                plan.items().iter().filter_map(|item| item.spliced_host.as_deref()).next_back(),
+                Some(expected)
+            );
         }
     }
 
     #[test]
-    fn toml_array_retirement_preserves_scaffold_and_unrelated_safe_writes() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"market:development\",\n\"market:checks\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_toml_array_region(entries)
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", "[plugins]\ndefault = [\"user:plugin\"]\n".to_owned());
-        let introduced = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(introduced.refusals(), &[] as &[String]);
-        let manifest = introduced.projected_manifest(&Manifest::default());
-        let safe = Artifact::region(RegionSpec {
+    fn toml_array_plan_refuses_header_dependencies_and_partial_migrations() {
+        let header = "# >>> anvil-managed: parent\n[plugins]\n# <<< anvil-managed: parent\n";
+        let entries = "default = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n\"user\"]\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "parent", checksum_str("[plugins]\n"));
+        manifest.set_region("config.toml", "entries", checksum_str("\"required\",\n"));
+        let parent = RegionSpec {
             host: HostSelector::Path("config.toml".to_owned()),
-            id: RegionId::new("safe"),
-            body: "# independent comment\n".to_owned(),
+            id: RegionId::new("parent"),
+            body: "[other]\n".to_owned(),
             syntax: CommentSyntax::Hash,
-        });
-        let retired_catalog = Catalog::builder(CliMeta::new("anvil")).with_artifact(safe).build().unwrap();
-        let retired = build_plan_with_hosts(root, &workspace, &manifest, &[], &retired_catalog, &mut hosts).unwrap();
-        assert_eq!(retired.refusals(), &[] as &[String]);
-        assert_eq!(
-            retired.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::Write, Decision::Remove]
-        );
-        let expected =
-            "[plugins]\ndefault = [\n\"user:plugin\"]\n\n# >>> anvil-managed: safe\n# independent comment\n# <<< anvil-managed: safe\n";
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-        assert_eq!(retired.items()[1].spliced_host.as_deref(), Some(expected));
-        let manifest = retired.projected_manifest(&manifest);
-        assert_eq!(manifest.region_checksum("config.toml", "entries"), None);
-        let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &retired_catalog, &mut hosts).unwrap();
-        assert_eq!(rerun.refusals(), &[] as &[String]);
-        assert_eq!(
-            rerun.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync]
-        );
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-    }
-
-    #[test]
-    fn toml_array_dependency_remedy_retires_entry_ownership_before_changing_its_parent() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
         };
-        let text = concat!(
-            "# >>> anvil-managed: cfg\n[plugins]\n# <<< anvil-managed: cfg\n",
-            "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n"
-        );
-        let cfg = |body: &str| {
-            Artifact::region(RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("cfg"),
-                body: body.to_owned(),
-                syntax: CommentSyntax::Hash,
-            })
-        };
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let mut manifest = Manifest::default();
-        manifest.set_region("config.toml", "cfg", checksum_str("[plugins]\n"));
-        manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
-        let changing = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(cfg("[other]\n"))
-            .with_toml_array_region(entries)
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", text.to_owned());
-        let refused = build_plan_with_hosts(root, &workspace, &manifest, &[], &changing, &mut hosts).unwrap();
-        assert_eq!(refused.items()[0].decision, Decision::LeaveAlone);
-        assert_eq!(refused.items()[0].spliced_host, None);
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(text));
-        assert_eq!(
-            refused.refusals(),
-            &[concat!(
-                "Refused to manage config.toml [cfg]: this change would remove or rebind the live TOML array selector ",
-                "[\"plugins\", \"default\"]. This region was left unchanged; other regions in the same file and other ",
-                "artifacts may still be updated. Preserve the selected array's table headers, key, and brackets outside ",
-                "the changing region, or retire its array-entry ownership first. This dependent change was not applied."
+        for array_first in [false, true] {
+            array_plan(
+                &format!("{header}{entries}"),
+                &manifest,
+                &array_catalog(Some(parent.clone()), array_first),
             )
-            .to_owned()]
-        );
-        let retire_entries = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(cfg("[plugins]\n"))
-            .build()
-            .unwrap();
-        let retired = build_plan_with_hosts(root, &workspace, &manifest, &[], &retire_entries, &mut hosts).unwrap();
-        assert_eq!(retired.refusals(), &[] as &[String]);
-        assert_eq!(
-            retired.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync, Decision::Remove]
-        );
-        let expected = "# >>> anvil-managed: cfg\n[plugins]\n# <<< anvil-managed: cfg\ndefault = [\n\"user\"]\n";
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-        let manifest = retired.projected_manifest(&manifest);
-        assert_eq!(manifest.region_checksum("config.toml", "entries"), None);
-        let change_parent = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(cfg("[other]\n"))
-            .build()
-            .unwrap();
-        let changed = build_plan_with_hosts(root, &workspace, &manifest, &[], &change_parent, &mut hosts).unwrap();
-        assert_eq!(changed.refusals(), &[] as &[String]);
-        assert_eq!(changed.items()[0].decision, Decision::Write);
-        assert_eq!(
-            hosts.cached("config.toml").as_deref(),
-            Some("# >>> anvil-managed: cfg\n[other]\n# <<< anvil-managed: cfg\ndefault = [\n\"user\"]\n")
-        );
+            .unwrap_err();
+        }
+        // Both regions retiring must not rebind the remaining user array either.
+        let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
+        array_plan(&format!("{header}{entries}"), &manifest, &empty).unwrap_err();
+        let malformed = format!("{header}{entries}# >>> anvil-managed: stray\n");
+        let error = array_plan(&malformed, &manifest, &empty).unwrap_err();
+        assert_eq!(error.to_string(), "opening sentinel without its matching close");
+        let duplicate = format!("{header}{entries}\n[plugins]\nmode = true\n");
+        array_plan(&duplicate, &manifest, &array_catalog(None, true)).unwrap_err();
+        array_plan(&duplicate, &manifest, &array_catalog(None, false)).unwrap_err();
     }
 
     #[test]
-    fn toml_array_pending_retirement_refuses_scaffold_that_moves_another_live_array() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let text = concat!(
-            "plugins.a = true\nother = [\"user\"]\nplugins.b = true\n\n",
-            "# >>> anvil-managed: old\n[settings]\nmode = true\n# <<< anvil-managed: old\n"
-        );
+    fn toml_array_plan_retirement_ignores_markers_in_multiline_string_data() {
+        let source = "text = '''\n# >>> anvil-managed: entries\nnot ownership\n# <<< anvil-managed: entries\n'''\n[plugins]\ndefault = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n\"user\"]\n";
         let mut manifest = Manifest::default();
-        manifest.set_region("config.toml", "old", checksum_str("[settings]\nmode = true\n"));
-        let array = |id: &'static str, path: Vec<String>| crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new(id),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path,
-        };
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("new"),
-                body: "[settings]\nmode = false\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            }))
-            .with_toml_array_region(array("entries", vec!["plugins".to_owned(), "default".to_owned()]))
-            .with_toml_array_region(array("other", vec!["other".to_owned()]))
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", text.to_owned());
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.items()[1].decision, Decision::LeaveAlone);
-        assert_eq!(plan.items()[1].spliced_host, None);
-        assert_eq!(plan.projected_manifest(&manifest).region_checksum("config.toml", "entries"), None);
+        manifest.set_region("config.toml", "entries", checksum_str("\"required\",\n"));
+        let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
+        let plan = array_plan(source, &manifest, &empty).unwrap();
+        assert_eq!(plan.items().len(), 1);
         assert_eq!(
-            plan.refusals(),
-            &[concat!(
-                "Refused to manage config.toml [entries]: the missing TOML array [\"plugins\", \"default\"] cannot be scaffolded by insertion alone. ",
-                "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-                "Add the selected empty array explicitly outside managed sentinels before retrying. ",
-                "Scaffolding never rewrites existing repository or retiring-region bytes."
+            plan.items()[0].spliced_host.as_deref(),
+            Some(
+                "text = '''\n# >>> anvil-managed: entries\nnot ownership\n# <<< anvil-managed: entries\n'''\n[plugins]\ndefault = [\n\"user\"]\n"
             )
-            .to_owned()]
         );
-        assert_eq!(
-            hosts.cached("config.toml").as_deref(),
-            Some(concat!(
-                "plugins.a = true\nother = [\n  # >>> anvil-managed: other\n  \"managed\",\n  # <<< anvil-managed: other\n\"user\"]\n",
-                "plugins.b = true\n\n# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n"
-            ))
-        );
-    }
-
-    #[test]
-    fn toml_array_unsafe_scaffold_preserves_managed_and_repository_bytes() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let body = "plugins.a = true\nother = true\nplugins.b = true\n";
-        let text =
-            format!("# repository guidance\n# >>> anvil-managed: cfg\n{body}# <<< anvil-managed: cfg\n\n[settings]\nvalue = 'untouched'\n");
-        let mut manifest = Manifest::default();
-        manifest.set_region("config.toml", "cfg", checksum_str(body));
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("cfg"),
-                body: body.to_owned(),
-                syntax: CommentSyntax::Hash,
-            }))
-            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
-                region: RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "\"managed\",\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                },
-                path: vec!["plugins".to_owned(), "default".to_owned()],
-            })
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", text.clone());
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(
-            plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync, Decision::LeaveAlone]
-        );
-        assert_eq!(plan.items()[1].spliced_host, None);
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(text.as_str()));
-        assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
-        assert_eq!(
-            plan.refusals(),
-            &[concat!(
-                "Refused to manage config.toml [entries]: the missing TOML array [\"plugins\", \"default\"] cannot be scaffolded by insertion alone. ",
-                "This region was left unchanged; other regions in the same file and other artifacts may still be updated. ",
-                "Add the selected empty array explicitly outside managed sentinels before retrying. ",
-                "Scaffolding never rewrites existing repository or retiring-region bytes."
-            )
-            .to_owned()]
-        );
-        let corrected = format!("plugins.default=[]\n{text}");
-        hosts.set("config.toml", corrected);
-        let repaired = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        let expected =
-            format!("plugins.default=[\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n{text}");
-        assert_eq!(repaired.refusals(), &[] as &[String]);
-        assert_eq!(
-            repaired.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync, Decision::Write]
-        );
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
-        assert_eq!(
-            repaired.projected_manifest(&manifest).region_checksum("config.toml", "cfg"),
-            manifest.region_checksum("config.toml", "cfg")
-        );
-    }
-
-    #[test]
-    fn toml_array_enclosing_region_can_retire_without_live_selector_dependencies() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let text = "# >>> anvil-managed: cfg\n[plugins]\ndefault = [\"managed\"]\n# <<< anvil-managed: cfg\n";
-        let mut manifest = Manifest::default();
-        manifest.set_region(
-            "config.toml",
-            "cfg",
-            checksum_str(find_region(text, "cfg", CommentSyntax::Hash).unwrap().unwrap().body_str()),
-        );
-        let catalog = Catalog::builder(CliMeta::new("anvil")).build().unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", text.to_owned());
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(plan.refusals(), &[] as &[String]);
-        assert_eq!(
-            plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::Remove]
-        );
-        assert_eq!(hosts.cached("config.toml").as_deref(), Some(""));
         assert_eq!(plan.projected_manifest(&manifest).regions.len(), 0);
     }
 
     #[test]
-    fn toml_array_dependencies_allow_unrelated_table_migration_and_root_relocation() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        for (id, old, body, expected) in [
+    fn toml_array_plan_rejects_resolved_identity_aliases_before_planning() {
+        for (selector, workspace) in [
             (
-                "old",
-                "[settings]\nmode = true\n",
-                "[settings]\nmode = false\n",
-                "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n",
+                HostSelector::WorkspaceCargoToml,
+                Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: true,
+                },
             ),
             (
-                "anvil-spellcheck-root",
-                "# old root comment\n",
-                "# new root comment\n",
-                "# >>> anvil-managed: anvil-spellcheck-root\n# new root comment\n# <<< anvil-managed: anvil-spellcheck-root\n\nplugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n",
+                HostSelector::SingleCrateCargoToml,
+                Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+            ),
+            (
+                HostSelector::EachMemberManifest,
+                Workspace {
+                    members: vec![workspace::WorkspaceMember {
+                        manifest_relpath: "Cargo.toml".to_owned(),
+                    }],
+                    has_workspace_table: true,
+                },
             ),
         ] {
-            for array_first in [true, false] {
-                for prior_body in [None, Some("\"previous\",\n"), Some("\"managed\",\n")] {
-                    let mut text = format!("plugins.default = [\"user\"]\n\n# >>> anvil-managed: {id}\n{old}# <<< anvil-managed: {id}\n");
-                    let mut manifest = Manifest::default();
-                    manifest.set_region("spellcheck.toml", id, checksum_str(old));
-                    let entries = crate::catalog::TomlArrayRegionSpec {
-                        region: RegionSpec {
-                            host: HostSelector::Path("spellcheck.toml".to_owned()),
-                            id: RegionId::new("entries"),
-                            body: "\"managed\",\n".to_owned(),
-                            syntax: CommentSyntax::Hash,
-                        },
-                        path: vec!["plugins".to_owned(), "default".to_owned()],
-                    };
-                    let array_decision = if let Some(prior_body) = prior_body {
-                        let mut prior = entries.clone();
-                        prior.region.body = prior_body.to_owned();
-                        let item =
-                            crate::emit::toml_array_region::plan_toml_array_region(&manifest, Some(&text), "spellcheck.toml", &prior)
-                                .unwrap();
-                        assert_eq!(item.decision, Decision::Write);
-                        manifest.set_region("spellcheck.toml", "entries", item.rendered_checksum.unwrap());
-                        text = item.spliced_host.unwrap();
-                        if prior_body == entries.region.body {
-                            Decision::InSync
-                        } else {
-                            Decision::Write
-                        }
-                    } else {
-                        Decision::Write
-                    };
-                    let next_id = if id == "old" {
-                        RegionId::new("new")
-                    } else {
-                        RegionId::new("anvil-spellcheck-root")
-                    };
-                    let ordinary = Artifact::region(RegionSpec {
-                        host: HostSelector::Path("spellcheck.toml".to_owned()),
-                        id: next_id,
-                        body: body.to_owned(),
-                        syntax: CommentSyntax::Hash,
-                    });
-                    let builder = Catalog::builder(CliMeta::new("anvil"));
-                    let catalog = if array_first {
-                        builder.with_toml_array_region(entries).with_artifact(ordinary)
-                    } else {
-                        builder.with_artifact(ordinary).with_toml_array_region(entries)
-                    }
-                    .build()
-                    .unwrap();
-                    let mut hosts = HostTextCache::default();
-                    hosts.set("spellcheck.toml", text);
-                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    assert_eq!(plan.refusals(), &[] as &[String]);
-                    let mut decisions = if array_first {
-                        vec![array_decision, Decision::Write]
-                    } else {
-                        vec![Decision::Write, array_decision]
-                    };
-                    if id == "old" {
-                        decisions.push(Decision::Remove);
-                    }
-                    assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), decisions);
-                    assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
-                    let manifest = plan.projected_manifest(&manifest);
-                    let rerun = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    assert_eq!(rerun.refusals(), &[] as &[String]);
-                    assert_eq!(
-                        rerun.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-                        [Decision::InSync, Decision::InSync]
-                    );
-                    assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
-                }
-            }
+            let spec = RegionSpec {
+                host: selector,
+                id: RegionId::new("same"),
+                body: "\"x\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            };
+            let mut literal = spec.clone();
+            literal.host = HostSelector::Path("Cargo.toml".to_owned());
+            let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+                .with_artifact(Artifact::region(literal))
+                .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                    region: spec,
+                    path: vec!["items".to_owned()],
+                })
+                .build()
+                .unwrap();
+            let error = build_plan(Path::new("in-memory-array-tests"), &workspace, &Manifest::default(), &[], &catalog).unwrap_err();
+            assert_eq!(error.to_string(), "duplicate resolved region identity: Cargo.toml [same]");
         }
     }
 
     #[test]
-    fn toml_array_partial_apply_recovers_write_before_retirement() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let old_body = "[settings]\nmode = true\n";
-        let new_body = "[settings]\nmode = false\n";
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let ordinary = Artifact::region(RegionSpec {
-            host: HostSelector::Path("config.toml".to_owned()),
-            id: RegionId::new("new"),
-            body: new_body.to_owned(),
-            syntax: CommentSyntax::Hash,
-        });
-        for array_first in [false, true] {
-            for established in [false, true] {
-                let array = if established {
-                    "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n"
-                } else {
-                    "plugins.default = [\"user\"]\n"
-                };
-                let interrupted = format!(
-                    "{array}\n# >>> anvil-managed: old\n{old_body}# <<< anvil-managed: old\n\n# >>> anvil-managed: new\n{new_body}# <<< anvil-managed: new\n"
-                );
-                let expected = "plugins.default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: new\n[settings]\nmode = false\n# <<< anvil-managed: new\n";
-                for new_tracked in [false, true] {
-                    let mut manifest = Manifest::default();
-                    manifest.set_region("config.toml", "old", checksum_str(old_body));
-                    if new_tracked {
-                        manifest.set_region("config.toml", "new", checksum_str(new_body));
-                    }
-                    if established {
-                        manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
-                    }
-                    let builder = Catalog::builder(CliMeta::new("anvil"));
-                    let catalog = if array_first {
-                        builder.with_toml_array_region(entries.clone()).with_artifact(ordinary.clone())
-                    } else {
-                        builder.with_artifact(ordinary.clone()).with_toml_array_region(entries.clone())
-                    }
-                    .build()
-                    .unwrap();
-                    let mut hosts = HostTextCache::default();
-                    hosts.set("config.toml", interrupted.clone());
-                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    assert_eq!(
-                        plan.refusals(),
-                        &[] as &[String],
-                        "array_first={array_first}, established={established}"
-                    );
-                    let array_decision = if established { Decision::InSync } else { Decision::Write };
-                    let decisions = if array_first {
-                        [array_decision, Decision::InSync, Decision::Remove]
-                    } else {
-                        [Decision::InSync, array_decision, Decision::Remove]
-                    };
-                    assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), decisions);
-                    assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-                    let mut expected_manifest = Manifest::default();
-                    expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
-                    expected_manifest.set_region("config.toml", "new", checksum_str(new_body));
-                    expected_manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
-                    let projected = plan.projected_manifest(&manifest);
-                    assert_eq!(projected, expected_manifest);
-                    assert_eq!(
-                        manifest.region_checksum("config.toml", "old"),
-                        Some(checksum_str(old_body).as_str())
-                    );
-                    for _ in 0..2 {
-                        let rerun = build_plan_with_hosts(root, &workspace, &projected, &[], &catalog, &mut hosts).unwrap();
-                        assert_eq!(rerun.refusals(), &[] as &[String]);
-                        assert_eq!(
-                            rerun.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-                            [Decision::InSync, Decision::InSync]
-                        );
-                        assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected));
-                        assert_eq!(rerun.projected_manifest(&projected), expected_manifest);
-                    }
-                }
+    fn toml_array_plan_rejects_absent_owned_file_aliases() {
+        for owned_first in [false, true] {
+            let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+            if owned_first {
+                builder = builder.with_artifact(Artifact::owned_file("CONFIG.toml", "other = true\n"));
             }
-        }
-    }
-
-    #[test]
-    fn toml_array_partial_apply_preserves_retired_selector_dependencies() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let old_body = "[plugins]\ndefault = [\"user\"]\n[settings]\nmode = true\n";
-        let new_body = "[settings]\nmode = false\n";
-        let text = format!(
-            "# >>> anvil-managed: old\n{old_body}# <<< anvil-managed: old\n\n# >>> anvil-managed: new\n{new_body}# <<< anvil-managed: new\n"
-        );
-        let mut manifest = Manifest::default();
-        manifest.set_region("config.toml", "old", checksum_str(old_body));
-        manifest.set_region("config.toml", "new", checksum_str(new_body));
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("new"),
-                body: new_body.to_owned(),
-                syntax: CommentSyntax::Hash,
-            }))
-            .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+            builder = builder.with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
                 region: RegionSpec {
                     host: HostSelector::Path("config.toml".to_owned()),
                     id: RegionId::new("entries"),
-                    body: "\"managed\",\n".to_owned(),
+                    body: "\"x\",\n".to_owned(),
                     syntax: CommentSyntax::Hash,
                 },
-                path: vec!["plugins".to_owned(), "default".to_owned()],
-            })
-            .build()
-            .unwrap();
-        let mut hosts = HostTextCache::default();
-        hosts.set("config.toml", text.clone());
-        let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-        assert_eq!(
-            plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-            [Decision::InSync, Decision::LeaveAlone, Decision::LeaveAlone]
-        );
-        assert_eq!(hosts.cached("config.toml"), Some(text));
-        let mut expected_manifest = manifest.clone();
-        expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
-        assert_eq!(plan.projected_manifest(&manifest), expected_manifest);
-    }
-
-    #[test]
-    fn toml_array_partial_apply_preserves_live_parent_selector_dependencies() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let parent_body = "[plugins]\nenabled = true\n";
-        let new_body = "[settings]\nmode = false\n";
-        for (old_body, established) in [
-            ("default = [\"user\"]\n[settings]\nmode = true\n", false),
-            (
-                "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n\"user\"]\n[settings]\nmode = true\n",
-                true,
-            ),
-        ] {
-            let text = format!(
-                "# >>> anvil-managed: parent\n{parent_body}# <<< anvil-managed: parent\n\n# >>> anvil-managed: old\n{old_body}# <<< anvil-managed: old\n\n# >>> anvil-managed: new\n{new_body}# <<< anvil-managed: new\n"
-            );
-            for (array_first, live_tracked) in [(false, false), (false, true), (true, false), (true, true)] {
-                let mut manifest = Manifest::default();
-                manifest.set_region("config.toml", "old", checksum_str(old_body));
-                if established {
-                    manifest.set_region("config.toml", "entries", checksum_str("  \"managed\",\n"));
-                }
-                if live_tracked {
-                    manifest.set_region("config.toml", "parent", checksum_str(parent_body));
-                    manifest.set_region("config.toml", "new", checksum_str(new_body));
-                }
-                let parent = Artifact::region(RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("parent"),
-                    body: parent_body.to_owned(),
-                    syntax: CommentSyntax::Hash,
-                });
-                let new = Artifact::region(RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("new"),
-                    body: new_body.to_owned(),
-                    syntax: CommentSyntax::Hash,
-                });
-                let entries = crate::catalog::TomlArrayRegionSpec {
-                    region: RegionSpec {
-                        host: HostSelector::Path("config.toml".to_owned()),
-                        id: RegionId::new("entries"),
-                        body: "\"managed\",\n".to_owned(),
-                        syntax: CommentSyntax::Hash,
-                    },
-                    path: vec!["plugins".to_owned(), "default".to_owned()],
-                };
-                let builder = Catalog::builder(CliMeta::new("anvil"));
-                let catalog = if array_first {
-                    builder.with_toml_array_region(entries).with_artifact(parent).with_artifact(new)
-                } else {
-                    builder.with_artifact(parent).with_artifact(new).with_toml_array_region(entries)
-                }
-                .build()
-                .unwrap();
-                let mut hosts = HostTextCache::default();
-                hosts.set("config.toml", text.clone());
-                let mut expected_manifest = manifest.clone();
-                expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
-                expected_manifest.set_region("config.toml", "parent", checksum_str(parent_body));
-                expected_manifest.set_region("config.toml", "new", checksum_str(new_body));
-                for _ in 0..2 {
-                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    assert_eq!(hosts.cached("config.toml"), Some(text.clone()));
-                    let expected = if array_first {
-                        [Decision::LeaveAlone, Decision::InSync, Decision::InSync, Decision::LeaveAlone]
-                    } else {
-                        [Decision::InSync, Decision::InSync, Decision::LeaveAlone, Decision::LeaveAlone]
-                    };
-                    assert_eq!(plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(), expected);
-                    assert_eq!(plan.projected_manifest(&manifest), expected_manifest);
-                    manifest = expected_manifest.clone();
-                }
+                path: vec!["items".to_owned()],
+            });
+            if !owned_first {
+                builder = builder.with_artifact(Artifact::owned_file("CONFIG.toml", "other = true\n"));
             }
-        }
-    }
-
-    #[test]
-    fn toml_array_partial_apply_keeps_unsafe_orphans_and_unmanaged_errors() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let old_body = "[settings]\nmode = true\n";
-        let new_body = "[settings]\nmode = false\n";
-        for (tracked, last_body, closer, unmanaged) in [
-            (false, old_body, "# <<< anvil-managed: old\n", ""),
-            (true, "[settings]\nmode = \"edited\"\n", "# <<< anvil-managed: old\n", ""),
-            (true, old_body, "", ""),
-            (true, old_body, "# <<< anvil-managed: old\n", "broken = [\n"),
-        ] {
-            for array_first in [false, true] {
-                let text = format!(
-                    "{unmanaged}plugins.default = [\"user\"]\n\n# >>> anvil-managed: old\n{old_body}{closer}\n# >>> anvil-managed: new\n{new_body}# <<< anvil-managed: new\n"
-                );
-                let mut manifest = Manifest::default();
-                if tracked {
-                    manifest.set_region("config.toml", "old", checksum_str(last_body));
-                }
-                manifest.set_region("config.toml", "new", checksum_str(new_body));
-                let mut expected_manifest = manifest.clone();
-                expected_manifest.host_scanners.insert("config.toml".to_owned(), HostScanner::Toml);
-                let ordinary = Artifact::region(RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("new"),
-                    body: new_body.to_owned(),
-                    syntax: CommentSyntax::Hash,
-                });
-                let entries = crate::catalog::TomlArrayRegionSpec {
-                    region: RegionSpec {
-                        host: HostSelector::Path("config.toml".to_owned()),
-                        id: RegionId::new("entries"),
-                        body: "\"managed\",\n".to_owned(),
-                        syntax: CommentSyntax::Hash,
-                    },
-                    path: vec!["plugins".to_owned(), "default".to_owned()],
-                };
-                let builder = Catalog::builder(CliMeta::new("anvil"));
-                let catalog = if array_first {
-                    builder.with_toml_array_region(entries).with_artifact(ordinary)
-                } else {
-                    builder.with_artifact(ordinary).with_toml_array_region(entries)
-                }
-                .build()
-                .unwrap();
-                let mut hosts = HostTextCache::default();
-                hosts.set("config.toml", text.clone());
-                for _ in 0..2 {
-                    let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                    let mut expected = if array_first {
-                        vec![
-                            ("entries", Decision::LeaveAlone, None),
-                            ("new", Decision::InSync, Some(checksum_str(new_body))),
-                        ]
-                    } else {
-                        vec![
-                            ("new", Decision::InSync, Some(checksum_str(new_body))),
-                            ("entries", Decision::LeaveAlone, None),
-                        ]
-                    };
-                    if tracked {
-                        expected.push(("old", Decision::LeaveAlone, None));
-                    }
-                    assert_eq!(plan.items().len(), expected.len());
-                    for (item, (id, decision, checksum)) in plan.items().iter().zip(expected) {
-                        assert_eq!(
-                            item.target,
-                            Target::Region {
-                                host: "config.toml".to_owned(),
-                                id: id.to_owned(),
-                            }
-                        );
-                        assert_eq!(item.decision, decision);
-                        assert_eq!(item.rendered, None);
-                        assert_eq!(item.spliced_host, None);
-                        assert_eq!(item.rendered_checksum, checksum);
-                    }
-                    assert_eq!(hosts.cached("config.toml"), Some(text.clone()));
-                    assert_eq!(plan.projected_manifest(&manifest), expected_manifest);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn toml_array_migration_keeps_edited_and_untracked_orphans() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let text = "plugins.default = [\"user\"]\n\n# >>> anvil-managed: old\n[settings]\nmode = true\n# <<< anvil-managed: old\n";
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("config.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let ordinary = Artifact::region(RegionSpec {
-            host: HostSelector::Path("config.toml".to_owned()),
-            id: RegionId::new("new"),
-            body: "[settings]\nmode = false\n".to_owned(),
-            syntax: CommentSyntax::Hash,
-        });
-        for tracked in [false, true] {
-            for array_first in [true, false] {
-                let mut manifest = Manifest::default();
-                if tracked {
-                    manifest.set_region("config.toml", "old", checksum_str("[settings]\nmode = \"previous\"\n"));
-                }
-                let builder = Catalog::builder(CliMeta::new("anvil"));
-                let catalog = if array_first {
-                    builder.with_toml_array_region(entries.clone()).with_artifact(ordinary.clone())
-                } else {
-                    builder.with_artifact(ordinary.clone()).with_toml_array_region(entries.clone())
-                }
-                .build()
-                .unwrap();
-                let mut hosts = HostTextCache::default();
-                hosts.set("config.toml", text.to_owned());
-                let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-                assert!(!plan.refusals().is_empty());
-                for item in plan.items() {
-                    let Target::Region { id, .. } = &item.target else {
-                        panic!("expected a region")
-                    };
-                    assert_eq!(item.decision, if id == "entries" { Decision::Write } else { Decision::LeaveAlone });
-                }
-                let final_text = hosts.cached("config.toml").unwrap();
-                assert_eq!(
-                    find_region(&final_text, "old", CommentSyntax::Hash).unwrap().unwrap().body_str(),
-                    "[settings]\nmode = true\n"
-                );
-                assert!(find_region(&final_text, "new", CommentSyntax::Hash).unwrap().is_none());
-                let document = toml_edit::Document::parse(&final_text).unwrap();
-                assert_eq!(document["settings"]["mode"].as_bool(), Some(true));
-                assert_eq!(
-                    document["plugins"]["default"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter_map(toml_edit::Value::as_str)
-                        .collect::<Vec<_>>(),
-                    ["managed", "user"]
-                );
-                assert_eq!(
-                    plan.projected_manifest(&manifest).region_checksum("config.toml", "old"),
-                    manifest.region_checksum("config.toml", "old")
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn toml_array_dependencies_survive_parseable_intermediate_rebinding() {
-        let root = Path::new("__anvil_in_memory_repository__");
-        let workspace = Workspace {
-            members: Vec::new(),
-            has_workspace_table: false,
-        };
-        let text = concat!(
-            "# >>> anvil-managed: other\n[other]\n# <<< anvil-managed: other\n",
-            "# >>> anvil-managed: anvil-spellcheck-root\n[plugins]\n# <<< anvil-managed: anvil-spellcheck-root\n",
-            "# >>> anvil-managed: cfg\ndefault = [\"keep\"]\n# <<< anvil-managed: cfg\n"
-        );
-        let mut manifest = Manifest::default();
-        for id in ["other", "anvil-spellcheck-root", "cfg"] {
-            manifest.set_region(
-                "spellcheck.toml",
-                id,
-                checksum_str(find_region(text, id, CommentSyntax::Hash).unwrap().unwrap().body_str()),
-            );
-        }
-        let entries = crate::catalog::TomlArrayRegionSpec {
-            region: RegionSpec {
-                host: HostSelector::Path("spellcheck.toml".to_owned()),
-                id: RegionId::new("entries"),
-                body: "\"managed\",\n".to_owned(),
-                syntax: CommentSyntax::Hash,
-            },
-            path: vec!["plugins".to_owned(), "default".to_owned()],
-        };
-        let root_region = Artifact::region(RegionSpec {
-            host: HostSelector::Path("spellcheck.toml".to_owned()),
-            id: RegionId::new("anvil-spellcheck-root"),
-            body: "[plugins]\n".to_owned(),
-            syntax: CommentSyntax::Hash,
-        });
-        let cfg = Artifact::region(RegionSpec {
-            host: HostSelector::Path("spellcheck.toml".to_owned()),
-            id: RegionId::new("cfg"),
-            body: "# no array\n".to_owned(),
-            syntax: CommentSyntax::Hash,
-        });
-        for array_first in [true, false] {
-            let builder = Catalog::builder(CliMeta::new("anvil"));
-            let builder = if array_first {
-                builder.with_toml_array_region(entries.clone()).with_artifact(root_region.clone())
-            } else {
-                builder.with_artifact(root_region.clone()).with_toml_array_region(entries.clone())
+            let workspace = Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
             };
-            let catalog = builder.with_artifact(cfg.clone()).build().unwrap();
-            let mut hosts = HostTextCache::default();
-            hosts.set("spellcheck.toml", text.to_owned());
-            let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
-            assert_eq!(
-                plan.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-                if array_first {
-                    [Decision::LeaveAlone, Decision::Write, Decision::LeaveAlone, Decision::Remove]
-                } else {
-                    [Decision::Write, Decision::LeaveAlone, Decision::LeaveAlone, Decision::Remove]
-                }
-            );
-            let expected = concat!(
-                "# >>> anvil-managed: anvil-spellcheck-root\n[plugins]\n# <<< anvil-managed: anvil-spellcheck-root\n",
-                "# >>> anvil-managed: cfg\ndefault = [\"keep\"]\n# <<< anvil-managed: cfg\n"
-            );
-            assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
-            let projected = plan.projected_manifest(&manifest);
-            assert_eq!(
-                projected.region_checksum("spellcheck.toml", "cfg"),
-                manifest.region_checksum("spellcheck.toml", "cfg")
-            );
-            assert_eq!(projected.region_checksum("spellcheck.toml", "other"), None);
-            assert_eq!(
-                toml_edit::Document::parse(expected).unwrap()["plugins"]["default"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                1
-            );
-            let rerun = build_plan_with_hosts(root, &workspace, &projected, &[], &catalog, &mut hosts).unwrap();
-            assert_eq!(
-                rerun.items().iter().map(|item| item.decision).collect::<Vec<_>>(),
-                if array_first {
-                    [Decision::LeaveAlone, Decision::InSync, Decision::LeaveAlone]
-                } else {
-                    [Decision::InSync, Decision::LeaveAlone, Decision::LeaveAlone]
-                }
-            );
-            assert_eq!(hosts.cached("spellcheck.toml").as_deref(), Some(expected));
+            let error = build_plan(
+                Path::new("in-memory-array-tests"),
+                &workspace,
+                &Manifest::default(),
+                &[],
+                &builder.build().unwrap(),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "a TOML array host cannot also be an owned file: CONFIG.toml");
         }
+    }
+
+    #[test]
+    fn toml_array_plan_rejects_absent_case_aliases() {
+        let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+        for (host, id) in [("config.toml", "one"), ("CONFIG.toml", "two")] {
+            builder = builder.with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path(host.to_owned()),
+                    id: RegionId::new(id),
+                    body: "\"x\",\n".to_owned(),
+                    syntax: CommentSyntax::Hash,
+                },
+                path: vec!["items".to_owned()],
+            });
+        }
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let error = build_plan(
+            Path::new("in-memory-array-tests"),
+            &workspace,
+            &Manifest::default(),
+            &[],
+            &builder.build().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().starts_with("ambiguous casing for TOML array host:"));
     }
 
     fn write(path: &Path, contents: &str) {
@@ -3466,56 +1645,6 @@ mod tests {
     /// unconditionally would run the parser's message straight into the remedy.
     mod refuse_region {
         use super::*;
-
-        #[test]
-        fn array_faults_have_actionable_diagnostics_and_no_write_plan() {
-            for (remedy, advice) in [
-                (
-                    RefusalRemedy::EnclosingOwnership,
-                    "Retire the existing ownership before managing these array entries, preserving any repository \
-                     settings outside its sentinels. Retrying without changing that ownership cannot resolve this refusal.",
-                ),
-                (
-                    RefusalRemedy::MisplacedArrayMarkers,
-                    "Keep both sentinels together around complete entries in the selected array. If the selector changed, \
-                     restore the old selector and retire its region before registering the new selector, or explicitly \
-                     reconcile the old marked entries with the new array. Do not delete only one sentinel.",
-                ),
-                (
-                    RefusalRemedy::CommentedArrayEntry,
-                    "Move the repository comments outside the matching compound entry before adopting it. Anvil will \
-                     not discard interior comments or silently duplicate the entry.",
-                ),
-                (
-                    RefusalRemedy::ArrayDependency,
-                    "Preserve the selected array's table headers, key, and brackets outside the changing region, \
-                     or retire its array-entry ownership first. This dependent change was not applied.",
-                ),
-                (
-                    RefusalRemedy::ArrayShape,
-                    "Correct the catalog selector or the conflicting repository setting: the selected item must be an array \
-                     and every parent must be table-like. Retrying unchanged input cannot resolve this type conflict.",
-                ),
-                (
-                    RefusalRemedy::ArrayScaffold,
-                    "Add the selected empty array explicitly outside managed sentinels before retrying. \
-                     Scaffolding never rewrites existing repository or retiring-region bytes.",
-                ),
-            ] {
-                let mut plan = Plan::default();
-                super::super::refuse_region(&mut plan, "config.toml".to_owned(), "entries", "unsafe array adoption", remedy);
-                assert_eq!(
-                    plan.refusals(),
-                    &[format!(
-                        "Refused to manage config.toml [entries]: unsafe array adoption. This region was left unchanged; \
-                         other regions in the same file and other artifacts may still be updated. {advice}"
-                    )]
-                );
-                assert_eq!(plan.items().len(), 1);
-                assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
-                assert_eq!(plan.items()[0].spliced_host, None);
-            }
-        }
 
         fn refusal_for(reason: &str) -> String {
             let mut plan = Plan::default();

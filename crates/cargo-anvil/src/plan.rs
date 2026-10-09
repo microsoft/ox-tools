@@ -13,6 +13,9 @@
 //! - **Summarizes** for `--dry-run`: prints counts and outstanding items,
 //!   without touching disk. Returns a non-zero exit code if anything is
 //!   out of date.
+//!
+//! See [`updates.md §7`](../../docs/design/updates.md) for the proposed-file
+//! protocol.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -23,7 +26,6 @@ use ohno::{AppError, IntoAppError as _, bail};
 use crate::decision::Decision;
 use crate::io::resolve_existing_case_insensitive;
 use crate::manifest::{Manifest, RegionKey};
-use crate::region::HostScanner;
 
 /// What is being changed by a single plan item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,13 +228,9 @@ pub struct Plan {
     notes: Vec<String>,
     refusals: Vec<String>,
     manifest_update_required: bool,
-    host_scanners: std::collections::BTreeMap<String, HostScanner>,
 }
 
 impl Plan {
-    pub(crate) fn record_host_scanner(&mut self, host: String, scanner: HostScanner) {
-        self.host_scanners.insert(host, scanner);
-    }
     /// Append a new item.
     pub fn push(&mut self, item: PlanItem) {
         self.items.push(item);
@@ -291,7 +289,8 @@ impl Plan {
     ///
     /// When `previous_manifest` is provided, `Write` items are split
     /// into "Will create" (no prior manifest entry) and "Will update"
-    /// (existing entry getting refreshed). The stale-entries
+    /// (existing entry getting refreshed) per
+    /// [`updates.md §9`](../../docs/design/updates.md). The stale-entries
     /// section enumerates manifest entries that were present before
     /// this run but are no longer in the plan; these are purged on
     /// non-dry-run application (see [`Plan::apply`]).
@@ -441,11 +440,13 @@ impl Plan {
     /// Calculate the manifest produced by this plan without touching disk.
     #[must_use]
     pub(crate) fn projected_manifest(&self, previous_manifest: &Manifest) -> Manifest {
-        let mut next = previous_manifest.clone();
-        for (host, scanner) in &self.host_scanners {
-            next.host_scanners.retain(|path, _| !path.eq_ignore_ascii_case(host));
-            next.host_scanners.insert(host.clone(), *scanner);
-        }
+        let mut next = Manifest {
+            tool: previous_manifest.tool.clone(),
+            tool_version: previous_manifest.tool_version.clone(),
+            catalog_checksum: previous_manifest.catalog_checksum.clone(),
+            files: previous_manifest.files.clone(),
+            regions: previous_manifest.regions.clone(),
+        };
 
         for item in &self.items {
             match item.decision {
@@ -482,8 +483,6 @@ impl Plan {
             }
         }
 
-        next.host_scanners
-            .retain(|host, _| next.regions.keys().any(|key| key.host.eq_ignore_ascii_case(host)));
         next
     }
 }

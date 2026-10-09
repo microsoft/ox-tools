@@ -211,13 +211,13 @@ impl CatalogBuilder {
     /// Replacement preserves the selector; removal removes it.
     /// The path must contain at least one TOML key component (not a dotted
     /// expression); quoted or empty TOML keys are supported as literal components.
-    /// The region must use hash comments and contain only TOML array entries
+    /// The host must have a `.toml` suffix (case insensitive).
+    /// The region must use hash comments and contain only TOML string entries
     /// and comments, with a trailing comma after the last entry.
     /// Actual full-line managed-region sentinel comments are not valid body content;
-    /// marker-looking string values and quoted keys remain valid entries.
+    /// marker-looking string values remain valid entries.
     /// Invalid specifications are reported by [`Self::build`].
-    /// Registration declares TOML for the whole host, regardless of its suffix.
-    /// Ordinary neighbors use that scanner too; incompatible comment syntax refuses.
+    /// Ownership migrations and dependencies on other regions' table headers refuse.
     #[must_use]
     pub fn with_toml_array_region(mut self, spec: TomlArrayRegionSpec) -> Self {
         let placement = (spec.region.host.clone(), spec.region.id, spec.path);
@@ -345,10 +345,10 @@ mod tests {
     use crate::anvil::artifacts;
 
     #[test]
-    fn provenance_rejects_conflicting_array_host_comment_syntax() {
+    fn rejects_conflicting_array_host_comment_syntax() {
         let array = TomlArrayRegionSpec {
             region: RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
+                host: HostSelector::Path("config.toml".to_owned()),
                 id: RegionId::new("entries"),
                 body: "\"managed\",\n".to_owned(),
                 syntax: CommentSyntax::Hash,
@@ -358,7 +358,7 @@ mod tests {
         let error = Catalog::builder(CliMeta::new("anvil"))
             .with_toml_array_region(array)
             .with_artifact(Artifact::region(RegionSpec {
-                host: HostSelector::Path("config".to_owned()),
+                host: HostSelector::Path("config.toml".to_owned()),
                 id: RegionId::new("other"),
                 body: "setting = true\n".to_owned(),
                 syntax: CommentSyntax::SlashSlash,

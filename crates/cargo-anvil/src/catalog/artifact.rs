@@ -99,10 +99,12 @@ pub struct RegionSpec {
     pub syntax: CommentSyntax,
 }
 
-/// A managed region containing entries of a TOML array.
+/// A managed region containing required string entries of a TOML array.
 ///
 /// The table and array delimiters remain repository-owned. `region.body`
-/// contains array entries, including a trailing comma, and uses hash comments.
+/// contains string entries, including a trailing comma, and uses hash comments.
+/// Hosts require a `.toml` suffix and a selector through normal tables.
+/// Scaffolding must be independent of other regions; ownership migrations refuse.
 /// Identity is still the region's host and id, not its array selector.
 ///
 /// Like [`RegionSpec`], this is editable catalog input, not a validated
