@@ -2250,15 +2250,19 @@ mod tests {
                 ),
             ] {
                 let mut hosts = HostTextCache::default();
-                hosts.set("config.toml", source.replace('\n', newline));
-                let plan = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &catalog, &mut hosts).unwrap();
+                let old = "# >>> anvil-managed: old\nobsolete=true\n# <<< anvil-managed: old\n".replace('\n', newline);
+                let mut manifest = Manifest::default();
+                manifest.set_region("config.toml", "old", checksum_str(&format!("obsolete=true{newline}")));
+                hosts.set("config.toml", format!("{}{old}", source.replace('\n', newline)));
+                let plan = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap();
                 let expected = expected.replace('\n', newline);
                 assert_eq!(plan.refusals(), &[] as &[String]);
-                assert_eq!(plan.items().len(), 1);
+                assert_eq!(plan.items().len(), 2);
                 assert_eq!(plan.items()[0].decision, Decision::Write);
-                assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(expected.as_str()));
+                assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(format!("{expected}{old}").as_str()));
+                assert_eq!(plan.items()[1].decision, Decision::Remove);
                 assert_eq!(hosts.cached("config.toml").as_deref(), Some(expected.as_str()));
-                let manifest = plan.projected_manifest(&Manifest::default());
+                let manifest = plan.projected_manifest(&manifest);
                 assert_eq!(
                     manifest.region_checksum("config.toml", "entries"),
                     Some(checksum_str(&format!("  \"managed\",{newline}")).as_str())

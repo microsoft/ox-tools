@@ -87,7 +87,7 @@ fn render_body(body: &str, newline: &str) -> Result<String, ManagedRegionRefusal
     for line in body.split_inclusive('\n') {
         // Indent entry/comment lines, but not continuations inside values:
         // indentation in a multiline string is data, not TOML decoration.
-        let in_value = spans.iter().any(|span| span.start < offset && offset < span.end);
+        let in_value = spans.iter().any(|span| contains_interior(span, offset));
         let content = line.trim_end_matches(['\r', '\n']);
         if in_value || !content.trim().is_empty() {
             if !in_value {
@@ -101,10 +101,13 @@ fn render_body(body: &str, newline: &str) -> Result<String, ManagedRegionRefusal
     Ok(rendered)
 }
 
+fn contains_interior(span: &std::ops::Range<usize>, offset: usize) -> bool {
+    span.contains(&offset) && span.start != offset
+}
+
 /// Create only missing table/array scaffolding, leaving existing items intact.
 fn scaffold(text: &str, path: &[String], retiring: &std::collections::BTreeSet<String>) -> Result<String, ManagedRegionRefusal> {
-    let projected = mask_retiring_managed_regions(text, CommentSyntax::Hash, retiring);
-    let normalized = projected.replace("\r\n", "\n");
+    let normalized = mask_retiring_managed_regions(text, CommentSyntax::Hash, retiring).replace("\r\n", "\n");
     let mut document = normalized
         .parse::<DocumentMut>()
         .map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
@@ -163,27 +166,28 @@ fn scaffold(text: &str, path: &[String], retiring: &std::collections::BTreeSet<S
     let regions = validated_regions(&scaffolded)?;
     let Some(owner) = regions
         .iter()
-        .find(|region| region.body.start <= span.start && span.start < region.body.end)
+        .find(|region| (region.body.start..region.body.end).contains(&span.start))
     else {
         return Ok(scaffolded);
     };
     // toml_edit inserts ahead of a following closing sentinel. Move the whole
     // scaffold delta, including any new parent headers, but no existing bytes.
-    let parent = lookup(document.as_item(), &path[..path.len() - 1]).expect("the scaffold created the parent table");
+    let (_, parent_path) = path.split_last().expect("the array selector was validated as nonempty");
+    let parent = lookup(document.as_item(), parent_path).expect("the scaffold created the parent table");
     if parent.as_inline_table().is_some() {
         return Err(refusal(
             "the array's inline parent belongs to a managed region",
             RefusalRemedy::EnclosingOwnership,
         ));
     }
-    let start = before;
-    let end = start + inserted.len();
-    if start < owner.body.start || end > owner.body.end {
+    let end = before + inserted.len();
+    let owned_offsets = before.checked_sub(owner.body.start).zip(end.checked_sub(owner.body.start));
+    let Some(owned_delta) = owned_offsets.and_then(|(start, end)| owner.body_str().get(start..end)) else {
         return Err(refusal(
             "the missing array cannot be scaffolded without changing existing managed content",
             RefusalRemedy::EnclosingOwnership,
         ));
-    }
+    };
     let separator = if scaffolded[..owner.end_line.end].ends_with('\n') {
         ""
     } else {
@@ -191,15 +195,15 @@ fn scaffold(text: &str, path: &[String], retiring: &std::collections::BTreeSet<S
     };
     let moved = format!(
         "{}{}{separator}{}{}",
-        &scaffolded[..start],
+        &scaffolded[..before],
         &scaffolded[end..owner.end_line.end],
-        &scaffolded[start..end],
+        owned_delta,
         &scaffolded[owner.end_line.end..]
     );
     let moved_document = Document::parse(mask_retiring_managed_regions(&moved, CommentSyntax::Hash, retiring))
         .map_err(|error| refusal(error, RefusalRemedy::EnclosingOwnership))?;
     let moved_array = lookup(moved_document.as_item(), path).and_then(Item::as_array);
-    let expected_start = owner.end_line.end - (end - start) + separator.len() + (span.start - start);
+    let expected_start = owner.end_line.end - inserted.len() + separator.len() + (span.start - before);
     if moved_array.and_then(Array::span).is_none_or(|span| span.start != expected_start) {
         return Err(refusal(
             "the missing array cannot be scaffolded outside managed ownership while remaining in its parent table",
@@ -311,9 +315,9 @@ pub(crate) fn plan_toml_array_region_with_retirements(
         if id == spec.region.id.as_str() {
             continue;
         }
-        if (other.start_line.start <= span.start && span.start < other.end_line.end)
-            || (other.start_line.start < span.end && span.end <= other.end_line.end)
-        {
+        // Delimiters and their token ends cannot coincide with full sentinel-line boundaries.
+        let ownership = other.start_line.start..other.end_line.end;
+        if ownership.contains(&span.start) || ownership.contains(&span.end) {
             return Err(refusal(
                 format!(
                     "the selected array belongs to managed region '{id}'; retire its enclosing ownership before managing array entries"
@@ -325,7 +329,7 @@ pub(crate) fn plan_toml_array_region_with_retirements(
     let region =
         find_region(base, spec.region.id.as_str(), CommentSyntax::Hash).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
     if let Some(region) = &region {
-        if region.start_line.start <= span.start || region.end_line.end > span.end {
+        if !span.contains(&region.start_line.start) || !span.contains(&region.end_line.end) {
             return Err(refusal(
                 "the managed region is outside its selected TOML array",
                 RefusalRemedy::MisplacedArrayMarkers,
@@ -335,8 +339,7 @@ pub(crate) fn plan_toml_array_region_with_retirements(
         // or a nested value must not claim part of that value.
         if array.iter().any(|value| {
             let value = value.span().expect("parsed array values retain source spans");
-            (value.start < region.body.start && value.end > region.body.start)
-                || (value.start < region.body.end && value.end > region.body.end)
+            contains_interior(&value, region.body.start) || contains_interior(&value, region.body.end)
         }) {
             return Err(refusal(
                 "the region splits a TOML array value",
@@ -494,12 +497,13 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
             let next = values
                 .get(index + 1)
                 .and_then(|value| value.span())
-                .map_or_else(|| array.span().expect("parsed array retains its span").end - 1, |span| span.start);
+                // Including the array closer is harmless; punctuation AFTER it belongs to the parent.
+                .map_or_else(|| array.span().expect("parsed array retains its span").end, |span| span.start);
             if let Some(comma) = separator_comma(&text[span.end..next]) {
                 let comma = span.end + comma..span.end + comma + 1;
                 if protected
                     .iter()
-                    .any(|region| comma.start < region.end_line.end && region.start_line.start < comma.end)
+                    .any(|region| (region.start_line.start..region.end_line.end).contains(&comma.start))
                 {
                     return Err(refusal(
                         "the matching array entry's separator belongs to another managed region",
