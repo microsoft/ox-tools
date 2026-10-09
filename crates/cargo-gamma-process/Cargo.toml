@@ -33,6 +33,9 @@ fault-injection = []
 [dependencies]
 cargo-gamma-unsafe = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 camino = { workspace = true }
 tempfile = { workspace = true }

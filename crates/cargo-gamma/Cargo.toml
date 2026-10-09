@@ -29,8 +29,10 @@ min-lines-percent = 0.0
 
 [dependencies]
 cargo-gamma-lib = { workspace = true }
-rallocator = { workspace = true }
 terminal_size = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", windows))'.dependencies]
+rallocator = { workspace = true }
 
 [dev-dependencies]
 cargo-gamma-lib = { workspace = true, features = ["internals"] }

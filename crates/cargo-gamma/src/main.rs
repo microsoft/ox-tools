@@ -1699,7 +1699,7 @@ use std::{env, process};
 use cargo_gamma_lib::run;
 use real_host::RealHost;
 
-#[cfg(not(miri))]
+#[cfg(all(not(miri), any(target_os = "linux", windows)))]
 rallocator::rallocator!();
 
 #[cfg_attr(coverage_nightly, coverage(off))]
