@@ -392,7 +392,13 @@ generation and linking. After check convergence, one build produces the test bin
 baseline measurement. Example and benchmark targets are not built: cargo-gamma does not execute
 them, so they are not part of its compilation oracle. A selected package with mutations but no test
 target is still included in schema checking; after its source is proven buildable, its mutants are
-reported uncovered rather than being mistaken for a build cargo-gamma failed to perform.
+reported uncovered rather than being mistaken for a build cargo-gamma failed to perform. A
+selection in which no package has a library target is checked without Cargo's `--lib` selector,
+which would reject those packages before compiling any source. In a selection containing packages
+with and without library targets, cargo-gamma temporarily adds empty library targets to the latter
+in the copied tree for the convergence check, then removes them before building the actual test
+binaries. Cargo therefore checks the whole selected workspace under one feature graph without
+requesting a missing library target.
 
 During convergence, the normal progress display says only how many unviable mutants have been found;
 Cargo's per-invocation unit counter and isolation diagnostics are hidden because their changing

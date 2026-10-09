@@ -673,6 +673,103 @@ fn session_on_with(mut host: Sink, root: &Path, args: &[&str], whole_test_binari
     (code, host.out(), host.err())
 }
 
+#[test]
+fn a_binary_only_crate_converges_and_runs_its_unit_tests() {
+    step_aside_if_nested!();
+    let dir = TempDir::new().unwrap_or_else(|error| panic!("could not create the binary fixture directory: {error}"));
+    write_project(
+        dir.path(),
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"binary-only\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            (
+                "src/main.rs",
+                "fn boundary(value: i32) -> bool { value >= 1 }\n\
+                 fn main() { println!(\"{}\", boundary(1)); }\n\
+                 #[cfg(test)] mod tests {\n\
+                     #[test] fn checks_boundary() {\n\
+                         assert!(!super::boundary(0));\n\
+                         assert!(super::boundary(1));\n\
+                     }\n\
+                 }\n",
+            ),
+        ],
+    );
+
+    let (code, output) = session(&dir, &["--mutators", "relational"]);
+
+    assert_eq!(code, EXIT_OK, "{output}");
+
+    let report = fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json"))
+        .unwrap_or_else(|error| panic!("could not read the binary fixture's report: {error}"));
+    let document: serde_json::Value =
+        serde_json::from_str(&report).unwrap_or_else(|error| panic!("the binary fixture's report is invalid JSON: {error}"));
+    let Some(mutants) = document["files"]["src/main.rs"]["mutants"].as_array() else {
+        panic!("the binary's mutants are missing from the report");
+    };
+
+    assert!(
+        mutants.iter().any(|mutant| mutant["status"] == "Killed"),
+        "the binary's tests did not judge a mutant: {mutants:?}"
+    );
+}
+
+#[test]
+fn a_mixed_workspace_checks_libraries_under_the_test_feature_graph() {
+    step_aside_if_nested!();
+    let dir = TempDir::new().unwrap_or_else(|error| panic!("could not create the mixed fixture directory: {error}"));
+    write_project(
+        dir.path(),
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"app\", \"core\", \"island\"]\nresolver = \"2\"\n",
+            ),
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"gamma-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\nautolib = false\n\n\
+                 [dev-dependencies]\ngamma-core = { path = \"../core\", features = [\"enabled\"] }\n",
+            ),
+            (
+                "app/src/main.rs",
+                "fn accepts(value: i32) -> bool { value >= 1 }\n\
+                 fn main() { println!(\"{}\", accepts(1)); }\n\
+                 #[cfg(test)] mod tests {\n\
+                     #[test] fn boundary() {\n\
+                         assert!(!super::accepts(0));\n\
+                         assert!(super::accepts(1));\n\
+                     }\n\
+                 }\n",
+            ),
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"gamma-core\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+                 [features]\nenabled = []\n\n[lib]\ntest = false\n",
+            ),
+            (
+                "core/src/lib.rs",
+                "#[cfg(not(feature = \"enabled\"))] compile_error!(\"feature required by app tests\");\n\
+                 pub fn accepts(value: i32) -> bool { value >= 1 }\n",
+            ),
+            (
+                "island/Cargo.toml",
+                "[package]\nname = \"gamma-island\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ntest = false\n",
+            ),
+            ("island/src/lib.rs", "pub fn accepts(value: i32) -> bool { value >= 1 }\n"),
+        ],
+    );
+
+    let (code, output) = session(&dir, &["--workspace", "--mutators", "relational"]);
+
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(
+        output.contains("6 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 4 uncovered => 33.3%)"),
+        "the untested libraries were not compiled under the same feature graph: {output}"
+    );
+}
+
 fn promote_hints(dir: &TempDir) -> (i32, String) {
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
     let mut host = Sink::default();

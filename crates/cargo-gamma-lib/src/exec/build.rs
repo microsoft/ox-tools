@@ -24,6 +24,7 @@ mod invoke;
 mod isolation;
 pub(super) mod messages;
 mod splices;
+mod temporary_libraries;
 
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -37,6 +38,7 @@ use isolation::IsolationBudget;
 use isolation::{FailureContext, failure_contexts, push_isolation_tiers};
 use messages::compiled_sources;
 use splices::Splices;
+use temporary_libraries::TemporaryLibraries;
 
 /// Where each live mutant's guard landed, by ordinal, paired with the file it landed in.
 type Guards = HashMap<u32, (Utf8PathBuf, Guard)>;
@@ -400,6 +402,9 @@ pub(super) struct Converger {
     /// Cargo's successful preflight artifact stream, used only to narrow later test-target builds.
     target_discovery: Option<String>,
 
+    /// Packages with a library target in Cargo's resolved workspace metadata.
+    library_packages: Option<HashSet<String>>,
+
     /// Whether the verdict oracle is restricted to library unit-test harnesses.
     test_lib: bool,
 
@@ -490,6 +495,10 @@ impl Converger {
     /// Supplies the successful unmodified artifact stream used for target-level narrowing.
     pub(super) fn target_discovery(&mut self, discovery: String) {
         self.target_discovery = Some(discovery);
+    }
+
+    pub(super) fn library_packages(&mut self, packages: HashSet<String>) {
+        self.library_packages = Some(packages);
     }
 
     /// Invalidates position-based splice indexes after the plan is sorted.
@@ -1263,7 +1272,29 @@ impl Converger {
             );
         }
 
-        self.converge_scoped(
+        // Cargo rejects `--lib` for binary-only packages. An empty temporary library target in
+        // each such member lets a mixed workspace keep one Cargo invocation and feature graph.
+        let mut binary_packages = self.library_packages.as_ref().map_or_else(Vec::new, |libraries| {
+            select.map_or_else(
+                || plan.specs.keys().filter(|package| !libraries.contains(*package)).cloned().collect(),
+                |packages| packages.iter().filter(|package| !libraries.contains(*package)).cloned().collect(),
+            )
+        });
+        binary_packages.sort();
+        let selected_count = select.map_or(plan.specs.len(), <[String]>::len);
+        let only_binaries = !binary_packages.is_empty() && binary_packages.len() == selected_count;
+        let verb: &[&str] = if only_binaries {
+            &["check", "--keep-going", "--bins", "--tests"]
+        } else {
+            &["check", "--keep-going", "--lib", "--bins", "--tests"]
+        };
+
+        let temporary = if !binary_packages.is_empty() && !only_binaries {
+            Some(TemporaryLibraries::install(work, plan, &binary_packages)?)
+        } else {
+            None
+        };
+        let checked = self.converge_scoped(
             work,
             plan,
             BuildScope {
@@ -1271,10 +1302,14 @@ impl Converger {
                 mutants: None,
                 publish_progress,
             },
-            &["check", "--keep-going", "--lib", "--bins", "--tests"],
+            verb,
             limits,
             events,
-        )
+        );
+        if let Some(temporary) = temporary {
+            temporary.restore()?;
+        }
+        checked
     }
 
     /// Compiles the test targets of `select`, or of the whole workspace when it is `None`.

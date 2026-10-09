@@ -140,6 +140,9 @@ pub struct Survey {
     /// Library unit-test harnesses Cargo may build, retaining package ownership.
     pub(crate) library_tests: Vec<LibraryTestTarget>,
 
+    /// Workspace packages with a library target, including libraries without a test harness.
+    pub(crate) library_packages: HashSet<String>,
+
     /// Every test target that appears to run the compiler rather than the code under test.
     ///
     /// Kept beside `tests` because it is a property of what the workspace declares rather than of
@@ -475,6 +478,7 @@ impl Survey {
             selected: sorted(selected),
             tests: test_targets(&metadata),
             library_tests: library_tests(&metadata),
+            library_packages: library_packages(&metadata),
             compile_fail: compile_fail_targets(&metadata),
             roots,
             specs,
@@ -2153,6 +2157,15 @@ fn target_is_library(target: &Target) -> bool {
             TargetKind::Lib | TargetKind::RLib | TargetKind::DyLib | TargetKind::CDyLib | TargetKind::StaticLib | TargetKind::ProcMacro
         )
     })
+}
+
+fn library_packages(metadata: &Metadata) -> HashSet<String> {
+    metadata
+        .workspace_packages()
+        .iter()
+        .filter(|package| package.targets.iter().any(target_is_library))
+        .map(|package| package.name.to_string())
+        .collect()
 }
 
 /// Returns the first `--file` or `--exclude-file` pattern that matches no source file.
