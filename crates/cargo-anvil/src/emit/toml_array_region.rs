@@ -579,6 +579,227 @@ mod tests {
         plan(Some(text)).spliced_host.unwrap()
     }
 
+    fn mutation_spec(path: &[&str]) -> TomlArrayRegionSpec {
+        TomlArrayRegionSpec {
+            path: path.iter().map(|key| (*key).to_owned()).collect(),
+            region: RegionSpec {
+                body: "\"managed\",\n".to_owned(),
+                ..spec().region
+            },
+        }
+    }
+
+    fn assert_mutation_write(host: &str, expected: &str, spec: &TomlArrayRegionSpec, manifest: &Manifest, newline: &str) {
+        let item = plan_toml_array_region(manifest, Some(host), "config.toml", spec).unwrap();
+        let body = format!("  \"managed\",{newline}");
+        assert_eq!(
+            item.target,
+            Target::Region {
+                host: "config.toml".to_owned(),
+                id: "entries".to_owned()
+            }
+        );
+        assert_eq!(item.decision, Decision::Write);
+        assert_eq!(item.spliced_host.as_deref(), Some(expected));
+        assert_eq!(item.rendered.as_deref(), Some(body.as_str()));
+        assert_eq!(item.rendered_checksum, Some(checksum_str(&body)));
+        let mut plan = Plan::default();
+        plan.push(item);
+        let projected = plan.projected_manifest(manifest);
+        assert_eq!(
+            projected.region_checksum("config.toml", "entries"),
+            Some(checksum_str(&body).as_str())
+        );
+        let rerun = plan_toml_array_region(&projected, Some(expected), "config.toml", spec).unwrap();
+        assert_eq!(rerun.decision, Decision::InSync);
+        assert_eq!(rerun.spliced_host, None);
+    }
+
+    #[test]
+    fn mutation_nested_opening_cannot_hide_an_unclosed_owner() {
+        for newline in ["\n", "\r\n"] {
+            let host =
+                "items = []\n# >>> anvil-managed: outer\n# >>> anvil-managed: inner\n# <<< anvil-managed: inner\n".replace('\n', newline);
+            let error = plan_toml_array_region(&Manifest::default(), Some(&host), "config.toml", &mutation_spec(&["items"])).unwrap_err();
+            assert_eq!(error.remedy, RefusalRemedy::MalformedMarkers);
+            assert_eq!(error.reason.to_string(), "duplicate or nested opening sentinel");
+        }
+    }
+
+    #[test]
+    fn mutation_owned_inline_parent_has_its_specific_diagnostic() {
+        for newline in ["\n", "\r\n"] {
+            let host = "# >>> anvil-managed: cfg\na = { b = {} }\n# <<< anvil-managed: cfg\n".replace('\n', newline);
+            let error = plan_toml_array_region(
+                &Manifest::default(),
+                Some(&host),
+                "config.toml",
+                &mutation_spec(&["a", "b", "items"]),
+            )
+            .unwrap_err();
+            assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
+            assert_eq!(error.reason.to_string(), "the array's inline parent belongs to a managed region");
+        }
+    }
+
+    #[test]
+    fn mutation_scaffold_relocation_preserves_owned_trailing_trivia() {
+        for newline in ["\n", "\r\n"] {
+            let host = "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n\n# <<< anvil-managed: cfg\n".replace('\n', newline);
+            let expected = concat!(
+                "# >>> anvil-managed: cfg\n[plugins]\nmode = true\n\n# <<< anvil-managed: cfg\n",
+                "default = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n"
+            )
+            .replace('\n', newline);
+            assert_mutation_write(
+                &host,
+                &expected,
+                &mutation_spec(&["plugins", "default"]),
+                &Manifest::default(),
+                newline,
+            );
+            assert_eq!(
+                find_region(&expected, "cfg", CommentSyntax::Hash).unwrap().unwrap().body_str(),
+                format!("[plugins]{newline}mode = true{newline}{newline}")
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_one_sided_value_cuts_and_outside_closer_have_precise_diagnostics() {
+        for newline in ["\n", "\r\n"] {
+            for (source, reason) in [
+                (
+                    "items = [[\n# >>> anvil-managed: entries\n1\n],\n# <<< anvil-managed: entries\n\"user\"]\n",
+                    "the region splits a TOML array value",
+                ),
+                (
+                    "items = [\n# >>> anvil-managed: entries\n[1,\n# <<< anvil-managed: entries\n2],\n\"user\"]\n",
+                    "the region splits a TOML array value",
+                ),
+                (
+                    "items = [\n# >>> anvil-managed: entries\n1,\n]\n# <<< anvil-managed: entries\n",
+                    "the managed region is outside its selected TOML array",
+                ),
+            ] {
+                let host = source.replace('\n', newline);
+                let mut manifest = Manifest::default();
+                manifest.set_region(
+                    "config.toml",
+                    "entries",
+                    checksum_str(find_region(&host, "entries", CommentSyntax::Hash).unwrap().unwrap().body_str()),
+                );
+                let error = plan_toml_array_region(&manifest, Some(&host), "config.toml", &mutation_spec(&["items"])).unwrap_err();
+                assert_eq!(error.remedy, RefusalRemedy::MisplacedArrayMarkers);
+                assert_eq!(error.reason.to_string(), reason);
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_whole_values_at_the_first_owned_byte_and_before_it_are_not_split() {
+        for newline in ["\n", "\r\n"] {
+            for (source, expected) in [
+                (
+                    "items = [\n# >>> anvil-managed: entries\n1,\n# <<< anvil-managed: entries\n]\n",
+                    "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n",
+                ),
+                (
+                    "items = [0,\n# >>> anvil-managed: entries\n1,\n# <<< anvil-managed: entries\n]\n",
+                    "items = [0,\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n]\n",
+                ),
+            ] {
+                let host = source.replace('\n', newline);
+                let expected = expected.replace('\n', newline);
+                let mut manifest = Manifest::default();
+                manifest.set_region("config.toml", "entries", checksum_str(&format!("1,{newline}")));
+                assert_mutation_write(&host, &expected, &mutation_spec(&["items"]), &manifest, newline);
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_adoption_respects_post_closer_entries_separators_and_enclosing_commas() {
+        for newline in ["\n", "\r\n"] {
+            for (source, expected, path) in [
+                (
+                    "items = [\n# >>> anvil-managed: other\n\"user\",\n# <<< anvil-managed: other\n\"managed\"\n]\n",
+                    "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n# >>> anvil-managed: other\n\"user\",\n# <<< anvil-managed: other\n\n]\n",
+                    vec!["items"],
+                ),
+                (
+                    "cfg = { items = [\"managed\"], user = 1 }\n",
+                    "cfg = { items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n], user = 1 }\n",
+                    vec!["cfg", "items"],
+                ),
+                (
+                    "items = [\"managed\"\n# >>> anvil-managed: other\n# keep\n# <<< anvil-managed: other\n,\n\"user\"]\n",
+                    "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n# >>> anvil-managed: other\n# keep\n# <<< anvil-managed: other\n\n\"user\"]\n",
+                    vec!["items"],
+                ),
+            ] {
+                let host = source.replace('\n', newline);
+                let expected = expected.replace('\n', newline);
+                assert_mutation_write(&host, &expected, &mutation_spec(&path), &Manifest::default(), newline);
+                let document = Document::parse(expected.as_str()).unwrap();
+                let path: Vec<_> = path.iter().map(|key| (*key).to_owned()).collect();
+                let array = lookup(document.as_item(), &path).unwrap().as_array().unwrap();
+                assert_eq!(
+                    array.iter().filter_map(Value::as_str).collect::<Vec<_>>(),
+                    if path.len() == 1 {
+                        vec!["managed", "user"]
+                    } else {
+                        vec!["managed"]
+                    }
+                );
+                if path.len() == 2 {
+                    assert_eq!(document["cfg"]["user"].as_integer(), Some(1));
+                } else {
+                    assert_eq!(
+                        find_region(&expected, "other", CommentSyntax::Hash).unwrap().unwrap().body_str(),
+                        if source.contains("# keep") {
+                            format!("# keep{newline}")
+                        } else {
+                            format!("\"user\",{newline}")
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_adoption_never_removes_a_comment_comma_and_resets_after_newline() {
+        for newline in ["\n", "\r\n"] {
+            for (source, expected, values) in [
+                (
+                    "items = [\"managed\" # user, café\n]\n",
+                    "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n # user, café\n]\n",
+                    vec!["managed"],
+                ),
+                (
+                    "items = [\"managed\" # user, café\n,\n\"user\"]\n",
+                    "items = [\n  # >>> anvil-managed: entries\n  \"managed\",\n  # <<< anvil-managed: entries\n # user, café\n\n\"user\"]\n",
+                    vec!["managed", "user"],
+                ),
+            ] {
+                let host = source.replace('\n', newline);
+                let expected = expected.replace('\n', newline);
+                assert_mutation_write(&host, &expected, &mutation_spec(&["items"]), &Manifest::default(), newline);
+                let document = Document::parse(expected.as_str()).unwrap();
+                assert_eq!(
+                    document["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>(),
+                    values
+                );
+            }
+        }
+    }
+
     #[test]
     fn review_marker_data_is_not_ownership() {
         for quote in ["\"\"\"", "'''"] {
