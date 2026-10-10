@@ -667,6 +667,7 @@ version = "0.2.1"
 dependencies = [
  "camino",
  "cargo-gamma-unsafe",
+ "libc",
  "tempfile",
 ]
 

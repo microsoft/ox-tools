@@ -30,6 +30,8 @@ use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use cargo_gamma_unsafe::group::only_group_leader_is_listed;
 #[cfg(unix)]
 use cargo_gamma_unsafe::group::{exists, exited, group_of, kill, raise_interrupt};
 
@@ -144,15 +146,25 @@ fn observing_an_exit_keeps_its_group_reserved_until_the_explicit_reap() {
         poll_until(|| exited(child.id()).expect("the child can be observed")),
         "the killed child never became observable"
     );
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(
         group_of(pid),
         Some(pid),
         "the leader's group must stay reserved until the caller explicitly reaps it"
     );
+    // Darwin's getpgid reports ESRCH for a zombie leader. The group listing used by cleanup must
+    // still identify that unreaped leader, then stop identifying it after the explicit reap.
+    #[cfg(target_os = "macos")]
+    assert!(only_group_leader_is_listed(pid), "the unreaped leader no longer names its group");
 
     let status = child.wait().expect("the observed child remains waitable");
 
     assert_eq!(status.signal(), Some(libc::SIGKILL));
+    #[cfg(target_os = "macos")]
+    assert!(
+        !only_group_leader_is_listed(pid),
+        "the reaped leader still appears in its former group"
+    );
     assert_eq!(group_of(pid), None, "the group is released only by the explicit reap");
 }
 
