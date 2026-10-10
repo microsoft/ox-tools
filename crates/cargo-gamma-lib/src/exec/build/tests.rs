@@ -995,6 +995,77 @@ fn trivial_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     (dir, work)
 }
 
+#[test]
+fn convergence_still_checks_a_library_without_a_test_harness() -> Result<()> {
+    let (_dir, work) = trivial_workspace("build-library-without-harness-");
+    fs::write(
+        work.root.join("Cargo.toml").as_std_path(),
+        "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\ntest = false\n\n[workspace]\n",
+    )?;
+    let mut plan = empty_plan(&work);
+    let _previous = plan.specs.insert("trivial".to_owned(), (Utf8PathBuf::new(), "0.0.0".to_owned()));
+    let mut converger = Converger::default();
+    converger.library_packages(std::iter::once("trivial".to_owned()).collect());
+
+    let checked = converger.converge_check(
+        &work,
+        &plan,
+        None,
+        BuildLimits::default(),
+        false,
+        &mut crate::testing::Recorder::default(),
+    )?;
+
+    assert!(
+        matches!(checked, Convergence::Built(stdout) if stdout.contains("\"reason\":\"compiler-artifact\"")),
+        "the library source was skipped by the target selectors"
+    );
+    Ok(())
+}
+
+#[test]
+fn temporary_library_restores_the_binary_manifest_after_checking() -> Result<()> {
+    let (_dir, work) = trivial_workspace("build-temporary-library-");
+    let manifest = work.root.join("Cargo.toml");
+    let original = "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\nautolib = false\n\n[workspace]\n";
+    fs::write(manifest.as_std_path(), original)?;
+    let mut plan = empty_plan(&work);
+    let _previous = plan.specs.insert("trivial".to_owned(), (Utf8PathBuf::new(), "0.0.0".to_owned()));
+
+    let temporary = TemporaryLibraries::install(&work, &plan, &["trivial".to_owned()])?;
+    let changed = fs::read_to_string(manifest.as_std_path())?;
+    assert!(changed.contains("[lib]"), "the check target was not added: {changed}");
+    temporary.restore()?;
+
+    assert_eq!(fs::read_to_string(manifest.as_std_path())?, original);
+    assert!(
+        fs::read_dir(work.root.as_std_path())?
+            .all(|entry| { entry.is_ok_and(|entry| !entry.file_name().to_string_lossy().starts_with("__cargo_gamma_check_lib_")) }),
+        "a temporary library source remained in the copied workspace"
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_temporary_library_install_restores_earlier_manifests() -> Result<()> {
+    let (_dir, work) = trivial_workspace("build-temporary-library-failure-");
+    let manifest = work.root.join("Cargo.toml");
+    let original = fs::read(manifest.as_std_path())?;
+    let mut plan = empty_plan(&work);
+    let _previous = plan.specs.insert("trivial".to_owned(), (Utf8PathBuf::new(), "0.0.0".to_owned()));
+
+    let error = TemporaryLibraries::install(&work, &plan, &["trivial".to_owned(), "missing".to_owned()]);
+
+    assert!(error.is_err(), "the second package has no manifest directory");
+    assert_eq!(fs::read(manifest.as_std_path())?, original);
+    assert!(
+        fs::read_dir(work.root.as_std_path())?
+            .all(|entry| { entry.is_ok_and(|entry| !entry.file_name().to_string_lossy().starts_with("__cargo_gamma_check_lib_")) }),
+        "a failed install left a temporary library source"
+    );
+    Ok(())
+}
+
 /// A build that fails for a reason no guard explains stops rather than looping forever.
 #[test]
 fn a_build_that_no_guard_explains_stops_with_the_compiler_output() {

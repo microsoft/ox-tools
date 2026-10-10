@@ -586,6 +586,7 @@ fn preflight(
     let intended = survey.packages();
     let intending: crate::HashSet<&str> = intended.iter().map(String::as_str).collect();
     let checking = reaching_packages(&survey.reach, &intending, &scope);
+    converger.library_packages(survey.library_packages.clone());
     let cleared = Converger::preflight(work, plan, checking.as_deref(), &intended, config.test_lib, config.build, events)?;
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     record_preflight_discovery(converger, cleared.discovery.clone());
