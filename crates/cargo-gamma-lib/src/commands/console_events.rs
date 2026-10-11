@@ -209,11 +209,13 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
         if !self.dashboard.enabled() {
             self.progress.complete(self.host, &crate::report::quantity(work.len(), "mutant"));
         }
-        self.progress.set_total(work.len());
+        self.progress.set_remaining_total(work.len());
         if self.dashboard.enabled() {
             self.progress.finish(self.host);
             self.progress.resize(self.host.terminal_width());
             self.dashboard.start_testing(self.host, jobs, self.progress.render());
+        } else {
+            self.progress.draw_now(self.host);
         }
     }
 
@@ -262,9 +264,10 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
 
     fn measured(&mut self, plan: &crate::discover::Plan, session: &crate::exec::Session) {
         self.dashboard.measured(plan, session);
+        self.progress.restore_outcomes(plan.mutants.iter().map(|mutant| mutant.outcome));
         for mutant in &plan.mutants {
             if mutant.outcome != Outcome::Pending {
-                self.verdict_log.record(mutant);
+                self.verdict_log.record_prepared(mutant);
             }
         }
     }
@@ -289,7 +292,6 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use camino::Utf8PathBuf;
@@ -446,6 +448,44 @@ mod tests {
         assert!(err.contains("SURVIVED"), "{err}");
         assert!(err.contains("peaked at 2.1 GiB"), "{err}");
         assert!(!err.contains("after"), "{err}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "restores a 45,153-mutant campaign and allocates 40,008 work items; native population-scale regression"
+    )]
+    fn testing_status_is_painted_before_execution_with_the_announced_retained_count() {
+        let mut host = Sink::default().terminal(200);
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(true, Styler::new(false), Some(200)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
+            styler: Styler::new(false),
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+        let outcomes = core::iter::repeat_n(Outcome::Killed, 1381)
+            .chain([Outcome::Survived, Outcome::Timeout, Outcome::OutOfMemory])
+            .chain(core::iter::repeat_n(Outcome::CompileError, 1000))
+            .chain(core::iter::repeat_n(Outcome::Ignored, 2000))
+            .chain(core::iter::repeat_n(Outcome::NotBuilt, 761))
+            .chain(core::iter::repeat_n(Outcome::Pending, 40008));
+        let retained = events.progress.restore_outcomes(outcomes);
+        assert_eq!(retained, 1384);
+        events.sweep_planning(&empty_plan(), 1, 1);
+        let work = (0..40008)
+            .map(|_| crate::estimate::MutationWork::new(crate::estimate::WorkKind::Whole, core::time::Duration::from_secs(1)))
+            .collect::<Vec<_>>();
+        events.sweep_planned(&work, 1);
+        assert!(
+            events.host.err().contains(&format!("{retained}/41392 mutants evaluated")),
+            "{}",
+            events.host.err()
+        );
+        events.mutant(&mutant(Outcome::Killed, None));
+        assert!(events.progress.render().contains("1385/41392 mutants evaluated"));
+        assert!(!events.progress.render().contains("45153"));
     }
 
     #[test]
@@ -690,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "writes and reads the filesystem-backed testing progress log")]
     fn the_testing_progress_log_is_truncated_and_flushed_after_every_verdict() {
         let directory = crate::testing::workdir("testing-progress-log-");
         let scratch = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the test path is UTF-8");

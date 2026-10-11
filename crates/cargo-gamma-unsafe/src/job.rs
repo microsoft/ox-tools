@@ -402,6 +402,7 @@ fn resume(thread: u32) -> bool {
     // owns it, so this is what closes it exactly once when the function returns.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
 
+    // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "defaulting the suspension count either skips ResumeThread or reports success on its failure, leaving suspended children waiting forever; campaign logs 4175 and 4212")]
     previous_suspension_count(&handle) != u32::MAX
 }
 
@@ -568,30 +569,11 @@ impl Job {
 
     /// Drains job messages until none is immediately available, retaining a memory-limit hit.
     fn memory_limit_was_hit(&self) -> bool {
-        let Some(completion) = self.completion.as_ref() else {
-            return false;
-        };
-        let mut hit = self.memory_limit_hit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // #[gamma::skip(cond.always_false, reason = "once true, draining an already-empty non-blocking completion queue leaves the retained flag true and returns the same answer")]
-        if *hit {
-            return true;
-        }
-
-        loop {
-            let (mut message, mut key, mut overlapped) = (u32::default(), usize::default(), core::ptr::null_mut());
-
-            let received = NATIVE_CALLS.completion_status(completion.as_raw_handle(), &mut message, &mut key, &mut overlapped);
-
-            // #[gamma::skip(all, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
-            if !received {
-                return *hit;
-            }
-
-            if message == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT {
-                *hit = true;
-            }
-        }
+        memory_limit_was_hit_with(
+            self.completion.as_ref().map(OwnedHandle::as_raw_handle),
+            &self.memory_limit_hit,
+            |completion, message, key, overlapped| NATIVE_CALLS.completion_status(completion, message, key, overlapped),
+        )
     }
 
     /// Kills everything in the job.
@@ -606,6 +588,35 @@ impl Job {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
+        }
+    }
+}
+
+fn memory_limit_was_hit_with(
+    completion: Option<HANDLE>,
+    memory_limit_hit: &Mutex<bool>,
+    mut completion_status: impl FnMut(HANDLE, &mut u32, &mut usize, &mut *mut OVERLAPPED) -> bool,
+) -> bool {
+    let Some(completion) = completion else {
+        return false;
+    };
+    let mut hit = memory_limit_hit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // #[gamma::skip(cond.always_false, reason = "once true, draining an already-empty non-blocking completion queue leaves the retained flag true and returns the same answer")]
+    if *hit {
+        return true;
+    }
+
+    loop {
+        let (mut message, mut key, mut overlapped) = (u32::default(), usize::default(), core::ptr::null_mut());
+        let received = completion_status(completion, &mut message, &mut key, &mut overlapped);
+
+        // #[gamma::skip(all, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
+        if !received {
+            break *hit;
+        }
+        if message == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT {
+            *hit = true;
         }
     }
 }
@@ -709,6 +720,76 @@ mod tests {
     const HANDLE_LEAK_WARMUPS: u32 = 8;
     const ALLOWED_HANDLE_DRIFT: u32 = 8;
     const FAULT_TEST_LIMIT: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn native_memory_limits_preserve_exact_bytes_and_target_width_failures() {
+        for limit in [0, 1, u64::from(u32::MAX), u64::MAX] {
+            let expected = usize::try_from(limit).ok();
+            assert_eq!(native_limit(limit), expected, "{limit}");
+            // SAFETY: all fields of this Win32 information structure are integers, and zero is valid for each.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+            assert_eq!(install_memory_limit(&mut limits, limit), expected.map(|_| ()), "{limit}");
+            if let Some(expected) = expected {
+                assert_eq!(limits.JobMemoryLimit, expected, "{limit}");
+                assert_ne!(limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY, 0);
+            } else {
+                assert_eq!(limits.JobMemoryLimit, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn resume_passes_the_exact_thread_identifier_to_the_native_adapter() {
+        for thread in [1, 41, u32::MAX - 1] {
+            let _fault = native_faults::arm(NativeCall::OpenThread);
+            assert!(!resume(thread));
+            assert_eq!(LAST_OPEN_THREAD_REQUEST.get(), Some(thread));
+        }
+    }
+
+    #[test]
+    fn completion_draining_returns_and_retains_the_actual_limit_hit() {
+        for expected in [false, true] {
+            let completion = core::ptr::dangling_mut::<c_void>();
+            let hit = Mutex::new(false);
+            let mut messages = std::collections::VecDeque::from([
+                (true, 0),
+                (true, if expected { JOB_OBJECT_MSG_JOB_MEMORY_LIMIT } else { 0 }),
+                (false, 0),
+            ]);
+            let mut calls = 0;
+            assert_eq!(
+                memory_limit_was_hit_with(Some(completion), &hit, |handle, message, key, overlapped| {
+                    assert_eq!(handle, completion);
+                    assert_eq!((*message, *key, *overlapped), (0, 0, core::ptr::null_mut()));
+                    calls += 1;
+                    let (received, value) = messages.pop_front().expect("unexpected completion-status call");
+                    *message = value;
+                    received
+                }),
+                expected
+            );
+            assert_eq!(calls, 3);
+            assert!(messages.is_empty());
+            assert_eq!(*hit.lock().unwrap(), expected);
+            let mut repeated_calls = 0;
+            assert_eq!(
+                memory_limit_was_hit_with(Some(completion), &hit, |handle, _, _, _| {
+                    assert!(!expected, "a retained hit must not read the completion port again");
+                    assert_eq!(handle, completion);
+                    repeated_calls += 1;
+                    assert_eq!(repeated_calls, 1, "an empty queue must stop the drain");
+                    false
+                }),
+                expected
+            );
+            assert_eq!(repeated_calls, usize::from(!expected));
+            assert!(!memory_limit_was_hit_with(None, &hit, |_, _, _, _| panic!(
+                "no completion handle permits no native calls"
+            )));
+            assert_eq!(*hit.lock().unwrap(), expected);
+        }
+    }
 
     #[test]
     fn win32_boolean_results_distinguish_failure_from_every_success_value() {

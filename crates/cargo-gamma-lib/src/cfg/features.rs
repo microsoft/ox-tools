@@ -85,6 +85,7 @@ pub fn enabled(metadata: &Metadata, args: &FeatureArgs) -> HashMap<String, Vec<S
 fn requested(args: &FeatureArgs) -> Vec<(Option<String>, String)> {
     args.features
         .iter()
+        // #[gamma::skip(collection.reverse_array, reason = "split treats the character array as an unordered set of delimiters")]
         .flat_map(|entry| entry.split([',', ' ']))
         .filter(|entry| !entry.is_empty())
         .map(|entry| match entry.split_once('/') {
@@ -146,7 +147,9 @@ fn propagate_worklist(members: &[&Package], renames: &Renames, on: &mut HashMap<
         for dependency in &package.dependencies {
             let target = dependency.name.as_str();
 
+            // #[gamma::skip(cond.always_false, reason = "for nonmembers every subsequent turn_on returns false without inserting or enqueueing, so bypassing this fast path leaves the feature sets unchanged")]
             if !on.contains_key(target) {
+                // #[gamma::skip(loop.delete_continue, reason = "for nonmembers every subsequent turn_on returns false without inserting or enqueueing, so falling through leaves the feature sets unchanged")]
                 continue;
             }
 
@@ -318,6 +321,7 @@ fn apply(entry: &str, owner: &str, renames: &Renames, on: &mut HashMap<String, H
 ///
 /// A package that is not a workspace member is ignored: its code is never mutated, so what it
 /// compiles is not this tool's business.
+// #[gamma::skip(fn_value.bool_true, tag = "timeout", reason = "reporting every feature as newly enabled prevents the feature propagation fixed point from terminating")]
 fn turn_on(package: &str, feature: &str, on: &mut HashMap<String, HashSet<String>>) -> bool {
     on.get_mut(package).is_some_and(|features| features.insert(feature.to_owned()))
 }
@@ -474,6 +478,74 @@ mod tests {
             },
         ] {
             assert_eq!(enabled(&metadata, &args), enabled_by_rescan(&metadata, &args));
+        }
+    }
+
+    #[test]
+    fn feature_arguments_preserve_space_delimiters_qualified_names_and_option_values() {
+        let args = FeatureArgs {
+            features: vec!["one two,alpha/three".to_owned()],
+            ..FeatureArgs::default()
+        };
+        assert_eq!(
+            requested(&args),
+            [
+                (None, "one".to_owned()),
+                (None, "two".to_owned()),
+                (Some("alpha".to_owned()), "three".to_owned()),
+            ]
+        );
+        for raw in [
+            vec!["--features", "alpha/one", "--features", "two", "--all-features"],
+            vec!["-F", "alpha/one", "-F=two", "--all-features"],
+            vec!["--features=alpha/one", "-Ftwo", "--all-features"],
+        ] {
+            let extra: Vec<_> = raw.into_iter().map(str::to_owned).collect();
+            let found = from_extra(&FeatureArgs::default(), &extra);
+            assert_eq!(found.features, ["alpha/one", "two"]);
+            assert!(found.all_features);
+            assert!(!found.no_default_features);
+        }
+    }
+
+    #[test]
+    fn dependency_default_and_explicit_features_enqueue_transitive_entries() {
+        let files = pair(
+            "[features]\ndefault = []\n\n[dependencies]\nbeta = { path = \"../beta\", features = [\"explicit\"] }\n",
+            "default = [\"from_default\"]\nfrom_default = [\"deep_default\"]\ndeep_default = []\n\
+             explicit = [\"from_explicit\"]\nfrom_explicit = []\nforbidden = []\n",
+        );
+        let (_directory, mut metadata) = metadata_for(&borrowed(&files));
+        let alpha = metadata
+            .packages
+            .iter_mut()
+            .find(|package| package.name.as_str() == "alpha")
+            .expect("the fixture declares alpha");
+        let mut unknown = alpha.dependencies[0].clone();
+        unknown.kind = DependencyKind::Unknown;
+        unknown.features = vec!["forbidden".to_owned()];
+        unknown.uses_default_features = false;
+        alpha.dependencies.insert(0, unknown);
+        let args = FeatureArgs {
+            no_default_features: true,
+            ..FeatureArgs::default()
+        };
+        for uses_default in [true, false] {
+            metadata
+                .packages
+                .iter_mut()
+                .find(|package| package.name.as_str() == "alpha")
+                .expect("the fixture declares alpha")
+                .dependencies
+                .last_mut()
+                .expect("the fixture has one known dependency after the unknown dependency")
+                .uses_default_features = uses_default;
+            let expected: &[&str] = if uses_default {
+                &["deep_default", "default", "explicit", "from_default", "from_explicit"]
+            } else {
+                &["explicit", "from_explicit"]
+            };
+            assert_eq!(enabled(&metadata, &args)["beta"], expected, "uses_default = {uses_default}");
         }
     }
 

@@ -72,11 +72,13 @@ pub(crate) fn fit(text: &str, width: usize) -> String {
                 break;
             };
             end = sequence_end;
+            // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "fitting must advance past a complete control sequence")]
             at = sequence_end;
             continue;
         }
 
         let cluster_start = at;
+        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "fitting must advance past the visible character to make progress")]
         at += character.len_utf8();
         while at < text.len() {
             let next = text[at..]
@@ -84,6 +86,7 @@ pub(crate) fn fit(text: &str, width: usize) -> String {
                 .next()
                 .expect("the byte cursor is advanced only along UTF-8 character boundaries");
             if next == '\u{1b}' {
+                // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "the cluster scan cannot consume an escape and must hand it back to the outer scan")]
                 break;
             }
             if next == '\u{200d}' {
@@ -101,6 +104,7 @@ pub(crate) fn fit(text: &str, width: usize) -> String {
                 at += next.len_utf8();
                 continue;
             }
+            // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "timeout", reason = "a new visible cluster ends this scan; continuing revisits the same character")]
             break;
         }
 
@@ -226,6 +230,37 @@ mod tests {
         assert_eq!(fit("abc", 0), "");
         assert_eq!(fit("abc", 1), ".");
         assert_eq!(fit("abc", 2), "..");
+    }
+
+    #[test]
+    fn control_sequence_offsets_and_incomplete_sequences_are_exact() {
+        for (text, start, expected) in [
+            ("", 0, None),
+            ("\u{1b}", 0, None),
+            ("\u{1b}[", 0, None),
+            ("\u{1b}[31", 0, None),
+            ("\u{1b}Mtail", 0, Some(2)),
+            ("ab\u{1b}Mtail", 2, Some(4)),
+            ("ab\u{1b}[31mtail", 2, Some(7)),
+            ("ab\u{1b}界tail", 2, Some(6)),
+        ] {
+            assert_eq!(control_sequence_end(text, start), expected, "{text:?} at {start}");
+        }
+    }
+
+    #[test]
+    fn fitting_keeps_adjacent_clusters_and_escape_boundaries() {
+        for (text, width, expected) in [
+            ("abcdef\u{1b}[31mgh", 9, "abcdef\u{1b}[31mgh"),
+            ("ab\u{1b}Mabcdefgh", 6, "ab\u{1b}Ma...\u{1b}[0m"),
+            ("a\u{301}\u{302}bcdef", 5, "a\u{301}\u{302}b..."),
+            ("👩‍👩‍👧‍👦abcdef", 5, "👩‍👩‍👧‍👦..."),
+            ("a\u{200d}", 0, ""),
+            ("abcdef\u{200d}", 5, "ab..."),
+            ("ab\u{1b}[31mcdefgh", 5, "ab\u{1b}[31m...\u{1b}[0m"),
+        ] {
+            assert_eq!(fit(text, width), expected, "{text:?} at width {width}");
+        }
     }
 
     #[test]

@@ -455,6 +455,25 @@ mod tests {
         ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)
     }
 
+    #[test]
+    fn emptied_legacy_lints_can_migrate_even_when_the_old_checksum_differs() {
+        for (legacy, replacement, body) in [
+            (
+                "anvil-workspace-lints",
+                "anvil-workspace-rust-lints",
+                "[workspace.lints.rust]\nsetting='warn'\n",
+            ),
+            ("anvil-lints", "anvil-rust-lints", "[lints.rust]\nsetting='warn'\n"),
+        ] {
+            let host = format!("# >>> anvil-managed: {legacy}\n \t\n# <<< anvil-managed: {legacy}\n");
+            let mut manifest = Manifest::default();
+            manifest.set_region("Cargo.toml", legacy, "different-original-checksum");
+            let item = plan_managed_region(&manifest, Some(&host), request("Cargo.toml", replacement, body))
+                .expect("empty legacy bodies explicitly permit regeneration");
+            assert_eq!(item.decision, Decision::Write);
+        }
+    }
+
     /// The backstop with nothing retiring, which is every case but a migration.
     fn refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<String> {
         toml_introduction_refusal(host_text, request, &BTreeSet::new()).map(|refusal| refusal.reason)

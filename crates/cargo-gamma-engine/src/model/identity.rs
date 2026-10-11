@@ -346,6 +346,7 @@ pub fn normalize_site_text(text: &str) -> CompactString {
             .get(offset..)
             .and_then(|rest| rest.chars().next())
             .expect("the loop keeps the UTF-8 boundary below the text length");
+        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "removing the character advance revisits the same nonliteral character indefinitely")]
         offset += character.len_utf8();
 
         if character.is_whitespace() {

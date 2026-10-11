@@ -25,6 +25,7 @@ pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     loop {
         let components: Vec<Utf8Component<'_>> = pending.components().collect();
         let mut resolved = Utf8PathBuf::new();
+        // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "claiming a restart without following a link repeatedly resolves the same path")]
         let mut restarted = false;
 
         for (at, component) in components.iter().enumerate() {
@@ -62,8 +63,10 @@ pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
                         continue;
                     }
 
+                    // #[gamma::skip(literal.int_decrement, tag = "timeout", reason = "the symlink counter must advance to bound cyclic resolution")]
                     followed_links += 1;
 
+                    // #[gamma::skip(cond.always_false, tag = "timeout", reason = "cyclic symlink resolution must stop at the traversal limit")]
                     if followed_links > MAX_SYMLINKS {
                         return Err(error!("could not resolve `{path}`: too many symlinks"));
                     }

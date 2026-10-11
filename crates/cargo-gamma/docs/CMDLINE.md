@@ -9,6 +9,7 @@ Every subcommand and every option `cargo-gamma` accepts.
 * [The option categories](#the-option-categories)
 * [Where settings come from](#where-settings-come-from)
 * [Passing arguments through](#passing-arguments-through)
+* [Resuming interrupted testing](#resuming-interrupted-testing)
 * [Understanding uncovered mutants](#understanding-uncovered-mutants)
 * [Exit status](#exit-status)
 * [Full option reference](#full-option-reference)
@@ -71,6 +72,43 @@ is a run over the whole workspace; `cargo gamma list` is the `list` subcommand a
 | `files` | List source files in the selected population. |
 | `mutators` | List registered mutators and their selection state. |
 | `presets` | List named mutator presets. |
+
+## Resuming interrupted testing
+
+After CTRL+C during the mutant-testing phase, continue that same campaign with:
+
+```bash
+cargo gamma run --resume-testing
+```
+
+The prepared workspace and test binaries are reused as-is. Discovery, copying,
+instrumentation, builds, baseline measurement, and test census collection do not
+run again. All completed verdicts are retained; unfinished mutants are retried.
+Selection and test settings are frozen, so live source changes, execution settings
+in `gamma.toml`, new hints, and suppression edits do not alter the resumed
+campaign. Reporting options remain live; `min-score` and `max-flaky` gates are
+read from current configuration unless overridden on the command line. Unrelated
+execution values are not validated on resume, but unknown top-level configuration
+keys are rejected. Use `--dir` and, if necessary,
+`--cache-dir` to identify the existing campaign.
+
+Resume reports an error if the campaign did not reach testing, already published
+its completed ledger, has incompatible or corrupt state, or is missing or has
+changed its prepared artifacts or, when tests remain pending, inherited
+environment. If testing finished
+but completed-ledger publication was interrupted, resume publishes the result
+without rerunning mutants or requiring the current inherited environment to
+match. It never falls back to starting a new campaign. Only
+campaigns started by a version supporting this option have resumable state;
+older diagnostic progress logs cannot be resumed.
+
+`cargo gamma hints`, `cargo gamma suppress`, and `cargo gamma unsuppress` can
+also be used after interruption. Hints and suppressions use the current partial
+campaign's recorded evidence rather than an older completed campaign. Pending
+mutants supply no verdict. Suppression and unsuppression preview edits unless
+`--apply` is passed, and their source-validation safeguards still apply.
+`hints --replace` is the exception: whole-artifact replacement requires a valid
+completed campaign ledger and never uses the interrupted checkpoint.
 
 ## The option categories
 
@@ -207,6 +245,22 @@ Run mutation testing
 cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 ```
 
+**Run control**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--resume-testing` |  | Continue the interrupted campaign's testing phase using its existing prepared tree. |
+| `--progress` | `<WHEN>` | When to show the progress display. Defaults to `auto`. |
+| `--dashboard` |  | Show a live testing dashboard instead of the progress bar. |
+| `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |
+| `--max-flaky` | `<COUNT>` | Fail if more than this many mutants have an unresolved flaky outcome. |
+| `--incremental` | `<INCREMENTAL>` | How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler unviability and checked execution hints. |
+| `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
+| `--no-baseline` |  | Skip the baseline run. |
+| `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
+| `--dry-run` |  | Find and report mutants without building or running anything. |
+| `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
+
 **Selecting what to mutate**
 
 | Option | Value | What it does |
@@ -238,21 +292,6 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | --- | --- | --- |
 | `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
 | `--no-config` |  | Ignore the configuration file entirely. |
-
-**Run control**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `--progress` | `<WHEN>` | When to show the progress display. Defaults to `auto`. |
-| `--dashboard` |  | Show a live testing dashboard instead of the progress bar. |
-| `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |
-| `--max-flaky` | `<COUNT>` | Fail if more than this many mutants have an unresolved flaky outcome. |
-| `--incremental` | `<INCREMENTAL>` | How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler unviability and checked execution hints. |
-| `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
-| `--no-baseline` |  | Skip the baseline run. |
-| `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
-| `--dry-run` |  | Find and report mutants without building or running anything. |
-| `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
 
 **Running tests**
 
@@ -526,7 +565,7 @@ cargo gamma suppress [OPTIONS]
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose completed campaign should be used. Defaults to `.`. |
+| `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose latest campaign should be used. Defaults to `.`. |
 | `--apply` |  | Write and verify the generated directives instead of printing the proposed diff. |
 | `--eligible` | `<LIST>` | Which verdicts may be suppressed. Defaults to `timeout,outofmem`. |
 | `--allow-dirty` |  | Edit source files that have uncommitted changes. |
@@ -535,7 +574,7 @@ cargo gamma suppress [OPTIONS]
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `--cache-dir` | `<PATH>` | Read the completed campaign from this cache directory instead of cargo-gamma's default. |
+| `--cache-dir` | `<PATH>` | Read completed or interrupted testing evidence from this cache directory. |
 
 ### `gamma unsuppress`
 
@@ -628,7 +667,7 @@ cargo gamma hints [OPTIONS]
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose latest completed campaign should be promoted. Defaults to `.`. |
+| `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose latest campaign knowledge should be promoted. Defaults to `.`. |
 
 **Cache**
 
@@ -641,7 +680,7 @@ cargo gamma hints [OPTIONS]
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--dry-run` |  | Report what would be promoted without writing anything. |
-| `--replace` |  | Replace the complete hints artifact instead of merging the completed campaign into it. |
+| `--replace` |  | Replace the complete hints artifact instead of merging the recorded campaign into it. |
 
 ### `gamma clean`
 

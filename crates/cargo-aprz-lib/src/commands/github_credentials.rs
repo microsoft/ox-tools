@@ -77,7 +77,6 @@ struct GhCommandRequest {
 
 /// Resolve the GitHub credential used by the hosting provider.
 pub(super) async fn discover(explicit: Option<&GitHubToken>, github_token_from_gh: bool, endpoints: &Endpoints) -> Option<GitHubToken> {
-    // #[gamma::skip(parameter.default_shadow, tag = "trivial", reason = "this production wrapper only supplies process-global environment and subprocess adapters; discover_with tests explicit-token precedence with injected boundaries")]
     discover_with(
         explicit,
         github_token_from_gh,
@@ -273,10 +272,22 @@ async fn resolve_executable_async(resolver: impl FnOnce() -> Option<PathBuf> + S
 }
 
 fn resolve_gh_from_environment() -> Option<PathBuf> {
+    resolve_gh_with(
+        || std::env::var_os("PATH"),
+        process_current_dir,
+        || std::env::var_os(concat!("PATH", "EXT")),
+    )
+}
+
+fn resolve_gh_with(
+    path: impl FnOnce() -> Option<OsString>,
+    current_dir: impl FnOnce() -> Option<PathBuf>,
+    path_ext: impl FnOnce() -> Option<OsString>,
+) -> Option<PathBuf> {
     // #[gamma::skip(try.propagate_to_unwrap, tag = "trivial", reason = "removing PATH requires mutating process-global state and races parallel tests; resolve_executable is tested with explicit empty and populated PATH values")]
-    let path = std::env::var_os("PATH")?;
-    let current_dir = process_current_dir()?;
-    let path_ext = std::env::var_os(concat!("PATH", "EXT"));
+    let path = path()?;
+    let current_dir = current_dir()?;
+    let path_ext = path_ext();
 
     resolve_executable(OsStr::new("gh"), &path, path_ext.as_deref(), &current_dir)
 }
@@ -372,6 +383,32 @@ mod tests {
 
     fn token(value: &str) -> GitHubToken {
         value.parse().expect("GitHubToken parsing is infallible")
+    }
+
+    #[tokio::test]
+    async fn discovery_retains_the_explicit_token_without_environment_or_gh() {
+        let explicit = token("noncredential-test-value");
+        let discovered = discover_with(
+            Some(&explicit),
+            false,
+            &Endpoints::default(),
+            || panic!("explicit token must precede environment discovery"),
+            |_| async { panic!("explicit token must precede gh discovery") },
+        )
+        .await;
+        assert_eq!(discovered.as_ref().map(GitHubToken::expose_secret), Some(explicit.expose_secret()));
+    }
+
+    #[test]
+    fn production_gh_resolution_returns_none_when_its_working_directory_was_removed() {
+        assert_eq!(
+            resolve_gh_with(
+                || Some(OsString::from("tools")),
+                || None,
+                || panic!("PATHEXT must not be read without a working directory")
+            ),
+            None
+        );
     }
 
     fn successful(stdout: &[u8]) -> GhCommandOutput {

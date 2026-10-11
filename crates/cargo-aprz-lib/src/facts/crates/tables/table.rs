@@ -124,17 +124,37 @@ fn finish_buffered_writer<W: Write>(writer: BufWriter<W>) -> Result<W> {
 }
 
 pub(super) fn map_table_file(file: &File, file_size: usize) -> Result<Mmap> {
-    let mut reader = file.try_clone().into_app_err("cloning table file handle")?;
+    map_table_file_with(
+        file.try_clone(),
+        file_size,
+        MmapOptions::new,
+        |options| {
+            options
+                .with_flags(MmapFlags::TRANSPARENT_HUGE_PAGES.union(MmapFlags::SEQUENTIAL))
+                .map_mut()
+        },
+        |mmap| mmap.make_read_only().map_err(|(_mmap, cause)| cause),
+    )
+}
+
+fn map_table_file_with<R, O, B, T, E>(
+    reader: std::io::Result<R>,
+    file_size: usize,
+    options: impl FnOnce(usize) -> std::result::Result<O, E>,
+    allocate: impl FnOnce(O) -> std::result::Result<B, E>,
+    protect: impl FnOnce(B) -> std::result::Result<T, E>,
+) -> Result<T>
+where
+    R: IoRead + Seek,
+    B: AsMut<[u8]>,
+    E: core::error::Error + Send + Sync + 'static,
+{
+    let mut reader = reader.into_app_err("cloning table file handle")?;
     let _ = reader.seek(SeekFrom::Start(0)).into_app_err("rewinding table file")?;
-    let mut mmap = MmapOptions::new(file_size)
-        .into_app_err("creating memory-map options")?
-        .with_flags(MmapFlags::TRANSPARENT_HUGE_PAGES.union(MmapFlags::SEQUENTIAL))
-        .map_mut()
-        .into_app_err("allocating table memory")?;
-    reader.read_exact(&mut mmap).into_app_err("reading table file")?;
-    mmap.make_read_only()
-        .map_err(|(_mmap, cause)| cause)
-        .into_app_err("protecting table memory")
+    let options = options(file_size).into_app_err("creating memory-map options")?;
+    let mut mmap = allocate(options).into_app_err("allocating table memory")?;
+    reader.read_exact(mmap.as_mut()).into_app_err("reading table file")?;
+    protect(mmap).into_app_err("protecting table memory")
 }
 
 fn finish_table_header(writer: &mut (impl Write + Seek), count: u64, timestamp: u64) -> Result<()> {
@@ -721,6 +741,10 @@ mod tests {
 
     #[test]
     fn table_content_writes_return_stage_contexts() {
+        let error = write_table_contents::<TestTable>(&mut FailingIo, &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("the initial placeholder write must be propagated by table construction");
+        assert!(format!("{error:#}").contains("writing table header placeholder"));
+
         let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(1), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
             .expect_err("writing the first row must fail");
         assert!(format!("{error:#}").contains("writing table row"));
@@ -742,5 +766,92 @@ mod tests {
 
         let error = finish_buffered_writer(writer).expect_err("flushing the buffered data must fail");
         assert!(format!("{error:#}").contains("flushing table data"));
+    }
+
+    #[test]
+    fn table_header_and_snapshot_errors_are_propagated_at_the_call_sites() {
+        let error = write_table_contents::<TestTable>(&mut Cursor::new(Vec::new()), &b"\xFF\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("invalid UTF-8 in the CSV header must be rejected");
+        assert!(format!("{error:#}").contains("reading CSV headers"), "{error:#}");
+
+        for (stage, expected, cause, kind) in [
+            (
+                0,
+                "creating memory-map options",
+                "scripted options failure",
+                std::io::ErrorKind::Other,
+            ),
+            (
+                1,
+                "allocating table memory",
+                "scripted allocation failure",
+                std::io::ErrorKind::Other,
+            ),
+            (
+                2,
+                "reading table file",
+                "failed to fill whole buffer",
+                std::io::ErrorKind::UnexpectedEof,
+            ),
+            (
+                3,
+                "protecting table memory",
+                "scripted protection failure",
+                std::io::ErrorKind::Other,
+            ),
+        ] {
+            let file_size = if stage == 3 { 2 } else { 3 };
+            let calls = std::cell::RefCell::new(Vec::new());
+            let error = map_table_file_with(
+                Ok(Cursor::new([1_u8, 2])),
+                file_size,
+                |size| {
+                    assert_eq!(size, file_size);
+                    calls.borrow_mut().push("options");
+                    if stage == 0 {
+                        Err(Error::other("scripted options failure"))
+                    } else {
+                        Ok(size)
+                    }
+                },
+                |size| {
+                    assert_ne!(stage, 0, "options failure must stop allocation");
+                    assert_eq!(size, file_size);
+                    calls.borrow_mut().push("allocate");
+                    if stage == 1 {
+                        Err(Error::other("scripted allocation failure"))
+                    } else {
+                        Ok(vec![0; size])
+                    }
+                },
+                |bytes| {
+                    assert_eq!(stage, 3, "earlier failure must stop protection");
+                    assert_eq!(bytes, [1, 2]);
+                    calls.borrow_mut().push("protect");
+                    Err::<(), _>(Error::other("scripted protection failure"))
+                },
+            )
+            .expect_err("the selected snapshot stage must fail");
+            assert_eq!(error.message(), cause);
+            assert_eq!(
+                error.find_source::<Error>().expect("the scripted IO error is retained").kind(),
+                kind
+            );
+            let display = error.to_string();
+            let context = display.lines().nth(1).expect("the error carries its stage context");
+            let (context, _location) = context
+                .split_once(" (at ")
+                .expect("ohno annotates context with its source location");
+            assert_eq!(context, format!("> {expected}"));
+            assert_eq!(
+                calls.into_inner(),
+                match stage {
+                    0 => vec!["options"],
+                    1 | 2 => vec!["options", "allocate"],
+                    3 => vec!["options", "allocate", "protect"],
+                    _ => unreachable!(),
+                }
+            );
+        }
     }
 }

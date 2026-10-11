@@ -91,6 +91,49 @@ fn a_directive_only_suppresses_the_mutators_it_names() {
 }
 
 #[test]
+fn condition_resource_directives_leave_nested_and_sibling_gaps_mutable() {
+    let source = r#"fn f(left: bool, right: bool, nested: bool) {
+    if
+    // #[gamma::skip(cond.always_false, cond.negate, logical.or_remove_right, logical.or_to_and, tag = "timeout", reason = "bounded campaign failure")]
+    !left ||
+        // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "bounded campaign failure")]
+        !right
+    {
+        if !nested { sink(); }
+    }
+}"#;
+    let (parsed, mut mutants) = mutants_of(
+        source,
+        "cond.always_false,cond.negate,logical.or_remove_right,logical.or_to_and,unary.remove_not",
+    );
+    let found = directives(&parsed).expect("the two condition directives use supported selectors and tags");
+    assert_eq!(found.len(), 2);
+    let _ = suppress(&mut mutants, &found);
+    for mutant in &mutants {
+        let original = &*mutant.original;
+        let ignored = original.contains("||") || original == "!right";
+        assert_eq!(
+            mutant.outcome,
+            if ignored { Outcome::Ignored } else { Outcome::Pending },
+            "{}: {original}",
+            mutant.mutator
+        );
+    }
+    for (original, outcome) in [
+        ("!left", Outcome::Pending),
+        ("!right", Outcome::Ignored),
+        ("!nested", Outcome::Pending),
+    ] {
+        assert!(
+            mutants
+                .iter()
+                .any(|mutant| &*mutant.original == original && mutant.outcome == outcome),
+            "{original} must retain its independently scoped outcome"
+        );
+    }
+}
+
+#[test]
 fn the_reason_reaches_the_suppressed_mutant() {
     let source = "// #[gamma::skip(arith, reason = \"why not\")]\nfn f(a: i32) -> i32 { a + 1 }";
     let (parsed, mut mutants) = mutants_of(source, "arith");

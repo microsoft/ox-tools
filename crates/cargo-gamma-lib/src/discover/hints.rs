@@ -978,6 +978,7 @@ impl From<&Hints> for GroupedHints {
             let path = hints.mutants[start].file.clone();
             let end = hints.mutants[start..]
                 .iter()
+                // #[gamma::skip(relational.ne_to_eq, tag = "outofmemory", reason = "matching the first equal path produces an empty group and repeatedly allocates without advancing start")]
                 .position(|hint| hint.file != path)
                 .map_or(hints.mutants.len(), |offset| start + offset);
             let group = &hints.mutants[start..end];
@@ -1070,7 +1071,9 @@ fn reach_entries(generalized: &GeneralizedHints) -> Vec<(super::record::SiteIden
         .into_iter()
         .flat_map(|hints| &hints.reach)
         .filter_map(|cluster| {
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "supported already checked that every cluster index converts to usize successfully")]
             let index = usize::try_from(cluster.test_set).ok()?;
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "supported already checked every cluster index is smaller than test_sets length")]
             Some((cluster.site.clone(), generalized.test_sets.get(index)?.clone()))
         })
         .collect()
@@ -1307,6 +1310,164 @@ mod tests {
 
         assert!(Hints::load(&root).is_empty());
         assert!(Hints::is_missing(&root));
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "the table exercises accounting across all hint tiers together")]
+    fn change_accounting_matrix_distinguishes_preserved_added_updated_and_removed_tiers() {
+        let mut first = Hints {
+            mutants: vec![Hint {
+                file: "a.rs".into(),
+                id: "exact".into(),
+                killer: Some(killer("old")),
+                unviable: false,
+            }],
+            generalized: GeneralizedHints::empty_supported(),
+            ..Hints::default()
+        };
+        first.generalized.items = vec![record::ItemHints {
+            file: "a.rs".into(),
+            item: "old".to_owned(),
+            candidates: Vec::new(),
+        }];
+        first.generalized.binaries = vec![record::FileBinaryHints {
+            file: "a.rs".into(),
+            candidates: Vec::new(),
+        }];
+        let site = record::SiteIdentity::from_mutant(&mutant("exact", "a.rs"));
+        first.generalized.reach = vec![record::ReachCluster { site, test_set: 0 }];
+        first.generalized.test_sets = vec![vec![killer("old")]];
+        assert_eq!(
+            first.changes_from(&first),
+            HintChanges {
+                preserved: 4,
+                ..HintChanges::default()
+            }
+        );
+        assert_eq!(
+            Hints::default().changes_from(&first),
+            HintChanges {
+                removed: 4,
+                ..HintChanges::default()
+            }
+        );
+        assert_eq!(
+            first.changes_from(&Hints::default()),
+            HintChanges {
+                added: 4,
+                ..HintChanges::default()
+            }
+        );
+        let mut changed = first.clone();
+        changed.mutants[0].killer = Some(killer("new"));
+        assert_eq!(
+            changed.changes_from(&first),
+            HintChanges {
+                updated: 1,
+                preserved: 3,
+                ..HintChanges::default()
+            }
+        );
+        changed = first.clone();
+        changed.generalized.items[0].item = "new".to_owned();
+        assert_eq!(
+            changed.changes_from(&first),
+            HintChanges {
+                added: 1,
+                removed: 1,
+                preserved: 3,
+                ..HintChanges::default()
+            }
+        );
+        changed = first.clone();
+        changed.generalized.binaries[0].file = "new.rs".into();
+        assert_eq!(
+            changed.changes_from(&first),
+            HintChanges {
+                added: 1,
+                removed: 1,
+                preserved: 3,
+                ..HintChanges::default()
+            }
+        );
+        changed = first.clone();
+        changed.generalized.test_sets[0] = vec![killer("new")];
+        assert_eq!(
+            changed.changes_from(&first),
+            HintChanges {
+                updated: 1,
+                preserved: 3,
+                ..HintChanges::default()
+            }
+        );
+        changed = first.clone();
+        changed.generalized.reach[0].site.file = "new.rs".into();
+        assert_eq!(
+            changed.changes_from(&first),
+            HintChanges {
+                added: 1,
+                removed: 1,
+                preserved: 3,
+                ..HintChanges::default()
+            }
+        );
+        changed = first.clone();
+        changed.generalized.test_sets.insert(0, vec![killer("unused")]);
+        changed.generalized.reach[0].test_set = 1;
+        assert_eq!(
+            changed.changes_from(&first),
+            HintChanges {
+                preserved: 4,
+                ..HintChanges::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rebuilding_reach_canonicalizes_duplicates_and_stable_pool_indices() {
+        let mut first = record::SiteIdentity::from_mutant(&mutant("first", "a.rs"));
+        first.occurrence = 1;
+        let mut second = first.clone();
+        second.file = "b.rs".into();
+        let third = record::SiteIdentity {
+            file: "c.rs".into(),
+            ..second.clone()
+        };
+        let mut generalized = GeneralizedHints::empty_supported();
+        rebuild_reach(
+            &mut generalized,
+            vec![
+                (third.clone(), vec![killer("alpha")]),
+                (second.clone(), vec![killer("zeta"), killer("alpha"), killer("zeta")]),
+                (first.clone(), vec![killer("zeta"), killer("alpha")]),
+                (first.clone(), vec![killer("alpha"), killer("zeta")]),
+            ],
+        );
+        assert_eq!(
+            generalized.test_sets,
+            [vec![killer("alpha")], vec![killer("alpha"), killer("zeta")]]
+        );
+        assert_eq!(
+            generalized.reach,
+            [
+                record::ReachCluster { site: first, test_set: 1 },
+                record::ReachCluster { site: second, test_set: 1 },
+                record::ReachCluster { site: third, test_set: 0 },
+            ]
+        );
+        let entries = reach_entries(&generalized);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].1, [killer("alpha"), killer("zeta")]);
+        generalized.reach.push(record::ReachCluster {
+            site: entries[0].0.clone(),
+            test_set: u32::MAX,
+        });
+        assert!(
+            reach_entries(&generalized).is_empty(),
+            "an invalid pool index rejects the entire generalized schema"
+        );
+        generalized.version = record::GENERALIZED_HINTS_VERSION + 1;
+        assert!(reach_entries(&generalized).is_empty());
     }
 
     /// A file that cannot be parsed must cost the run nothing but the speed-up it would have given.

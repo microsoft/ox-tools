@@ -30,7 +30,7 @@ use super::test_binary::{
 use super::workspace::{Workspace, campaign_base};
 use crate::discover::{CompileFailTarget, LibraryTestTarget, Plan, Survey, compile_fail_advice};
 use crate::error::error;
-use crate::model::Outcome;
+use crate::model::{Mutant, Outcome};
 use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet, Result};
 
@@ -49,10 +49,14 @@ const GROUP_LIMIT: usize = 5;
 pub fn run(survey: &Survey, selection: &Selection, config: &Config, events: &mut impl Events) -> Result<Measured> {
     let mut failed = FailedMeasurement::default();
 
-    run_with_locks(survey, selection, config, events, None, &mut failed)
+    run_with_locks(survey, selection, config, events, None, &mut failed, None)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "prepared testing, census and checkpoint publication share the measured campaign state"
+)]
 pub(crate) fn run_with_locks(
     survey: &Survey,
     selection: &Selection,
@@ -60,6 +64,7 @@ pub(crate) fn run_with_locks(
     events: &mut impl Events,
     locks: Option<super::workspace::CacheLocks>,
     failed: &mut FailedMeasurement,
+    record: Option<&super::testing_state::RecordPreparation>,
 ) -> Result<Measured> {
     let Measured {
         mut plan,
@@ -120,7 +125,7 @@ pub(crate) fn run_with_locks(
     let census_requested = census_is_worthwhile(config.optimize_test_execution, narrowed, &census_targets, maximum_census_savings);
     let census_started = Instant::now();
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    let census = if census_requested {
+    let mut census = if census_requested {
         census::take(
             &built.work,
             &built.session.binaries,
@@ -156,6 +161,28 @@ pub(crate) fn run_with_locks(
         }
     }
 
+    if let Some(record) = record {
+        let state = super::testing_state::TestingState::start(
+            &plan,
+            &built,
+            census,
+            killers,
+            super::testing_state::TestingSettings {
+                jobs: config.jobs,
+                mutators: Some(selection.sorted().join(",")),
+                timeout_floor: config.timeout_floor,
+                confirm: config.confirm,
+                narrowed,
+                incremental,
+            },
+            record,
+            (&stuck, &dropped),
+        )?;
+        census = state.census;
+        killers = state.killers;
+        built.work.arm_testing_journal()?;
+    }
+
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     announce_measurement(events, &plan, &built.session);
 
@@ -187,6 +214,7 @@ pub(crate) fn run_with_locks(
     // that happened to cost nothing, which is what [`Phases::sweep`] documents its `Option` to mean.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     built.session.phases.sweep = sweep_cost(spent, sweep_elapsed);
+    built.work.complete_testing()?;
 
     Ok(Measured {
         plan,
@@ -194,6 +222,59 @@ pub(crate) fn run_with_locks(
         stuck,
         dropped,
         learning: Some(killers),
+    })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn resume_testing(
+    mut state: super::testing_state::TestingState,
+    mut workspace: Workspace,
+    events: &mut impl Events,
+) -> Result<Measured> {
+    let scope = state.oracle.scope();
+    workspace.retain_sweep_cost(state.session.phases.sweep.clone());
+    events.sweep_planning(&state.plan, state.session.binaries.len(), state.settings.jobs);
+    let reach = Reachability::build(&state.plan, &state.session.binaries, &scope);
+    announce_measurement(events, &state.plan, &state.session);
+    let started = Instant::now();
+    let sweep = Sweep {
+        timeout_floor: state.settings.timeout_floor,
+        stall: Stall {
+            budget: state.session.stall,
+        },
+        jobs: state.settings.jobs,
+        meter: state.session.metered,
+        confirm: state.settings.confirm,
+        census: &state.census,
+    };
+    let swept = test_all(
+        &workspace,
+        &mut state.plan,
+        &reach,
+        sweep,
+        state.settings.narrowed,
+        &mut state.killers,
+        events,
+    );
+    let spent = match swept {
+        Ok(spent) => spent,
+        Err(failure) => {
+            store_incomplete_learning(state.settings.incremental, &state.killers, &state.record.base, &state.plan.mutants);
+            return Err(failure);
+        }
+    };
+    state.session.phases.sweep = SweepCost::combine(state.session.phases.sweep, sweep_cost(spent, started.elapsed()));
+    workspace.complete_testing()?;
+    Ok(Measured {
+        plan: state.plan,
+        built: Some(Built {
+            work: workspace,
+            session: state.session,
+            oracle: state.oracle,
+        }),
+        learning: Some(state.killers),
+        stuck: state.stuck,
+        dropped: state.dropped,
     })
 }
 
@@ -327,7 +408,7 @@ fn census_status(enabled: bool, admitted: bool, census: &Census, candidates: usi
     }
 }
 
-fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<SweepCost> {
+pub(super) fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<SweepCost> {
     let spent = spent?;
 
     Some(SweepCost {
@@ -413,6 +494,7 @@ fn store_learning(killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::
 
 fn store_incomplete_learning(incremental: bool, killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::model::Mutant]) {
     if incremental {
+        // #[gamma::skip(call_result.default, reason = "store_learning returns unit and this mutator retains its cache publication effects before replacing unit with unit")]
         store_learning(killers, base, mutants);
     }
 }
@@ -514,7 +596,7 @@ fn session_before_sweep(baseline: Baseline, build: Build, work: &Workspace, cont
 }
 
 /// The packages whose tests decide verdicts, owned so a later phase can borrow it back.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Oracle {
     /// The `--test-package` restriction, empty when nothing is restricted.
     pub packages: Vec<String>,
@@ -719,13 +801,13 @@ pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: 
     measure_with_locks(survey, selection, config, events, None, &mut failed)
 }
 
-fn validate_test_oracle(survey: &Survey, config: &Config) -> Result<()> {
+fn validate_test_oracle(tests: &[String], libraries: &[LibraryTestTarget], selected: &[String], config: &Config) -> Result<()> {
     let library_tests;
     let declared_tests = if config.test_lib {
-        library_tests = admitted_library_tests(&survey.library_tests, &survey.selected, config);
-        &library_tests
+        library_tests = admitted_library_tests(libraries, selected, config);
+        library_tests.as_slice()
     } else {
-        &survey.tests
+        tests
     };
     if let Some(pattern) = unmatched_test(declared_tests, &config.include_tests, &config.exclude_tests) {
         return Err(error!("no test target matches `{pattern}`; patterns match cargo target names, not test function names").usage());
@@ -774,7 +856,7 @@ fn measure_with_locks(
     // Checked against what the workspace declares, before anything is copied or compiled. A typo
     // here changes which tests get to convict a mutant, so it should cost a second rather than a
     // full instrumented build.
-    validate_test_oracle(survey, config)?;
+    validate_test_oracle(&survey.tests, &survey.library_tests, &survey.selected, config)?;
 
     // Said before the tree is copied, let alone built. A compile-fail target is expensive per
     // mutant rather than once, so by the time its cost is visible in the progress display the run
@@ -873,21 +955,8 @@ fn measure_with_locks(
         });
     }
 
-    let unviable = plan
-        .mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::CompileError)
-        .count();
-    let viable = plan
-        .mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
-        .count();
-    let not_built = plan
-        .mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::NotBuilt)
-        .count();
+    let (unviable, viable, not_built) = schema_build_counts(&plan.mutants);
+    // #[gamma::skip(call_result.default, reason = "finish_schema_build returns unit and this mutator retains the completion event before replacing unit with unit")]
     finish_schema_build(events, unviable, viable, not_built);
 
     // Before the baseline, so the shares `apportion` computes describe the suite that will actually
@@ -1243,6 +1312,22 @@ fn finish_population(events: &mut impl Events, mutants: usize) {
     events.end(&detail);
 }
 
+fn schema_build_counts(mutants: &[Mutant]) -> (usize, usize, usize) {
+    let unviable = mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::CompileError)
+        .count();
+    let viable = mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+        .count();
+    let not_built = mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::NotBuilt)
+        .count();
+    (unviable, viable, not_built)
+}
+
 fn begin_schema_build(events: &mut impl Events) {
     events.begin("Excluding", "Excluded", "unviable mutants");
 }
@@ -1563,8 +1648,284 @@ mod tests {
     use crate::discover::{Killer, ReachCluster, SiteIdentity, TargetFile};
     use crate::exec::memory::{Demand, MemoryControl};
     use crate::fixtures;
-    use crate::model::Mutant;
     use crate::testing::Recorder;
+
+    #[test]
+    fn oracle_scope_and_library_admission_truth_tables_preserve_package_ownership() {
+        let tests = [
+            LibraryTestTarget {
+                package: "alpha".to_owned(),
+                target: "zeta".to_owned(),
+            },
+            LibraryTestTarget {
+                package: "alpha".to_owned(),
+                target: "alpha".to_owned(),
+            },
+            LibraryTestTarget {
+                package: "beta".to_owned(),
+                target: "beta".to_owned(),
+            },
+            LibraryTestTarget {
+                package: "beta".to_owned(),
+                target: "alpha".to_owned(),
+            },
+        ];
+        for package_local in [false, true] {
+            for whole_workspace in [false, true] {
+                let oracle = Oracle::new(vec!["selected".to_owned()], package_local, whole_workspace);
+                let scope = oracle.scope();
+                assert_eq!(scope.packages, ["selected"]);
+                assert_eq!(scope.package_local, package_local);
+                assert_eq!(scope.whole_workspace, whole_workspace);
+            }
+        }
+        for workspace in [false, true] {
+            for requested in [Vec::new(), vec!["beta".to_owned()]] {
+                let config = Config {
+                    test_workspace: workspace,
+                    test_packages: requested.clone(),
+                    ..Config::default()
+                };
+                let targets = admitted_library_tests(&tests, &["alpha".to_owned()], &config);
+                assert_eq!(
+                    targets,
+                    if workspace {
+                        vec!["alpha".to_owned(), "beta".to_owned(), "zeta".to_owned()]
+                    } else if requested.is_empty() {
+                        vec!["alpha".to_owned(), "zeta".to_owned()]
+                    } else {
+                        vec!["alpha".to_owned(), "beta".to_owned()]
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_validation_matrix_distinguishes_library_targets_patterns_and_empty_oracles() {
+        let tests = vec!["integration".to_owned()];
+        let libraries = [LibraryTestTarget {
+            package: "selected".to_owned(),
+            target: "library".to_owned(),
+        }];
+        let selected = ["selected".to_owned()];
+        for test_lib in [false, true] {
+            let valid = if test_lib { "library" } else { "integration" };
+            let invalid = if test_lib { "integration" } else { "library" };
+            let config = Config {
+                test_lib,
+                include_tests: vec![valid.to_owned()],
+                ..Config::default()
+            };
+            validate_test_oracle(&tests, &libraries, &selected, &config).unwrap();
+            let config = Config {
+                test_lib,
+                include_tests: vec![invalid.to_owned()],
+                ..Config::default()
+            };
+            let failure =
+                validate_test_oracle(&tests, &libraries, &selected, &config).expect_err("pattern names a target outside this oracle");
+            assert_eq!(
+                failure.to_string(),
+                format!("no test target matches `{invalid}`; patterns match cargo target names, not test function names")
+            );
+            assert!(failure.is_usage());
+        }
+        validate_test_oracle(&[], &[], &selected, &Config::default()).unwrap();
+        let config = Config {
+            test_lib: true,
+            ..Config::default()
+        };
+        let failure = validate_test_oracle(&tests, &[], &selected, &config).expect_err("library oracle has no targets");
+        assert_eq!(
+            failure.to_string(),
+            "`--test-lib` selected no runnable library unit-test harness; ensure an oracle package has a library target with `test = true`"
+        );
+        assert!(failure.is_usage());
+        validate_test_oracle(&tests, &libraries, &selected, &config).unwrap();
+    }
+
+    #[test]
+    fn preflight_retreat_uses_checked_packages_only_for_unrestricted_requests() {
+        let checked = vec!["checked".to_owned(), "helper".to_owned()];
+        for whole_workspace in [false, true] {
+            let cleared = finish_preflight(Vec::new(), checked.clone(), whole_workspace, vec!["broken".to_owned()])
+                .expect("unrestricted retreat names checked packages");
+            assert_eq!(cleared.packages, checked);
+            assert_eq!(cleared.whole_workspace, whole_workspace);
+            assert_eq!(cleared.dropped, ["broken"]);
+            let cleared = finish_preflight(
+                vec!["requested".to_owned(), "broken".to_owned()],
+                checked.clone(),
+                whole_workspace,
+                vec!["broken".to_owned()],
+            )
+            .expect("restricted retreat subtracts only");
+            assert_eq!(cleared.packages, ["requested"]);
+        }
+        let failure = narrowed_oracle(vec!["broken".to_owned()], checked, &["broken".to_owned(), "other".to_owned()])
+            .expect_err("no requested oracle remains");
+        assert_eq!(
+            failure.to_string(),
+            "none of the packages this run's tests would come from could be compiled: `broken`, `other`.\nFix the build there, or name a package that does build with --test-package."
+        );
+    }
+
+    #[test]
+    fn schema_progress_reports_zero_singular_and_plural_unbuilt_populations_exactly() {
+        for (not_built, expected) in [
+            (0, "2 unviable mutants, leaving 7 viable mutants"),
+            (1, "2 unviable mutants; 1 mutant could not be built; 7 are viable"),
+            (2, "2 unviable mutants; 2 mutants could not be built; 7 are viable"),
+        ] {
+            let mut events = Recorder::default();
+            begin_schema_build(&mut events);
+            finish_schema_build(&mut events, 2, 7, not_built);
+            assert_eq!(
+                events.phases,
+                [
+                    ("Excluding".to_owned(), "unviable mutants".to_owned()),
+                    (String::new(), expected.to_owned()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn schema_population_counts_require_live_ordinals_and_exact_outcome_classes() {
+        let fixture = oracle_plan("core").mutants.remove(0);
+        let mut population = Vec::new();
+        for outcome in Outcome::ALL {
+            for ordinal in 0..=2 {
+                let mutant = Mutant {
+                    ordinal,
+                    outcome,
+                    ..fixture.clone()
+                };
+                let expected = if ordinal == 0 {
+                    (0, 0, 0)
+                } else {
+                    match outcome {
+                        Outcome::CompileError => (1, 0, 0),
+                        Outcome::Pending => (0, 1, 0),
+                        Outcome::NotBuilt => (0, 0, 1),
+                        _ => (0, 0, 0),
+                    }
+                };
+                assert_eq!(
+                    schema_build_counts(core::slice::from_ref(&mutant)),
+                    expected,
+                    "{outcome:?}/{ordinal}"
+                );
+                population.push(mutant);
+            }
+        }
+        assert_eq!(schema_build_counts(&population), (2, 2, 2));
+        assert_eq!(schema_build_counts(&[]), (0, 0, 0));
+    }
+
+    #[test]
+    fn session_construction_carries_stall_and_metering_without_rederiving_measurements() {
+        let (_dir, work) = crate::testing::helper_workspace("measure-session-contract-", &["exit:0"]);
+        for metered in [false, true] {
+            for stall in [None, Some(Duration::from_secs(23))] {
+                let baseline = Baseline {
+                    elapsed: Duration::from_secs(2),
+                    wall: Duration::from_secs(3),
+                    quiet: Duration::from_secs(4),
+                    tests: Some(5),
+                    peak: Some(6),
+                };
+                let build = Build {
+                    history: Vec::new(),
+                    binaries: vec![crate::testing::test_binary("subject")],
+                    artifacts: String::new(),
+                    withdrawn: 7,
+                    rounds: 8,
+                    widened: true,
+                    census: Vec::new(),
+                    stuck: None,
+                    ordering: super::super::build::OrderingHints::default(),
+                };
+                let context = SessionContext {
+                    build: Duration::from_secs(9),
+                    metered,
+                    unbounded: Some("fixture policy".to_owned()),
+                    filtered: 10,
+                    copy: Duration::from_secs(11),
+                    preflight: Duration::from_secs(12),
+                };
+                let session = session_before_sweep(baseline, build, &work, context, stall);
+                assert_eq!(session.stall, stall);
+                assert_eq!(session.metered, metered);
+                assert_eq!(session.baseline, Duration::from_secs(2));
+                assert_eq!(session.baseline_wall, Duration::from_secs(3));
+                assert_eq!(session.quiet, Duration::from_secs(4));
+                assert_eq!(session.tests, Some(5));
+                assert_eq!(session.peak, Some(6));
+                assert_eq!(session.withdrawn, 7);
+                assert_eq!(session.rounds, 8);
+                assert!(session.widened);
+                assert_eq!(session.build, Duration::from_secs(9));
+                assert_eq!(session.filtered, 10);
+                assert_eq!(session.unbounded.as_deref(), Some("fixture policy"));
+                assert_eq!(session.scratch.as_path(), work.base());
+                assert_eq!(session.binaries.len(), 1);
+                assert_eq!(session.binaries[0].path.as_str(), "subject");
+                assert_eq!(session.phases.copy, Duration::from_secs(11));
+                assert_eq!(session.phases.preflight, Duration::from_secs(12));
+                assert!(session.phases.census.is_none());
+                assert!(session.phases.sweep.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn census_learning_installs_complete_and_partial_evidence_only_when_requested() {
+        let plan = oracle_plan("core");
+        let mut binary = oracle_binary("core", Some(4));
+        binary.baseline = Duration::from_secs(1);
+        for requested in [false, true] {
+            for complete in [false, true] {
+                let census = if complete {
+                    Census::examined(&binary.path, 1, 1, 4)
+                } else {
+                    Census::partial(&binary.path, 1, 1, 4)
+                };
+                let mut generalized = crate::discover::GeneralizedHints::empty_supported();
+                let changed = persist_census_learning(requested, &census, &plan, core::slice::from_ref(&binary), &mut generalized);
+                assert_eq!(changed, requested);
+                assert_eq!(generalized.reach.is_empty(), !requested);
+                if requested {
+                    assert_eq!(generalized.reach.len(), 1);
+                    assert_eq!(generalized.reach[0].site, SiteIdentity::from_mutant(&plan.mutants[0]));
+                    assert_eq!(generalized.test_sets.len(), 1);
+                    assert_eq!(generalized.test_sets[0].len(), 1);
+                    assert_eq!(generalized.test_sets[0][0].package, "core");
+                    let mut killers = Killers::default();
+                    install_census_learning(&mut killers, generalized.clone());
+                    assert_eq!(killers.generalized(), &generalized);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn synchronized_source_read_failures_remain_errors_instead_of_panics() {
+        let (_dir, work) = crate::testing::helper_workspace("measure-source-errors-", &["exit:0"]);
+        for path in ["missing.rs", "directory"] {
+            if path == "directory" {
+                fs::create_dir(work.root.join(path)).expect("directory read failure fixture");
+            }
+            let digests = std::iter::once((Utf8PathBuf::from(path), "unused".to_owned())).collect();
+            let failure = validate_synchronized_sources(&work, &digests).expect_err("unreadable synchronized source");
+            assert!(
+                failure
+                    .to_string()
+                    .contains(&format!("could not validate synchronized source `{path}`"))
+            );
+        }
+    }
 
     #[test]
     fn library_oracle_validation_keeps_package_and_target_associated() {

@@ -20,7 +20,7 @@ use super::owner::Owner;
 use super::owner_kind::OwnerKind as PublicOwnerKind;
 use super::tables::{
     CategoriesTableIndex, CategoryId, CrateId, CratesTableIndex, KeywordId, KeywordsTableIndex, OwnerKind as TableOwnerKind, Table,
-    TableMgr, TeamId, TeamsTableIndex, UserId, UsersTableIndex, VersionId, VersionsTableIndex,
+    TableMgr, TeamId, TeamsTableIndex, UserId, UsersTableIndex, VersionDownloadRow, VersionId, VersionsTableIndex,
 };
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::progress::Progress;
@@ -76,6 +76,7 @@ type LookupTables = (
     HashMap<TeamId, TeamsTableIndex>,
 );
 
+// #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "the campaign discarded the mock dump URL in this parser and attempted the production crates.io download for eighteen minutes")]
 fn parse_dump_url(dump_url: Option<&str>) -> Result<Url> {
     Ok(Url::parse(dump_url.unwrap_or(DEFAULT_DUMP_URL))?)
 }
@@ -202,6 +203,7 @@ impl Provider {
             self.phase7_collect_downloads(&mut crate_data, &version_ids, &all_version_to_crate);
 
         // Phase 8: Count dependents
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "count_dependents returns unit and still populates every dependent count before unit is replaced with unit")]
         count_dependents(&mut crate_data, &crate_to_dependent_versions, &version_id_to_crate_id);
 
         let results: Vec<_> = requested
@@ -270,7 +272,9 @@ impl Provider {
         let (normalized_requested, mut suggestions_map): (
             HashMap<CompactString, CompactString>,
             HashMap<CompactString, [Option<(CompactString, f64)>; MAX_NAME_SUGGESTIONS]>,
-        ) = if suggestions {
+        ) = if
+        // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "when suggestions are disabled the later candidate and extraction branches ignore these maps, so building them cannot change query results")]
+        suggestions {
             let normalized: HashMap<_, _> = requested_names
                 .iter()
                 .filter(|name| name.len() >= MIN_SUGGESTABLE_LEN)
@@ -290,9 +294,10 @@ impl Provider {
 
         let mut remaining = requested_names.len();
 
-        // #[gamma::skip(cond.always_true, reason = "scanning with no requested names rejects every row and produces the same empty maps; this guard is only a fast path")]
         let should_scan = !requested_names.is_empty();
-        if should_scan {
+        if
+        // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "when there are no requested names the suggestion maps are also empty and every scanned row is rejected, leaving all returned maps empty")]
+        should_scan {
             for (row, index) in self.table_mgr.crates_table().iter() {
                 if requested_names.contains(row.name) {
                     // Exact match found
@@ -320,7 +325,9 @@ impl Provider {
                     if remaining == 0 {
                         break;
                     }
-                } else if suggestions {
+                } else if
+                // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "when suggestions are disabled suggestions_map is empty, so this branch only normalizes a name and its candidate loop does no work")]
+                suggestions {
                     // Check for similar names using Damerau-Levenshtein on normalized names
                     normalize_name_into(row.name, &mut normalized_buffer);
 
@@ -329,6 +336,7 @@ impl Provider {
                         let score = normalized_damerau_levenshtein(normalized_requested, &normalized_buffer);
                         if score >= MIN_SUGGESTION_SCORE {
                             // Find the lowest score in the array (or first empty slot)
+                            // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "an empty slot leaves min_score infinite and the index unused; a full array always overwrites min_idx with the first finite score before replacement")]
                             let mut min_idx = 0;
                             let mut min_score = f64::INFINITY;
 
@@ -359,7 +367,9 @@ impl Provider {
         }
 
         // Extract just the names, sorted by score (only if suggestions enabled)
-        let final_suggestions: HashMap<CompactString, Vec<CompactString>> = if suggestions {
+        let final_suggestions: HashMap<CompactString, Vec<CompactString>> = if
+        // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "when suggestions are disabled suggestions_map is empty and collecting it returns the same empty map as the false branch")]
+        suggestions {
             suggestions_map
                 .into_iter()
                 .map(|(name, top3)| {
@@ -395,7 +405,9 @@ impl Provider {
         requested: &[CrateRef],
         crate_name_to_id: &HashMap<CompactString, CrateId>,
     ) -> (HashMap<CrateId, HashMap<SemverVersion, CrateRef>>, HashMap<CrateId, CrateRef>) {
+        // #[gamma::skip(expr.increment, tag = "equivalent", reason = "reserving one extra slot changes allocation only; version requirement entries are unchanged")]
         let mut needed_versions = hash_map_with_capacity(requested.len());
+        // #[gamma::skip(expr.increment, tag = "equivalent", reason = "reserving one extra slot changes allocation only; latest-version request entries are unchanged")]
         let mut need_latest_version = hash_map_with_capacity(requested.len());
 
         for crate_ref in requested {
@@ -859,6 +871,25 @@ impl Provider {
             return (HashMap::default(), HashMap::default());
         }
 
+        self.aggregate_monthly_rows(
+            self.table_mgr.version_downloads_table().iter().map(|(row, _)| row),
+            version_ids,
+            all_version_to_crate,
+            crate_data,
+        )
+    }
+
+    #[expect(
+        clippy::type_complexity,
+        reason = "the two maps distinguish requested-version downloads from all crate downloads"
+    )]
+    fn aggregate_monthly_rows(
+        &self,
+        rows: impl IntoIterator<Item = VersionDownloadRow>,
+        version_ids: &HashSet<VersionId>,
+        all_version_to_crate: &HashMap<VersionId, CrateId>,
+        crate_data: &HashMap<CrateId, PerCrateData>,
+    ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
         let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(version_ids.len());
         let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(crate_data.len());
 
@@ -871,7 +902,7 @@ impl Provider {
 
         // Rows keep their date encoded so the two rejection tests below are plain integer and
         // hash comparisons. Only rows that pass both pay for the date conversion.
-        for (row, _) in self.table_mgr.version_downloads_table().iter() {
+        for row in rows {
             if row.date < cutoff_days {
                 continue;
             }
@@ -1047,6 +1078,7 @@ fn missing_crate_spec(crate_ref: &CrateRef) -> CrateSpec {
 /// Normalize a crate name for similarity matching by converting to lowercase and removing separators.
 fn normalize_name_into(name: &str, buffer: &mut CompactString) {
     buffer.clear();
+    // #[gamma::skip(stmt.delete_call, tag = "equivalent", reason = "CompactString grows during push as needed, so removing reserve does not change the normalized bytes")]
     buffer.reserve(name.len());
     for byte in name.bytes() {
         if byte == b'-' || byte == b'_' || byte == b' ' {
@@ -1104,7 +1136,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{PerCrateData, Provider, count_dependents, missing_crate_spec, monthly_btree_to_vec, normalize_name};
+    use super::{PerCrateData, Provider, VersionDownloadRow, count_dependents, missing_crate_spec, monthly_btree_to_vec, normalize_name};
     use crate::facts::crates::tables::{CategoryId, CrateId, CratesTableIndex, KeywordId, OwnerKind as TableOwnerKind, UserId, VersionId};
     use crate::facts::{CrateRef, Progress, ProviderResult};
     use crate::{HashMap, HashSet};
@@ -1573,6 +1605,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn database_timestamp_matches_the_downloaded_table_header() {
+        let now = DateTime::from_timestamp(1_704_067_200, 0).unwrap();
+        let provider = provider_from_dump(now).await;
+        assert_eq!(provider.table_mgr.created_at(), now);
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn progress_distinguishes_single_and_multiple_crate_queries() {
         let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
@@ -1827,6 +1866,42 @@ mod tests {
         assert_eq!(versions.keys().copied().collect::<Vec<_>>(), [VersionId(103)]);
         assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 102);
         assert_eq!(crates[&CrateId(10)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 179);
+
+        let version_ids = HashSet::from_iter([VersionId(103), VersionId(203)]);
+        let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10)), (VersionId(203), CrateId(20))]);
+        let crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data()), (CrateId(20), empty_per_crate_data())]);
+        let (versions, crates) = provider.aggregate_all_monthly_downloads(&version_ids, &all_versions, &crate_data);
+        assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 102);
+        assert_eq!(versions[&VersionId(203)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 34);
+        assert_eq!(crates[&CrateId(20)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 34);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+    async fn monthly_aggregation_skips_corrupt_dates_without_losing_later_rows() {
+        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let provider = provider_from_dump(now).await;
+        let valid_date = u64::try_from(now.date_naive().to_epoch_days()).unwrap();
+        let ids = HashSet::from_iter([VersionId(103)]);
+        let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10))]);
+        let crates = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
+        for date in [u64::MAX, i32::MAX as u64] {
+            let rows = [
+                VersionDownloadRow {
+                    version_id: VersionId(103),
+                    downloads: 999,
+                    date,
+                },
+                VersionDownloadRow {
+                    version_id: VersionId(103),
+                    downloads: 42,
+                    date: valid_date,
+                },
+            ];
+            let (versions, crate_totals) = provider.aggregate_monthly_rows(rows, &ids, &all_versions, &crates);
+            assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
+            assert_eq!(crate_totals[&CrateId(10)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
+        }
     }
 
     #[test]

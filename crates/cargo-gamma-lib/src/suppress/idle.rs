@@ -10,7 +10,7 @@ use crate::model::Mutant;
 use crate::ops::registry::Selection;
 
 /// One skip directive that suppressed nothing, located well enough to go and look at it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Idle {
     /// The file it sits in, relative to the workspace root.
     pub file: Utf8PathBuf,

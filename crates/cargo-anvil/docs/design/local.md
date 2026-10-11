@@ -658,6 +658,15 @@ moves, and the working-tree snapshot only when the tree changes; an unchanged re
 a full cache hit (`anvil-impact: impact set up to date`). To force a recompute, delete
 `target/anvil/impact/`.
 
+Each baseline worktree uses a fresh unique scratch path, so abandoned directories
+cannot collide with reused process IDs. Creation failures include Git's diagnostic
+output; cleanup removes only the worktree created by that invocation, including
+its registration and any partial directory left by a failed checkout. Cleanup
+failures are accumulated and reported after all cleanup steps have been attempted,
+rather than silently abandoning scratch state. If baseline creation or snapshotting
+also failed, its original error is preserved and cleanup diagnostics are added as
+warnings. A cleanup-only failure still fails the recipe.
+
 ### 4.4 Uncommitted changes widen to the full workspace
 
 cargo-delta scopes on the **committed** diff of `HEAD` against the base ref, so an

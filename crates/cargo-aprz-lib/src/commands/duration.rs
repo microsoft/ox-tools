@@ -172,7 +172,8 @@ pub(super) fn format(value: Duration) -> String {
     for (divisor, unit) in [(1_000_000, "ms"), (1_000, "us"), (1, "ns")] {
         let amount = (nanos / divisor) % 1_000;
         if amount > 0 {
-            write_pair(&mut out, u64::from(amount), unit, false);
+            let amount = u64::from(amount);
+            write_pair(&mut out, amount, unit, false);
         }
     }
 
@@ -338,6 +339,17 @@ mod tests {
 
     #[test]
     fn plural_units_keep_their_suffix() {
+        for (seconds, singular, plural) in [
+            (SECS_PER_YEAR, "1year", "2years"),
+            (SECS_PER_MONTH, "1month", "2months"),
+            (SECS_PER_DAY, "1day", "2days"),
+            (3_600, "1h", "2h"),
+            (60, "1m", "2m"),
+            (1, "1s", "2s"),
+        ] {
+            assert_eq!(format(Duration::from_secs(seconds)), singular);
+            assert_eq!(format(Duration::from_secs(2 * seconds)), plural);
+        }
         assert_eq!(format(Duration::from_secs(SECS_PER_DAY)), "1day");
         assert_eq!(format(Duration::from_secs(2 * SECS_PER_DAY)), "2days");
         assert_eq!(format(Duration::from_secs(1)), "1s");

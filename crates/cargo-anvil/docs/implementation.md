@@ -256,8 +256,10 @@ The recipe keeps two independently keyed snapshots under `target/anvil/impact/sn
 The composite baseline key is why the base worktree is retaken when the base moves *or*
 `.delta.toml` changes; `baseline_regenerates_when_delta_config_changes_without_moving_the_base`
 pins that second input. The worktree lives under the runner-managed scratch dir
-(`RUNNER_TEMP` → `AGENT_TEMPDIRECTORY` → system temp) and is named with `$PID` so concurrent
-runs never collide or remove each other's checkout; it is always removed in a `finally`.
+(`RUNNER_TEMP` → `AGENT_TEMPDIRECTORY` → system temp) and is named with `$PID` and a fresh
+GUID. Reused process IDs cannot select abandoned directories, and a run never removes a
+pre-existing checkout to claim its path. Its own worktree is removed in a `finally`.
+Creation failures include Git's diagnostic output.
 
 ### Fail-closed mapping and the dirty-tree safety net
 

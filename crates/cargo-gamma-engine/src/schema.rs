@@ -251,6 +251,7 @@ fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> 
     for (offset, ordinal, slot) in requests {
         let containing_line = starts.partition_point(|start| *start <= offset).saturating_sub(1);
 
+        // #[gamma::skip(cond.always_true, relational.gt_to_ge, reason = "resetting to the same line start recomputes the identical character column instead of extending the already-counted prefix")]
         if containing_line > line {
             line = containing_line;
             cursor = starts[line];
@@ -406,6 +407,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
                 break;
             }
 
+            // #[gamma::skip(loop.break_to_continue, reason = "the while condition observed a nonempty stack and no intervening operation changes it, so pop cannot enter this else branch")]
             let Some(finished) = stack.pop() else { break };
 
             attach(finished, &mut stack, &mut roots);
@@ -442,6 +444,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
         attach(finished, &mut stack, &mut roots);
     }
 
+    // #[gamma::skip(iter.remove_sort, reason = "instrument_with_guards passes sites sorted by start, and stack closures attach roots in that same increasing order")]
     roots.sort_by_key(|node| node.span.start);
 
     Ok(roots)
@@ -564,6 +567,50 @@ mod tests {
 
     use super::{AssignedMutant, Guard, Ordinal, Position, Shape};
     use crate::{HashMap, Result};
+
+    #[test]
+    fn position_sweep_matches_independent_unicode_prefix_counts() {
+        let text = "éxy\n😀z\nlast";
+        let boundaries = text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(core::iter::once(text.len()))
+            .collect::<Vec<_>>();
+        let mut spans = HashMap::default();
+        for (index, &offset) in boundaries.iter().enumerate() {
+            let _previous = spans.insert(u32::try_from(index).unwrap(), (0..offset, offset..offset));
+        }
+        let guards = super::positions(text, &spans);
+        for (index, &offset) in boundaries.iter().enumerate() {
+            let prefix = &text[..offset];
+            let line = prefix.bytes().filter(|&byte| byte == b'\n').count() + 1;
+            let column = prefix.rsplit('\n').next().unwrap().chars().count() + 1;
+            let guard = &guards[&u32::try_from(index).unwrap()];
+            assert_eq!(guard.site.start, at(1, 1));
+            assert_eq!(guard.site.end, at(u32::try_from(line).unwrap(), u32::try_from(column).unwrap()));
+            assert_eq!(guard.mutated, None);
+        }
+    }
+
+    #[test]
+    fn adjacent_sites_and_same_span_different_shapes_keep_separate_guards() {
+        let first = mutant(0..1, 1, "x", Shape::Expr);
+        let second = mutant(1..2, 2, "y", Shape::Expr);
+        let output = instrument("ab", &[&second, &first]).unwrap();
+        assert_eq!(
+            output,
+            "(if ::gamma_rt::a(1u32) { x } else { a })(if ::gamma_rt::a(2u32) { y } else { b })"
+        );
+
+        let statement = mutant(0..1, 2, "", Shape::Stmt);
+        let (output, guards) = instrument_with_guards("a", &[&statement, &first]).unwrap();
+        assert_eq!(output, "(if ::gamma_rt::a(1u32) { x } else { if !::gamma_rt::a(2u32) { a } })");
+        assert!(guards[&1].mutated.is_some());
+        assert_eq!(guards[&2].mutated, None);
+        let arm = mutant(0..1, 3, "", Shape::Arm);
+        let (_, guards) = instrument_with_guards("a", &[&arm]).unwrap();
+        assert_eq!(guards[&3].mutated, None);
+    }
 
     #[derive(Debug)]
     struct Mutant {

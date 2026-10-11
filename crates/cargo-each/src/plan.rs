@@ -145,6 +145,7 @@ impl Plan {
             workspace_rust_version,
         } = options;
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "is_empty already ran validate_build on this same immutable command and mode; every substitute repeats only that validated placeholder check, so all collected results and direct substitutions are Ok")]
         let invocations = match mode {
             Mode::PerPackage => members
                 .iter()

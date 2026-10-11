@@ -130,8 +130,10 @@ fn publish_capture_with(directory: &camino::Utf8Path, bytes: &[u8], mut next_ste
     fs::remove_file(temporary.as_std_path())
 }
 
+// #[gamma::skip(fn_value.xyzzy_string, tag = "timeout", reason = "a fixed capture filename repeatedly collides with existing captures in the campaign")]
 fn next_capture_stem() -> String {
     // #[gamma::skip(literal.int_increment, reason = "the counter is used only to propose filenames; stepping by one or two preserves progress and no ordering is consumed")]
+    // #[gamma::skip(literal.int_decrement, tag = "timeout", reason = "a zero counter step repeatedly proposes an already occupied capture filename")]
     let sequence = NEXT_CAPTURE.fetch_add(1, Ordering::Relaxed);
     format!("{}-{sequence}", std::process::id())
 }
@@ -169,6 +171,7 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
             index += 1;
         } else if argument == "--test" {
             test = true;
+            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, tag = "timeout", reason = "the test-option scan must consume its argument to make progress")]
             index += 1;
         } else if separate("--out-dir") {
             out_dir = utf8(&args[index + 1]);

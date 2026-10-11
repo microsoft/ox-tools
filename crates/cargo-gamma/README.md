@@ -426,8 +426,9 @@ leave `--cache-dir` unset and use Cargo’s `CARGO_TARGET_DIR` or `build.target-
 cache after taking the same lock as a run. It leaves published reports under
 `target/cargo-gamma`, checked-in hints and source suppressions untouched.
 
-As soon as a measured run acquires its campaign cache, it truncates `gamma-progress.log` and
-`gamma-selection.jsonl`. Every mutant verdict is appended and flushed to the progress journal as
+As soon as a fresh measured run acquires its campaign cache, it truncates `gamma-progress.log` and
+`gamma-selection.jsonl`. Testing-only resume preserves these logs without replaying their previous
+verdict lines. Every new mutant verdict is appended and flushed to the progress journal as
 it arrives, using the console’s outcome-line format but without color or redraw escapes. Unlike
 the console, the journal includes ordinary killed mutants as well as survivors, timeouts, memory
 exhaustion, flakes and uncovered mutants. The JSON Lines selection journal is transient,
@@ -1408,6 +1409,25 @@ context and inputs match. Every killed, survived, timed-out, out-of-memory, flak
 uncovered mutant is evaluated again. A previous killer is tried first, but its result is checked
 and the ordinary suite follows when it no longer kills the mutant.
 
+#### Resuming interrupted testing
+
+Once mutant testing starts, each settled verdict is persisted before its progress is reported.
+After Ctrl+C or a host restart, continue that same campaign with:
+
+```bash
+cargo gamma run --resume-testing
+```
+
+Resume reuses the copied, instrumented workspace and compiled tests without rebuilding or
+repeating settled mutants. Only unfinished work runs again. The original selection and testing
+settings stay frozen, even if the live source, hints, or suppressions change. Missing, damaged,
+incompatible, completed, or pre-testing state is an error, not a request to start over.
+Campaigns started before this feature do not contain the required checkpoint.
+
+`cargo gamma hints`, `cargo gamma suppress`, and `cargo gamma unsuppress` also work after an
+interruption. Hints and suppressions use recorded partial evidence; pending mutants are not
+treated as verdicts. Use the same `--cache-dir` when a campaign used a redirected cache.
+
 #### What a run remembers
 
 Three things carry knowledge from one run to the next, and they differ in exactly one way that
@@ -1447,7 +1467,8 @@ keyed by the mutant’s content id, which hashes the file, the item path, the mu
 replacement.
 
 A run adopts only compiler unviability under a matching build context. Test outcomes are
-observations that can vary even when every captured input is unchanged, so they are never reused.
+observations that can vary even when every captured input is unchanged, so a new campaign never
+reuses them. Testing-only resume instead continues the same frozen campaign.
 
 **A skip directive is not a cache and must never be treated as one.**
 `cargo gamma suppress --apply` writes a suppression directive into the source, where it is

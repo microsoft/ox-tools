@@ -24,6 +24,30 @@ use std::path::Path;
 use cargo_unique_target_names::{EXIT_UNREADABLE_WORKSPACE, EXIT_USAGE, Outcome, run};
 use common::{Member, workspace};
 
+#[test]
+fn cli_preserves_help_and_usage_streams_and_exit_codes() {
+    let help = run(["cargo", "unique-target-names", "--help"].map(std::ffi::OsStr::new));
+    assert!(matches!(help, Outcome::Help(_)));
+    assert_eq!(help.exit_code(), 0);
+    assert!(help.is_informational());
+    assert_eq!(
+        help.render(),
+        concat!(
+            "Check that no two workspace targets uplift to the same build artifact\n\n",
+            "\x1b[1m\x1b[32mUsage:\x1b[0m \x1b[1m\x1b[36mcargo unique-target-names\x1b[0m \x1b[36m[OPTIONS]\x1b[0m\n\n",
+            "\x1b[1m\x1b[32mOptions:\x1b[0m\n",
+            "      \x1b[1m\x1b[36m--manifest-path\x1b[0m\x1b[36m \x1b[0m\x1b[36m<PATH>\x1b[0m  Path to the `Cargo.toml` to inspect\n",
+            "  \x1b[1m\x1b[36m-h\x1b[0m, \x1b[1m\x1b[36m--help\x1b[0m                  Print help\n",
+            "  \x1b[1m\x1b[36m-V\x1b[0m, \x1b[1m\x1b[36m--version\x1b[0m               Print version",
+        )
+    );
+    let usage = run(["cargo", "unique-target-names", "--no-such-option"].map(std::ffi::OsStr::new));
+    assert!(matches!(usage, Outcome::Usage(_)));
+    assert_eq!(usage.exit_code(), EXIT_USAGE);
+    assert!(!usage.is_informational());
+    assert!(usage.render().contains("--no-such-option"));
+}
+
 /// Runs the tool the way Cargo invokes it: `cargo unique-target-names ...`,
 /// with the subcommand name as the first argument after the driver.
 fn invoke(manifest: &Path) -> Outcome {

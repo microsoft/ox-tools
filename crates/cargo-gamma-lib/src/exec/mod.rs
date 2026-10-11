@@ -46,6 +46,7 @@ mod sweep;
 mod sync;
 mod test_binary;
 mod test_environment;
+mod testing_state;
 mod verdict;
 mod workspace;
 
@@ -69,7 +70,7 @@ pub use loader::UNDER_GAMMA_VAR;
 pub(crate) use manifest::RUNTIME_CRATE;
 #[doc(inline)]
 pub use measure::{Built, Measured, Oracle, measure, run};
-pub(crate) use measure::{FailedMeasurement, run_with_locks};
+pub(crate) use measure::{FailedMeasurement, resume_testing, run_with_locks};
 #[doc(inline)]
 pub use memory::{DEFAULT_HEADROOM, DEFAULT_MULTIPLIER, Demand, MemoryControl, MemoryPolicy};
 // Named for its subject at this level, where `support` alone would say nothing about what is
@@ -83,6 +84,7 @@ pub use rustc_wrapper::run_if_requested as run_rustc_wrapper_if_requested;
 pub use session::{CensusCost, CensusStatus, PackageSweepCost, Phases, Session, SweepCost};
 #[doc(inline)]
 pub use test_binary::TestBinary;
+pub(crate) use testing_state::{RecordPreparation, TestingState, finish_testing_record, invalidate_testing, partial_testing_record};
 #[doc(inline)]
 pub use verdict::READERS;
 #[cfg(loom)]
@@ -95,4 +97,7 @@ pub(crate) use workspace::production_campaign_base;
 pub use workspace::{Workspace, campaign_base, clean_cache, footprint, gamma_base, scratch_tree};
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
-pub(crate) use workspace::{campaign_base_from_state, claim_cache, claim_campaign_state, claim_workspace, remember_campaign_base};
+pub(crate) use workspace::{
+    campaign_base_from_state, claim_cache, claim_campaign_state, claim_testing_state, claim_workspace, remember_campaign_base,
+    same_existing_path,
+};

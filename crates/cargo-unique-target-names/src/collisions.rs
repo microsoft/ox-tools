@@ -159,25 +159,7 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
     let mut owners: BTreeMap<String, Contenders> = BTreeMap::new();
 
     for package in metadata.workspace_packages() {
-        for target in &package.targets {
-            if target.kind.iter().any(is_hashed) {
-                continue;
-            }
-            let directory = directory(target);
-            let crate_name = crate_name(&target.name);
-            for family in target.crate_types.iter().filter_map(Family::of) {
-                for pattern in family.artifacts() {
-                    let file = format!(
-                        "{directory}/{}",
-                        pattern.replace("{crate}", &crate_name).replace("{name}", &target.name)
-                    );
-                    owners.entry(file).or_default().insert(
-                        (package.name.to_string(), target.name.clone(), kind_key(target)),
-                        format!("{} ({} '{}')", package.name, label(target, family), target.name),
-                    );
-                }
-            }
-        }
+        collect_target_owners(package.name.as_str(), &package.targets, &mut owners);
     }
 
     let mut grouped: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
@@ -191,10 +173,71 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
     grouped.into_iter().map(|(owners, files)| Collision { owners, files }).collect()
 }
 
+fn collect_target_owners(package: &str, targets: &[Target], owners: &mut BTreeMap<String, Contenders>) {
+    for target in targets {
+        if target.kind.iter().any(is_hashed) {
+            continue;
+        }
+        let directory = directory(target);
+        let crate_name = crate_name(&target.name);
+        for family in target.crate_types.iter().filter_map(Family::of) {
+            for pattern in family.artifacts() {
+                let file = format!(
+                    "{directory}/{}",
+                    pattern.replace("{crate}", &crate_name).replace("{name}", &target.name)
+                );
+                owners.entry(file).or_default().insert(
+                    (package.to_owned(), target.name.clone(), kind_key(target)),
+                    format!("{} ({} '{}')", package, label(target, family), target.name),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn target(kinds: &str, name: &str) -> Target {
+        let message = format!(
+            r#"{{"reason":"compiler-artifact","package_id":"fixture 0.1.0 (path+file:///fixture)","manifest_path":"Cargo.toml","target":{{"kind":[{kinds}],"crate_types":["bin"],"name":"{name}","src_path":"main.rs","edition":"2024","doc":true,"doctest":false,"test":true}},"profile":{{"opt_level":"0","debuginfo":0,"debug_assertions":true,"overflow_checks":true,"test":false}},"features":[],"filenames":[],"executable":null,"fresh":false}}"#
+        );
+        match cargo_metadata::Message::parse_stream(std::io::Cursor::new(message))
+            .next()
+            .expect("one artifact message exists")
+            .expect("artifact JSON is valid")
+        {
+            cargo_metadata::Message::CompilerArtifact(artifact) => artifact.target,
+            other => panic!("expected artifact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_target_kinds_keep_example_semantics_and_distinct_identity_keys() {
+        let example = target("\"bin\",\"example\"", "sample");
+        assert_eq!(directory(&example), "target/<profile>/examples");
+        assert_eq!(label(&example, Family::Executable), "example");
+        assert_eq!(kind_key(&example), "bin+example");
+        let other = target("\"example\",\"bin\"", "sample");
+        assert_eq!(kind_key(&other), "example+bin");
+    }
+
+    #[test]
+    fn hashed_mixed_targets_are_skipped_without_losing_later_uplifted_targets() {
+        for kind in ["test", "bench", "custom-build"] {
+            let targets = [target(&format!("\"bin\",\"{kind}\""), "ignored"), target("\"bin\"", "later")];
+            let mut owners = BTreeMap::new();
+            collect_target_owners("fixture", &targets, &mut owners);
+            assert_eq!(owners.len(), 2);
+            assert!(owners.keys().all(|path| path.contains("later")));
+            assert_eq!(
+                owners["target/<profile>/later[.exe]"].values().collect::<Vec<_>>(),
+                ["fixture (binary 'later')"]
+            );
+        }
+    }
 
     /// Crate types Cargo never uplifts have no family, so a future crate type
     /// is ignored rather than guessed at.

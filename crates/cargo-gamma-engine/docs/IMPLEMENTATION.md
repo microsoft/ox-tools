@@ -36,6 +36,9 @@ indexes. Keeping one index per package prevents unrelated same-named types in
 different workspace members from colliding. Repeated names inside a package
 preserve positive evidence when every definition is defaultable and negative
 evidence when none are; a mixed collision remains unknown.
+Aliases and public re-exports also mark their exposed names as unresolved, so
+an unrelated nominal declaration cannot supply negative `Default` evidence for
+those names. A wildcard re-export prevents name-only negative evidence.
 
 The import index records each binding's complete source path, including renamed
 imports, and marks declared modules as local path roots. Root, nested-module,
@@ -46,8 +49,9 @@ per scope after the pre-pass; ambiguous bindings and alias cycles remain unknown
 than being repeatedly resolved at each type query. Parameter and local type
 evidence retains the import map from its declaration scope, so a body-local
 shadow cannot reinterpret a previously declared binding. Value synthesis
-therefore applies package evidence to unambiguous bare types while leaving
-qualified local paths, aliases, and dependency paths unresolved. A generic bare
+therefore applies package evidence to unambiguous bare types and unrenamed imports
+rooted at `crate`, `self`, or `super`, while leaving source-written qualified local
+paths, renamed local imports, aliases, and dependency paths unresolved. A generic bare
 local path retains the declaration's evidence, and its concrete arguments are
 checked against derived or declared bounds. Function-local iterator bounds are
 hidden at a nested function boundary while enclosing impl and trait bounds

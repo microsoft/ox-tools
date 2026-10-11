@@ -144,6 +144,7 @@ impl SourceFile {
             Err(insertion) => insertion.saturating_sub(1),
         };
 
+        // #[gamma::skip(literal.int_increment, reason = "line_starts always supplies an initial zero and binary_search yields an index within that nonempty vector, so the fallback is unreachable")]
         let line_start = self.lines.get(line_index).copied().unwrap_or(0);
         let clamped = offset.min(self.text.len());
         let column = self.text.get(line_start..clamped).map_or(0, |s| s.chars().count());
@@ -261,6 +262,35 @@ pub(super) fn line_starts(text: &str) -> Vec<usize> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locations_cover_empty_unicode_and_every_line_boundary() {
+        assert_eq!(line_starts(""), vec![0]);
+        assert_eq!(line_starts("\n"), vec![0]);
+        assert_eq!(line_starts("a\n\nb\n"), vec![0, 2, 3]);
+        let file = parse("// é\n\nfn f() {}\n");
+        for (offset, expected) in [
+            (0, (1, 1)),
+            (3, (1, 4)),
+            (4, (1, 1)),
+            (5, (1, 5)),
+            (6, (2, 1)),
+            (7, (3, 1)),
+            (file.text.len(), (3, 11)),
+            (usize::MAX, (3, 11)),
+        ] {
+            assert_eq!(file.location(offset), expected, "offset {offset}");
+            assert_eq!(file.line_of(offset), expected.0, "offset {offset}");
+        }
+        assert!(!exceeds_nesting_limit("fn f() {}"));
+        assert!(exceeds_nesting_limit(&"(".repeat(nesting::NESTING_LIMIT + 1)));
+        let text = format!("// é\n{}", "(".repeat(nesting::NESTING_LIMIT + 1));
+        let error = SourceFile::parse("deep.rs", text).unwrap_err();
+        assert!(error.to_string().contains("deep.rs:2:"), "{error}");
+        let text = format!("{}\n(", "(".repeat(nesting::NESTING_LIMIT));
+        let error = SourceFile::parse("boundary.rs", text).unwrap_err();
+        assert!(error.to_string().contains("boundary.rs:2:"), "{error}");
+    }
 
     fn parse(text: &str) -> SourceFile {
         SourceFile::parse("test.rs", text.to_owned()).unwrap()

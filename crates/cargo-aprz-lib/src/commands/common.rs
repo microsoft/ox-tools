@@ -274,6 +274,7 @@ impl<'a, H: super::Host> Common<'a, H> {
         let endpoints = args.endpoints();
         let github_token = discover(args.github_token.as_ref(), args.github_token_from_gh, &endpoints).await;
 
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Config::load already compiled these unchanged patterns in validate; defaults are compiled from the validated embedded config, so repeating the deterministic compilation cannot newly return an error")]
         let bug_label_matcher = config.bug_label_matcher()?;
         let collector = Collector::new(
             github_token.as_ref().map(GitHubToken::expose_secret),
@@ -331,11 +332,14 @@ impl<'a, H: super::Host> Common<'a, H> {
 
         let env = env_logger::Env::default().filter_or(RUST_LOG_ENV, level);
 
-        env_logger::Builder::from_env(env)
+        Self::configure_logging(&mut env_logger::Builder::from_env(env), log_level).init();
+    }
+
+    fn configure_logging(builder: &mut env_logger::Builder, log_level: LogLevel) -> &mut env_logger::Builder {
+        builder
             .format_timestamp(None)
             .format_module_path(false)
             .format_target(matches!(log_level, LogLevel::Debug | LogLevel::Trace))
-            .init();
     }
 
     // The collector only fails as a whole if a provider gives up before it can report per-crate
@@ -418,7 +422,7 @@ impl<'a, H: super::Host> Common<'a, H> {
         let default_mode = ConsoleOutputMode::full();
         let console_mode = match &self.console {
             Some(mode) => Some(mode),
-            None if !generating_reports && !error_if => Some(&default_mode),
+            None if default_console_enabled(generating_reports, error_if) => Some(&default_mode),
             None => None,
         };
 
@@ -492,6 +496,10 @@ fn cache_dir_from_platform(platform_dir: Option<PathBuf>) -> Result<PathBuf> {
 
 const fn risk_error_requested(error_if_high_risk: bool, error_if_medium_risk: bool) -> bool {
     error_if_high_risk || error_if_medium_risk
+}
+
+const fn default_console_enabled(generating_reports: bool, error_if: bool) -> bool {
+    !generating_reports && !error_if
 }
 
 fn write_excel_report(reportable_crates: &[ReportableCrate], filename: &Utf8Path) -> Result<()> {
@@ -873,12 +881,15 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     fn text_report_propagates_write_errors() {
         let root = tempfile::tempdir().expect("creating a report fixture");
-        let missing_parent = Utf8PathBuf::try_from(root.path().join("missing").join("report.txt")).expect("temporary paths are UTF-8");
-        let error = write_text_report(&missing_parent, "report".to_owned()).expect_err("the parent directory does not exist");
-        assert_eq!(
-            error.source().and_then(|source| source.downcast_ref::<Error>()).map(Error::kind),
-            Some(ErrorKind::NotFound)
-        );
+        for extension in ["html", "csv", "json"] {
+            let missing_parent =
+                Utf8PathBuf::try_from(root.path().join("missing").join(format!("report.{extension}"))).expect("temporary paths are UTF-8");
+            let error = write_text_report(&missing_parent, "report".to_owned()).expect_err("the parent directory does not exist");
+            assert_eq!(
+                error.source().and_then(|source| source.downcast_ref::<Error>()).map(Error::kind),
+                Some(ErrorKind::NotFound)
+            );
+        }
     }
 
     #[test]
@@ -925,6 +936,31 @@ mod tests {
                 ("zeta", &Version::new(1, 0, 0)),
             ]
         );
+        let mut json = String::new();
+        generate_json(&crates, &mut json).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json["crates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["alpha", "alpha", "zeta"]
+        );
+    }
+
+    #[test]
+    fn risk_only_invocation_suppresses_the_default_console() {
+        for (reports, error_if, expected) in [
+            (false, false, true),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+        ] {
+            assert_eq!(default_console_enabled(reports, error_if), expected);
+        }
+        assert!(risk_error_requested(false, true));
     }
 
     #[tokio::test]
@@ -942,6 +978,38 @@ mod tests {
             .err()
             .expect("an invalid bug-label expression must be returned");
         assert!(error.to_string().contains('('), "unexpected configuration error: {error}");
+    }
+
+    #[test]
+    fn production_logger_omits_module_paths_at_info_level() {
+        #[derive(Clone)]
+        struct Writer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Writer(Arc::default());
+        let mut builder = env_logger::Builder::new();
+        builder
+            .filter_level(log::LevelFilter::Info)
+            .write_style(env_logger::WriteStyle::Never)
+            .target(env_logger::Target::Pipe(Box::new(output.clone())));
+        let logger = Common::<TestHost>::configure_logging(&mut builder, LogLevel::Info).build();
+        log::Log::log(
+            &logger,
+            &log::Record::builder()
+                .level(log::Level::Info)
+                .target("aprz-campaign-control")
+                .module_path(Some("fixture::module"))
+                .args(format_args!("logger format control"))
+                .build(),
+        );
+        assert_eq!(*output.0.lock().unwrap(), b"[INFO ] logger format control\n");
     }
 
     #[tokio::test]
@@ -1181,6 +1249,58 @@ mod tests {
         )];
 
         check_risk_errors(&crates, &Config::default(), false, true, true).unwrap_err()
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn rejection_threshold_details_and_singular_tails_follow_the_full_matrix() {
+        let config = Config::default();
+        for medium in [false, true] {
+            for include_details in [false, true] {
+                for count in [11, 12] {
+                    let outcomes = inconclusive_outcomes(count);
+                    for (appraisal, noun, names_without_details) in [
+                        (Appraisal::required_check_failure(outcomes.clone()), "required check", true),
+                        (
+                            Appraisal::new(Risk::High, outcomes.clone(), 12, 0, 0.0),
+                            "non-passing outcome",
+                            false,
+                        ),
+                        (Appraisal::weighted_evaluation_failure(outcomes.clone()), "weighted check", false),
+                    ] {
+                        let crates = vec![ReportableCrate::new(
+                            "foo".into(),
+                            Arc::new(Version::new(1, 0, 0)),
+                            vec![],
+                            Some(appraisal),
+                        )];
+                        let message = check_risk_errors(&crates, &config, medium, !medium, include_details)
+                            .unwrap_err()
+                            .to_string();
+                        let threshold = if medium { "medium or high risk" } else { "high risk" };
+                        assert!(
+                            message.starts_with(&format!("1 crate was appraised as {threshold} and caused rejection:")),
+                            "{message}"
+                        );
+                        assert_eq!(message.contains("Check 0"), include_details || names_without_details, "{message}");
+                        assert_eq!(message.contains("Policy."), include_details, "{message}");
+                        assert_eq!(message.contains("could not evaluate requirement"), include_details, "{message}");
+                        assert_eq!(message.contains(TRUNCATION_HINT), include_details, "{message}");
+                        if include_details || names_without_details {
+                            let omitted = count - 10;
+                            let suffix = if omitted == 1 { "" } else { "s" };
+                            assert!(message.contains(&format!("... and {omitted} more {noun}{suffix}\n")), "{message}");
+                        }
+                    }
+                }
+            }
+        }
+        let crates: Vec<_> = (0..21)
+            .map(|index| make_crate(&format!("crate-{index}"), Version::new(1, 0, 0), Risk::High))
+            .collect();
+        let message = check_risk_errors(&crates, &config, false, true, false).unwrap_err().to_string();
+        assert!(message.contains("more rejected crate"));
+        assert!(!message.contains(TRUNCATION_HINT), "{message}");
     }
 
     #[test]

@@ -146,6 +146,151 @@ mod tests {
 
     use super::*;
 
+    type Shape = (&'static str, usize, Vec<&'static str>);
+
+    struct ShapeSerializer;
+
+    struct ShapeFields {
+        name: &'static str,
+        declared: usize,
+        keys: Vec<&'static str>,
+    }
+
+    impl serde::ser::SerializeStruct for ShapeFields {
+        type Ok = Shape;
+        type Error = serde_json::Error;
+
+        fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, _value: &T) -> Result<(), Self::Error> {
+            self.keys.push(key);
+            Ok(())
+        }
+
+        fn end(self) -> Result<Self::Ok, Self::Error> {
+            Ok((self.name, self.declared, self.keys))
+        }
+    }
+
+    macro_rules! reject_shapes {
+        ($($method:ident($($arg:ident: $ty:ty),*)),* $(,)?) => {
+            $(
+                fn $method(self, $($arg: $ty),*) -> Result<Self::Ok, Self::Error> {
+                    Err(serde::ser::Error::custom("expected a struct"))
+                }
+            )*
+        };
+    }
+
+    impl Serializer for ShapeSerializer {
+        type Ok = Shape;
+        type Error = serde_json::Error;
+        type SerializeSeq = serde::ser::Impossible<Shape, Self::Error>;
+        type SerializeTuple = serde::ser::Impossible<Shape, Self::Error>;
+        type SerializeTupleStruct = serde::ser::Impossible<Shape, Self::Error>;
+        type SerializeTupleVariant = serde::ser::Impossible<Shape, Self::Error>;
+        type SerializeMap = serde::ser::Impossible<Shape, Self::Error>;
+        type SerializeStruct = ShapeFields;
+        type SerializeStructVariant = serde::ser::Impossible<Shape, Self::Error>;
+
+        reject_shapes!(
+            serialize_bool(_value: bool), serialize_i8(_value: i8), serialize_i16(_value: i16),
+            serialize_i32(_value: i32), serialize_i64(_value: i64), serialize_u8(_value: u8),
+            serialize_u16(_value: u16), serialize_u32(_value: u32), serialize_u64(_value: u64),
+            serialize_f32(_value: f32), serialize_f64(_value: f64), serialize_char(_value: char),
+            serialize_str(_value: &str), serialize_bytes(_value: &[u8]), serialize_none(),
+            serialize_unit(), serialize_unit_struct(_name: &'static str),
+            serialize_unit_variant(_name: &'static str, _index: u32, _variant: &'static str),
+        );
+
+        fn serialize_some<T: ?Sized + Serialize>(self, _value: &T) -> Result<Self::Ok, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, _value: &T) -> Result<Self::Ok, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_newtype_variant<T: ?Sized + Serialize>(
+            self,
+            _name: &'static str,
+            _index: u32,
+            _variant: &'static str,
+            _value: &T,
+        ) -> Result<Self::Ok, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_tuple_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeTupleStruct, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_tuple_variant(
+            self,
+            _name: &'static str,
+            _index: u32,
+            _variant: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+
+        fn serialize_struct(self, name: &'static str, len: usize) -> Result<Self::SerializeStruct, Self::Error> {
+            Ok(ShapeFields {
+                name,
+                declared: len,
+                keys: Vec::new(),
+            })
+        }
+
+        fn serialize_struct_variant(
+            self,
+            _name: &'static str,
+            _index: u32,
+            _variant: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeStructVariant, Self::Error> {
+            Err(serde::ser::Error::custom("expected a struct"))
+        }
+    }
+
+    #[test]
+    fn serialization_declares_the_exact_struct_shape_for_every_optional_field_combination() {
+        for description in [None, Some("a description")] {
+            for points in [None, Some(0), Some(7)] {
+                let expression = Expression::new("check", description, "true", points).unwrap();
+                let (name, declared, keys) = expression.serialize(ShapeSerializer).unwrap();
+                let mut expected = vec!["name"];
+                if description.is_some() {
+                    expected.push("description");
+                }
+                expected.push("expression");
+                if points.is_some() {
+                    expected.push("points");
+                }
+                assert_eq!(name, "Expression");
+                assert_eq!(declared, expected.len());
+                assert_eq!(keys, expected);
+                let bytes = rmp_serde::to_vec_named(&expression).unwrap();
+                let decoded: Expression = rmp_serde::from_slice(&bytes).unwrap();
+                assert_eq!(decoded.name(), "check");
+                assert_eq!(decoded.description(), description);
+                assert_eq!(decoded.points(), points);
+                assert_eq!(decoded.expression(), "true");
+            }
+        }
+    }
+
     struct FailAfter {
         budget: usize,
         writes: usize,

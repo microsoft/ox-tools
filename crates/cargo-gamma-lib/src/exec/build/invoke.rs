@@ -547,6 +547,7 @@ pub(super) fn finish_readers(
     let finished = |reader: &Option<io::Result<JoinHandle<Pipe>>>| {
         reader
             .as_ref()
+            // #[gamma::skip(result.is_err_to_is_ok, tag = "timeout", reason = "the campaign stalled pipe supervision when failed reader creation was no longer treated as finished")]
             .is_none_or(|reader| reader.as_ref().is_err() || reader.as_ref().is_ok_and(JoinHandle::is_finished))
     };
 

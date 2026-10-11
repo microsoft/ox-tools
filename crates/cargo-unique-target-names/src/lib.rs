@@ -214,11 +214,7 @@ impl Outcome {
 /// cargo's own crates to run the rule.
 #[must_use]
 pub fn check(manifest_path: Option<&Path>) -> Outcome {
-    let mut command = MetadataCommand::new();
-    command.no_deps();
-    if let Some(path) = manifest_path {
-        command.manifest_path(path);
-    }
+    let command = metadata_command(manifest_path);
     match command.exec() {
         Ok(metadata) => {
             let collisions = collisions::find(&metadata);
@@ -230,6 +226,15 @@ pub fn check(manifest_path: Option<&Path>) -> Outcome {
         }
         Err(error) => Outcome::Unreadable(error.to_string()),
     }
+}
+
+fn metadata_command(manifest_path: Option<&Path>) -> MetadataCommand {
+    let mut command = MetadataCommand::new();
+    command.no_deps();
+    if let Some(path) = manifest_path {
+        command.manifest_path(path);
+    }
+    command
 }
 
 /// Parses `args` as the command line, runs the check, prints the report, and
@@ -268,4 +273,37 @@ where
         eprintln!("{}", outcome.render());
     }
     outcome
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod campaign_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_command_requests_only_workspace_targets_and_exact_manifest() {
+        let command = metadata_command(Some(Path::new("Cargo.toml"))).cargo_command();
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", "Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn multiple_collision_reports_have_exact_line_and_paragraph_separators() {
+        let outcome = Outcome::Contended(vec![
+            collisions::Collision {
+                owners: vec!["first".into(), "second".into()],
+                files: vec!["one".into()],
+            },
+            collisions::Collision {
+                owners: vec!["third".into(), "fourth".into()],
+                files: vec!["two".into()],
+            },
+        ]);
+        assert_eq!(
+            outcome.render(),
+            "cargo-unique-target-names: 2 targets uplift to the same file: one\n  declared by first, second\ncargo-unique-target-names: 2 targets uplift to the same file: two\n  declared by third, fourth\n\nRename the reported targets so each one uplifts to its own path."
+        );
+    }
 }

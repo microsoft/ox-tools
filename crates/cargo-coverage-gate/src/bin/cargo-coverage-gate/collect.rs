@@ -538,7 +538,9 @@ fn plain_configuration_command(
 ) -> Command {
     let mut command = cargo_command(workspace, tools);
     command.args(["nextest", "run"]);
+    // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, selection);
+    // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
     append_nextest_options(&mut command, args, configuration, target);
     command.arg("--no-tests=pass");
     command
@@ -586,7 +588,9 @@ fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureCo
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
+    // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
+    // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
     append_nextest_options(&mut command, execution.args, configuration, execution.target);
     command.arg("--no-tests=pass");
     command
@@ -706,6 +710,7 @@ fn report_command(execution: &CollectionExecution<'_>, configuration: FeatureCon
     #[cfg(windows)]
     command.env_remove("MSYSTEM");
     command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
+    // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
     command.arg("--target").arg(execution.target);
     command
@@ -864,6 +869,7 @@ fn windows_response_contents(arguments: &[String]) -> Result<Vec<u8>, AppError> 
                 "cargo-llvm-cov's Windows command-too-long diagnostic contained a null byte",
             ));
         }
+        // #[gamma::skip(call_result.default, reason = "quote_windows_argument returns unit; every quoted byte is still written and () is replaced with ()")]
         quote_windows_argument(argument, &mut response);
         response.push('\n');
     }
@@ -984,6 +990,7 @@ fn execute_windows_export(
     output_file: fs::File,
 ) -> Result<(String, Output), AppError> {
     let mut command = Command::new(llvm_cov);
+    // #[gamma::skip(call_result.default, reason = "configure_windows_export_command returns unit; command configuration still executes and () is replaced with ()")]
     configure_windows_export_command(&mut command, workspace_root, response);
     command.stdout(Stdio::from(output_file));
     let display = command_display(&command);

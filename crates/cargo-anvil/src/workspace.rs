@@ -155,6 +155,42 @@ fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<Works
 /// More elaborate globbing isn't observed in the wild and can be added
 /// later if needed.
 fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMember>) -> Result<(), AppError> {
+    expand_member_pattern_with(root, pattern, out, Path::is_dir, |parent_path| {
+        member_directory_entries(std::fs::read_dir(parent_path), parent_path)
+    })
+}
+
+fn member_directory_entries(entries: std::io::Result<std::fs::ReadDir>, parent_path: &Path) -> Result<Vec<std::path::PathBuf>, AppError> {
+    member_paths(
+        entries
+            .into_app_err_with(|| format!("failed to read directory {}", parent_path.display()))?
+            .map(|entry| entry.map(|entry| entry.path())),
+        parent_path,
+    )
+}
+
+fn member_paths(
+    entries: impl IntoIterator<Item = std::io::Result<std::path::PathBuf>>,
+    parent_path: &Path,
+) -> Result<Vec<std::path::PathBuf>, AppError> {
+    let paths = entries
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .into_app_err_with(|| format!("failed to enumerate directory {}", parent_path.display()))?;
+    Ok(paths
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .collect())
+}
+
+fn expand_member_pattern_with(
+    root: &Path,
+    pattern: &str,
+    out: &mut Vec<WorkspaceMember>,
+    is_dir: impl FnOnce(&Path) -> bool,
+    entries: impl FnOnce(&Path) -> Result<Vec<std::path::PathBuf>, AppError>,
+) -> Result<(), AppError> {
     let pattern = pattern.trim_end_matches('/');
     if pattern.is_empty() {
         bail!("workspace member pattern is empty");
@@ -162,17 +198,11 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
 
     if let Some(parent) = pattern.strip_suffix("/*") {
         let parent_path = root.join(parent);
-        if !parent_path.is_dir() {
+        if !is_dir(&parent_path) {
             // Pattern with no matches is not an error — Cargo itself tolerates this.
             return Ok(());
         }
-        let mut entries: Vec<_> = std::fs::read_dir(&parent_path)
-            .into_app_err_with(|| format!("failed to read directory {}", parent_path.display()))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .filter(|path| path.join("Cargo.toml").is_file())
-            .collect();
+        let mut entries = entries(&parent_path)?;
         entries.sort_by_key(|path| path.file_name().map(OsStr::to_os_string));
         for entry in entries {
             let name = entry.file_name().expect("read_dir child paths always have a final path component");
@@ -508,5 +538,71 @@ members = ["cra*tes"]
         fs::create_dir_all(tmp.path().join("crates")).unwrap();
         let err = load_workspace(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("zero members"), "{err}");
+    }
+
+    #[test]
+    fn glob_expansion_orders_directory_results_and_preserves_enumeration_failures() {
+        let root = Path::new("workspace");
+        let parent = root.join("crates");
+        let mut members = Vec::new();
+        expand_member_pattern_with(
+            root,
+            "crates/*",
+            &mut members,
+            |path| {
+                assert_eq!(path, parent);
+                true
+            },
+            |_| Ok(vec![parent.join("zeta"), parent.join("alpha")]),
+        )
+        .expect("synthetic directory entries are expanded");
+        assert_eq!(
+            members.iter().map(|member| member.manifest_relpath.as_str()).collect::<Vec<_>>(),
+            ["crates/alpha/Cargo.toml", "crates/zeta/Cargo.toml"]
+        );
+        let error = expand_member_pattern_with(
+            root,
+            "crates/*",
+            &mut Vec::new(),
+            |_| true,
+            |path| member_directory_entries(Err(std::io::Error::other("directory unavailable")), path),
+        )
+        .expect_err("directory enumeration errors propagate through expansion");
+        assert_eq!(
+            error.to_string().split(" (at ").next(),
+            Some(format!("directory unavailable\n> failed to read directory {}", parent.display()).as_str())
+        );
+        expand_member_pattern_with(
+            root,
+            "crates/*",
+            &mut Vec::new(),
+            |_| false,
+            |_| panic!("a missing parent must not be enumerated"),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_expansion_propagates_non_utf8_directory_name_errors() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let root = Path::new("workspace");
+        let parent = root.join("crates");
+        let invalid = parent.join(std::ffi::OsString::from_vec(vec![0xff]));
+        let error = expand_member_pattern_with(root, "crates/*", &mut Vec::new(), |_| true, |_| Ok(vec![invalid]))
+            .expect_err("invalid directory names return errors instead of panicking");
+        assert!(error.to_string().contains("non-UTF-8 directory name"), "{error}");
+    }
+
+    #[test]
+    fn member_entry_errors_are_not_discarded() {
+        let parent = Path::new("crates");
+        let error =
+            member_paths([Err(std::io::Error::other("entry unavailable"))], parent).expect_err("an unreadable entry must fail enumeration");
+        let diagnostic = error.to_string();
+        assert_eq!(
+            diagnostic.split(" (at ").next(),
+            Some("entry unavailable\n> failed to enumerate directory crates")
+        );
     }
 }

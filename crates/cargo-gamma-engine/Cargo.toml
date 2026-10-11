@@ -33,6 +33,7 @@ blake3 = { workspace = true, features = ["std"] }
 camino = { workspace = true }
 compact_str = { workspace = true, features = ["serde", "std"] }
 proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
+quote = { workspace = true }
 regex-syntax = { workspace = true, features = ["std", "unicode"] }
 rustc-hash = { workspace = true, features = ["std"] }
 rustc_lexer = { workspace = true }

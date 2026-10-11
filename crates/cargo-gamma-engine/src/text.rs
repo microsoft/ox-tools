@@ -93,6 +93,7 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
                 let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
                 out.push_str(&text[copied..cursor]);
+                // #[gamma::skip(call_result.default, reason = "push_escape returns unit; the call and its writes still execute before unit is defaulted to unit")]
                 push_escape(out, control);
 
                 cursor += 2;
@@ -130,6 +131,7 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
         out.push_str(&text[copied..cursor]);
+        // #[gamma::skip(call_result.default, reason = "push_escape and char::from are still called; only push_escape's unit result becomes unit again")]
         push_escape(out, char::from(byte));
 
         cursor += 1;
@@ -197,6 +199,7 @@ fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
                 assert!(cursor > before, "scanning an SGR parameter must advance by one byte");
             }
             b'm' => {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "the scanner admits only ASCII digits, semicolons and colons before m, so this parameter slice is always valid UTF-8")]
                 let parameters = core::str::from_utf8(&bytes[start + 2..cursor]).ok()?;
 
                 return allowed_style(parameters).then_some(cursor + 1);
@@ -290,6 +293,59 @@ mod tests {
     use core::iter::once;
 
     use super::*;
+
+    #[test]
+    fn control_boundaries_and_style_endpoints_have_exact_encodings() {
+        for (text, expected) in [
+            ("\0\t", "\\0\\t"),
+            ("\u{7f}\u{80}\u{9f}\u{a0}", "\\u{7f}\\u{80}\\u{9f}\u{a0}"),
+            ("é€😀", "é€😀"),
+            ("\u{80}plain\u{a0}", "\\u{80}plain\u{a0}"),
+        ] {
+            assert_eq!(encode_controls(text), expected);
+            assert_eq!(encode_preserving_color(text), expected);
+        }
+        for parameters in [
+            "",
+            "0",
+            "1",
+            "22",
+            "30",
+            "97",
+            "100",
+            "107",
+            "38;5;255",
+            "48;2;0;128;255",
+            "38:2::0:128:255",
+        ] {
+            let sequence = format!("\x1b[{parameters}m");
+            let text = format!("é{sequence}z");
+            assert_eq!(style_sequence_end(text.as_bytes(), "é".len()), Some(text.len() - 1));
+            assert_eq!(encode_preserving_color(&text), format!("{text}{STYLE_RESET}"));
+            assert_eq!(encode_controls(&text), format!("é\\e[{parameters}mz"));
+        }
+        for parameters in [
+            "38;3;0;0;0",
+            "38;2;0;0",
+            "38;5;256",
+            "38:5:1:2",
+            "38:2::256:0:0",
+            "38:2::0:0:0:1",
+            "38:2::0:0",
+            "48:2:0:0:0:1",
+            "9",
+            "999",
+        ] {
+            let text = format!("\x1b[{parameters}mz");
+            assert!(!allowed_style(parameters), "{parameters}");
+            assert_eq!(style_sequence_end(text.as_bytes(), 0), None);
+            assert_eq!(encode_preserving_color(&text), format!("\\e[{parameters}mz"));
+        }
+        assert_eq!(encode_preserving_color("\0[31m"), "\\0[31m");
+        assert_eq!(encode_preserving_color("\x1b[31m\nz"), "\x1b[31m\\nz\x1b[0m");
+        assert_eq!(style_sequence_end(b"\x1b[", 0), None);
+        assert_eq!(style_sequence_end(b"\x1b[xm", 0), None);
+    }
 
     #[test]
     fn ordinary_text_is_borrowed_unchanged() {

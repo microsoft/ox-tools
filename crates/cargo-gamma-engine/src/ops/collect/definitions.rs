@@ -112,3 +112,34 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
 
     definitions
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::cfg::CfgSet;
+    use crate::ops::collect::collect_in;
+    use crate::ops::registry::Selection;
+
+    #[test]
+    fn reserved_occurrences_advance_unreserved_sites_and_share_same_span() {
+        let file = SourceFile::parse("fixture.rs", "fn f() { a(); a(); a(); a(); }".to_owned()).unwrap();
+        let selection = Selection::parse("stmt.delete_call").unwrap();
+        let mut candidates = collect_in(&file, &selection, &CfgSet::unconditional());
+        assert_eq!(candidates.len(), 4);
+        candidates[0].identity_occurrence = Some(4);
+        candidates[1].identity_occurrence = Some(2);
+        candidates[2].identity_occurrence = None;
+        candidates[3].identity_occurrence = None;
+        let mut duplicate = candidates[2].clone();
+        duplicate.replacement_index = 7;
+        candidates.push(duplicate);
+        let definitions = into_definitions(&file, candidates);
+        assert_eq!(
+            definitions.iter().map(|value| value.occurrence).collect::<Vec<_>>(),
+            [4, 2, 5, 6, 5]
+        );
+        assert_eq!(definitions[4].replacement_index, 7);
+        assert_ne!(definitions[2].id, definitions[4].id);
+    }
+}

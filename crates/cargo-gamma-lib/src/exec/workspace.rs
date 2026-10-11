@@ -135,6 +135,8 @@ pub struct Workspace {
     /// Shared resources declared by selected tests and their campaign-wide admission state.
     resources: Resources,
 
+    testing_journal: Option<super::testing_state::TestingJournal>,
+
     /// The private cache home inherited by nested Cargo Gamma processes in self-tests.
     #[cfg(any(test, feature = "internals"))]
     test_cache_home: Option<Utf8PathBuf>,
@@ -323,6 +325,7 @@ impl Workspace {
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
             resources: Resources::default(),
+            testing_journal: None,
             #[cfg(any(test, feature = "internals"))]
             test_cache_home: crate::testing::cache_home(source),
             _workspace_lock: workspace_lock,
@@ -450,6 +453,7 @@ impl Workspace {
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
             resources: Resources::default(),
+            testing_journal: None,
             #[cfg(any(test, feature = "internals"))]
             test_cache_home,
             _workspace_lock: tempfile::tempfile().expect("a temporary file should be creatable"),
@@ -469,6 +473,155 @@ impl Workspace {
 
     pub(super) fn set_resources(&mut self, resources: Resources) {
         self.resources = resources;
+    }
+
+    pub(crate) fn reporting_profile(&self) -> Option<&str> {
+        self.cargo.profile.as_deref()
+    }
+
+    pub(super) fn testing_snapshot(&self) -> Result<serde_json::Value> {
+        #[derive(serde::Serialize)]
+        struct Snapshot<'a> {
+            base: &'a Utf8Path,
+            root: &'a Utf8Path,
+            target: &'a Utf8Path,
+            runtime: &'a Utf8Path,
+            libraries: &'a [Utf8PathBuf],
+            cargo: &'a CargoOptions,
+            nextest: &'a Option<Harness>,
+            test_environment: &'a Option<TestEnvironment>,
+            launch: &'a Launch,
+            harness_threads: Option<&'a str>,
+            resources: &'a Resources,
+        }
+        serde_json::to_value(Snapshot {
+            base: &self.base,
+            root: &self.root,
+            target: &self.target,
+            runtime: &self.runtime,
+            libraries: &self.libraries,
+            cargo: &self.cargo,
+            nextest: &self.nextest,
+            test_environment: &self.test_environment,
+            launch: self.launch(),
+            harness_threads: self.harness_threads(),
+            resources: &self.resources,
+        })
+        .map_err(|cause| error!("could not encode the prepared testing workspace").caused_by(cause))
+    }
+
+    pub(super) fn testing_roots(&self) -> Result<Vec<Utf8PathBuf>> {
+        let mut paths = vec![self.root.clone(), self.runtime.clone()];
+        if let Some(nextest) = &self.nextest {
+            paths.extend(nextest.testing_paths().into_iter().map(Utf8Path::to_owned));
+        }
+        if let Some(environment) = &self.test_environment {
+            paths.extend(environment.testing_paths()?);
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    pub(crate) fn resume_testing(
+        source: &Utf8Path,
+        base: &Utf8Path,
+        snapshot: serde_json::Value,
+        workspace_lock: File,
+        valid_bytes: u64,
+    ) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct Snapshot {
+            base: Utf8PathBuf,
+            root: Utf8PathBuf,
+            target: Utf8PathBuf,
+            runtime: Utf8PathBuf,
+            libraries: Vec<Utf8PathBuf>,
+            cargo: CargoOptions,
+            nextest: Option<Harness>,
+            test_environment: Option<TestEnvironment>,
+            launch: Launch,
+            harness_threads: Option<String>,
+            resources: Resources,
+        }
+        let saved: Snapshot = serde_json::from_value(snapshot)
+            .map_err(|cause| error!("prepared testing workspace is invalid; start a new campaign").caused_by(cause))?;
+        let scratch = saved
+            .root
+            .parent()
+            .ok_or_else(|| error!("prepared testing workspace has no scratch directory"))?;
+        let default_scratch = gamma_base(source, None);
+        if saved.base != base
+            || saved.target != base.join("target")
+            || (scratch != default_scratch && scratch != base)
+            || saved.root != scratch.join("workspace")
+            || saved.runtime != scratch.join("rt")
+        {
+            return Err(error!(
+                "prepared testing workspace does not belong to `{source}` and `{base}`; start a new campaign"
+            ));
+        }
+        let cache_lock = if scratch == base && base != default_scratch {
+            Some(claim_redirected_cache(source, base)?)
+        } else {
+            None
+        };
+        let testing_journal = Some(super::testing_state::TestingJournal::open(base, Some(valid_bytes))?);
+        Ok(Self {
+            base: saved.base,
+            root: saved.root,
+            target: saved.target,
+            runtime: saved.runtime,
+            libraries: saved.libraries,
+            cargo: saved.cargo,
+            nextest: saved.nextest,
+            test_environment: saved.test_environment,
+            resources: saved.resources,
+            testing_journal,
+            launch: OnceLock::from(saved.launch),
+            harness_threads: OnceLock::from(saved.harness_threads),
+            rustc_captures: None,
+            rustc_captures_ready: AtomicBool::new(false),
+            cargo_metadata: None,
+            settled: AtomicBool::new(true),
+            leak: false,
+            #[cfg(any(test, feature = "internals"))]
+            test_cache_home: crate::testing::cache_home(source),
+            _workspace_lock: workspace_lock,
+            _cache_lock: cache_lock,
+            torn_down: false,
+        })
+    }
+
+    pub(super) fn arm_testing_journal(&mut self) -> Result<()> {
+        self.testing_journal = Some(super::testing_state::TestingJournal::open(&self.base, None)?);
+        Ok(())
+    }
+
+    pub(super) fn retain_sweep_cost(&mut self, cost: Option<super::session::SweepCost>) {
+        if let Some(journal) = &mut self.testing_journal {
+            journal.previous_sweep = cost;
+        }
+    }
+
+    pub(super) fn checkpoint_mutant(
+        &self,
+        mutant: &crate::model::Mutant,
+        killers: &super::killers::Killers,
+        cost: &super::session::SweepCost,
+    ) -> Result<()> {
+        if let Some(journal) = &self.testing_journal {
+            let cumulative = super::session::SweepCost::combine(journal.previous_sweep.clone(), Some(cost.clone()));
+            journal.publish_with_cost(mutant, killers, cumulative)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn complete_testing(&self) -> Result<()> {
+        if self.testing_journal.is_some() {
+            super::testing_state::TestingJournal::complete(&self.base)?;
+        }
+        Ok(())
     }
 
     pub(super) fn acquire_resources<'work>(&'work self, binary: &TestBinary, only: super::verdict::Only<'_>) -> ResourcePermit<'work> {
@@ -1071,6 +1224,55 @@ pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>
     Ok((root, base, lock))
 }
 
+pub(crate) fn claim_testing_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
+    let (root, _) = locate_testing_state(selected, cache)?;
+    let lock = claim_workspace(&root)?;
+    let (locked_root, base) = locate_testing_state(selected, cache)?;
+    if !same_existing_path(&root, &locked_root) {
+        return Err(error!(
+            "the testing campaign changed while acquiring its lock; retry `--resume-testing`"
+        ));
+    }
+    Ok((root, base, lock))
+}
+
+fn locate_testing_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+    let selected = physical(selected);
+    if let Some(cache) = cache {
+        let base = absolute(cache);
+        let root = cache_owner_root(&base)
+            .ok_or_else(|| error!("cannot resume testing: `{base}` has no valid campaign owner; start a new campaign"))?;
+        if !selected_within_workspace(&selected, &root, same_existing_path) {
+            return Err(error!(
+                "cannot resume testing: `{base}` belongs to `{root}`, not the selected directory `{selected}`"
+            ));
+        }
+        return Ok((root, base));
+    }
+    for ancestor in selected.ancestors() {
+        let locator = gamma_base(ancestor, None).join(CAMPAIGN_LOCATION);
+        let text = match fs::read_to_string(&locator) {
+            Ok(text) => text,
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => continue,
+            Err(cause) => return Err(error!("could not read testing campaign location `{locator}`").caused_by(cause)),
+        };
+        let base = Utf8PathBuf::from(text.trim());
+        if !base.is_absolute() || !cache_owner_root(&base).is_some_and(|owner| same_existing_path(&owner, ancestor)) {
+            return Err(error!(
+                "testing campaign location `{locator}` has an invalid owner; start a new campaign"
+            ));
+        }
+        return Ok((ancestor.to_owned(), base));
+    }
+    Err(error!(
+        "cannot resume testing: no previous campaign under `{selected}` was interrupted during testing; start a new campaign"
+    ))
+}
+
+fn selected_within_workspace(selected: &Utf8Path, root: &Utf8Path, mut same: impl FnMut(&Utf8Path, &Utf8Path) -> bool) -> bool {
+    selected.ancestors().any(|ancestor| same(ancestor, root))
+}
+
 fn cache_owner_root(base: &Utf8Path) -> Option<Utf8PathBuf> {
     let base_metadata = fs::symlink_metadata(base.as_std_path()).ok()?;
     if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
@@ -1092,7 +1294,7 @@ fn cache_owner_root(base: &Utf8Path) -> Option<Utf8PathBuf> {
     Some(root)
 }
 
-fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
+pub(crate) fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
     #[cfg(windows)]
     {
         let left = left.as_str().strip_prefix(r"\\?\").unwrap_or(left.as_str());
@@ -1384,6 +1586,7 @@ fn physical(path: &Utf8Path) -> Utf8PathBuf {
 
         tail.push(name);
 
+        // #[gamma::skip(cond.always_false, tag = "timeout", reason = "the ancestor scan must stop when no further parent can be removed")]
         if !existing.pop() {
             return path.to_owned();
         }
@@ -2251,6 +2454,51 @@ fn vendor_runtime(at: &Utf8Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod path_identity_tests {
+    #[cfg(windows)]
+    use super::same_existing_path;
+    use super::{Utf8Path, selected_within_workspace};
+
+    #[test]
+    fn selection_uses_ancestor_identity_and_keeps_directory_boundaries() {
+        let root = Utf8Path::new("workspace");
+        for insensitive in [false, true] {
+            for (directory, belongs) in [
+                ("workspace", true),
+                ("workspace/member", true),
+                ("WORKSPACE/member", insensitive),
+                ("workspace-other/member", false),
+                ("elsewhere/member", false),
+            ] {
+                let actual = selected_within_workspace(Utf8Path::new(directory), root, |left, right| {
+                    if insensitive {
+                        left.as_str().eq_ignore_ascii_case(right.as_str())
+                    } else {
+                        left == right
+                    }
+                });
+                assert_eq!(actual, belongs, "directory={directory}, insensitive={insensitive}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_selection_accepts_casing_and_extended_prefix_changes() {
+        let root = Utf8Path::new(r"C:\workspace");
+        for directory in [r"c:\WORKSPACE", r"c:\WORKSPACE\member", r"\\?\C:\WORKSPACE\member"] {
+            assert!(selected_within_workspace(Utf8Path::new(directory), root, same_existing_path));
+        }
+        assert!(!selected_within_workspace(
+            Utf8Path::new(r"C:\workspace-other\member"),
+            root,
+            same_existing_path
+        ));
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -2368,6 +2616,52 @@ mod tests {
 
         assert_eq!(args.iter().filter(|arg| *arg == "fallback").count(), 1);
         assert_eq!(args.iter().filter(|arg| *arg == "precise-id").count(), 1);
+    }
+
+    #[test]
+    fn testing_resume_restores_launch_environment_arguments_and_idle_resource_admission() {
+        let directory = crate::testing::workdir("workspace-testing-restore-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).unwrap();
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).unwrap();
+        let root = base.join("workspace");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
+        mark_cache_owned_for_test(&source, &base);
+        let mut original = Workspace::adopt(root, base.join("target"));
+        original.runtime = base.join("rt");
+        original.cargo.profile = Some("gamma".to_owned());
+        original.cargo.test_args = vec!["--skip".into(), "slow".into()];
+        original.test_environment = Some(TestEnvironment::fake("subject", "BUILD_SCRIPT_VALUE", "captured"));
+        original.harness_threads = OnceLock::from(Some("3".into()));
+        original.launch = OnceLock::from(Launch {
+            loader: Some("captured-library-path".into()),
+            stack: "7654321".into(),
+        });
+        let binary = TestBinary {
+            package_id: "subject".into(),
+            ..crate::testing::test_binary("a-test")
+        };
+        original.resources = Resources::fake_tests(&binary, &[("one", "database")]);
+        let _held = original.acquire_resources(&binary, super::super::verdict::Only::One("one"));
+        let snapshot = original.testing_snapshot().unwrap();
+        assert!(snapshot["resources"].get("active").is_none());
+        let restored = Workspace::resume_testing(&source, &base, snapshot.clone(), tempfile::tempfile().unwrap(), 0).unwrap();
+        assert_eq!(restored.testing_snapshot().unwrap(), snapshot);
+        assert_eq!(restored.reporting_profile(), Some("gamma"));
+        assert_eq!(restored.test_arguments(), ["--skip", "slow"]);
+        assert_eq!(restored.harness_threads(), Some("3"));
+        assert_eq!(restored.launch().stack, "7654321");
+        let required = restored.required_resources(&binary, super::super::verdict::Only::One("one"));
+        assert_eq!(required.iter().map(AsRef::as_ref).collect::<Vec<&str>>(), ["database"]);
+        let mut command = Command::new("unused");
+        restored.configure_test_environment(&mut command, &binary);
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "BUILD_SCRIPT_VALUE" && value == Some(OsStr::new("captured")))
+        );
+        let _fresh = restored.acquire_resources(&binary, super::super::verdict::Only::One("one"));
     }
 
     #[test]
@@ -3545,6 +3839,7 @@ mod tests {
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
             resources: Resources::default(),
+            testing_journal: None,
             test_cache_home: crate::testing::cache_home(root),
             _workspace_lock: File::create(base.join("lock").as_std_path()).unwrap(),
             _cache_lock: None,
@@ -3853,6 +4148,7 @@ mod tests {
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
             resources: Resources::default(),
+            testing_journal: None,
             test_cache_home,
             _workspace_lock: tempfile::tempfile().unwrap(),
             _cache_lock: None,
@@ -3881,6 +4177,7 @@ mod tests {
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
             resources: Resources::default(),
+            testing_journal: None,
             test_cache_home: None,
             _workspace_lock: tempfile::tempfile().unwrap(),
             _cache_lock: None,

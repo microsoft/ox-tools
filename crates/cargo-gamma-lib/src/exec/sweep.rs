@@ -374,7 +374,8 @@ fn mutant_work_with_hints(
 struct GeneralizedPlanning<'a> {
     items: crate::HashMap<(&'a Utf8Path, &'a str), &'a [RankedHint<Killer>]>,
     files: crate::HashMap<&'a Utf8Path, &'a [RankedHint<BinaryHint>]>,
-    reach: crate::HashMap<&'a SiteIdentity, &'a [Killer]>,
+    // Preserve first-match execution and last-match cost estimation for duplicate sites.
+    reach: crate::HashMap<&'a SiteIdentity, (&'a [Killer], &'a [Killer])>,
 }
 
 impl<'a> GeneralizedPlanning<'a> {
@@ -397,10 +398,17 @@ impl<'a> GeneralizedPlanning<'a> {
         planning
             .files
             .extend(hints.binaries.iter().map(|file| (file.file.as_path(), file.candidates.as_slice())));
-        planning.reach.extend(hints.reach.iter().filter_map(|cluster| {
-            let index = usize::try_from(cluster.test_set).ok()?;
-            Some((&cluster.site, hints.test_sets.get(index)?.as_slice()))
-        }));
+        for cluster in &hints.reach {
+            let Ok(index) = usize::try_from(cluster.test_set) else { continue };
+            let Some(candidates) = hints.test_sets.get(index).map(Vec::as_slice) else {
+                continue;
+            };
+            planning
+                .reach
+                .entry(&cluster.site)
+                .and_modify(|entry| entry.1 = candidates)
+                .or_insert((candidates, candidates));
+        }
         planning
     }
 }
@@ -497,7 +505,7 @@ fn generalized_mutant_work(
     let candidate = hints
         .reach
         .get(&site)
-        .and_then(|candidates| reached_work_candidate(binaries, candidates))
+        .and_then(|(_, candidates)| reached_work_candidate(binaries, candidates))
         .or_else(|| {
             hints
                 .items
@@ -597,7 +605,7 @@ struct ScheduledWork {
     resources: Vec<Arc<str>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SchedulerState {
     remaining: Vec<bool>,
     remaining_count: usize,
@@ -607,16 +615,41 @@ struct SchedulerState {
     package_turns: Vec<usize>,
     package_queues: Vec<BTreeSet<LocalPriority>>,
     heads: BTreeSet<PackageHead>,
+    groups: Vec<GroupQueue>,
+    files: Vec<FileQueue>,
     priorities: Vec<Option<LocalPriority>>,
+    pending_groups: BTreeSet<usize>,
     active_resources: crate::HashMap<Arc<str>, usize>,
     #[cfg(test)]
     priority_updates: usize,
+    #[cfg(test)]
+    learning_updates: usize,
+}
+
+#[derive(Debug, Default)]
+struct GroupQueue {
+    // Contention-free priorities; reservations change only the published heads.
+    cold: BTreeSet<LocalPriority>,
+    informed: BTreeSet<LocalPriority>,
+    idle_head: Option<LocalPriority>,
+    active_head: Option<LocalPriority>,
+}
+
+#[derive(Debug, Default)]
+struct FileQueue {
+    idle: BTreeSet<LocalPriority>,
+    active: BTreeSet<LocalPriority>,
+    head: Option<LocalPriority>,
 }
 
 struct Scheduler {
     work: Vec<ScheduledWork>,
     package_slots: Vec<usize>,
     by_file: Vec<Vec<usize>>,
+    file_packages: Vec<usize>,
+    group_files: Vec<usize>,
+    work_groups: Vec<usize>,
+    by_item: crate::HashMap<(usize, Arc<str>), Vec<usize>>,
     state: Mutex<SchedulerState>,
     changed: Condvar,
     resource_capacities: crate::HashMap<Arc<str>, usize>,
@@ -694,6 +727,7 @@ impl Assignment<'_> {
 }
 
 impl Drop for Assignment<'_> {
+    // #[gamma::skip(fn_value.unit, tag = "timeout", reason = "dropping an assignment must release scheduler capacity and wake pending work")]
     fn drop(&mut self) {
         self.scheduler.release(self.index, self.learned);
     }
@@ -715,8 +749,27 @@ impl Scheduler {
             })
             .collect::<Vec<_>>();
         let mut by_file = vec![Vec::new(); files];
+        let mut file_slots = crate::HashMap::default();
+        let mut file_packages = Vec::new();
+        let mut group_slots = crate::HashMap::default();
+        let mut group_files = Vec::new();
+        let mut work_groups = Vec::with_capacity(work.len());
+        let mut by_item: crate::HashMap<(usize, Arc<str>), Vec<usize>> = crate::HashMap::default();
         for (index, item) in work.iter().enumerate() {
-            by_file[item.file].push(index);
+            let package = package_slots[index];
+            let next_file = file_packages.len();
+            let file_slot = *file_slots.entry((item.file, package)).or_insert_with(|| {
+                by_file[item.file].push(next_file);
+                file_packages.push(package);
+                next_file
+            });
+            let next_group = group_files.len();
+            let group = *group_slots.entry((file_slot, Arc::clone(&item.item))).or_insert_with(|| {
+                group_files.push(file_slot);
+                by_item.entry((item.file, Arc::clone(&item.item))).or_default().push(next_group);
+                next_group
+            });
+            work_groups.push(group);
         }
 
         let mut state = SchedulerState {
@@ -728,29 +781,59 @@ impl Scheduler {
             package_turns: vec![0; packages.len()],
             package_queues: vec![BTreeSet::new(); packages.len()],
             heads: BTreeSet::new(),
+            groups: (0..group_files.len()).map(|_| GroupQueue::default()).collect(),
+            files: (0..file_packages.len()).map(|_| FileQueue::default()).collect(),
             priorities: vec![None; work.len()],
+            pending_groups: (0..group_files.len()).collect(),
             active_resources: crate::HashMap::default(),
             #[cfg(test)]
             priority_updates: 0,
+            #[cfg(test)]
+            learning_updates: 0,
         };
         for index in 0..work.len() {
-            insert_priority(&work, &package_slots, &mut state, index);
-        }
-        for package in 0..packages.len() {
-            insert_head(&mut state, package);
+            let priority = priority(&work, &state, index).expect("all pending work is eligible before any reservation");
+            state.priorities[index] = Some(priority);
+            let group = &mut state.groups[work_groups[index]];
+            if work[index].hinted {
+                group.informed.insert(priority);
+            } else {
+                group.cold.insert(priority);
+            }
         }
 
-        Self {
+        let mut scheduler = Self {
             work,
             package_slots,
             by_file,
-            state: Mutex::new(state),
+            file_packages,
+            group_files,
+            work_groups,
+            by_item,
+            state: Mutex::new(SchedulerState::default()),
             changed: Condvar::new(),
             resource_capacities,
+        };
+        for key in scheduler.by_item.keys() {
+            scheduler.refresh_item(&mut state, key);
         }
+        for file in 0..files {
+            scheduler.detach_file(&mut state, file);
+            scheduler.attach_file(&mut state, file);
+        }
+        *scheduler
+            .state
+            .get_mut()
+            .expect("new scheduler mutex has never been locked or poisoned") = state;
+        scheduler
     }
 
+    #[cfg(test)]
     fn claim(&self, abandoned: &OnceLock<String>) -> Option<usize> {
+        self.claim_with(abandoned, || {})
+    }
+
+    fn claim_with(&self, abandoned: &OnceLock<String>, mut before_wait: impl FnMut()) -> Option<usize> {
         let mut state = self
             .state
             .lock()
@@ -763,11 +846,12 @@ impl Scheduler {
 
             if let Some(index) = self.select(&state) {
                 let work = &self.work[index];
-                let packages = self.detach_file(&mut state, work.file);
+                self.detach_file(&mut state, work.file);
                 debug_assert!(state.remaining[index], "only remaining work may be claimed");
                 debug_assert!(state.remaining_count > 0, "remaining work implies a positive remaining count");
                 state.remaining[index] = false;
                 state.remaining_count -= 1;
+                self.remove_work(&mut state, index);
                 state.active_files[work.file] = state.active_files[work.file]
                     .checked_add(1)
                     .expect("active file count cannot exceed the finite worker population");
@@ -785,7 +869,8 @@ impl Scheduler {
                         .checked_add(1)
                         .expect("active resource count cannot exceed the finite worker population");
                 }
-                self.attach_file(&mut state, work.file, &packages);
+                self.refresh_item(&mut state, &(work.file, Arc::clone(&work.item)));
+                self.attach_file(&mut state, work.file);
                 return Some(index);
             }
 
@@ -793,6 +878,7 @@ impl Scheduler {
                 return None;
             }
 
+            before_wait();
             state = self
                 .changed
                 .wait(state)
@@ -800,8 +886,13 @@ impl Scheduler {
         }
     }
 
+    #[cfg(test)]
     fn assignment<'a>(&'a self, abandoned: &OnceLock<String>) -> Option<Assignment<'a>> {
-        self.claim(abandoned).map(|index| Assignment {
+        self.assignment_with(abandoned, || {})
+    }
+
+    fn assignment_with<'a>(&'a self, abandoned: &OnceLock<String>, before_wait: impl FnMut()) -> Option<Assignment<'a>> {
+        self.claim_with(abandoned, before_wait).map(|index| Assignment {
             scheduler: self,
             index,
             learned: false,
@@ -819,7 +910,7 @@ impl Scheduler {
             .state
             .lock()
             .expect("a scheduler panic can leave coupled queue and reservation state inconsistent");
-        let packages = self.detach_file(&mut state, work.file);
+        self.detach_file(&mut state, work.file);
         let key = (work.file, Arc::clone(&work.item));
         if learned {
             let _inserted = state.learned_items.insert(key.clone());
@@ -846,15 +937,21 @@ impl Scheduler {
                 state.active_resources.remove(resource);
             }
         }
-        self.attach_file(&mut state, work.file, &packages);
+        self.refresh_item(&mut state, &key);
+        self.attach_file(&mut state, work.file);
         core::mem::drop(state);
         self.changed.notify_all();
     }
 
     fn abandon(&self) {
+        let _state = self
+            .state
+            .lock()
+            .expect("a scheduler panic can leave coupled queue and reservation state inconsistent");
         self.changed.notify_all();
     }
 
+    // #[gamma::skip(fn_value.none, tag = "timeout", reason = "never selecting available work leaves scheduler waiters blocked")]
     fn select(&self, state: &SchedulerState) -> Option<usize> {
         if self.resource_capacities.is_empty() {
             return state.heads.first().map(|head| head.local.index);
@@ -866,24 +963,33 @@ impl Scheduler {
         }
 
         state
-            .package_queues
+            .pending_groups
             .iter()
-            .enumerate()
-            .filter_map(|(package, queue)| {
+            .flat_map(|group| {
+                let queue = &state.groups[*group];
+                [&queue.cold, &queue.informed]
+            })
+            .filter_map(|queue| {
+                let distance = priority(&self.work, state, queue.first()?.index)?.distance;
                 queue
                     .iter()
-                    .find(|priority| self.resources_available(state, priority.index))
-                    .copied()
-                    .map(|local| PackageHead {
-                        package,
-                        turns: state.package_turns[package],
-                        local,
+                    .find(|entry| self.resources_available(state, entry.index))
+                    .map(|entry| {
+                        let mut local = *entry;
+                        local.distance = distance;
+                        let package = self.package_slots[entry.index];
+                        PackageHead {
+                            package,
+                            turns: state.package_turns[package],
+                            local,
+                        }
                     })
             })
             .min()
             .map(|head| head.local.index)
     }
 
+    // #[gamma::skip(fn_value.bool_false, tag = "timeout", reason = "declaring every resource unavailable leaves scheduler waiters blocked")]
     fn resources_available(&self, state: &SchedulerState, index: usize) -> bool {
         self.work[index].resources.iter().all(|resource| {
             let capacity = self.resource_capacities.get(resource).copied().unwrap_or(1);
@@ -891,50 +997,117 @@ impl Scheduler {
         })
     }
 
-    fn detach_file(&self, state: &mut SchedulerState, file: usize) -> crate::HashSet<usize> {
-        let packages = self.by_file[file]
-            .iter()
-            .filter(|index| state.remaining[**index])
-            .map(|index| self.package_slots[*index])
-            .collect::<crate::HashSet<_>>();
-
-        for package in &packages {
-            remove_head(state, *package);
+    fn detach_file(&self, state: &mut SchedulerState, file: usize) {
+        for slot in &self.by_file[file] {
+            let package = self.file_packages[*slot];
+            remove_head(state, package);
+            if let Some(head) = state.files[*slot].head.take() {
+                let removed = state.package_queues[package].remove(&head);
+                debug_assert!(removed, "each published file head belongs to its package queue");
+            }
         }
-        for index in &self.by_file[file] {
-            remove_priority(&self.package_slots, state, *index);
-        }
-
-        packages
     }
 
-    fn attach_file(&self, state: &mut SchedulerState, file: usize, packages: &crate::HashSet<usize>) {
-        for index in &self.by_file[file] {
-            insert_priority(&self.work, &self.package_slots, state, *index);
+    // #[gamma::skip(fn_value.unit, tag = "timeout", reason = "without inserting file priorities pending work has no schedulable head")]
+    fn attach_file(&self, state: &mut SchedulerState, file: usize) {
+        let contention = state.active_files[file];
+        for slot in &self.by_file[file] {
+            let queue = &mut state.files[*slot];
+            let head = if contention == 0 {
+                queue.idle.first().copied()
+            } else {
+                queue.active.first().copied().map(|mut head| {
+                    head.distance.1 = contention;
+                    head
+                })
+            };
+            queue.head = head;
+            let package = self.file_packages[*slot];
+            if let Some(head) = head {
+                state.package_queues[package].insert(head);
+            }
+            insert_head(state, package);
         }
-        for package in packages {
-            insert_head(state, *package);
+    }
+
+    fn refresh_item(&self, state: &mut SchedulerState, key: &(usize, Arc<str>)) {
+        let active = state.active_items.get(key).copied().unwrap_or(0) != 0;
+        let learned = state.learned_items.contains(key);
+        for group_index in &self.by_item[key] {
+            #[cfg(test)]
+            {
+                state.priority_updates += 1;
+            }
+            let group = &mut state.groups[*group_index];
+            let file = &mut state.files[self.group_files[*group_index]];
+            if let Some(head) = group.idle_head.take() {
+                file.idle.remove(&head);
+            }
+            if let Some(head) = group.active_head.take() {
+                file.active.remove(&head);
+            }
+            // Learning changes cold priorities only once; reservations thereafter change heads.
+            if learned {
+                for mut entry in core::mem::take(&mut group.cold) {
+                    #[cfg(test)]
+                    {
+                        state.learning_updates += 1;
+                    }
+                    entry.benefit = 0;
+                    state.priorities[entry.index] = Some(entry);
+                    group.informed.insert(entry);
+                }
+            }
+            let idle = group.cold.first().into_iter().chain(group.informed.first()).min().copied();
+            let available = if active { group.informed.first().copied() } else { idle };
+            group.idle_head = idle;
+            group.active_head = available.map(|mut head| {
+                head.distance = (if active { 2 } else { 1 }, 0);
+                head
+            });
+            if let Some(head) = group.idle_head {
+                file.idle.insert(head);
+            }
+            if let Some(head) = group.active_head {
+                file.active.insert(head);
+            }
+        }
+    }
+
+    fn remove_work(&self, state: &mut SchedulerState, index: usize) {
+        let entry = state.priorities[index].take().expect("only queued pending work can be removed");
+        let group = &mut state.groups[self.work_groups[index]];
+        let removed = group.cold.remove(&entry) || group.informed.remove(&entry);
+        debug_assert!(removed, "each pending priority belongs to exactly one item queue");
+        if group.cold.is_empty() && group.informed.is_empty() {
+            state.pending_groups.remove(&self.work_groups[index]);
         }
     }
 
     #[cfg(test)]
     fn refresh_file(&self, state: &mut SchedulerState, file: usize) {
-        let packages = self.detach_file(state, file);
-        self.attach_file(state, file, &packages);
+        self.detach_file(state, file);
+        for key in self.by_item.keys().filter(|(candidate, _)| *candidate == file) {
+            self.refresh_item(state, key);
+        }
+        self.attach_file(state, file);
     }
 
     #[cfg(test)]
     fn withdraw(&self, state: &mut SchedulerState, index: usize) {
         let file = self.work[index].file;
-        let packages = self.detach_file(state, file);
+        self.detach_file(state, file);
         if state.remaining[index] {
             state.remaining[index] = false;
             state.remaining_count = state.remaining_count.saturating_sub(1);
+            self.remove_work(state, index);
         }
-        self.attach_file(state, file, &packages);
+        self.refresh_item(state, &(file, Arc::clone(&self.work[index].item)));
+        self.attach_file(state, file);
     }
 }
 
+// #[gamma::skip(fn_value.none, tag = "timeout", reason = "without priorities pending work has no schedulable head")]
 fn priority(work: &[ScheduledWork], state: &SchedulerState, index: usize) -> Option<LocalPriority> {
     if !state.remaining[index] {
         return None;
@@ -987,6 +1160,7 @@ fn remove_head(state: &mut SchedulerState, package: usize) {
     debug_assert!(removed, "the cached package head must be present before it is refreshed");
 }
 
+// #[gamma::skip(fn_value.unit, tag = "timeout", reason = "not inserting a package head leaves pending work unschedulable")]
 fn insert_head(state: &mut SchedulerState, package: usize) {
     let Some(local) = state.package_queues[package].first().copied() else {
         return;
@@ -997,26 +1171,6 @@ fn insert_head(state: &mut SchedulerState, package: usize) {
         local,
     });
     debug_assert!(inserted, "a package may have only one cached head");
-}
-
-fn remove_priority(package_slots: &[usize], state: &mut SchedulerState, index: usize) {
-    let Some(priority) = state.priorities[index].take() else {
-        return;
-    };
-    let removed = state.package_queues[package_slots[index]].remove(&priority);
-    debug_assert!(removed, "the cached local priority must be present before it is refreshed");
-}
-
-fn insert_priority(work: &[ScheduledWork], package_slots: &[usize], state: &mut SchedulerState, index: usize) {
-    #[cfg(test)]
-    {
-        state.priority_updates = state.priority_updates.saturating_add(1);
-    }
-    if let Some(priority) = priority(work, state, index) {
-        let inserted = state.package_queues[package_slots[index]].insert(priority);
-        debug_assert!(inserted, "a work item may have only one cached local priority");
-        state.priorities[index] = Some(priority);
-    }
 }
 
 /// What a sweep spent, tallied across its workers as they run.
@@ -1126,6 +1280,57 @@ pub(super) struct PackageSpent {
     pub(super) settled_ms: u64,
 }
 
+impl Tally {
+    fn spent(&self, spans: &crate::HashMap<Arc<str>, (usize, u64, u64)>) -> Spent {
+        let mut packages = spans
+            .iter()
+            .map(|(package, &(mutants, first_started_ms, settled_ms))| PackageSpent {
+                package: Arc::clone(package),
+                mutants,
+                first_started_ms,
+                settled_ms,
+            })
+            .collect::<Vec<_>>();
+        packages.sort_by(|left, right| left.package.cmp(&right.package));
+        Spent {
+            launches: self.launches.load(Ordering::Relaxed),
+            probes: self.probes.load(Ordering::Relaxed),
+            exact_probes: self.exact_probes.load(Ordering::Relaxed),
+            exact_hits: self.exact_hits.load(Ordering::Relaxed),
+            generalized_probes: self.generalized_probes.load(Ordering::Relaxed),
+            generalized_hits: self.generalized_hits.load(Ordering::Relaxed),
+            generalized_rejected: self.generalized_rejected.load(Ordering::Relaxed),
+            exact_candidates: self.exact_candidates.load(Ordering::Relaxed),
+            generalized_candidates: self.generalized_candidates.load(Ordering::Relaxed),
+            item_candidates: self.item_candidates.load(Ordering::Relaxed),
+            reach_candidates: self.reach_candidates.load(Ordering::Relaxed),
+            file_candidates: self.file_candidates.load(Ordering::Relaxed),
+            census_candidates: self.census_candidates.load(Ordering::Relaxed),
+            item_probes: self.item_probes.load(Ordering::Relaxed),
+            item_hits: self.item_hits.load(Ordering::Relaxed),
+            reach_probes: self.reach_probes.load(Ordering::Relaxed),
+            reach_hits: self.reach_hits.load(Ordering::Relaxed),
+            file_probes: self.file_probes.load(Ordering::Relaxed),
+            file_hits: self.file_hits.load(Ordering::Relaxed),
+            item_rejected: self.item_rejected.load(Ordering::Relaxed),
+            reach_rejected: self.reach_rejected.load(Ordering::Relaxed),
+            file_rejected: self.file_rejected.load(Ordering::Relaxed),
+            census_probes: self.census_probes.load(Ordering::Relaxed),
+            census_hits: self.census_hits.load(Ordering::Relaxed),
+            whole_selections: self.whole_selections.load(Ordering::Relaxed),
+            case_selections: self.case_selections.load(Ordering::Relaxed),
+            hinted_selections: self.hinted_selections.load(Ordering::Relaxed),
+            hinted_fallbacks: self.hinted_fallbacks.load(Ordering::Relaxed),
+            uncovered_selections: self.uncovered_selections.load(Ordering::Relaxed),
+            available_tests: self.available_tests.load(Ordering::Relaxed),
+            selected_tests: self.selected_tests.load(Ordering::Relaxed),
+            packages,
+            saved: self.saved.load(Ordering::Relaxed),
+            reach_saved: self.reach_saved.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Default)]
 struct NegativeLearning {
     binaries: Mutex<crate::HashSet<(SiteIdentity, camino::Utf8PathBuf)>>,
@@ -1158,7 +1363,6 @@ impl NegativeLearning {
 ///
 /// Returns an error if the requested memory accounting becomes unavailable. The sweep stops rather
 /// than produce verdicts without the protection the run promised.
-#[expect(clippy::too_many_lines, reason = "sweep setup and its scoped worker loop share borrowed state")]
 pub(super) fn test_all(
     work: &Workspace,
     plan: &mut Plan,
@@ -1168,11 +1372,77 @@ pub(super) fn test_all(
     killers: &mut Killers,
     events: &mut impl Events,
 ) -> Result<Option<Spent>> {
+    test_all_with_accounting_hooks(
+        work,
+        plan,
+        reach,
+        sweep,
+        deterministic_reach,
+        killers,
+        events,
+        (
+            |mutant, killers, cost| work.checkpoint_mutant(mutant, killers, cost),
+            |_| None,
+            || {},
+        ),
+    )
+}
+
+#[cfg(test)]
+#[expect(clippy::too_many_arguments, reason = "test adapters mirror the sweep execution boundary")]
+pub(super) fn test_all_with_hooks(
+    work: &Workspace,
+    plan: &mut Plan,
+    reach: &Reachability<'_>,
+    sweep: Sweep<'_>,
+    deterministic_reach: bool,
+    killers: &mut Killers,
+    events: &mut impl Events,
+    hooks: (
+        impl FnMut(&Mutant, &Killers) -> Result<()>,
+        impl Fn(u32) -> Option<Judgement> + Sync,
+        impl Fn() + Sync,
+    ),
+) -> Result<Option<Spent>> {
+    let (mut checkpoint, judgement, before_wait) = hooks;
+    test_all_with_accounting_hooks(
+        work,
+        plan,
+        reach,
+        sweep,
+        deterministic_reach,
+        killers,
+        events,
+        (|mutant, killers, _cost| checkpoint(mutant, killers), judgement, before_wait),
+    )
+}
+
+#[expect(clippy::too_many_lines, reason = "sweep setup and its scoped worker loop share borrowed state")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "execution adapters keep durability and admission failures deterministically testable"
+)]
+pub(super) fn test_all_with_accounting_hooks(
+    work: &Workspace,
+    plan: &mut Plan,
+    reach: &Reachability<'_>,
+    sweep: Sweep<'_>,
+    deterministic_reach: bool,
+    killers: &mut Killers,
+    events: &mut impl Events,
+    hooks: (
+        impl FnMut(&Mutant, &Killers, &super::session::SweepCost) -> Result<()>,
+        impl Fn(u32) -> Option<Judgement> + Sync,
+        impl Fn() + Sync,
+    ),
+) -> Result<Option<Spent>> {
+    let (mut checkpoint, judgement, before_wait) = hooks;
     let jobs = sweep.jobs;
 
     let mut pending = pending_positions(plan);
 
     if pending.is_empty() {
+        events.sweep_planned(&[], jobs);
         return Ok(None);
     }
 
@@ -1273,9 +1543,13 @@ pub(super) fn test_all(
         .collect();
     let reach_hints: Vec<Vec<Candidate>> = pending
         .iter()
-        .map(|position| {
+        .enumerate()
+        .map(|(index, position)| {
             bounded_reach_hints(
-                killers.reach_hints(&SiteIdentity::from_mutant(&plan.mutants[*position])),
+                generalized
+                    .reach
+                    .get(&site_identities[index])
+                    .map_or(&[], |(candidates, _)| *candidates),
                 reach
                     .reachable(&plan.mutants[*position])
                     .expect("the reachability index contains every pending mutant"),
@@ -1316,6 +1590,7 @@ pub(super) fn test_all(
         work.resource_capacities(),
     );
     let notes = notes::current();
+    let mut checkpoint_failed = false;
 
     thread::scope(|scope| {
         // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
@@ -1335,12 +1610,14 @@ pub(super) fn test_all(
             let tally = &tally;
             let negative = &negative;
             let notes = notes.clone();
+            let judgement = &judgement;
+            let before_wait = &before_wait;
 
             let _handle = scope.spawn(move || {
                 let _notes = notes::enter(notes.as_ref());
 
                 while abandoned.get().is_none() {
-                    let Some(assignment) = scheduler.assignment(abandoned) else {
+                    let Some(assignment) = scheduler.assignment_with(abandoned, before_wait) else {
                         return;
                     };
                     let index = assignment.index();
@@ -1353,21 +1630,23 @@ pub(super) fn test_all(
                     let reachable = &reachable[index];
                     begin_selection_trace();
                     let _sent = sender.send(SweepEvent::Started);
-                    let judged = judge_learning(
-                        work,
-                        active,
-                        reachable,
-                        hints[index].as_ref(),
-                        &reach_hints[index],
-                        &file_killers[file_slots[index]],
-                        &item_paths[index],
-                        &site_identities[index],
-                        negative,
-                        deterministic_reach,
-                        timeout_multiplier,
-                        sweep,
-                        tally,
-                    );
+                    let judged = judgement(active).unwrap_or_else(|| {
+                        judge_learning(
+                            work,
+                            active,
+                            reachable,
+                            hints[index].as_ref(),
+                            &reach_hints[index],
+                            &file_killers[file_slots[index]],
+                            &item_paths[index],
+                            &site_identities[index],
+                            negative,
+                            deterministic_reach,
+                            timeout_multiplier,
+                            sweep,
+                            tally,
+                        )
+                    });
                     let attempts = take_selection_trace();
 
                     let (outcome, killer, note) = match judged {
@@ -1428,22 +1707,25 @@ pub(super) fn test_all(
                         span.1 = span.1.min(completed.first_started_ms);
                         span.2 = span.2.max(completed.settled_ms);
                     }
-                    publish_completed(plan, killers, events, completed);
+                    if let Some(mutant) = apply_completed(plan, killers, completed) {
+                        if checkpoint_failed {
+                            continue;
+                        }
+                        let cost = super::measure::sweep_cost(Some(tally.spent(&package_spans)), sweep_started.elapsed())
+                            .expect("a completed mutant always supplies sweep accounting");
+                        match checkpoint(mutant, killers, &cost) {
+                            Ok(()) => events.mutant(mutant),
+                            Err(failure) => {
+                                checkpoint_failed = true;
+                                let _ = abandoned.set(failure.to_string());
+                                scheduler.abandon();
+                            }
+                        }
+                    }
                 }
             }
         }
     });
-
-    let mut packages = package_spans
-        .into_iter()
-        .map(|(package, (mutants, first_started_ms, settled_ms))| PackageSpent {
-            package,
-            mutants,
-            first_started_ms,
-            settled_ms,
-        })
-        .collect::<Vec<_>>();
-    packages.sort_by(|left, right| left.package.cmp(&right.package));
 
     let mut generalized = killers.generalized().clone();
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -1452,44 +1734,7 @@ pub(super) fn test_all(
     killers.replace_generalized(generalized);
 
     abandoned.into_inner().map_or_else(
-        || {
-            Ok(Some(Spent {
-                launches: tally.launches.into_inner(),
-                probes: tally.probes.into_inner(),
-                exact_probes: tally.exact_probes.into_inner(),
-                exact_hits: tally.exact_hits.into_inner(),
-                generalized_probes: tally.generalized_probes.into_inner(),
-                generalized_hits: tally.generalized_hits.into_inner(),
-                generalized_rejected: tally.generalized_rejected.into_inner(),
-                exact_candidates: tally.exact_candidates.into_inner(),
-                generalized_candidates: tally.generalized_candidates.into_inner(),
-                item_candidates: tally.item_candidates.into_inner(),
-                reach_candidates: tally.reach_candidates.into_inner(),
-                file_candidates: tally.file_candidates.into_inner(),
-                census_candidates: tally.census_candidates.into_inner(),
-                item_probes: tally.item_probes.into_inner(),
-                item_hits: tally.item_hits.into_inner(),
-                reach_probes: tally.reach_probes.into_inner(),
-                reach_hits: tally.reach_hits.into_inner(),
-                file_probes: tally.file_probes.into_inner(),
-                file_hits: tally.file_hits.into_inner(),
-                item_rejected: tally.item_rejected.into_inner(),
-                reach_rejected: tally.reach_rejected.into_inner(),
-                file_rejected: tally.file_rejected.into_inner(),
-                census_probes: tally.census_probes.into_inner(),
-                census_hits: tally.census_hits.into_inner(),
-                whole_selections: tally.whole_selections.into_inner(),
-                case_selections: tally.case_selections.into_inner(),
-                hinted_selections: tally.hinted_selections.into_inner(),
-                hinted_fallbacks: tally.hinted_fallbacks.into_inner(),
-                uncovered_selections: tally.uncovered_selections.into_inner(),
-                available_tests: tally.available_tests.into_inner(),
-                selected_tests: tally.selected_tests.into_inner(),
-                packages,
-                saved: tally.saved.into_inner(),
-                reach_saved: tally.reach_saved.into_inner(),
-            }))
-        },
+        || Ok(Some(tally.spent(&package_spans))),
         |reason| {
             Err(error!(
                 "the run cannot be trusted to judge anything further: {reason}.\n\
@@ -1564,10 +1809,8 @@ fn elapsed_millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn publish_completed(plan: &mut Plan, killers: &mut Killers, events: &mut impl Events, completed: Completed) {
-    let Some(mutant) = plan.mutants.get_mut(completed.position) else {
-        return;
-    };
+fn apply_completed<'plan>(plan: &'plan mut Plan, killers: &mut Killers, completed: Completed) -> Option<&'plan Mutant> {
+    let mutant = plan.mutants.get_mut(completed.position)?;
     mutant.outcome = completed.outcome;
     mutant.elapsed_ms = completed.elapsed_ms;
     let observed = completed.killer.as_ref().and_then(KillerAttribution::observed);
@@ -1584,7 +1827,14 @@ fn publish_completed(plan: &mut Plan, killers: &mut Killers, events: &mut impl E
         None => killers.forget(&mutant.id),
     }
 
-    events.mutant(mutant);
+    Some(mutant)
+}
+
+#[cfg(test)]
+fn publish_completed(plan: &mut Plan, killers: &mut Killers, events: &mut impl Events, completed: Completed) {
+    if let Some(mutant) = apply_completed(plan, killers, completed) {
+        events.mutant(mutant);
+    }
 }
 
 fn persist_learning(generalized: &mut GeneralizedHints, files: &[Arc<Utf8Path>], learning: &[FileLearning]) {
@@ -1631,7 +1881,7 @@ pub(super) struct Sweep<'run> {
 }
 
 /// What one mutant's run across its reachable test binaries came to.
-enum Judgement {
+pub(super) enum Judgement {
     /// The mutant was judged: an outcome, the test that caught it if one did, and any note.
     Reached(Outcome, Option<Killer>, Option<String>),
 
@@ -1892,29 +2142,50 @@ fn whole_probe_attempt(binary: &TestBinary, timeout_multiplier: Option<f64>, swe
     }
 }
 
-fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u32, census: &Census) -> Vec<Killer> {
-    let all = hints;
-
-    all.iter()
-        .filter(|hint| {
-            let Some(binary) = reachable.iter().copied().find(|binary| binary.matches_killer(hint)) else {
-                return false;
-            };
-            let Some(total) = binary.tests else {
-                return false;
-            };
-            let measured = match census.work(binary, ordinal) {
-                CensusWork::Selected(duration) | CensusWork::Hinted(duration) => duration,
-                CensusWork::Whole | CensusWork::Uncovered => return false,
-            };
-            if binary.baseline.is_zero() || measured.cmp(&binary.baseline).is_ge() {
+fn bounded_reach_hints(hints: &[Killer], reachable: &[&TestBinary], ordinal: u32, census: &Census) -> Vec<Killer> {
+    if hints.is_empty() {
+        return Vec::new();
+    }
+    let mut binaries: crate::HashMap<&str, crate::HashMap<String, Vec<usize>>> = crate::HashMap::default();
+    for (index, binary) in reachable.iter().enumerate() {
+        let targets = binaries.entry(&binary.package).or_default();
+        targets.entry(binary.target.clone()).or_default().push(index);
+        if !binary.target_kind.is_empty() {
+            targets.entry(binary.killer_target()).or_default().push(index);
+        }
+    }
+    let mut counts = vec![0_usize; reachable.len()];
+    let resolved = hints
+        .iter()
+        .map(|hint| {
+            let matches = binaries.get(hint.package.as_str())?.get(hint.target.as_str())?;
+            // Legacy target names can match multiple binaries; eligibility uses the first,
+            // but the half-suite bound counts candidates for every matching binary.
+            for index in matches {
+                counts[*index] += 1;
+            }
+            matches.first().copied()
+        })
+        .collect::<Vec<_>>();
+    let eligible = reachable
+        .iter()
+        .enumerate()
+        .map(|(index, binary)| {
+            let Some(total) = binary.tests else { return false };
+            if counts[index] == 0 || counts[index] > total / 2 || binary.baseline.is_zero() {
                 return false;
             }
-            let selected = all.iter().filter(|candidate| binary.matches_killer(candidate)).count();
-
-            selected <= total / 2
+            match census.work(binary, ordinal) {
+                CensusWork::Selected(duration) | CensusWork::Hinted(duration) => duration < binary.baseline,
+                CensusWork::Whole | CensusWork::Uncovered => false,
+            }
         })
-        .cloned()
+        .collect::<Vec<_>>();
+    hints
+        .iter()
+        .zip(resolved)
+        .filter(|(_, index)| index.is_some_and(|index| eligible[index]))
+        .map(|(hint, _)| hint.clone())
         .collect()
 }
 
@@ -1950,6 +2221,7 @@ fn probe_cases(
         census: None,
     };
 
+    // #[gamma::skip(call_result.default, reason = "record_launch returns unit and this mutator retains the launch counter update before replacing unit with unit")]
     record_launch(tally);
     let _probes = tally.probes.fetch_add(1, Ordering::Relaxed);
     ProbeKind::Census.attempt(tally);
@@ -3109,6 +3381,200 @@ mod tests {
     use camino::Utf8PathBuf;
 
     use super::*;
+
+    #[test]
+    fn checkpoint_accounting_samples_counters_and_sorts_completed_package_spans() {
+        let tally = Tally::default();
+        tally.launches.store(7, Ordering::Relaxed);
+        tally.probes.store(3, Ordering::Relaxed);
+        tally.saved.store(2, Ordering::Relaxed);
+        tally.exact_hits.store(1, Ordering::Relaxed);
+        tally.selected_tests.store(9, Ordering::Relaxed);
+        let spans = crate::HashMap::from_iter([(Arc::from("b"), (2, 5, 90)), (Arc::from("a"), (1, 10, 50))]);
+        let actual = super::super::measure::sweep_cost(Some(tally.spent(&spans)), Duration::from_millis(100)).unwrap();
+        let expected = super::super::session::SweepCost {
+            elapsed: Duration::from_millis(100),
+            launches: 7,
+            probes: 3,
+            launches_saved: 2,
+            exact_hits: 1,
+            selected_tests: 9,
+            packages: vec![
+                super::super::session::PackageSweepCost {
+                    package: "a".into(),
+                    mutants: 1,
+                    first_started_ms: 10,
+                    settled_ms: 50,
+                },
+                super::super::session::PackageSweepCost {
+                    package: "b".into(),
+                    mutants: 2,
+                    first_started_ms: 5,
+                    settled_ms: 90,
+                },
+            ],
+            ..super::super::session::SweepCost::default()
+        };
+        assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+    }
+
+    #[test]
+    fn learning_observation_matrix_updates_matching_tiers_and_preserves_seed_order() {
+        let binary = TestBinary {
+            package: "package".to_owned(),
+            target: "target".to_owned(),
+            ..crate::testing::test_binary("learning-binary")
+        };
+        let killer = Killer {
+            package: "package".to_owned(),
+            target: "target".to_owned(),
+            test: "test".to_owned(),
+        };
+        for hit in [false, true] {
+            let learning = FileLearning::new();
+            learning.reached("item", &binary, Duration::from_millis(13));
+            learning.publish("item", &Judgement::Guessed(killer.clone()));
+            let identity = BinaryIdentity::from_binary(&binary);
+            for candidate in [
+                Candidate::Exact(killer.clone()),
+                Candidate::ItemBinary(identity.clone()),
+                Candidate::ReachFileBinary(identity.clone()),
+                Candidate::FileBinary(identity),
+            ] {
+                learning.observe("item", &candidate, hit, Duration::from_millis(17));
+            }
+            let state = learning.locked();
+            for candidate in [&state.items["item"].reached[0], &state.reached_file[0], &state.binaries[0]] {
+                assert_eq!(candidate.hits, u32::from(hit));
+                assert_eq!(candidate.misses, u32::from(!hit));
+                assert_eq!(candidate.seeds, 1);
+                assert_eq!(candidate.canonical_passes, 0);
+            }
+            assert_eq!(state.items["item"].exact[0].hits, u32::from(hit));
+            assert_eq!(state.items["item"].exact[0].misses, u32::from(!hit));
+            assert_eq!(state.items["item"].exact[0].samples, 1);
+            assert_eq!(state.items["item"].exact[0].measured, Duration::from_millis(17));
+            assert_eq!(state.items["item"].reached[0].samples, 2);
+            assert_eq!(state.items["item"].reached[0].measured, Duration::from_millis(30));
+            assert_eq!(state.items["item"].reached[0].order, 0);
+            assert_eq!(state.reached_file[0].order, 0);
+            assert_eq!(state.items["item"].exact[0].order, 1);
+            assert_eq!(state.binaries[0].order, 1);
+            assert_eq!(state.next_order, 2);
+            let serialized = state.items["item"].exact[0].hint(Clone::clone);
+            assert_eq!(serialized.measured_ms, 17);
+        }
+    }
+
+    #[test]
+    fn canonical_pass_matrix_updates_reached_file_only_when_reach_was_observed() {
+        let binary = crate::testing::test_binary("canonical-binary");
+        for reached in [false, true] {
+            let learning = FileLearning::new();
+            learning.reached("item", &binary, Duration::from_millis(1));
+            learning.publish(
+                "item",
+                &Judgement::Guessed(Killer {
+                    package: binary.package.clone(),
+                    target: binary.killer_target(),
+                    test: "test".to_owned(),
+                }),
+            );
+            learning.record_canonical_pass("item", &binary, reached);
+            let state = learning.locked();
+            assert_eq!(state.items["item"].reached[0].canonical_passes, 1);
+            assert_eq!(state.reached_file[0].canonical_passes, u32::from(reached));
+            assert_eq!(state.binaries[0].canonical_passes, 1);
+            assert_eq!(state.items["item"].exact[0].canonical_passes, 0);
+        }
+    }
+
+    #[test]
+    fn selection_trace_preserves_each_context_field_and_resets_the_previous_generation() {
+        let binary = TestBinary {
+            package: "package".to_owned(),
+            target: "target".to_owned(),
+            ..crate::testing::test_binary("trace-binary")
+        };
+        for (observation, expected) in [
+            (Some(true), SelectionResult::Hit),
+            (Some(false), SelectionResult::Miss),
+            (None, SelectionResult::Inconclusive),
+        ] {
+            begin_selection_trace();
+            trace_selection(
+                7,
+                &binary,
+                Some("test".to_owned()),
+                SelectionTier::Reach,
+                3,
+                observation,
+                true,
+                Duration::from_millis(11),
+                Duration::from_millis(13),
+            );
+            let attempts = take_selection_trace();
+            assert_eq!(attempts.len(), 1);
+            let attempt = &attempts[0];
+            assert_eq!(attempt.ordinal, 7);
+            assert_eq!(attempt.package, "package");
+            assert_eq!(attempt.target, "target");
+            assert_eq!(attempt.test.as_deref(), Some("test"));
+            assert_eq!(attempt.tier, SelectionTier::Reach);
+            assert_eq!(attempt.rank, 3);
+            assert_eq!(attempt.result, expected);
+            assert!(attempt.all_tests);
+            assert_eq!(attempt.elapsed_ms, 11);
+            assert_eq!(attempt.fallback_ms, 13);
+            assert!(take_selection_trace().is_empty());
+        }
+        begin_selection_trace();
+        trace_selection(
+            1,
+            &binary,
+            None,
+            SelectionTier::Exact,
+            0,
+            None,
+            false,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        begin_selection_trace();
+        assert!(take_selection_trace().is_empty());
+    }
+
+    #[test]
+    fn filtered_confirmation_and_census_absence_truth_tables_do_not_equate_hints_with_proofs() {
+        let binary = crate::testing::test_binary("selection-binary");
+        let complete = Census::examined(&binary.path, 7, 1, 4);
+        let partial = Census::partial(&binary.path, 7, 1, 4);
+        assert!(census_excludes(&complete, &binary, 99));
+        assert!(!census_excludes(&complete, &binary, 7));
+        assert!(!census_excludes(&partial, &binary, 99));
+        for already_whole in [false, true] {
+            for selection in [
+                CensusSelection::Whole,
+                CensusSelection::Uncovered,
+                CensusSelection::Hinted(vec!["test"]),
+                CensusSelection::Selected(vec!["test"]),
+            ] {
+                for verdict in [
+                    Verdict::Passed,
+                    Verdict::Failed(None),
+                    Verdict::TimedOut,
+                    Verdict::Unjudged("fixture".to_owned()),
+                ] {
+                    assert_eq!(
+                        filtered_run_needs_confirmation(already_whole, &selection, &verdict),
+                        !already_whole
+                            && matches!(selection, CensusSelection::Selected(_))
+                            && matches!(verdict, Verdict::TimedOut | Verdict::Unjudged(_))
+                    );
+                }
+            }
+        }
+    }
     #[cfg(unix)]
     use crate::exec::faults::{self, Fault};
     #[cfg(unix)]
@@ -3132,6 +3598,38 @@ mod tests {
             meter: false,
             confirm: true,
             census: blind(),
+        }
+    }
+
+    #[test]
+    fn scheduler_priority_partial_order_always_matches_total_order() {
+        let first = LocalPriority {
+            distance: (1, 2),
+            benefit: 3,
+            cost: 4,
+            stable_order: 5,
+            index: 6,
+        };
+        let values = [
+            first,
+            LocalPriority { cost: 7, ..first },
+            LocalPriority { distance: (2, 0), ..first },
+        ];
+        for left in values {
+            for right in values {
+                assert_eq!(left.partial_cmp(&right), Some(left.cmp(&right)));
+                let left = PackageHead {
+                    package: 1,
+                    turns: 2,
+                    local: left,
+                };
+                let right = PackageHead {
+                    package: 3,
+                    turns: 4,
+                    local: right,
+                };
+                assert_eq!(left.partial_cmp(&right), Some(left.cmp(&right)));
+            }
         }
     }
 
@@ -3857,22 +4355,31 @@ mod tests {
     fn a_plan_with_no_pending_mutants_sweeps_nothing_and_returns_none() {
         let (_directory, work, mut plan, binaries) = unreachable_harness(Vec::new());
 
-        // No pending mutant of any kind, which is what makes the sweep absent rather than empty.
-        plan.mutants.clear();
+        plan.mutants[0].outcome = Outcome::Survived;
         let reach = Reachability::build(&plan, &binaries, &NARROW);
+        let mut events = crate::testing::Recorder::default();
 
-        let swept = test_all(
+        let swept = test_all_with_hooks(
             &work,
             &mut plan,
             &reach,
             sweep(Stall::NONE),
             false,
             &mut Killers::default(),
-            &mut crate::testing::Recorder::default(),
+            &mut events,
+            (
+                |_, _| panic!("a settled plan must not checkpoint another verdict"),
+                |_| panic!("a settled plan must not launch a mutant"),
+                || panic!("a settled plan must not wait for workers"),
+            ),
         )
         .expect("an empty sweep is not a failure");
 
         assert!(swept.is_none(), "nothing pending means there is no sweep phase, not a free one");
+        assert_eq!(events.sweep_plan, Some((0, 1)));
+        assert_eq!(events.mutant_starts, 0);
+        assert_eq!(events.mutants, 0);
+        assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
     }
 
     /// A note describing a mutant that outgrew its ceiling says both numbers: what it reached and
@@ -5694,6 +6201,83 @@ mod tests {
     }
 
     #[test]
+    fn reach_index_preserves_first_execution_and_last_estimation_candidates() {
+        let site = SiteIdentity::from_mutant(&crate::fixtures::mutant());
+        let first = vec![killer("first")];
+        let last = vec![killer("last")];
+        let mut hints = GeneralizedHints::empty_supported();
+        hints.test_sets = vec![first.clone(), last.clone()];
+        hints.reach = vec![
+            crate::discover::ReachCluster {
+                site: site.clone(),
+                test_set: 0,
+            },
+            crate::discover::ReachCluster {
+                site: site.clone(),
+                test_set: 1,
+            },
+        ];
+        let mut killers = Killers::default();
+        killers.replace_generalized(hints);
+        let index = GeneralizedPlanning::new(&killers);
+        let (execution, estimation) = index.reach[&site];
+        assert_eq!(execution, first);
+        assert_eq!(execution, killers.reach_hints(&site));
+        assert_eq!(estimation, last);
+    }
+
+    #[test]
+    fn indexed_reach_filter_preserves_legacy_matching_order_and_duplicate_counts() {
+        fn original(hints: &[Killer], reachable: &[&TestBinary], census: &Census) -> Vec<Killer> {
+            hints
+                .iter()
+                .filter(|hint| {
+                    let Some(binary) = reachable.iter().copied().find(|binary| binary.matches_killer(hint)) else {
+                        return false;
+                    };
+                    let Some(total) = binary.tests else { return false };
+                    let measured = match census.work(binary, 7) {
+                        CensusWork::Selected(duration) | CensusWork::Hinted(duration) => duration,
+                        CensusWork::Whole | CensusWork::Uncovered => return false,
+                    };
+                    !binary.baseline.is_zero()
+                        && measured < binary.baseline
+                        && hints.iter().filter(|candidate| binary.matches_killer(candidate)).count() <= total / 2
+                })
+                .cloned()
+                .collect()
+        }
+        let mut first = crate::testing::helper();
+        first.package = "subject".into();
+        first.target = "shared".into();
+        first.target_kind = "lib".into();
+        first.tests = Some(8);
+        first.baseline = Duration::from_millis(10);
+        let mut second = first.clone();
+        second.target_kind = "bin".into();
+        second.tests = Some(2);
+        let hints = ["shared", "lib:shared", "bin:shared", "shared", "missing"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, target)| Killer {
+                package: "subject".into(),
+                target: target.into(),
+                test: format!("test_{index}"),
+            })
+            .collect::<Vec<_>>();
+        for reachable in [[&first, &second], [&second, &first]] {
+            for census in [Census::partial(&first.path, 7, 1, 8), Census::default()] {
+                for count in 0..=hints.len() {
+                    assert_eq!(
+                        bounded_reach_hints(&hints[..count], &reachable, 7, &census),
+                        original(&hints[..count], &reachable, &census),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn persisted_reach_hints_are_bounded_by_half_the_binary_suite() {
         let mut binary = crate::testing::helper();
         binary.package = "subject".to_owned();
@@ -5705,21 +6289,21 @@ mod tests {
         let over_half = Census::partial(&binary.path, 7, 3, 4);
         let bounded = Census::partial(&binary.path, 7, 2, 4);
 
-        assert!(bounded_reach_hints(hints.clone(), &reachable, 7, &over_half).is_empty());
-        assert_eq!(bounded_reach_hints(hints[..2].to_vec(), &reachable, 7, &bounded).len(), 2);
+        assert!(bounded_reach_hints(&hints, &reachable, 7, &over_half).is_empty());
+        assert_eq!(bounded_reach_hints(&hints[..2], &reachable, 7, &bounded).len(), 2);
         let mut expensive = binary.clone();
         expensive.baseline = Duration::from_millis(1);
         assert!(
-            bounded_reach_hints(hints[..2].to_vec(), &[&expensive], 7, &bounded).is_empty(),
+            bounded_reach_hints(&hints[..2], &[&expensive], 7, &bounded).is_empty(),
             "persisted exact probes must cost less than the binary they replace"
         );
 
         let mut unknown_count = binary.clone();
         unknown_count.tests = None;
-        assert!(bounded_reach_hints(hints[..2].to_vec(), &[&unknown_count], 7, &bounded).is_empty());
+        assert!(bounded_reach_hints(&hints[..2], &[&unknown_count], 7, &bounded).is_empty());
         assert!(
             bounded_reach_hints(
-                vec![Killer {
+                &[Killer {
                     package: "elsewhere".to_owned(),
                     target: "other".to_owned(),
                     test: "tests::a".to_owned(),
@@ -6679,6 +7263,80 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_abandonment_wakes_all_resource_waiters_before_the_active_worker_finishes() {
+        let resource: Arc<str> = "exclusive".into();
+        let work = (0..5)
+            .map(|index| {
+                let mut work = scheduled(index, "item", "package", 1, 0, false, index);
+                work.resources.push(Arc::clone(&resource));
+                work
+            })
+            .collect();
+        let scheduler = Scheduler::with_resources(work, 5, std::iter::once((resource, 1)).collect());
+        let abandoned = OnceLock::new();
+        let active = scheduler.assignment(&abandoned).unwrap();
+        let (waiting, waited) = std::sync::mpsc::channel();
+        let (finished, joined) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                let waiting = waiting.clone();
+                let finished = finished.clone();
+                let scheduler = &scheduler;
+                let abandoned = &abandoned;
+                let _worker = scope.spawn(move || {
+                    let claimed = scheduler.claim_with(abandoned, || {
+                        waiting.send(()).unwrap();
+                    });
+                    finished.send(claimed).unwrap();
+                });
+            }
+            for _ in 0..4 {
+                waited
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("each worker reaches resource admission");
+            }
+            abandoned.set("checkpoint failed".to_owned()).unwrap();
+            scheduler.abandon();
+            for _ in 0..4 {
+                assert_eq!(
+                    joined
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("abandonment wakes every resource waiter"),
+                    None
+                );
+            }
+            assert_eq!(scheduler.state.lock().unwrap().active_resources.values().copied().sum::<usize>(), 1);
+        });
+        drop(active);
+        assert_eq!(scheduler.state.lock().unwrap().active_resources.values().copied().sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn scheduler_resource_fallback_can_skip_the_head_of_the_same_item_queue() {
+        let resource: Arc<str> = "exclusive".into();
+        let mut first = scheduled(0, "same", "a", 30, 1, false, 0);
+        first.resources.push(Arc::clone(&resource));
+        let mut blocked = scheduled(0, "same", "a", 20, 0, true, 1);
+        blocked.resources.push(Arc::clone(&resource));
+        let available = scheduled(0, "same", "a", 10, 0, true, 2);
+        let capacities = std::iter::once((resource, 1)).collect();
+        let scheduler = Scheduler::with_resources(vec![first, blocked, available], 1, capacities);
+        let abandoned = OnceLock::new();
+
+        let first = scheduler.assignment(&abandoned).expect("the scout is available");
+        assert_eq!(first.index(), 0);
+        let available = scheduler
+            .assignment(&abandoned)
+            .expect("the lower-priority hinted alternative is available");
+        assert_eq!(available.index(), 2);
+        drop(first);
+        let blocked = scheduler
+            .assignment(&abandoned)
+            .expect("the released resource admits the skipped head");
+        assert_eq!(blocked.index(), 1);
+    }
+
+    #[test]
     fn exact_work_reserves_only_the_killer_tests_resources() {
         let (_directory, mut work) = crate::testing::helper_workspace("scheduled-resource-", &["exit:0"]);
         let mut binary = crate::testing::helper();
@@ -6778,6 +7436,110 @@ mod tests {
             Some(3),
             "learning per estimated cost wins, then equal value keeps useful long work and stable order"
         );
+    }
+
+    #[test]
+    fn scheduler_updates_heads_not_the_population_of_a_large_file() {
+        let population = 4096;
+        for items in [1, 16, population] {
+            let scheduler = Scheduler::new(
+                (0..population)
+                    .map(|index| scheduled(0, &format!("item-{}", index % items), "a", 1, 2, false, index))
+                    .collect(),
+                1,
+            );
+            {
+                let mut state = scheduler.state.lock().expect("scheduler state is healthy");
+                state.priority_updates = 0;
+                state.learning_updates = 0;
+            }
+            let abandoned = OnceLock::new();
+            for _ in 0..population {
+                let index = scheduler.claim(&abandoned).expect("pending work is available");
+                scheduler.complete(index);
+            }
+            assert_eq!(scheduler.claim(&abandoned), None);
+            let state = scheduler.state.lock().expect("scheduler state is healthy");
+            assert_eq!(state.priority_updates, population * 2, "each reservation updates one item head");
+            assert!(state.learning_updates <= population, "cold priorities are converted at most once");
+            assert!(
+                state.pending_groups.is_empty(),
+                "finished groups leave the resource-selection frontier"
+            );
+            assert!(state.files[0].idle.is_empty());
+            assert!(state.files[0].active.is_empty());
+            assert!(state.heads.is_empty());
+        }
+    }
+
+    #[test]
+    fn scheduler_hierarchy_matches_full_scan_through_claims_and_releases() {
+        for resource_limited in [false, true] {
+            for seed in 0..8 {
+                let work = (0..96)
+                    .map(|index| {
+                        let mut entry = scheduled(
+                            index % 4,
+                            &format!("item-{}", index % 7),
+                            &format!("package-{}", index % 3),
+                            (index % 11 + 1) as u64,
+                            index % 5,
+                            index % 3 == 0,
+                            95 - index,
+                        );
+                        if resource_limited && index % 3 != 0 {
+                            entry.resources.push(format!("resource-{}", index % 2).into());
+                        }
+                        entry
+                    })
+                    .collect();
+                let capacities = if resource_limited {
+                    [("resource-0".into(), 1), ("resource-1".into(), 2)].into_iter().collect()
+                } else {
+                    crate::HashMap::default()
+                };
+                let scheduler = Scheduler::with_resources(work, 4, capacities);
+                let abandoned = OnceLock::new();
+                let mut active = Vec::new();
+                let mut step = seed;
+                loop {
+                    let (expected, remaining) = {
+                        let state = scheduler.state.lock().expect("scheduler state is healthy");
+                        let expected = (0..scheduler.work.len())
+                            .filter(|index| scheduler.resources_available(&state, *index))
+                            .filter_map(|index| {
+                                let package = scheduler.package_slots[index];
+                                priority(&scheduler.work, &state, index).map(|local| PackageHead {
+                                    package,
+                                    turns: state.package_turns[package],
+                                    local,
+                                })
+                            })
+                            .min()
+                            .map(|head| head.local.index);
+                        assert_eq!(
+                            scheduler.select(&state),
+                            expected,
+                            "seed={seed}, step={step}, resources={resource_limited}"
+                        );
+                        (expected, state.remaining_count)
+                    };
+                    if remaining == 0 && active.is_empty() {
+                        break;
+                    }
+                    step += 1;
+                    if !active.is_empty() && (expected.is_none() || active.len() == 8 || step % 3 == 0) {
+                        let index = active.swap_remove((step * 7 + seed) % active.len());
+                        scheduler.release(index, step % 4 != 0);
+                    } else if let Some(expected) = expected {
+                        assert_eq!(scheduler.claim(&abandoned), Some(expected));
+                        active.push(expected);
+                    } else {
+                        panic!("pending work must be available when no assignment is active");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

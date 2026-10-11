@@ -26,7 +26,7 @@ use crate::parse::SourceFile;
 use crate::{HashMap, HashSet};
 
 /// The test functions the current sources declare.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Killers {
     /// Whether every requested file was read and parsed.
     ///

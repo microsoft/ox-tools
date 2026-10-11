@@ -131,7 +131,11 @@ pub fn run() -> Result<ExitCode, AppError> {
     // Use --no-deps to avoid Cargo resolving dependencies (which would fail on cycles)
     cmd.no_deps();
 
-    let metadata = cmd.exec().into_app_err("Failed to load cargo metadata")?;
+    evaluate_metadata(cmd.exec())
+}
+
+fn evaluate_metadata(loaded: Result<Metadata, cargo_metadata::Error>) -> Result<ExitCode, AppError> {
+    let metadata = loaded.into_app_err("Failed to load cargo metadata")?;
 
     let cycles = detect_cycles(&metadata);
 
@@ -146,6 +150,19 @@ pub fn run() -> Result<ExitCode, AppError> {
             eprintln!();
         }
         Ok(ExitCode::FAILURE)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod campaign_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_execution_failure_returns_context_instead_of_panicking() {
+        let error = evaluate_metadata(Err(cargo_metadata::Error::Io(std::io::Error::other("metadata unavailable"))))
+            .expect_err("Cargo metadata execution errors propagate");
+        assert!(error.to_string().contains("Failed to load cargo metadata"), "{error}");
     }
 }
 

@@ -49,6 +49,7 @@ impl Diff {
     /// [`input::MAX_BYTES`] are refused before they can exhaust the process's memory.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn read_from(path: &Utf8Path, mut input: impl Read) -> Result<Self> {
+        // #[gamma::skip(cond.always_true, tag = "timeout", reason = "routing file inputs through standard input blocked waiting for input in the campaign")]
         let text = if path == "-" {
             input::text(&mut input).map_err(|cause| error!("could not read a diff from standard input").caused_by(cause))?
         } else {
@@ -79,6 +80,7 @@ impl Diff {
         let mut touched: HashMap<Utf8PathBuf, Vec<u32>> = HashMap::default();
         let mut sources: HashMap<Utf8PathBuf, Utf8PathBuf> = HashMap::default();
         let mut current: Option<(Utf8PathBuf, Utf8PathBuf)> = None;
+        // #[gamma::skip(literal.int_increment, reason = "every hunk assigns its declared start before any body line can use this initial counter")]
         let mut line_number = 0_u32;
 
         // What the `diff --git` header said the post-image prefix is, and what the `---` line
@@ -133,6 +135,7 @@ impl Diff {
 
             if let Some(rest) = line.strip_prefix("diff --git ") {
                 dst_prefix = git_prefix(rest);
+                // #[gamma::skip(assign_value.default, reason = "None is exactly the default value of this Option")]
                 pre_image = None;
             } else if let Some(rest) = line.strip_prefix("+++ ") {
                 current = new_file_path(rest, dst_prefix.as_deref(), pre_image.as_deref());
@@ -148,12 +151,14 @@ impl Diff {
                     remaining_old = old_count;
                     remaining_new = new_count;
                 } else {
+                    // #[gamma::skip(assign_value.default, reason = "None is exactly the default value of this Option")]
                     current = None;
                 }
             }
         }
 
         sources.retain(|path, _raw| touched.contains_key(path));
+        // #[gamma::skip(call_result.default, reason = "normalize_lines returns unit and this mutator still sorts and deduplicates the same lines before replacing unit with unit")]
         normalize_lines(&mut touched);
 
         Self { touched, sources }
@@ -252,6 +257,7 @@ impl Diff {
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn touches(&self, path: &Utf8Path, start: u32, end: u32) -> bool {
+        // #[gamma::skip(cond.always_false, reason = "when start exceeds end the partition-point candidate is at least start and therefore cannot satisfy the subsequent end comparison")]
         if start > end {
             return false;
         }
@@ -315,9 +321,14 @@ fn git_prefix(rest: &str) -> Option<String> {
     // A path may contain spaces, so the split is found by trying each one and keeping the split
     // whose halves agree once their first segment is removed, rather than by taking two tokens.
     for (index, _matched) in rest.match_indices(' ') {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "match_indices yields an in-bounds UTF-8 boundary for the ASCII space, so this prefix slice always exists")]
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "the extra byte is the matched ASCII space, which trim immediately removes from the prefix")]
         let left = rest.get(..index)?.trim();
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "the ASCII space occupies one byte within rest, so the byte immediately after it is an in-bounds UTF-8 boundary")]
+        // #[gamma::skip(literal.int_decrement, reason = "starting the suffix at the matched ASCII space instead of after it is identical after trim removes that leading space")]
         let right = rest.get(index.saturating_add(1)..)?.trim();
 
+        // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, reason = "one empty side cannot yield a derived prefix because it has no first segment; all three mutations still skip when both sides are empty")]
         if left.is_empty() || right.is_empty() {
             continue;
         }
@@ -347,8 +358,10 @@ fn derived_prefix<'a>(src: &str, dst: &'a str) -> Option<&'a str> {
 /// Splits a path into its first segment, separator included, and the rest.
 fn split_first_segment(path: &str) -> Option<(&str, &str)> {
     let slash = path.find('/')?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "a slash found inside a string has an index smaller than its length, so adding one cannot overflow usize")]
     let split = slash.checked_add(1)?;
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "the split is immediately after an in-bounds ASCII slash, so both slices use a valid in-bounds UTF-8 boundary")]
     Some((path.get(..split)?, path.get(split..)?))
 }
 
@@ -367,6 +380,7 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
                 }
             }
 
+            // #[gamma::skip(loop.delete_continue, reason = "an absolute candidate is never safe_relative, so the following guard independently continues the same loop")]
             continue;
         }
 
@@ -384,6 +398,7 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
         let mut rest = candidate.as_str();
 
         while let Some((_first, tail)) = split_first_segment(rest) {
+            // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the suffix scan must consume a path segment on every iteration")]
             rest = tail;
 
             if rest.is_empty() {
@@ -402,6 +417,7 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
     // This one stays a scan, and has to: a suffix match is not a lookup, and there is no key to
     // hash. It is reached only when every exact spelling has already failed.
     let mut matched = candidates.iter().filter(|file| {
+        // #[gamma::skip(collection.reverse_array, reason = "any over these two pure path predicates is independent of evaluation order")]
         [path, raw]
             .into_iter()
             .any(|candidate| (candidate.has_root() || safe_relative(candidate)) && ends_with_path(candidate, file))
@@ -528,6 +544,57 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn header_pair_without_git_metadata_derives_nonstandard_prefix_from_preimage() {
+        let diff = Diff::parse("--- old/source.rs\n+++ new/source.rs\n@@ -1 +1 @@\n+changed\n");
+        assert!(diff.touches(Utf8Path::new("source.rs"), 1, 1));
+        assert!(!diff.touches_file(Utf8Path::new("new/source.rs")));
+    }
+
+    #[test]
+    fn locate_non_source_matrix_requires_safe_existing_files_and_prefers_normalized_path() {
+        let directory = crate::testing::workdir("diff-nonsource-matrix-");
+        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("fixture is UTF-8");
+        let root = base.join("workspace");
+        std::fs::create_dir(&root).expect("workspace directory");
+        for name in ["first.toml", "second.toml", "unselected.rs"] {
+            std::fs::write(root.join(name), "").expect("fixture file");
+        }
+        std::fs::write(base.join("outside.toml"), "").expect("external file remains inside fixture");
+        std::fs::create_dir(root.join("directory")).expect("nonfile fixture");
+        let known = HashSet::default();
+        for (path, expected) in [
+            (root.join("first.toml"), Some(Utf8PathBuf::from("first.toml"))),
+            (root.join("missing.toml"), None),
+            (root.join("directory"), None),
+            (root.join("unselected.rs"), None),
+            (Utf8PathBuf::from("../outside.toml"), None),
+            (Utf8PathBuf::from("first.toml"), Some(Utf8PathBuf::from("first.toml"))),
+            (Utf8PathBuf::from("missing.toml"), None),
+            (Utf8PathBuf::from("directory"), None),
+            (Utf8PathBuf::from("unselected.rs"), None),
+        ] {
+            assert_eq!(locate(&path, &path, &root, &known, &[]), expected, "{path}");
+        }
+        assert_eq!(
+            locate(Utf8Path::new("first.toml"), Utf8Path::new("second.toml"), &root, &known, &[]),
+            Some(Utf8PathBuf::from("first.toml"))
+        );
+        let selected = [Utf8PathBuf::from("selected.rs")];
+        let known = selected.iter().map(Utf8PathBuf::as_path).collect();
+        assert_eq!(
+            locate(Utf8Path::new("prefix/"), Utf8Path::new("selected.rs"), &root, &known, &selected),
+            Some(Utf8PathBuf::from("selected.rs"))
+        );
+        let ambiguous = [Utf8PathBuf::from("src/a.rs"), Utf8PathBuf::from("a.rs")];
+        let known = ambiguous.iter().map(Utf8PathBuf::as_path).collect();
+        assert_eq!(
+            locate(&root.join("missing.rs"), Utf8Path::new("src/a.rs"), &root, &known, &ambiguous),
+            Some(Utf8PathBuf::from("src/a.rs")),
+            "an unresolved absolute normalized path must not stop the exact raw-path lookup before ambiguous suffix fallback"
+        );
+    }
+
     const SAMPLE: &str = "\
 diff --git a/src/lib.rs b/src/lib.rs
 index 1234567..89abcde 100644
@@ -542,6 +609,198 @@ index 1234567..89abcde 100644
 -removed line
  context four
 ";
+
+    #[test]
+    fn diff_header_helpers_preserve_empty_paths_prefixes_and_segment_boundaries() {
+        for (text, expected) in [
+            ("", None),
+            (" \tstamp", None),
+            ("/dev/null", None),
+            ("src/a.rs\tstamp", Some("src/a.rs")),
+        ] {
+            assert_eq!(header_path(text), expected, "{text:?}");
+        }
+        for (source, destination, expected) in [
+            ("a/a.rs", "b/a.rs", Some("b/")),
+            ("a/", "b/", None),
+            ("a/a.rs", "a.rs", None),
+            ("a.rs", "a.rs", Some("")),
+        ] {
+            assert_eq!(derived_prefix(source, destination), expected, "{source:?} -> {destination:?}");
+        }
+        for (path, suffix, expected) in [
+            ("a.rs", "a.rs", true),
+            ("src/a.rs", "a.rs", true),
+            ("othera.rs", "a.rs", false),
+            ("src/b.rs", "a.rs", false),
+        ] {
+            assert_eq!(ends_with_path(Utf8Path::new(path), Utf8Path::new(suffix)), expected);
+        }
+        assert_eq!(git_prefix(" "), None);
+        assert_eq!(git_prefix(" a/file.rs b/file.rs "), Some("b/".to_owned()));
+        assert_eq!(new_file_path("b/", None, None), None);
+        assert_eq!(
+            new_file_path("after/a.rs", None, Some("before/a.rs")),
+            Some((Utf8PathBuf::from("a.rs"), Utf8PathBuf::from("after/a.rs")))
+        );
+    }
+
+    #[test]
+    fn parsed_hunk_lines_are_sorted_deduplicated_and_not_confused_with_headers() {
+        let patch = "\
+--- old/src/a.rs
++++ new/src/a.rs
+@@ -8,4 +20,4 @@
+-gone
+--- deleted source
+ keep
++added
+ keep
++added again
+@@ -0,0 +5,1 @@
++early
+@@ -0,0 +5,1 @@
++same line again
+@@ -0,0 +9,1 @@
+++ source beginning with two pluses
++++ b/untouched.rs
+@@ -1 +1 @@
+ keep
+";
+        let diff = Diff::parse(patch);
+        assert_eq!(diff.touched[Utf8Path::new("src/a.rs")], [5, 9, 21, 23]);
+        assert_eq!(diff.sources[Utf8Path::new("src/a.rs")], Utf8Path::new("new/src/a.rs"));
+        assert_eq!(diff.touched.len(), 1);
+        assert_eq!(diff.sources.len(), 1);
+        for (start, end, expected) in [
+            (4, 4, false),
+            (5, 5, true),
+            (6, 8, false),
+            (9, 21, true),
+            (24, 25, false),
+            (21, 20, false),
+        ] {
+            assert_eq!(diff.touches(Utf8Path::new("src/a.rs"), start, end), expected, "{start}..={end}");
+        }
+    }
+
+    #[test]
+    fn malformed_hunks_do_not_reuse_the_previous_file_and_file_headers_reset_prefixes() {
+        let diff = Diff::parse(
+            "\
+diff --git before/a.rs after/a.rs
+--- before/a.rs
++++ after/a.rs
+@@ -0,0 +1,1 @@
++one
+@@ invalid @@
++not a valid hunk
+@@ -0,0 +2,1 @@
++orphan after malformed header
+diff --git before/old.rs next/a.rs
++++ next/a.rs
+@@ -0,0 +3,1 @@
++two
+",
+        );
+        assert_eq!(diff.touched[Utf8Path::new("a.rs")], [1]);
+        assert_eq!(diff.touched[Utf8Path::new("next/a.rs")], [3]);
+        assert_eq!(diff.touched.len(), 2);
+    }
+
+    #[test]
+    fn deletion_and_context_counts_keep_header_like_source_inside_the_hunk() {
+        for body in [
+            "@@ -1,2 +0,0 @@\n-gone\n--- removed source\n",
+            "@@ -1,2 +20,1 @@\n keep\n--- removed source\n",
+        ] {
+            let patch = format!("--- old/same.rs\n+++ new/same.rs\n{body}+++ new/same.rs\n@@ -0,0 +3,1 @@\n+added\n");
+            let diff = Diff::parse(&patch);
+            assert_eq!(diff.touched.len(), 1, "{patch}");
+            assert_eq!(diff.touched[Utf8Path::new("same.rs")], [3], "{patch}");
+            assert_eq!(diff.sources[Utf8Path::new("same.rs")], Utf8Path::new("new/same.rs"), "{patch}");
+        }
+    }
+
+    #[test]
+    fn resolution_normalizes_merged_aliases_and_reports_sorted_missing_sources() {
+        let mut diff = Diff::parse(
+            "\
+--- one/src/a.rs
++++ one/src/a.rs
+@@ -0,0 +2,1 @@
++two
+@@ -0,0 +8,1 @@
++eight
+--- two/src/a.rs
++++ two/src/a.rs
+@@ -0,0 +4,1 @@
++four
+@@ -0,0 +8,1 @@
++eight again
+",
+        );
+        diff.resolve(Utf8Path::new("workspace"), &[Utf8PathBuf::from("src/a.rs")])
+            .expect("both aliases peel to the same known source");
+        assert_eq!(diff.touched[Utf8Path::new("src/a.rs")], [2, 4, 8]);
+        assert_eq!(diff.touched.len(), 1);
+
+        let mut missing = Diff::parse(
+            "\
++++ z.rs
+@@ -0,0 +1,1 @@
++z
++++ a.rs
+@@ -0,0 +1,1 @@
++a
+",
+        );
+        let cause = missing
+            .resolve(Utf8Path::new("workspace"), &[])
+            .expect_err("neither source is in the supplied workspace inventory");
+        assert!(cause.to_string().contains("(a.rs, z.rs)"), "{cause}");
+    }
+
+    #[test]
+    fn path_resolution_prefers_exact_then_peeled_names_and_never_peels_traversals() {
+        for (path, raw, candidates, expected) in [
+            ("src/a.rs", "b/src/a.rs", vec!["src/a.rs", "b/src/a.rs"], Some("src/a.rs")),
+            (
+                "extra/long/src/a.rs",
+                "extra/long/src/a.rs",
+                vec!["src/a.rs", "long/src/a.rs"],
+                Some("long/src/a.rs"),
+            ),
+            ("a.rs", "/elsewhere/src/a.rs", vec!["src/a.rs"], Some("src/a.rs")),
+            ("../a.rs", "../a.rs", vec!["a.rs"], None),
+        ] {
+            let candidates: Vec<_> = candidates.into_iter().map(Utf8PathBuf::from).collect();
+            let known = candidates.iter().map(Utf8PathBuf::as_path).collect();
+            assert_eq!(
+                locate(
+                    Utf8Path::new(path),
+                    Utf8Path::new(raw),
+                    Utf8Path::new("workspace"),
+                    &known,
+                    &candidates
+                ),
+                expected.map(Utf8PathBuf::from),
+                "{path:?} / {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_body_metadata_abandons_remaining_hunk_counts_before_the_next_file() {
+        for range in ["-1,2 +0,0", "-0,0 +1,2"] {
+            let patch =
+                format!("--- a/old.rs\n+++ b/old.rs\n@@ {range} @@\nmetadata outside the hunk\n+++ b/new.rs\n@@ -0,0 +4,1 @@\n+new\n");
+            let diff = Diff::parse(&patch);
+            assert_eq!(diff.touched.len(), 1, "{patch}");
+            assert_eq!(diff.touched[Utf8Path::new("new.rs")], [4], "{patch}");
+            assert!(!diff.touches_file(Utf8Path::new("old.rs")), "{patch}");
+        }
+    }
 
     #[test]
     fn added_lines_are_numbered_in_the_new_file() {

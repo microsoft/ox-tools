@@ -104,6 +104,23 @@ mod tests {
     }
 
     #[test]
+    fn empty_diagnostics_are_skipped_but_single_lines_are_displayed() {
+        let mut fixture = outcome(Status::Fail);
+        fixture.diagnostics = vec![
+            LineDiagnostic {
+                path: "empty.rs".into(),
+                lines: Vec::new(),
+            },
+            LineDiagnostic {
+                path: "one.rs".into(),
+                lines: vec![42],
+            },
+        ];
+        let displayed = displayed_diagnostics(&fixture);
+        assert_eq!(displayed, vec![(std::path::Path::new("one.rs"), &[42_u32][..])]);
+    }
+
+    #[test]
     fn line_ranges_compress_only_adjacent_lines() {
         assert_eq!(format_line_ranges(&[]), "");
         assert_eq!(format_line_ranges(&[7]), "7");

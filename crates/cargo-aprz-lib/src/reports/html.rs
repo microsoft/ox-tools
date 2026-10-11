@@ -989,6 +989,7 @@ fn write_metrics_category<W: Write>(
 }
 
 fn crate_anchor_id(name: &str, version: &str) -> String {
+    // #[gamma::skip(arith.add_to_mul, literal.int_decrement, literal.int_increment, literal.int_to_one, literal.int_to_zero, tag = "equivalent", reason = "these capacity estimates do not change anchor bytes; String grows as characters are appended")]
     let mut id = String::with_capacity(name.len() + version.len() + 7);
     id.push_str("crate-");
     for c in name.chars() {
@@ -1300,25 +1301,22 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
     fn crate_description_is_rendered_in_the_risk_list() {
-        let described_metrics = vec![Metric::with_value(
-            &CRATE_DESCRIPTION_DEF,
-            MetricValue::String("A precise crate description".into()),
-        )];
-        let crates = vec![
-            ReportableCrate::new(
-                "described".into(),
-                Arc::new("1.0.0".parse().unwrap()),
-                described_metrics,
-                Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
-            ),
-            create_test_crate("other", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
-        ];
-        let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
-        assert!(
-            output.contains("title=\"described v1.0.0\nA precise crate description\""),
-            "{output}"
-        );
+        for appraisal in [None, Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))] {
+            let described_metrics = vec![Metric::with_value(
+                &CRATE_DESCRIPTION_DEF,
+                MetricValue::String("A precise crate description".into()),
+            )];
+            let crates = vec![
+                ReportableCrate::new("described".into(), Arc::new("1.0.0".parse().unwrap()), described_metrics, appraisal),
+                create_test_crate("other", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            ];
+            let mut output = String::new();
+            generate(&crates, test_timestamp(), &mut output).unwrap();
+            assert!(
+                output.contains("title=\"described v1.0.0\nA precise crate description\""),
+                "{output}"
+            );
+        }
     }
 
     #[test]

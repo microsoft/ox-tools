@@ -27,6 +27,12 @@ mod tests {
     use super::{diagnostic, parse};
 
     #[test]
+    fn printable_selector_characters_are_not_escaped() {
+        assert_eq!(diagnostic("alpha-beta_*é"), "alpha-beta_*é");
+        assert_eq!(diagnostic("a\nb"), "a\\nb");
+    }
+
+    #[test]
     fn matches_complete_selector_semantics() {
         for (pattern, name, expected) in [
             ("alpha*", "alpha", true),

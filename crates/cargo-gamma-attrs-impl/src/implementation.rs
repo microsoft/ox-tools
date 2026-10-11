@@ -181,6 +181,7 @@ fn valid_resource_name(name: &str) -> bool {
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_zero, reason = "the saturating allocation estimate changes capacity only; every byte still appends its two hex digits")]
     let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
 
     for byte in bytes {
@@ -668,7 +669,9 @@ pub(super) const MOST_FACTOR: f64 = 1e6;
 
 /// Checks a multiplier is positive, finite, and small enough to scale a baseline without overflow.
 fn is_bounded_multiplier(value: f64) -> bool {
-    value > 0.0 && value.is_finite() && value <= MOST_FACTOR
+    // #[gamma::skip(logical.and_remove_right, reason = "the following finite upper bound rejects positive infinity, and the positive comparison rejects NaN and negative infinity; removing is_finite cannot change the final result")]
+    let positive_finite = value > 0.0 && value.is_finite();
+    positive_finite && value <= MOST_FACTOR
 }
 
 /// Returns whether an argument is written as a bare number rather than as a key or a selector.
@@ -973,6 +976,102 @@ fn error(message: &str) -> TokenStream {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_diagnostics_keep_exact_reason_and_attribute_name() {
+        for (arguments, expected) in [
+            ("7", "expected one string literal, as in `#[gamma::resource(\"cargo-subprocess\")]`"),
+            (
+                "\"7invalid\"",
+                "resource name must start with an ASCII letter and contain only ASCII letters, digits, `.`, `_`, or `-`",
+            ),
+        ] {
+            let output = resource(stream(arguments), stream("#[test] fn fixture() {}"));
+            let syntax = syn::parse2::<syn::File>(output).expect("diagnostic output is valid Rust items");
+            let syn::Item::Macro(error) = &syntax.items[0] else {
+                panic!("the invalid resource starts with compile_error");
+            };
+            let message = syn::parse2::<syn::LitStr>(error.mac.tokens.clone()).expect("compile_error contains one literal");
+            assert_eq!(message.value(), format!("#[gamma::resource]: {expected}"));
+        }
+    }
+
+    #[test]
+    fn resource_nesting_limits_distinguish_the_boundary_from_one_group_too_many() {
+        for depth in [NESTING_LIMIT - 1, NESTING_LIMIT, NESTING_LIMIT + 1] {
+            let attr = stream(&format!("{}\"cargo\"{}", "(".repeat(depth), ")".repeat(depth)));
+            let output = resource(attr, stream("#[test] fn fixture() {}")).to_string();
+            let expected = if depth > NESTING_LIMIT {
+                "resource arguments nest too deeply to be safely parsed"
+            } else {
+                "expected one string literal"
+            };
+            assert!(output.contains(expected), "depth {depth}: {output}");
+
+            let body_depth = depth - 1;
+            let item = stream(&format!(
+                "#[test] fn fixture() {{ let _ = {}1{}; }}",
+                "(".repeat(body_depth),
+                ")".repeat(body_depth)
+            ));
+            let output = resource(stream("\"cargo\""), item).to_string();
+            if depth > NESTING_LIMIT {
+                assert!(output.contains("resource item nests too deeply to be safely parsed"), "{output}");
+            } else {
+                assert!(!output.contains("compile_error"), "depth {depth}: {output}");
+            }
+        }
+    }
+
+    #[test]
+    fn expression_chain_budget_is_exact_and_resets_between_operands() {
+        for (source, exceeds) in [
+            ("a + b + c + d + e", false),
+            ("a + b + c + d + e + f", true),
+            ("(a + b + c + d + e)", false),
+            ("a.b.c.d.e", false),
+            ("a.b.c.d.e.f", true),
+            ("a[a][b][c][d]", false),
+            ("a[a][b][c][d][e]", true),
+            ("a b c d e", false),
+            ("a + b + c + d + e; f + g + h + i + j", false),
+            ("a + b + c + d + e, f + g + h + i + j", false),
+            ("a as A as B as C as D", false),
+            ("a as A as B as C as D as E", true),
+        ] {
+            assert_eq!(exceeds_nesting_limit(&stream(source), 1), exceeds, "{source}");
+        }
+    }
+
+    #[test]
+    fn fractional_timeout_multipliers_and_const_trait_methods_obey_the_contract() {
+        for value in [0.01, 0.5, 1.0, MOST_FACTOR] {
+            assert!(is_bounded_multiplier(value), "{value}");
+        }
+        for value in [0.0, -0.5, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, MOST_FACTOR + 1.0] {
+            assert!(!is_bounded_multiplier(value), "{value}");
+        }
+        assert!(validate_value(stream("1"), &stream("fn method(&self) -> u32;")).is_err());
+        let error = validate_value(stream("1"), &stream("const fn method(&self) -> u32 { 2 }"))
+            .expect_err("const trait methods cannot contain a runtime guard");
+        assert!(error.contains("expected a function that can carry a mutant"), "{error}");
+    }
+
+    #[test]
+    fn empty_argument_segments_preserve_the_exact_diagnostic() {
+        for (arguments, position) in [
+            (",", "contain"),
+            ("arith,", "end with"),
+            (",arith", "contain"),
+            ("arith,,literal", "contain"),
+        ] {
+            assert_eq!(
+                validate(stream(arguments)),
+                Err(format!("attribute arguments must not {position} an empty comma-delimited segment")),
+                "{arguments}"
+            );
+        }
+    }
 
     /// Parses test input the way `rustc` would hand it to a proc macro.
     fn stream(source: &str) -> TokenStream {
@@ -2107,5 +2206,64 @@ mod tests {
                 "{tokens} must remain shallow"
             );
         }
+    }
+
+    #[test]
+    fn module_resource_replacement_preserves_source_span_and_untouched_tokens() {
+        let item = stream("\n\nmod fixture {\n    fn retained() {}\n}\n");
+        let original = item
+            .clone()
+            .into_iter()
+            .find_map(|token| match token {
+                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => Some(group.span()),
+                _ => None,
+            })
+            .expect("the inline module has a body");
+        let output = marker_inside_module(item, &stream("const MARKER: () = ();")).expect("an inline body accepts a marker");
+        let body = output
+            .into_iter()
+            .find_map(|token| match token {
+                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => Some(group),
+                _ => None,
+            })
+            .expect("the replacement keeps the module body");
+        assert_eq!(body.span().start(), original.start());
+        assert_eq!(body.span().end(), original.end());
+        assert!(body.stream().to_string().starts_with("fn retained"));
+        assert!(body.stream().to_string().ends_with("const MARKER : () = () ;"));
+    }
+
+    #[test]
+    fn malformed_attribute_prefixes_do_not_hide_a_later_value_attribute() {
+        assert!(states_a_value(&stream("# # [gamma::value(1)] fn f() { 2 }")));
+        for source in ["# (gamma::value(1)) fn f() { 2 }", "# {gamma::value(1)} fn f() { 2 }"] {
+            assert!(!states_a_value(&stream(source)), "{source}");
+        }
+        for constant in [false, true] {
+            let source = if constant {
+                "const fn method(&self) -> u32;"
+            } else {
+                "fn method(&self) -> u32;"
+            };
+            let parsed = parse_function(&stream(source)).expect("trait declarations parse");
+            assert_eq!(parsed.constant, constant);
+            assert!(!parsed.has_a_body());
+        }
+    }
+
+    #[test]
+    fn nested_expression_frames_start_with_fresh_chain_and_ladder_budgets() {
+        let limit = 2;
+        let links = limit * CHAIN_FACTOR;
+        let chain = format!("receiver{}", ".field".repeat(links));
+        assert!(!exceeds_nesting_limit(&stream(&format!("({chain})")), limit));
+        assert!(!exceeds_nesting_limit(&stream(&format!("({chain}), ({chain})")), limit));
+        assert!(exceeds_nesting_limit(&stream(&format!("({chain}.extra)")), limit));
+        assert!(!exceeds_nesting_limit(&stream("(receiver) else receiver"), limit));
+        let leading_else = format!("(else if false {{}} {}else {{}})", "else if false {} ".repeat(links - 1));
+        assert!(
+            !exceeds_nesting_limit(&stream(&leading_else), limit),
+            "a child's leading else is not attached to a parent brace"
+        );
     }
 }

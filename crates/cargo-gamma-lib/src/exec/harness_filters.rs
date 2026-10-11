@@ -72,6 +72,7 @@ impl<'args> HarnessFilters<'args> {
                 parsed.filters.push(arg);
             }
 
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, tag = "outofmemory", reason = "not advancing the argument cursor accumulates the same filter indefinitely")]
             index += 1;
         }
 
@@ -138,6 +139,8 @@ impl<'args> HarnessFilters<'args> {
                 args.extend(value);
             }
 
+            // #[gamma::skip(stmt.delete_assign, arith.add_to_mul, tag = "timeout", reason = "the argument cursor must advance even for valueless flags")]
+            // #[gamma::skip(arith.add_to_sub, literal.int_decrement, tag = "outofmemory", reason = "a zero cursor step repeatedly accumulates the same argument")]
             index += 1 + usize::from(value.is_some());
         }
 
@@ -159,6 +162,8 @@ fn without_test_threads<'args>(flags: &[&'args str]) -> Vec<&'args str> {
             kept.push(*flag);
             kept.extend(value);
         }
+        // #[gamma::skip(stmt.delete_assign, arith.add_to_mul, arith.add_to_sub, tag = "timeout", reason = "the argument cursor must advance past the flag and any value")]
+        // #[gamma::skip(literal.int_decrement, tag = "outofmemory", reason = "a zero cursor step repeatedly accumulates the same argument")]
         index += 1 + usize::from(value.is_some());
     }
 
@@ -283,5 +288,23 @@ mod tests {
         let parsed = HarnessFilters::parse(&raw);
 
         assert_eq!(parsed.selecting(), ["--skip=slow", "parser"]);
+    }
+
+    #[test]
+    fn numeric_values_of_other_options_are_not_thread_overrides() {
+        for flag in ["--skip", "--shuffle-seed", "--logfile", "--color", "--format", "-Z"] {
+            let raw = args(&[flag, "4", "--test-threads", "2", "--nocapture", "parser"]);
+            let parsed = HarnessFilters::parse(&raw);
+            assert_eq!(parsed.flags_without_test_threads(), [flag, "4", "--nocapture"], "{flag}");
+            assert_eq!(parsed.without_test_threads(), [flag, "4", "--nocapture", "parser"], "{flag}");
+        }
+    }
+
+    #[test]
+    fn listings_preserve_filter_only_arguments_without_capacity_underflow() {
+        let raw = args(&["parser", "lexer"]);
+        let parsed = HarnessFilters::parse(&raw);
+        assert_eq!(parsed.selecting(), ["parser", "lexer"]);
+        assert!(parsed.flags().is_empty());
     }
 }

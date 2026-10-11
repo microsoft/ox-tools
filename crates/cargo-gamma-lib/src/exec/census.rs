@@ -83,7 +83,7 @@ use crate::{HashMap, HashSet};
 const CENSUS_FACTOR: u32 = 4;
 
 /// Which tests reach which mutation sites, per test binary.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Census {
     /// Keyed by binary path, which is what the sweep has in hand. A binary missing from here was
     /// never censused, or its census was discarded, and its mutants run its whole suite.
@@ -106,7 +106,7 @@ pub(super) struct Census {
 }
 
 /// One binary's census.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Reach {
     /// Every test the harness announced, in the order it announced them.
     names: Vec<Box<str>>,
@@ -123,6 +123,7 @@ struct Reach {
     intern: Vec<Arc<[u32]>>,
 
     /// Reverse lookup from sorted reach set to its index in `intern`.
+    #[serde(skip)]
     intern_index: HashMap<Arc<[u32]>, u32>,
 
     /// Sample cost assigned to every test run by each retained scope, parallel to `names`.
@@ -437,6 +438,7 @@ impl Census {
         hints.reach = entries
             .into_iter()
             .filter_map(|(site, tests)| {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "test_sets is built from every entries test vector immediately above; sorting and deduplication retain an equal vector")]
                 let test_set = test_sets.iter().position(|known| *known == tests)?;
                 Some(ReachCluster {
                     site,
@@ -762,6 +764,7 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
                 whole &= read <= room;
             }
 
+            // #[gamma::skip(match_guard.always_true, tag = "timeout", reason = "retrying permanent read failures as interruptions loops indefinitely")]
             Err(cause) if cause.kind() == std::io::ErrorKind::Interrupted => {}
 
             Err(_truncated) => {
@@ -1457,6 +1460,250 @@ mod tests {
 
     struct DataThenError {
         data: Option<Vec<u8>>,
+    }
+
+    #[test]
+    fn census_selection_work_and_completion_matrix_keeps_partial_absence_unknown() {
+        let binary = binary("matrix-binary");
+        for complete in [false, true] {
+            for reached in [0, 1, 2, 3, 4] {
+                let census = Census::fixture(&binary.path, 7, reached, 4, complete);
+                assert_eq!(census.len(), 1);
+                assert!(census.has_evidence());
+                assert_eq!(census.complete_binaries(), usize::from(complete));
+                assert_eq!(census.incomplete_binaries(), usize::from(!complete));
+                assert_eq!(census.is_complete_for(1), complete);
+                assert!(!census.is_complete_for(0));
+                assert!(!census.is_complete_for(2));
+                let expected = if reached == 0 {
+                    if complete {
+                        CensusSelection::Uncovered
+                    } else {
+                        CensusSelection::Whole
+                    }
+                } else if reached > 2 {
+                    CensusSelection::Whole
+                } else if complete {
+                    CensusSelection::Selected((0..reached).map(|i| if i == 0 { "tests::t0" } else { "tests::t1" }).collect())
+                } else {
+                    CensusSelection::Hinted((0..reached).map(|i| if i == 0 { "tests::t0" } else { "tests::t1" }).collect())
+                };
+                assert_eq!(census.selection(&binary, 7), expected);
+                let duration = Duration::from_millis(u64::try_from(reached).expect("small reach matrix"));
+                match census.work(&binary, 7) {
+                    CensusWork::Uncovered => assert!(complete && reached == 0),
+                    CensusWork::Whole => assert!(reached > 2 || (!complete && reached == 0)),
+                    CensusWork::Selected(measured) => {
+                        assert!(complete && (1..=2).contains(&reached));
+                        assert_eq!(measured, duration);
+                    }
+                    CensusWork::Hinted(measured) => {
+                        assert!(!complete && (1..=2).contains(&reached));
+                        assert_eq!(measured, duration);
+                    }
+                }
+                assert_eq!(
+                    census.selection(&binary, 99),
+                    if complete {
+                        CensusSelection::Uncovered
+                    } else {
+                        CensusSelection::Whole
+                    }
+                );
+                let missing = self::binary("absent");
+                assert_eq!(census.selection(&missing, 7), CensusSelection::Whole);
+                assert!(matches!(census.work(&missing, 7), CensusWork::Whole));
+            }
+        }
+        let mut mixed = Census::examined(&binary.path, 7, 1, 4);
+        mixed.binaries.extend(Census::partial(Utf8Path::new("partial"), 7, 1, 4).binaries);
+        assert_eq!(mixed.complete_binaries(), 1);
+        assert_eq!(mixed.incomplete_binaries(), 1);
+        assert!(!mixed.is_complete_for(2));
+    }
+
+    #[test]
+    fn durable_clusters_replace_stale_site_once_then_union_every_profitable_binary() {
+        let mut mutant = crate::fixtures::mutant();
+        mutant.ordinal = 7;
+        let site = SiteIdentity::from_mutant(&mutant);
+        let stale = Killer {
+            package: "old".to_owned(),
+            target: "old".to_owned(),
+            test: "stale".to_owned(),
+        };
+        let mut hints = GeneralizedHints::empty_supported();
+        hints.test_sets = vec![vec![stale]];
+        hints.reach = vec![ReachCluster {
+            site: site.clone(),
+            test_set: 0,
+        }];
+        let mut first = binary("first");
+        first.package = "zeta".to_owned();
+        first.baseline = Duration::from_secs(1);
+        let mut second = binary("second");
+        second.package = "alpha".to_owned();
+        second.baseline = Duration::from_secs(1);
+        let missing = binary("missing");
+        let mut majority = binary("majority");
+        majority.baseline = Duration::from_secs(1);
+        let mut unprofitable = binary("unprofitable");
+        unprofitable.baseline = Duration::from_millis(1);
+        let mut census = Census::examined(&first.path, 7, 1, 4);
+        census.binaries.extend(Census::partial(&second.path, 7, 1, 4).binaries);
+        census.binaries.extend(Census::examined(&majority.path, 7, 3, 4).binaries);
+        census.binaries.extend(Census::examined(&unprofitable.path, 7, 1, 4).binaries);
+        census.persist_clusters(&[mutant], &[missing, majority, unprofitable, first, second], &mut hints);
+        assert_eq!(hints.reach, [ReachCluster { site, test_set: 0 }]);
+        assert_eq!(hints.test_sets.len(), 1);
+        let tests = &hints.test_sets[0];
+        assert_eq!(tests.len(), 2);
+        assert_eq!(
+            tests.iter().map(|test| test.package.as_str()).collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert!(tests.iter().all(|test| test.test == "tests::t0"));
+    }
+
+    #[test]
+    fn scope_subdivision_tables_keep_leaf_boundaries_and_nested_module_groups_exact() {
+        for (names, expected) in [
+            (vec!["root::a", "root::b::one"], None),
+            (vec!["root::a::one", "root::b"], None),
+            (vec!["root::a::one", "root::a::two"], None),
+            (vec!["root::a::one", "root::b::one"], Some(vec![vec![0], vec![1]])),
+            (
+                vec!["root::a::deep::one", "root::a::deep::two", "root::b::one"],
+                Some(vec![vec![0, 1], vec![2]]),
+            ),
+        ] {
+            let names: Vec<Box<str>> = names.into_iter().map(Into::into).collect();
+            let scope = Scope {
+                tests: (0..names.len()).map(|i| u32::try_from(i).expect("small scope")).collect(),
+            };
+            if let Some(groups) = &expected {
+                assert_eq!(
+                    initial_scopes(&names).into_iter().map(|scope| scope.tests).collect::<Vec<_>>(),
+                    *groups
+                );
+            }
+            assert_eq!(
+                module_children(&scope, &names).map(|groups| groups.into_iter().map(|group| group.tests).collect::<Vec<_>>()),
+                expected
+            );
+        }
+        for size in 0..=10 {
+            let names: Vec<Box<str>> = (0..size).map(|i| format!("flat{i}").into()).collect();
+            let scope = Scope {
+                tests: (0..size).collect(),
+            };
+            let split = subdivision(&scope, &names);
+            if size <= 1 {
+                assert!(split.is_none());
+            } else {
+                let groups = split.expect("non-leaf flat scopes bisect");
+                assert_eq!(groups.len(), 2);
+                assert_eq!(groups[0].tests.len(), usize::try_from(size.div_ceil(2)).expect("small scope"));
+                assert_eq!(groups.into_iter().flat_map(|group| group.tests).collect::<Vec<_>>(), scope.tests);
+            }
+        }
+    }
+
+    #[test]
+    fn durable_cluster_site_rejection_does_not_abandon_later_profitable_sites() {
+        let binary = binary("site-skip");
+        for majority in [false, true] {
+            let mut reach = reach_from(
+                ["a", "b", "c", "expensive"].map(Into::into).to_vec(),
+                vec![(1, vec![0]), (2, vec![0])],
+                vec![
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                    Duration::from_secs(5),
+                ],
+            );
+            let rejected = *reach.reached.keys().next().expect("two fixture sites");
+            let retained = if rejected == 1 { 2 } else { 1 };
+            let index = reach.intern_set(if majority { vec![0, 1, 2] } else { vec![3] });
+            *reach.reached.get_mut(&rejected).expect("chosen rejection site exists") = index;
+            let mutants = [1, 2].map(|ordinal| crate::model::Mutant {
+                ordinal,
+                occurrence: ordinal,
+                ..crate::fixtures::mutant()
+            });
+            let expected = SiteIdentity::from_mutant(&mutants[usize::try_from(retained - 1).expect("two-site fixture index")]);
+            let mut census = Census::default();
+            census.binaries.insert(binary.path.clone(), reach);
+            let mut hints = GeneralizedHints::empty_supported();
+            census.persist_clusters(&mutants, core::slice::from_ref(&binary), &mut hints);
+            assert_eq!(
+                hints.reach,
+                [ReachCluster {
+                    site: expected,
+                    test_set: 0
+                }]
+            );
+            assert_eq!(hints.test_sets[0].len(), 1);
+            assert_eq!(hints.test_sets[0][0].test, "a");
+        }
+    }
+
+    #[test]
+    fn durable_test_pool_indices_follow_sorted_killers_not_site_traversal_order() {
+        let binary = binary("pool-order");
+        let first = crate::model::Mutant {
+            ordinal: 1,
+            occurrence: 1,
+            ..crate::fixtures::mutant()
+        };
+        let second = crate::model::Mutant {
+            ordinal: 2,
+            occurrence: 2,
+            ..first.clone()
+        };
+        let mut census = Census::default();
+        census.binaries.insert(
+            binary.path.clone(),
+            reach_from(
+                ["alpha", "zeta", "unused-one", "unused-two"].map(Into::into).to_vec(),
+                vec![(1, vec![1]), (2, vec![0])],
+                vec![Duration::from_millis(1); 4],
+            ),
+        );
+        let mut hints = GeneralizedHints::empty_supported();
+        census.persist_clusters(&[first.clone(), second.clone()], core::slice::from_ref(&binary), &mut hints);
+        assert_eq!(
+            hints.test_sets.iter().map(|set| set[0].test.as_str()).collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(
+            hints.reach,
+            [
+                ReachCluster {
+                    site: SiteIdentity::from_mutant(&first),
+                    test_set: 1
+                },
+                ReachCluster {
+                    site: SiteIdentity::from_mutant(&second),
+                    test_set: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reach_interning_returns_nonzero_reused_slots_and_finish_releases_only_the_index() {
+        let mut reach = Reach::default();
+        assert_eq!(reach.intern_set(vec![3]), 0);
+        assert_eq!(reach.intern_set(vec![2, 1, 2]), 1);
+        assert_eq!(reach.intern_set(vec![1, 2]), 1);
+        assert_eq!(reach.intern.len(), 2);
+        reach.reached.insert(7, 1);
+        reach.finish();
+        assert!(reach.intern_index.is_empty());
+        assert_eq!(reach.tests_for(7), Some([1, 2].as_slice()));
+        assert_eq!(reach.tests_for(8), None);
     }
 
     impl Read for DataThenError {

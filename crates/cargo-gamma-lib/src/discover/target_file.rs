@@ -6,7 +6,7 @@
 use camino::Utf8PathBuf;
 
 /// A source file that will be analyzed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TargetFile {
     /// Path relative to the workspace root, with forward slashes.
     pub path: Utf8PathBuf,
