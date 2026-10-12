@@ -68,6 +68,9 @@ array entries when the document cannot be parsed. Existing live ordinary
 regions otherwise retain their behavior. Dry runs run the same planning
 checks without writing anything.
 
+Whole-file overlap checks resolve both catalog paths and recorded ownership
+paths using the same path resolver as writes, including repeated path separators.
+
 ## Deliberate non-goals
 
 No extensionless TOML, generated compound entries, inline-table scaffolding,

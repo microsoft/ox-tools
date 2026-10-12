@@ -11,8 +11,8 @@ use crate::emit::managed_region::{ManagedRegionRefusal, ManagedRegionRequest, Re
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
 use crate::region::{
-    CommentSyntax, Region, RegionPlacement, find_toml_region as find_region, remove_toml_region as remove_region, text_newline,
-    toml_comment_lines,
+    CommentSyntax, Region, RegionPlacement, find_region_in_lines, find_toml_region as find_region, remove_toml_region as remove_region,
+    text_newline, toml_comment_lines,
 };
 
 fn refusal(reason: impl std::fmt::Display, remedy: RefusalRemedy) -> ManagedRegionRefusal {
@@ -208,23 +208,23 @@ pub(crate) fn validated_regions(text: &str) -> Result<Vec<Region<'_>>, ManagedRe
     let mut open = None;
     let mut seen = std::collections::BTreeSet::new();
     for line in toml_comment_lines(text) {
-        let line = text[line.start..line.end].trim();
-        if let Some(id) = line.strip_prefix("# >>> anvil-managed:") {
+        let content = text[line.start..line.end].trim();
+        if let Some(id) = content.strip_prefix("# >>> anvil-managed:") {
             let id = id.trim();
             if id.is_empty() || open.is_some() || !seen.insert(id) {
                 return Err(refusal("duplicate or nested opening sentinel", RefusalRemedy::MalformedMarkers));
             }
-            open = Some(id);
-        } else if let Some(id) = line.strip_prefix("# <<< anvil-managed:") {
+            open = Some((id, line));
+        } else if let Some(id) = content.strip_prefix("# <<< anvil-managed:") {
             let id = id.trim();
-            if open.take() != Some(id) {
+            let Some((_, start)) = open.take().filter(|(opening, _)| *opening == id) else {
                 return Err(refusal(
                     "closing sentinel without its matching opener",
                     RefusalRemedy::MalformedMarkers,
                 ));
-            }
+            };
             regions.push(
-                find_region(text, id, CommentSyntax::Hash)
+                find_region_in_lines(text, id, CommentSyntax::Hash, [start, line].into_iter())
                     .map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?
                     .ok_or_else(|| refusal("unusable sentinel lines", RefusalRemedy::MalformedMarkers))?,
             );
@@ -605,6 +605,76 @@ mod tests {
         let rerun = plan_toml_array_region(&projected, Some(expected), "config.toml", spec).unwrap();
         assert_eq!(rerun.decision, Decision::InSync);
         assert_eq!(rerun.spliced_host, None);
+    }
+
+    #[test]
+    fn validated_pair_boundaries_preserve_source_spans_and_string_data() {
+        let data = "note = '''café\n# >>> anvil-managed: one\n# <<< anvil-managed: one\n'''\r\n";
+        let first_open = "\t# >>> anvil-managed: one  \r\n";
+        let first_body = "items = [\"one\"]\n";
+        let first_close = "  # <<< anvil-managed: one\r\n";
+        let second_open = "# >>> anvil-managed: two\n";
+        let second_body = "more = [\"two\"]\r\n";
+        let second_close = "# <<< anvil-managed: two";
+        let text = format!("{data}{first_open}{first_body}{first_close}{second_open}{second_body}{second_close}");
+        let regions = validated_regions(&text).unwrap();
+        assert_eq!(regions.len(), 2);
+        let mut offset = data.len();
+        for (region, id, opener, body, closer) in [
+            (&regions[0], "one", first_open, first_body, first_close),
+            (&regions[1], "two", second_open, second_body, second_close),
+        ] {
+            assert_eq!(region.id, id);
+            assert_eq!(
+                region.start_line,
+                crate::region::ByteRange {
+                    start: offset,
+                    end: offset + opener.len()
+                }
+            );
+            offset += opener.len();
+            assert_eq!(
+                region.body,
+                crate::region::ByteRange {
+                    start: offset,
+                    end: offset + body.len()
+                }
+            );
+            assert_eq!(region.body_str(), body);
+            offset += body.len();
+            assert_eq!(
+                region.end_line,
+                crate::region::ByteRange {
+                    start: offset,
+                    end: offset + closer.len()
+                }
+            );
+            offset += closer.len();
+        }
+    }
+
+    #[test]
+    fn validated_pairs_retain_exact_sentinel_spelling_checks() {
+        for (text, reason) in [
+            ("# >>> anvil-managed:one\n# <<< anvil-managed:one\n", "unusable sentinel lines"),
+            (
+                "# >>> anvil-managed:one\n# <<< anvil-managed: one\n",
+                "closing sentinel for region 'one' before its opener",
+            ),
+            (
+                "# >>> anvil-managed: one\n# <<< anvil-managed:one\n",
+                "region 'one' has an opening sentinel but no closing sentinel",
+            ),
+            ("# >>> anvil-managed:\n", "duplicate or nested opening sentinel"),
+            (
+                "# >>> anvil-managed: one\n# <<< anvil-managed: one\n# >>> anvil-managed: one\n# <<< anvil-managed: one\n",
+                "duplicate or nested opening sentinel",
+            ),
+        ] {
+            let error = validated_regions(text).unwrap_err();
+            assert_eq!(error.remedy, RefusalRemedy::MalformedMarkers);
+            assert_eq!(error.reason.to_string(), reason);
+        }
     }
 
     #[test]

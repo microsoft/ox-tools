@@ -46,12 +46,20 @@ pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
 /// no exact match. Choosing either candidate would make ownership depend on
 /// filesystem enumeration order.
 pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Result<String, AppError> {
+    resolve_case_insensitive_with(repo_root, relpath, find_entry_case_insensitive)
+}
+
+pub(crate) fn resolve_case_insensitive_with(
+    repo_root: &Path,
+    relpath: &str,
+    find_entry: impl Fn(&Path, &str) -> Result<Option<String>, AppError>,
+) -> Result<String, AppError> {
     let segments: Vec<&str> = relpath.split('/').filter(|s| !s.is_empty()).collect();
     let mut resolved: Vec<String> = Vec::with_capacity(segments.len());
 
     for (index, segment) in segments.iter().enumerate() {
         let current_dir = repo_root.join(resolved.join("/"));
-        if let Some(actual) = find_entry_case_insensitive(&current_dir, segment)? {
+        if let Some(actual) = find_entry(&current_dir, segment)? {
             resolved.push(actual);
         } else {
             // This segment (and everything below it) isn't on disk yet;

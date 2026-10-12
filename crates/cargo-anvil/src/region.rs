@@ -283,7 +283,7 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
     })
 }
 
-fn find_region_in_lines<'a>(
+pub(crate) fn find_region_in_lines<'a>(
     text: &'a str,
     id: &str,
     syntax: CommentSyntax,

@@ -360,14 +360,16 @@ fn array_host_inputs(
         }
     }
     for artifact in catalog.artifacts() {
-        if let Artifact::OwnedFile(spec) = artifact
-            && paths.keys().any(|host| host.eq_ignore_ascii_case(spec.path))
-        {
-            bail!("a TOML array host cannot also be an owned file: {}", spec.path);
+        if let Artifact::OwnedFile(spec) = artifact {
+            let path = (hosts.resolve)(repo_root, spec.path)?;
+            if paths.keys().any(|host| host.eq_ignore_ascii_case(&path)) {
+                bail!("a TOML array host cannot also be an owned file: {}", spec.path);
+            }
         }
     }
     for file in manifest.files.keys() {
-        if paths.keys().any(|host| host.eq_ignore_ascii_case(file)) {
+        let path = (hosts.resolve)(repo_root, file)?;
+        if paths.keys().any(|host| host.eq_ignore_ascii_case(&path)) {
             bail!("retire whole-file ownership separately before managing TOML array entries: {file}");
         }
     }
@@ -1382,7 +1384,7 @@ mod tests {
 
     fn memory_hosts() -> HostTextCache {
         HostTextCache {
-            resolve: |_, path| Ok(path.to_owned()),
+            resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
             ..HostTextCache::default()
         }
     }
@@ -1483,7 +1485,10 @@ mod tests {
         );
         assert_eq!(plan.projected_manifest(&manifest).regions.len(), 0);
         let edited = expected.replace("\"required\"", "\"edited\"");
-        array_plan(&edited, &manifest, &catalog).unwrap_err();
+        assert_eq!(
+            array_plan(&edited, &manifest, &catalog).unwrap_err().to_string(),
+            "Refused TOML array host config.toml: the managed region contains edits that do not match its last render or the current template. Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels. No plan was produced; no files were changed. The body between the sentinels is anvil's to write, and it will not overwrite changes it did not make. Settings that must survive belong outside the sentinels, where anvil never touches them."
+        );
         let plan = array_plan(&edited, &manifest, &empty).unwrap();
         assert!(!plan.refusals().is_empty());
         assert_eq!(plan.projected_manifest(&manifest), manifest);
@@ -1627,17 +1632,31 @@ mod tests {
             body: "[other]\n".to_owned(),
             syntax: CommentSyntax::Hash,
         };
+        let dependency = "Refused TOML array host config.toml: this change would remove or rebind the live TOML array selector [\"plugins\", \"default\"]. No plan was produced; no files were changed. Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.";
         for array_first in [false, true] {
-            array_plan(
+            let error = array_plan(
                 &format!("{header}{entries}"),
                 &manifest,
                 &array_catalog(Some(parent.clone()), array_first),
             )
             .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                if array_first {
+                    dependency
+                } else {
+                    "Refused TOML array host config.toml: the managed region is outside its selected TOML array. No plan was produced; no files were changed. Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported."
+                }
+            );
         }
         // Both regions retiring must not rebind the remaining user array either.
         let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
-        array_plan(&format!("{header}{entries}"), &manifest, &empty).unwrap_err();
+        assert_eq!(
+            array_plan(&format!("{header}{entries}"), &manifest, &empty)
+                .unwrap_err()
+                .to_string(),
+            dependency
+        );
         let malformed = format!("{header}{entries}# >>> anvil-managed: stray\n");
         let error = array_plan(&malformed, &manifest, &empty).unwrap_err();
         assert_eq!(
@@ -1645,8 +1664,14 @@ mod tests {
             "Refused TOML array host config.toml: opening sentinel without its matching close. No plan was produced; no files were changed. Without a matching pair of sentinels the boundary of the generated body cannot be established, so anvil will not write this region rather than risk appending a second copy of it. Restore the missing sentinel around the body anvil generated, or delete the stray one together with the body it was meant to enclose."
         );
         let duplicate = format!("{header}{entries}\n[plugins]\nmode = true\n");
-        array_plan(&duplicate, &manifest, &array_catalog(None, true)).unwrap_err();
-        array_plan(&duplicate, &manifest, &array_catalog(None, false)).unwrap_err();
+        for array_first in [false, true] {
+            assert_eq!(
+                array_plan(&duplicate, &manifest, &array_catalog(None, array_first))
+                    .unwrap_err()
+                    .to_string(),
+                "Refused TOML array host config.toml: TOML parse error at line 10, column 2\n   |\n10 | [plugins]\n   |  ^^^^^^^\nduplicate key\n. No plan was produced; no files were changed. This file does not parse as it stands, before this region is written, so no run can write it until the existing TOML is repaired."
+            );
+        }
     }
 
     #[test]
@@ -1724,39 +1749,62 @@ mod tests {
 
     #[test]
     fn toml_array_plan_rejects_absent_owned_file_aliases() {
-        for owned_first in [false, true] {
-            let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
-            if owned_first {
-                builder = builder.with_artifact(Artifact::owned_file("CONFIG.toml", "other = true\n"));
+        for (array_host, owned_path) in [
+            ("config.toml", "CONFIG.toml"),
+            ("a/config.toml", "a//config.toml"),
+            ("a//config.toml", "a/config.toml"),
+        ] {
+            for owned_first in [false, true] {
+                let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+                if owned_first {
+                    builder = builder.with_artifact(Artifact::owned_file(owned_path, "other = true\n"));
+                }
+                let array = crate::catalog::TomlArrayRegionSpec {
+                    region: RegionSpec {
+                        host: HostSelector::Path(array_host.to_owned()),
+                        id: RegionId::new("entries"),
+                        body: "\"x\",\n".to_owned(),
+                        syntax: CommentSyntax::Hash,
+                    },
+                    path: vec!["items".to_owned()],
+                };
+                builder = builder.with_toml_array_region(array.clone());
+                if !owned_first {
+                    builder = builder.with_artifact(Artifact::owned_file(owned_path, "other = true\n"));
+                }
+                let workspace = Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                };
+                let mut hosts = memory_hosts();
+                let root = Path::new("in-memory-array-tests");
+                let resolved = (hosts.resolve)(root, array_host).unwrap();
+                hosts.texts.insert(resolved, None);
+                let error = build_plan_with_hosts(
+                    Path::new("in-memory-array-tests"),
+                    &workspace,
+                    &Manifest::default(),
+                    &[],
+                    &builder.build().unwrap(),
+                    &mut hosts,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("a TOML array host cannot also be an owned file: {owned_path}")
+                );
+                let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+                    .with_toml_array_region(array)
+                    .build()
+                    .unwrap();
+                let mut manifest = Manifest::default();
+                manifest.files.insert(owned_path.to_owned(), checksum_str("other = true\n"));
+                let error = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("retire whole-file ownership separately before managing TOML array entries: {owned_path}")
+                );
             }
-            builder = builder.with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
-                region: RegionSpec {
-                    host: HostSelector::Path("config.toml".to_owned()),
-                    id: RegionId::new("entries"),
-                    body: "\"x\",\n".to_owned(),
-                    syntax: CommentSyntax::Hash,
-                },
-                path: vec!["items".to_owned()],
-            });
-            if !owned_first {
-                builder = builder.with_artifact(Artifact::owned_file("CONFIG.toml", "other = true\n"));
-            }
-            let workspace = Workspace {
-                members: Vec::new(),
-                has_workspace_table: false,
-            };
-            let mut hosts = memory_hosts();
-            hosts.texts.insert("config.toml".to_owned(), None);
-            let error = build_plan_with_hosts(
-                Path::new("in-memory-array-tests"),
-                &workspace,
-                &Manifest::default(),
-                &[],
-                &builder.build().unwrap(),
-                &mut hosts,
-            )
-            .unwrap_err();
-            assert_eq!(error.to_string(), "a TOML array host cannot also be an owned file: CONFIG.toml");
         }
     }
 
