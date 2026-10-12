@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-12
+
+- ✨ Features
+
+  - add doctest capability filter
+
 ## [0.4.0] - 2026-10-06
 
 - ✨ Features
