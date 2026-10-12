@@ -39,10 +39,11 @@ pub(crate) struct CoverageGateArgs {
     /// Restrict the operation to one or more package selectors.
     ///
     /// Accepts the same `-p` / `--package` idiom as `cargo build`:
-    /// repeat the flag (`-p foo -p bar`) and/or use Unix glob patterns
-    /// (`-p 'tokio-*'`, `-p 'ohno*'`). When unset, every workspace
-    /// member is in scope. CI integrations typically pass the
-    /// impacted-package list from their test-impact step.
+    /// repeat the flag (`-p foo -p bar`), pass exact `name@version`
+    /// package specs, and/or use Unix glob patterns (`-p 'tokio-*'`,
+    /// `-p 'ohno*'`). When unset, every workspace member is in scope.
+    /// CI integrations typically pass the impacted-package list from
+    /// their test-impact step.
     #[arg(long = "package", short = 'p', value_name = "SPEC", global = true)]
     pub(crate) packages: Vec<String>,
 

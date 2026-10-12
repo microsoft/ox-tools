@@ -126,13 +126,15 @@ Flags:
   invocation).
 - `-p` / `--package <spec>` — restrict the operation to one or more
   package selectors. Accepts the same idiom as `cargo build`: repeat
-  the flag (`-p foo -p bar`) and/or use Unix shell glob patterns
-  (`-p 'tokio-*'`, `-p '*macros'`). Default: every workspace
-  member. CI integrations pass the impacted-package list from their
-  test-impact step so that impact-scoped runs only gate the packages
-  whose tests actually ran. A selector that matches no member is a
-  configuration error (exit 2). A malformed glob is reported separately as
-  invalid selector syntax rather than as a valid selector with no matches.
+  the flag (`-p foo -p bar`), pass an exact Cargo package spec
+  (`-p foo@1.2.3`), and/or use Unix shell glob patterns
+  (`-p 'tokio-*'`, `-p '*macros'`). Default: every workspace member. CI
+  integrations pass the impacted-package list from their test-impact step so
+  that impact-scoped runs only gate the packages whose tests actually ran.
+  Exact version-qualified specs match only that workspace member; globs match
+  package names. A selector that matches no member is a configuration error
+  (exit 2). A malformed glob is reported separately as invalid selector syntax
+  rather than as a valid selector with no matches.
 - `--target <triple>` — collect coverage and evaluate target-specific package
   policies for the supplied Rust target. For standalone evaluation, omission
   resolves the rustc host only when target policies exist. `run` always

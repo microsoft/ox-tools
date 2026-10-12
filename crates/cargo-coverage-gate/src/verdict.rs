@@ -190,11 +190,12 @@ fn diagnostics(files: &[&FileReport], member: &Member, status: Status) -> Vec<Li
 /// workspace.
 ///
 /// An empty `packages` list selects every member. Otherwise each
-/// selector is matched against member names: bare identifiers require an
-/// exact match, while Unix shell globs support `*`, `?`, and bracket character
-/// classes (mirroring `cargo build -p 'tokio-*'`). A selector
-/// that matches no member is a configuration error. Members matched by
-/// multiple selectors appear only once.
+/// selector is matched against workspace members: exact `name@version` specs
+/// match the canonical Cargo package identity, bare identifiers require an
+/// exact name match, and Unix shell globs support `*`, `?`, and bracket
+/// character classes against names (mirroring `cargo build -p 'tokio-*'`).
+/// A selector that matches no member is a configuration error. Members matched
+/// by multiple selectors appear only once.
 pub(crate) fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
     if packages.is_empty() {
         return Ok(workspace.members.iter().collect());
