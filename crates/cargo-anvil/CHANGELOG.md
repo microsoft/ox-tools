@@ -31,11 +31,79 @@
     to custom catalog checksums; the built-in catalog and its generated
     infrastructure remain unchanged.
 
-## [0.13.0] - 2026-09-24
+- Dependencies
+
+  - Add `toml_parser` 1.1.3 as a direct dependency for TOML-aware
+    managed-region scanning.
+
+## [0.13.0] - 2026-10-08
+
+Release notes completed from the changes between `cargo-anvil-v0.12.0`
+and `cargo-anvil-v0.13.0`. These changes are already in 0.13.0, not new
+features of 0.14.0.
 
 - ✨ Features
 
-  - select platform-specific mutants configs
+  - Select `.cargo/mutants.<os>.toml` for both mutation recipes when
+    present. Platform files replace the default configuration rather
+    than overlay it; otherwise normal cargo-mutants discovery applies
+    ([#203](https://github.com/microsoft/ox-tools/pull/203)).
+  - Extend the generated Copilot code-review skill with
+    `.github/skills/code-review/test-review.md`. The guide covers
+    deterministic inputs, mocked collaborators, state isolation, exact
+    assertions, doctests, tests in examples, runtime limits, Miri, and
+    root-cause fixes for flaky tests. Review applies to changed tests,
+    not unrelated existing tests
+    ([#228](https://github.com/microsoft/ox-tools/pull/228)).
+  - Add `anvil-check-all-targets` to the fast PR tier. Check each affected
+    package independently with default features and with defaults
+    disabled, preventing workspace feature unification from hiding
+    missing test or example dependencies
+    ([#224](https://github.com/microsoft/ox-tools/pull/224)).
+
+- 🐛 Bug Fixes
+
+  - Filter doctest runs by Cargo's `doctest` capability instead of
+    selecting bin-only packages. An empty eligible set is a successful
+    no-op. Cache the capability list with impact metadata and fall back
+    to locked discovery for older caches or full-workspace paths
+    ([#218](https://github.com/microsoft/ox-tools/pull/218),
+    [#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Fetch the current GitHub PR title through the REST API so workflow
+    reruns validate renamed titles rather than the original event
+    payload. Title retrieval failures remain errors
+    ([#234](https://github.com/microsoft/ox-tools/pull/234)).
+  - Prefer exact path spelling and reject ambiguous case-insensitive
+    matches. Report directory-enumeration and permission errors instead
+    of treating them as missing files
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Return dry-run status through the application entry point instead
+    of terminating inside the engine. Dirty dry runs still exit with
+    failure; clean runs exit successfully
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Distinguish invalid generated TOML bodies from invalid existing
+    hosts and table-ownership conflicts in refusal guidance
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+
+- Documentation
+
+  - Clarify generated configuration comments, including empty impact
+    reports, coverage opt-outs, and the pinned nightly formatting policy
+    ([#223](https://github.com/microsoft/ox-tools/pull/223)).
+
+- Build and maintenance
+
+  - Raise the generated `cargo-each` pin from 0.1.0 to 0.3.0 for the
+    package-isolated checks
+    ([#224](https://github.com/microsoft/ox-tools/pull/224)).
+  - Exclude test-only modules from production coverage and record the
+    crate's coverage floor as 99.86445 percent
+    ([#229](https://github.com/microsoft/ox-tools/pull/229)).
+  - Expand engine regression and mutation coverage, and refactor
+    catalog, manifest, region, and workspace helpers without changing
+    the managed-file ownership contract
+    ([#208](https://github.com/microsoft/ox-tools/pull/208),
+    [#221](https://github.com/microsoft/ox-tools/pull/221)).
 
 ## [0.12.0] - 2026-09-18
 
