@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-12
+
+- ✨ Features
+
+  - support managed TOML array entries ([#235](https://github.com/microsoft/ox-tools/pull/235))
+
 ## [0.13.0] - 2026-09-24
 
 - ✨ Features
