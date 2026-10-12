@@ -19,9 +19,12 @@ dependencies = [
 
 [[package]]
 name = "allocation_hints"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1822e8bbb2c4d6662020c9c95049f9ad39b08aceaba3b9b5a538e9b2674a2a2"
+checksum = "edea269523fd8bc279a0e4f1578e18b204d1bc14c23c830727df7a5c7e7968f7"
+dependencies = [
+ "pin-project-lite",
+]
 
 [[package]]
 name = "allocator-api2"
@@ -3603,30 +3606,18 @@ dependencies = [
 
 [[package]]
 name = "rallocator"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c34b03da2f1c161c608dad2e01d61218d59569144eb24501c917b31486b725b6"
+checksum = "19170a50990d08388cf9abef93e188c699cd20f4a5652b865c4721ce6a305625"
 dependencies = [
  "allocation_hints",
+ "allocator-api2",
+ "hashbrown 0.17.1",
  "libc",
- "rallocator_telemetry",
+ "seismograph",
+ "seismograph_rallocator",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "rallocator_telemetry"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7193bf3b2860d9226227448a3f64ed00ccc59135e3eaff96f62b502691cebd32"
-dependencies = [
- "rallocator_wire",
-]
-
-[[package]]
-name = "rallocator_wire"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f66c46553d2329a96aa13e64851251c80f38a48a240b9c1461316e9ec166612"
 
 [[package]]
 name = "rand"
@@ -4185,6 +4176,25 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "seismograph"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51caaf2040ab7a4bcd319e28273137d481f3537b1ba88fa226b3033a2c4b1d0d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "seismograph_rallocator"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f82727c3e9b4224b4ac52a49c449b864d6eb5d59c76d263cdccb994b96b861b4"
+dependencies = [
+ "seismograph",
 ]
 
 [[package]]
