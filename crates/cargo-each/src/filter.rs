@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The `--filter` / `--exclude-filter` Boolean expression language.
+//! The `--filter` Boolean expression language.
 //!
 //! Expressions combine a small, fixed set of predicates over cargo metadata
 //! with `not`, `and`, `or`, and parentheses. This is enough to express every

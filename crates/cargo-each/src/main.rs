@@ -54,9 +54,9 @@
 //!
 //! `--filter` accepts Boolean expressions using `not`, `and`, `or`, and
 //! parentheses, with conventional precedence. Repeated `--filter` expressions
-//! are AND-combined. Repeated `--exclude-filter` expressions are OR-combined,
-//! and exclusion wins. Metadata values containing whitespace or Boolean syntax
-//! can be double-quoted. Expression atoms:
+//! are AND-combined; use `not` to exclude matching members. Metadata values
+//! containing whitespace or Boolean syntax can be double-quoted. Expression
+//! atoms:
 //!
 //! - `lib` / `bin` / `target-kind:<kind>` — target-kind membership.
 //! - `doctest` — Cargo reports at least one target with doctests enabled.
