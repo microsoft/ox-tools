@@ -31,10 +31,6 @@ jobs:
       # Publish supplemental failure commit statuses so the PR checks rollup identifies the
       # concrete failed Just recipe before the aggregate workflow job.
       statuses: write
-      # Write needed so the pr-fast job can upsert/clear the sticky PR
-      # comment carrying the cargo-semver-checks advisory (and any
-      # future advisory checks that emit target/anvil/comments/*).
-      pull-requests: write
     with:
       base_ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
       publish_commit_statuses: ${{ github.event_name == 'pull_request' }}

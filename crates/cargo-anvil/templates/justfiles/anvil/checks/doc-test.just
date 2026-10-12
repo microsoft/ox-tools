@@ -22,29 +22,50 @@
 [script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
-    $selection = @(if ($include) { -split $include } else { '--workspace' })
-    $capableText = (& "{{ just_executable() }}" _anvil-impact-doctest-packages)
-    $capabilityExit = $LASTEXITCODE
-    if ($capabilityExit -ne 0) { exit $capabilityExit }
-    $docPackages = [System.Collections.Generic.Dictionary[string, bool]]::new(
+    $selection = $null
+    if ('{{ anvil_impact_mode }}' -ne 'off') {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-doc-test: missing impact package file $packageFile"
+        }
+        $selection = @(Get-Content -LiteralPath $packageFile | Where-Object { $_ -ne '' })
+        if ($selection.Count -eq 0) {
+            Write-Host 'anvil-doc-test: no affected packages; skipping'
+            exit 0
+        }
+    }
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspacePackages = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::Ordinal
     )
-    foreach ($spec in @(-split "$capableText")) { if ($spec) { $docPackages[$spec] = $true } }
-    $specs = if ($selection -contains '--workspace') {
-        $workspaceSpecs = [string[]]@($docPackages.Keys)
+    $docPackages = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($package in $meta.packages) {
+        $spec = "$($package.name)@$($package.version)"
+        $workspacePackages.Add($spec) | Out-Null
+        if ($package.targets | Where-Object { $_.doctest -eq $true }) {
+            $docPackages.Add($spec) | Out-Null
+        }
+    }
+    $specs = if ($null -eq $selection) {
+        $workspaceSpecs = [string[]]@($docPackages)
         [Array]::Sort($workspaceSpecs, [System.StringComparer]::Ordinal)
         $workspaceSpecs
     } else {
         @(
-            for ($i = 0; $i -lt $selection.Count; $i++) {
-                if ($selection[$i] -eq '--package' -and ($i + 1) -lt $selection.Count) {
-                    $spec = $selection[++$i]
-                    if ($docPackages.ContainsKey($spec)) { $spec }
+            foreach ($spec in $selection) {
+                if (-not $workspacePackages.Contains($spec)) {
+                    throw "anvil-doc-test: impact package spec '$spec' does not identify a workspace member"
                 }
+                if ($docPackages.Contains($spec)) { $spec }
             }
         )
     }
@@ -57,15 +78,15 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         $docSelection.Add('--package')
         $docSelection.Add($spec)
     }
-    & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --all-features --locked
+    & cargo each @docSelection --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --locked
+    & cargo each @docSelection --once -- cargo {{ anvil_stable_toolchain_arg }} test --doc '{packages}' --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-setup installer="install": anvil-toolchain-stable-install
+anvil-doc-test-setup installer="install": (anvil-toolchain-stable-install installer)
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

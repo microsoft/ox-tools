@@ -219,9 +219,6 @@ These focused operations are not substitutes for either verification tier.
 - **Dependency Validation**. We use [`cargo-deny`](https://crates.io/crates/cargo-deny) to ensure our dependencies
   have acceptable licenses and don't contain known vulnerabilities.
 
-- **Semantic Version Compatibility**. We use [`cargo-semver-checks`](https://crates.io/crates/cargo-semver-checks) to report
-  advisory findings about API compatibility against the pull request target.
-
 - **PR Title**. Every PR submitted to this repo must follow
   the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
   specification. We use these PR titles as part of our automatic change log generation logic.
@@ -238,7 +235,7 @@ These focused operations are not substitutes for either verification tier.
 ### Tool Versions
 
 Anvil's Rust nightly and cargo-tool pins live exclusively in
-[`justfiles/anvil/versions.just`](./justfiles/anvil/versions.just). Because this
+[`.anvil/setup.just`](./.anvil/setup.just). Because this
 repository develops cargo-anvil itself, catalog updates start in
 `crates/cargo-anvil/templates/justfiles/anvil/versions.just` and are applied by
 running `cargo anvil`. The default stable toolchain remains in
