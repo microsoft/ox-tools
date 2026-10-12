@@ -224,6 +224,7 @@ impl fmt::Display for IconName<'_> {
 ///
 /// Returns a `HashMap` mapping each category to a vector of metric names.
 pub fn group_metrics_by_category<'a>(metrics: &'a [Metric]) -> HashMap<MetricCategory, Vec<&'a str>> {
+    // #[gamma::skip(expr.increment, tag = "equivalent", reason = "one extra map slot changes allocation only; grouping keys and values are unchanged")]
     let mut metrics_by_category: HashMap<MetricCategory, Vec<&'a str>> = hash_map_with_capacity(metrics.len());
 
     for metric in metrics {

@@ -198,6 +198,7 @@ where
     // Folded in binary order so the aggregate is deterministic regardless of worker completion.
     for (entry, taken) in binaries.iter_mut().zip(measured) {
         let Some((took, observation)) = taken else {
+            // #[gamma::skip(loop.continue_to_break, reason = "successful sweep_binaries_with returns one positional Some per binary; a worker panic unwinds its scope rather than returning partial measurements")]
             continue;
         };
 
@@ -226,6 +227,7 @@ where
             // there is no mutant to record it against, and a baseline binary that went unmeasured
             // leaves every mutant that binary covers without a budget to be judged against.
             verdict => {
+                // #[gamma::skip(call_result.default, reason = "append_baseline_failure returns unit after retaining the same diagnostics and accounting updates")]
                 append_baseline_failure(
                     &mut baseline_failure,
                     &mut remaining_failed_test_artifacts,
@@ -240,6 +242,7 @@ where
             }
         }
     }
+    // #[gamma::skip(call_result.default, reason = "set_omitted_failed_test_count returns unit after retaining every artifact update")]
     set_omitted_failed_test_count(&mut baseline_failure, omitted_failed_tests);
 
     let baseline = Baseline {
@@ -254,6 +257,7 @@ where
         if let Some(failed) = failed {
             *failed = Some(baseline);
         }
+        // #[gamma::skip(call_result.default, reason = "disambiguate_artifact_directories returns unit after retaining the same directory changes")]
         disambiguate_artifact_directories(&mut baseline_failure);
         let count = baseline_failure.artifacts().len();
         let noun = if count == 1 { "failure" } else { "failures" };
@@ -651,7 +655,12 @@ fn disambiguate_artifact_directories(failure: &mut Error) {
         );
 
         let mut placed = false;
-        for length in (INITIAL_DIGEST_LEN..=64).step_by(4) {
+        for length in (INITIAL_DIGEST_LEN
+            ..=
+            // #[gamma::skip(literal.int_increment, reason = "starting at eight and stepping by four visits the same lengths through 64 whether the inclusive bound is 64 or 65")]
+            64)
+            .step_by(4)
+        {
             let candidate = directory_with_digest(&artifact.directory, &identity, length);
             if used.insert(candidate.to_ascii_lowercase()) {
                 artifact.directory = candidate;
@@ -1597,5 +1606,279 @@ mod tests {
     fn completed_measurements_are_distinct_from_missing_baselines() {
         assert_eq!(measured_duration(Duration::ZERO), Duration::from_nanos(1));
         assert_eq!(measured_duration(Duration::from_millis(1)), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn retained_evidence_truth_table_deduplicates_before_applying_either_budget() {
+        for is_test_failure in [false, true] {
+            for limit in [0, 1, 2, 5, 64, 65] {
+                for size in [0, 1, 4, 70] {
+                    let ordered: Vec<String> = (0..size).map(|index| format!("case::{index:03}")).collect();
+                    let inputs: Vec<String> = ordered.iter().rev().chain(ordered.iter()).cloned().collect();
+                    let actual = retain_failed_test_evidence(inputs, is_test_failure, limit);
+                    let selected: Vec<String> = ordered.iter().take(if is_test_failure { limit } else { 64 }).cloned().collect();
+                    let observed = if is_test_failure { size.max(1) } else { size };
+                    let retained = if is_test_failure {
+                        if selected.is_empty() {
+                            usize::from(limit > 0)
+                        } else {
+                            selected.len()
+                        }
+                    } else {
+                        0
+                    };
+                    let omitted = if is_test_failure { observed - retained } else { 0 };
+                    let artifact_omitted = if is_test_failure { omitted } else { observed - selected.len() };
+                    assert_eq!(
+                        actual,
+                        (selected, retained, omitted, artifact_omitted),
+                        "test={is_test_failure}, limit={limit}, size={size}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_failed_tests_obey_zero_and_one_artifact_limits_and_resource_omissions_stay_separate() {
+        let (_directory, work, binaries) = diagnostic_harness();
+        for limit in [0, 1, 2] {
+            let (failure, retained, omitted) = baseline_failure_error_with_limit(
+                &work,
+                &binaries[0],
+                Duration::ZERO,
+                Duration::from_secs(1),
+                &Verdict::Failed(None),
+                None,
+                limit,
+            );
+            assert_eq!(failure.artifacts().len(), usize::from(limit > 0));
+            assert_eq!(retained, usize::from(limit > 0));
+            assert_eq!(omitted, usize::from(limit == 0));
+            for artifact in failure.artifacts() {
+                assert_eq!(artifact.file_name, "failure.json");
+                assert!(artifact.value["test"].is_null());
+            }
+        }
+        let mut failure = Error::new(String::new())
+            .with_nested_artifact(
+                "baseline-failures/a/b/test".to_owned(),
+                "failure.json",
+                json!({"kind":"testFailure","observedFailedTestsOmitted":1}),
+            )
+            .with_nested_artifact(
+                "baseline-failures/a/b/timeout".to_owned(),
+                "failure.json",
+                json!({"kind":"timeout","observedFailedTestsOmitted":2}),
+            );
+        set_omitted_failed_test_count(&mut failure, 7);
+        assert_eq!(failure.artifacts()[0].value["observedFailedTestsOmitted"], 7);
+        assert_eq!(failure.artifacts()[1].value["observedFailedTestsOmitted"], 2);
+    }
+
+    #[test]
+    fn artifact_names_pin_categories_sanitization_reserved_names_caps_and_suffixes() {
+        for (kind, expected) in [
+            ("timeout", "timeout"),
+            ("memoryLimit", "out-of-memory"),
+            ("enumerationFailure", "enumeration-failure"),
+            ("stall", "stall"),
+            ("infrastructureFailure", "environment-failure"),
+            ("unknown", "anonymous-failure"),
+        ] {
+            assert_eq!(failure_category(kind), expected);
+        }
+        for (input, cap, expected) in [
+            ("", 32, "_"),
+            ("a!!!b????c", 32, "a_b_c"),
+            ("-__a", 32, "-__a"),
+            ("界界", 32, "_"),
+            ("abcd", 2, "ab"),
+            ("a", 0, "a"),
+            ("CON", 2, "CO"),
+        ] {
+            assert_eq!(filesystem_component(input, cap), expected);
+        }
+        for reserved in ["CON", "con", "PrN", "AUX", "nul"] {
+            assert_eq!(filesystem_component(reserved, 32), format!("_{reserved}"));
+        }
+        for prefix in ["COM", "com", "LPT", "lpt"] {
+            for digit in 1..=9 {
+                let reserved = format!("{prefix}{digit}");
+                assert!(is_reserved_windows_name(&reserved));
+                assert_eq!(filesystem_component(&reserved, 32), format!("_{reserved}"));
+            }
+            for suffix in ["0", "10", "x", ""] {
+                assert!(!is_reserved_windows_name(&format!("{prefix}{suffix}")));
+            }
+        }
+        let binary = TestBinary {
+            package: "p".repeat(40),
+            target: "t".repeat(40),
+            ..crate::testing::test_binary("binary")
+        };
+        assert_eq!(
+            baseline_artifact_directory(&binary, "stall", None),
+            format!("baseline-failures/{}/{}/stall", "p".repeat(32), "t".repeat(32))
+        );
+        assert_eq!(
+            baseline_artifact_directory(&binary, "testFailure", Some(&"x".repeat(70))),
+            format!("baseline-failures/{}/{}/tests/{}", "p".repeat(32), "t".repeat(32), "x".repeat(56))
+        );
+        let directory = format!("baseline-failures/p/t/tests/{}", "x".repeat(56));
+        assert_eq!(
+            directory_with_suffix(&directory, "--2"),
+            format!("baseline-failures/p/t/tests/{}--2", "x".repeat(53))
+        );
+        let digest = blake3::hash(b"identity").to_hex().to_string();
+        for length in [0, 8, 20, 64, 80] {
+            let suffix = format!("--{}", &digest[..length.min(64)]);
+            assert_eq!(
+                directory_with_digest(&directory, "identity", length),
+                format!(
+                    "baseline-failures/p/t/tests/{}{suffix}",
+                    "x".repeat(56usize.saturating_sub(suffix.len()))
+                )
+            );
+        }
+        assert_eq!(duration_ms(Duration::ZERO), 0);
+        assert_eq!(duration_ms(Duration::from_nanos(999_999)), 0);
+        assert_eq!(duration_ms(Duration::from_millis(17)), 17);
+        assert_eq!(duration_ms(Duration::from_secs(u64::MAX)), u64::MAX);
+    }
+
+    #[test]
+    fn collision_resolution_exhausts_digest_prefixes_before_ordinal_fallback_and_avoids_case_aliases() {
+        crate::testing::within(Duration::from_secs(20), "artifact collision resolution", || {
+            let original = "baseline-failures/p/t/tests/leaf";
+            let values =
+                json!({"package":"package","target":"target","packageId":"id","executable":"path","kind":"testFailure","test":"test"});
+            let identity = "package\0target\0id\0path\0testFailure\0test";
+            let digest = blake3::hash(identity.as_bytes()).to_hex().to_string();
+            for mode in [0, 1, 2] {
+                let ordinal_fallback = mode > 0;
+                let mut failure =
+                    Error::new(String::new()).with_nested_artifact(original.to_ascii_uppercase(), "failure.json", values.clone());
+                for length in (8..=64).step_by(4) {
+                    if length == 64 && !ordinal_fallback {
+                        continue;
+                    }
+                    let suffix = format!("--{}", &digest[..length]);
+                    let keep = 56usize.saturating_sub(suffix.len());
+                    let leaf = &"leaf"[.."leaf".len().min(keep)];
+                    let blocked = format!("baseline-failures/p/t/tests/{leaf}{suffix}");
+                    failure = failure.with_nested_artifact(blocked.to_ascii_uppercase(), "failure.json", values.clone());
+                }
+                if mode == 2 {
+                    failure = failure.with_nested_artifact(format!("{original}--2").to_ascii_uppercase(), "failure.json", values.clone());
+                }
+                failure = failure.with_nested_artifact(original.to_owned(), "failure.json", values.clone());
+                disambiguate_artifact_directories(&mut failure);
+                let directories: Vec<String> = failure.artifacts().iter().map(|artifact| artifact.directory.clone()).collect();
+                assert_eq!(
+                    directories
+                        .iter()
+                        .map(|directory| directory.to_ascii_lowercase())
+                        .collect::<crate::HashSet<_>>()
+                        .len(),
+                    directories.len()
+                );
+                let expected = if mode == 2 {
+                    "baseline-failures/p/t/tests/leaf--3".to_owned()
+                } else if ordinal_fallback {
+                    "baseline-failures/p/t/tests/leaf--2".to_owned()
+                } else {
+                    format!("baseline-failures/p/t/tests/--{digest}")
+                };
+                assert_eq!(directories.last(), Some(&expected));
+            }
+        });
+    }
+
+    #[test]
+    fn failing_baseline_retains_aggregate_telemetry_and_reports_the_exact_singular_failure() {
+        let (_directory, work, mut binaries) = diagnostic_harness();
+        let mut failed = None;
+        let mut completed = 0;
+        let failure = measure_within_reporting_retaining(
+            Measurement {
+                work: &work,
+                budget: Duration::from_secs(17),
+                request: MemoryRequest::default(),
+                jobs: 1,
+            },
+            &mut binaries,
+            |_, _, _| Observation {
+                verdict: Verdict::Failed(None),
+                reach: crate::exec::verdict::ReachObservation::Unknown,
+                failure: None,
+                quiet: Duration::from_secs(3),
+                tests: Some(4),
+                peak: Some(100),
+            },
+            Some(&mut failed),
+            || completed += 1,
+        )
+        .expect_err("a non-passing baseline retains its measurement");
+        assert_eq!(completed, 1);
+        assert_eq!(
+            failure.to_string(),
+            "baseline measurement failed with 1 baseline failure; see the generated baseline-failure files for details"
+        );
+        assert_eq!(failure.artifacts().len(), 1);
+        let measured = failed.expect("failed calibration is retained for diagnostics");
+        assert_eq!(measured.tests, Some(4));
+        assert_eq!(measured.quiet, Duration::from_secs(3));
+        assert_eq!(measured.peak, Some(100));
+        assert_eq!(measured.elapsed, binaries[0].baseline);
+        assert_eq!(failure.artifacts()[0].file_name, "failure.json");
+        assert_eq!(failure.artifacts()[0].value["observedFailedTestsOmitted"], 0);
+        let mut duplicates = vec![binaries[0].clone(), binaries[0].clone()];
+        let observations = AtomicUsize::new(0);
+        let failure = measure_within_reporting_retaining(
+            Measurement {
+                work: &work,
+                budget: Duration::from_secs(17),
+                request: MemoryRequest::default(),
+                jobs: 1,
+            },
+            &mut duplicates,
+            |_, _, _| {
+                let count = if observations.fetch_add(1, Ordering::Relaxed) == 0 { 2 } else { 65 };
+                Observation {
+                    verdict: Verdict::Failed(None),
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: Some(FailureEvidence {
+                        termination: None,
+                        failed_tests: (0..count).map(|index| format!("case::{index:03}")).collect(),
+                        stdout_tail: String::new(),
+                        stderr_tail: String::new(),
+                        output_truncated: false,
+                    }),
+                    quiet: Duration::ZERO,
+                    tests: Some(count),
+                    peak: None,
+                }
+            },
+            None,
+            || {},
+        )
+        .expect_err("failed-test cap is campaign-wide");
+        assert_eq!(failure.artifacts().len(), 64);
+        assert!(
+            failure
+                .artifacts()
+                .iter()
+                .all(|artifact| artifact.value["observedFailedTestsOmitted"] == 3)
+        );
+        assert_eq!(
+            failure
+                .artifacts()
+                .iter()
+                .map(|artifact| artifact.directory.to_ascii_lowercase())
+                .collect::<crate::HashSet<_>>()
+                .len(),
+            64
+        );
     }
 }

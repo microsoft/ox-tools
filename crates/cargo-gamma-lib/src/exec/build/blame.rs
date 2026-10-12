@@ -281,6 +281,7 @@ fn normalize_category(message: &str) -> String {
 
     fn consume_path_tail(characters: &mut core::iter::Peekable<core::str::Chars<'_>>) {
         loop {
+            // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "the whitespace predicate must become false at the end of the path tail")]
             while characters.peek().is_some_and(|next| !next.is_whitespace()) {
                 let _ = characters.next();
             }
@@ -290,7 +291,9 @@ fn normalize_category(message: &str) -> String {
                 let _ = lookahead.next();
             }
             let next_component: String = lookahead.take_while(|next| !next.is_whitespace()).collect();
+            // #[gamma::skip(cond.always_false, cond.negate, unary.remove_not, tag = "timeout", reason = "without the component stop condition an exhausted path iterator is scanned forever")]
             if !next_component.contains('/') && !next_component.contains('\\') {
+                // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "timeout", reason = "the path-tail scan must stop when no further path component exists")]
                 break;
             }
 
@@ -323,6 +326,7 @@ fn normalize_category(message: &str) -> String {
         }
 
         if character.is_ascii_digit() {
+            // #[gamma::skip(cond.negate, tag = "timeout", reason = "negating the digit predicate keeps scanning an exhausted iterator forever")]
             while characters.peek().is_some_and(char::is_ascii_digit) {
                 let _ = characters.next();
             }

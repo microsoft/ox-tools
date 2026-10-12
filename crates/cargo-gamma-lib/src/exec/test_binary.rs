@@ -15,7 +15,7 @@ use crate::discover::{Glob, Killer, Plan};
 use crate::model::{Mutant, Outcome};
 
 /// A test executable and the package that produced it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TestBinary {
     /// Where the executable is.
     pub path: Utf8PathBuf,
@@ -414,7 +414,9 @@ fn linked_sources(
     let mut sources = crate::HashSet::default();
 
     'captures: while let Some(index) = pending.pop() {
+        // #[gamma::skip(cond.always_false, tag = "timeout", reason = "cyclic capture dependencies must not be revisited")]
         if !visit_capture(&mut visited, index) {
+            // #[gamma::skip(loop.delete_continue, tag = "timeout", reason = "re-enqueuing visited capture dependencies loops on cycles")]
             continue 'captures;
         }
 

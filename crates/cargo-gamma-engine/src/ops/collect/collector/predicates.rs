@@ -450,7 +450,7 @@ pub(super) fn is_default_call(expression: &Expr, defaults: &DefaultPaths, defaul
 /// Returns the path directly called by an expression, seeing through redundant parentheses.
 fn callee_path(callee: &Expr) -> Option<&Path> {
     match callee {
-        Expr::Path(path) => Some(&path.path),
+        Expr::Path(path) if path.qself.is_none() => Some(&path.path),
         Expr::Paren(paren) => callee_path(&paren.expr),
         _ => None,
     }
@@ -763,6 +763,99 @@ mod tests {
     use syn::parse_quote;
 
     use super::*;
+
+    #[test]
+    fn generic_payload_and_callee_helpers_reject_empty_path_nodes() {
+        let path = syn::Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        let ty = Type::Path(syn::TypePath {
+            attrs: Vec::new(),
+            qself: None,
+            path: path.clone(),
+        });
+        assert_eq!(payload(&ty, 0), None);
+        let callee = Expr::Path(syn::ExprPath {
+            attrs: Vec::new(),
+            qself: None,
+            path,
+        });
+        assert_eq!(callee_type(&callee), None);
+        assert_eq!(callee_name(&callee), None);
+        let ty: Type = syn::parse_quote!(Container<'static, u8, 3, bool>);
+        assert_eq!(payload(&ty, 0), Some(&syn::parse_quote!(u8)));
+        assert_eq!(payload(&ty, 1), Some(&syn::parse_quote!(bool)));
+        assert_eq!(payload(&ty, 2), None);
+    }
+
+    #[test]
+    fn loop_value_state_is_restored_before_unlabelled_root_breaks() {
+        for text in [
+            "loop { loop { break; } break 9; }",
+            "loop { while ready {} break 9; }",
+            "loop { for x in xs {} break 9; }",
+            "'outer: loop { 'outer: loop { break; } break 9; }",
+        ] {
+            let node: ExprLoop = syn::parse_str(text).unwrap();
+            assert!(loop_produces_value(&node), "{text}");
+        }
+        for text in [
+            "loop { break; }",
+            "'outer: loop { break 'other 9; }",
+            "'outer: loop { break 'outer; }",
+            "loop { loop { break 9; } }",
+        ] {
+            let node: ExprLoop = syn::parse_str(text).unwrap();
+            assert!(!loop_produces_value(&node), "{text}");
+        }
+    }
+
+    #[test]
+    fn predicate_classifiers_reject_nearby_but_different_shapes() {
+        for (text, expected) in [
+            ("-(call())", false),
+            ("-1", true),
+            ("\"text\".len()", false),
+            ("\"text\".is_empty()", false),
+            ("\"text\" - value", false),
+            ("value - \"text\"", false),
+            ("\"text\".min(value)", true),
+        ] {
+            let expression = syn::parse_str::<Expr>(text).unwrap();
+            if text.starts_with('-') {
+                assert_eq!(is_promotable(&expression), expected, "{text}");
+            } else {
+                assert_eq!(is_textual(&expression), expected, "{text}");
+            }
+        }
+        for method in ["as_secs_f32", "as_secs_f64", "elapsed_secs"] {
+            let ident = syn::Ident::new(method, proc_macro2::Span::call_site());
+            assert!(ident_returns_float(&ident), "{method}");
+            assert!(returns_numeric(method), "{method}");
+        }
+        assert!(!ident_returns_float(&syn::Ident::new("as_secs", proc_macro2::Span::call_site())));
+        assert!(is_binding_case("_Upper"));
+        assert!(!is_binding_case("Upper"));
+        assert!(!is_binding_case(""));
+        for (text, numeric, unsigned) in [
+            ("&u32", true, true),
+            ("&(core::primitive::u16)", true, true),
+            ("std::primitive::i16", true, false),
+            ("other::primitive::u16", false, false),
+            ("core::other::u16", false, false),
+            ("<T as Trait>::u16", false, false),
+            ("()", false, false),
+        ] {
+            let ty = syn::parse_str::<Type>(text).unwrap();
+            assert_eq!(is_numeric_binding(&ty), numeric, "{text}");
+            assert_eq!(is_unsigned_binding(&ty), unsigned, "{text}");
+        }
+        for text in ["panic!()", "todo!()", "unreachable!()", "unimplemented!()"] {
+            assert!(diverges(&syn::parse_str::<Expr>(text).unwrap()));
+        }
+        assert!(!diverges(&syn::parse_quote!(ordinary!())));
+    }
 
     fn default_paths(source: &str) -> DefaultPaths {
         DefaultPaths::of(&syn::parse_file(source).expect("test source should parse"))

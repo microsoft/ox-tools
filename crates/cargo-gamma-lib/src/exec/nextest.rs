@@ -29,7 +29,7 @@ const BINARIES_METADATA_FILE: &str = "nextest-binaries.json";
 const CARGO_METADATA_FILE: &str = "nextest-metadata.json";
 
 /// The metadata that lets nextest run a tree it did not build, and the ids it knows the binaries by.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Harness {
     /// Where the binaries nextest may run are described.
     binaries: Utf8PathBuf,
@@ -46,6 +46,10 @@ pub(super) struct Harness {
 }
 
 impl Harness {
+    pub(super) fn testing_paths(&self) -> [&Utf8Path; 2] {
+        [&self.binaries, &self.metadata]
+    }
+
     /// Describes the built tree to nextest, so that no later run of it needs cargo.
     ///
     /// # Errors

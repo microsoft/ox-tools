@@ -126,7 +126,15 @@ pub fn run() -> Result<ExitCode, AppError> {
 }
 
 fn check(manifest_path: &Path, exceptions: &[String]) -> Result<ExitCode, AppError> {
-    let content = std::fs::read_to_string(manifest_path).into_app_err_with(|| format!("Failed to read {}", manifest_path.display()))?;
+    check_with(manifest_path, exceptions, |path| std::fs::read_to_string(path))
+}
+
+fn check_with(
+    manifest_path: &Path,
+    exceptions: &[String],
+    read: impl FnOnce(&Path) -> std::io::Result<String>,
+) -> Result<ExitCode, AppError> {
+    let content = read(manifest_path).into_app_err_with(|| format!("Failed to read {}", manifest_path.display()))?;
 
     let (errors, found_deps, checked_sections) = validate_dependencies(&content, exceptions)?;
     if !errors.is_empty() {
@@ -154,20 +162,39 @@ fn check(manifest_path: &Path, exceptions: &[String]) -> Result<ExitCode, AppErr
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::fs;
+    use std::path::Path;
 
-    use tempfile::TempDir;
-
-    use super::check;
+    use super::check_with;
 
     #[test]
-    #[cfg_attr(miri, ignore = "uses a temporary directory")]
-    fn check_propagates_validation_errors() {
-        let dir = TempDir::new().expect("temporary directory");
-        let manifest = dir.path().join("Cargo.toml");
-        fs::write(&manifest, "[workspace]\ndependencies = \"invalid\"\n").expect("write invalid manifest");
+    fn manifest_read_failures_are_returned_with_the_original_path() {
+        let path = Path::new("manifest.toml");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::NotFound] {
+            let error = check_with(path, &[], |requested| {
+                assert_eq!(requested, path);
+                Err(std::io::Error::new(kind, "scripted manifest failure"))
+            })
+            .expect_err("scripted manifest read failures must propagate");
+            let cause = error.find_source::<std::io::Error>().expect("the read error is retained");
+            assert_eq!(cause.kind(), kind);
+            assert_eq!(cause.to_string(), "scripted manifest failure");
+            assert_eq!(error.message(), "scripted manifest failure");
+            let rendered = error.to_string();
+            assert_eq!(
+                rendered.lines().nth(1).unwrap().split(" (at ").next().unwrap(),
+                "> Failed to read manifest.toml"
+            );
+        }
+    }
 
-        let error = check(&manifest, &[]).expect_err("invalid dependency sections must be reported");
+    #[test]
+    fn check_propagates_validation_errors() {
+        let manifest = Path::new("Cargo.toml");
+        let error = check_with(manifest, &[], |requested| {
+            assert_eq!(requested, manifest);
+            Ok("[workspace]\ndependencies = \"invalid\"\n".to_owned())
+        })
+        .expect_err("invalid dependency sections must be reported");
 
         assert_eq!(error.to_string(), "[workspace.dependencies] is not a table");
     }

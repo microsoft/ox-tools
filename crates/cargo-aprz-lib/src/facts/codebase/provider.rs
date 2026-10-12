@@ -81,6 +81,7 @@ impl Provider {
     pub fn new(cache: Cache) -> Self {
         Self {
             cache,
+            // #[gamma::skip(expr.decrement, tag = "timeout", reason = "the campaign reduced the single repository permit to zero, leaving repository analysis waiting forever")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
             timeouts: Timeouts::default(),
         }
@@ -456,9 +457,16 @@ impl Provider {
         // Only `num_workers` files can be analyzed at a time regardless, so spawning a task per
         // file just adds scheduling overhead for tasks that immediately queue.
         let num_workers = source_analysis_worker_count(std::thread::available_parallelism().ok());
-        let chunk_size = source_analysis_chunk_size(file_paths.len(), num_workers);
+        let chunk_size = source_analysis_chunk_size(
+            // #[gamma::skip(expr.decrement, expr.increment, tag = "equivalent", reason = "the nonempty collection has at most MAX_FILES paths; adjusting only the sizing hint by one leaves a positive chunk size, and chunks still processes every actual path exactly once")]
+            file_paths.len(),
+            num_workers,
+        );
         let mut analysis_tasks: Vec<JoinHandle<Vec<Result<_, ohno::AppError>>>> = Vec::with_capacity(num_workers.get());
-        for chunk in file_paths.chunks(chunk_size) {
+        for chunk in file_paths.chunks(
+            // #[gamma::skip(expr.increment, tag = "equivalent", reason = "chunk_size is between 1 and MAX_FILES; adding one still partitions every collected path exactly once, and only changes how work is distributed among blocking tasks")]
+            chunk_size,
+        ) {
             let chunk = chunk.to_vec();
 
             let task = spawn_blocking(move || {
@@ -1124,6 +1132,16 @@ jobs:
         assert!(data.production_lines > 0, "expected production lines");
         assert!(data.test_lines > 0, "expected test lines");
         assert!(data.comment_lines > 0, "expected comment lines");
+        let expected = [
+            source_file_analyzer::analyze_source_file(FIXTURE_LIB_RS),
+            source_file_analyzer::analyze_source_file(FIXTURE_UTIL_RS),
+        ];
+        assert_eq!(
+            data.production_lines,
+            expected.iter().map(|info| info.production_lines).sum::<u64>()
+        );
+        assert_eq!(data.test_lines, expected.iter().map(|info| info.test_lines).sum::<u64>());
+        assert_eq!(data.comment_lines, expected.iter().map(|info| info.comment_lines).sum::<u64>());
         assert_eq!(data.unsafe_count, 2); // `unsafe fn` plus the `unsafe` block inside it
 
         assert_eq!(data.example_count, 1);
@@ -1148,8 +1166,40 @@ jobs:
         let tracker = test_tracker();
         let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("aprz-fixture", &repo_spec), crate_spec("aprz-helper", &repo_spec)]);
 
-        assert_eq!(provider.get_codebase_data(crates, &tracker).await.count(), 2);
+        assert_eq!(provider.get_codebase_data(Arc::clone(&crates), &tracker).await.count(), 2);
         assert_eq!(tracker.topic_state(TrackedTopic::Codebase), (1, 1, TopicStatus::Done));
+        let cached_tracker = test_tracker();
+        assert_eq!(provider.get_codebase_data(crates, &cached_tracker).await.count(), 2);
+        assert_eq!(cached_tracker.topic_state(TrackedTopic::Codebase), (1, 1, TopicStatus::Done));
+    }
+
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run isolated local repository analysis")]
+    fn cache_inspection_stops_after_the_first_repository_miss() {
+        let logs = run_ignored_helper("helper_capture_first_repository_cache_miss");
+        assert!(logs.contains("first repository miss fixture completed"), "{logs}");
+        assert!(!logs.contains("Cache hit for aprz-helper"), "{logs}");
+    }
+
+    #[tokio::test]
+    #[ignore = "executed by cache_inspection_stops_after_the_first_repository_miss"]
+    async fn helper_capture_first_repository_cache_miss() {
+        if std::env::var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
+            return;
+        }
+        install_capturing_logger();
+        let fixture = RepoFixture::new(FixtureOptions::default());
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let provider = Provider::new(test_cache(directory.path()));
+        let repo = fixture.repo_spec();
+        let later = Provider::get_data_filename("aprz-helper", &repo);
+        provider.cache.save_no_data(&later, "previous unavailable result").unwrap();
+        let crates = Arc::from(vec![crate_spec("aprz-fixture", &repo), crate_spec("aprz-helper", &repo)]);
+        assert_eq!(provider.get_codebase_data(crates, &test_tracker()).await.count(), 2);
+        let logs = captured_logs();
+        assert!(!logs.contains(&format!("Cache hit for {later}")), "{logs}");
+        println!("{logs}\nfirst repository miss fixture completed");
     }
 
     #[tokio::test]
@@ -1475,6 +1525,25 @@ jobs:
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run filesystem analysis workers")]
+    async fn analysis_chunk_boundaries_never_drop_or_duplicate_source_files() {
+        for count in [1, 2, 3, 5, 9, 17] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            for index in 0..count {
+                write_file(
+                    &directory.path().join("src").join(format!("file_{index}.rs")),
+                    "pub fn fixture() {}\n",
+                );
+            }
+            let mut data = empty_codebase_data();
+            Provider::analyze_source_files(directory.path(), &mut data).await;
+            assert_eq!(data.source_files_analyzed, count);
+            assert_eq!(data.production_lines, count);
+            assert_eq!(data.source_files_with_errors, 0);
+        }
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_analyze_source_files_counts_unparsable_files() {
         let tmp = tempfile::tempdir().expect("creating temp dir");
@@ -1633,6 +1702,11 @@ jobs:
 
         assert!(logs.contains("source file limit log capture control"), "{logs}");
         assert!(!logs.contains("File count limit"), "{logs}");
+        assert!(logs.contains("Analyzing 3 source files"), "{logs}");
+        assert!(!logs.contains("Analyzing 2 source files"), "{logs}");
+        assert!(!logs.contains("Analyzing 4 source files"), "{logs}");
+        assert!(!logs.contains("Analyzing 0 source files"), "{logs}");
+        assert!(!logs.contains("Could not walk directory"), "{logs}");
     }
 
     #[tokio::test]
@@ -1646,10 +1720,19 @@ jobs:
         log::debug!("source file limit log capture control");
 
         let tmp = tempfile::tempdir().expect("creating temp dir");
-        write_file(&tmp.path().join("src").join("lib.rs"), "pub fn ok() {}\n");
+        let missing = tempfile::tempdir_in(".").unwrap();
+        let mut empty_data = empty_codebase_data();
+        Provider::analyze_source_files(missing.path(), &mut empty_data).await;
+        fs::create_dir(missing.path().join("src")).unwrap();
+        Provider::analyze_source_files(missing.path(), &mut empty_data).await;
+        assert_eq!(empty_data.source_files_analyzed, 0);
+        for name in ["lib.rs", "one.rs", "two.rs"] {
+            write_file(&tmp.path().join("src").join(name), "pub fn ok() {}\n");
+        }
         let mut data = empty_codebase_data();
 
         Provider::analyze_source_files(tmp.path(), &mut data).await;
+        assert_eq!(data.source_files_analyzed, 3);
 
         println!("{}", captured_logs());
     }
@@ -1829,16 +1912,23 @@ jobs:
         assert_eq!(data.source_files_analyzed, 1);
     }
 
-    #[tokio::test]
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
-    async fn test_analyze_source_files_stops_at_the_file_limit() {
+    fn test_analyze_source_files_stops_at_the_file_limit() {
+        let logs = run_ignored_helper("helper_capture_source_file_limit_at_limit");
+        assert!(logs.contains("File count limit (10000) reached"), "{logs}");
+        assert!(logs.contains("Analyzing 10000 source files"), "{logs}");
+    }
+
+    #[tokio::test]
+    #[ignore = "spawned by test_analyze_source_files_stops_at_the_file_limit"]
+    async fn helper_capture_source_file_limit_at_limit() {
         const MAX_FILES: usize = 10_000;
-
-        // The "limit reached" notice is logged at debug level; evaluate its arguments too.
-        #[cfg(not(miri))]
-        crate::facts::test_logging::enable_log_argument_evaluation();
-
-        let tmp = tempfile::tempdir().expect("creating temp dir");
+        if std::env::var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
+            return;
+        }
+        install_capturing_logger();
+        let tmp = tempfile::tempdir_in(".").expect("creating temp dir");
         let src = tmp.path().join("src");
         fs::create_dir_all(&src).expect("creating the source directory");
         for i in 0..=MAX_FILES {
@@ -1849,6 +1939,7 @@ jobs:
         Provider::analyze_source_files(tmp.path(), &mut data).await;
 
         assert_eq!(data.source_files_analyzed, MAX_FILES as u64);
+        println!("{}", captured_logs());
     }
 
     #[test]

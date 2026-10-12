@@ -46,6 +46,7 @@ impl RepoSpec {
         if clean_url.set_password(None).is_err() || clean_url.set_username("").is_err() || clean_url.set_port(None).is_err() {
             bail!("repository URL does not support host credential normalization: {url}");
         }
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "path_segments returned Some above, proving this is a hierarchical URL; removing host credentials and port cannot change that property")]
         clean_url
             .path_segments_mut()
             .map_err(|()| ohno::app_err!("repository URL does not support path normalization: {url}"))?
@@ -95,6 +96,17 @@ impl Display for RepoSpec {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_utf8_in_either_repository_path_segment_is_returned_without_panicking() {
+        for (url, context) in [
+            ("https://example.invalid/%FF/repo", "repository owner is not valid UTF-8"),
+            ("https://example.invalid/owner/%FF", "repository name is not valid UTF-8"),
+        ] {
+            let error = RepoSpec::parse(&Url::parse(url).unwrap()).expect_err("percent decoding must reject invalid UTF-8");
+            assert!(format!("{error:#}").contains(context), "{error:#}");
+        }
+    }
 
     #[test]
     fn test_parse_github_url() {

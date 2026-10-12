@@ -75,6 +75,7 @@ pub fn detect_from_url(url: &str) -> Vec<Backend> {
 /// - `user@host:owner/repo[.git]` (the scp-style shorthand)
 fn extract_host(url: &str) -> Option<&str> {
     let url = url.trim();
+    // #[gamma::skip(cond.always_false, reason = "an empty string has neither :// nor the scp-style host separator, so falling through returns None too")]
     if url.is_empty() {
         return None;
     }
@@ -185,6 +186,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn a_single_character_scheme_still_has_a_host() {
+        assert_eq!(extract_host("x://github.com/owner/repo"), Some("github.com"));
+    }
 
     #[test]
     fn parse_backend_names() {

@@ -105,10 +105,7 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     next.catalog_checksum = Some(catalog.checksum());
 
     let expected_manifest = next.to_toml();
-    let current_manifest = read_file_if_present(&Manifest::path_for(&repo_root))?;
-    let manifest_is_current = current_manifest
-        .as_deref()
-        .is_some_and(|current| normalize_line_endings(current.as_bytes()) == normalize_line_endings(expected_manifest.as_bytes()));
+    let manifest_is_current = manifest_matches(read_file_if_present(&Manifest::path_for(&repo_root)), &expected_manifest)?;
     plan.set_manifest_update_required(!manifest_is_current);
 
     let applied = !args.dry_run;
@@ -124,6 +121,13 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
         applied,
         backends,
     })
+}
+
+fn manifest_matches(current: Result<Option<String>, AppError>, expected: &str) -> Result<bool, AppError> {
+    let current = current?;
+    Ok(current
+        .as_deref()
+        .is_some_and(|current| normalize_line_endings(current.as_bytes()) == normalize_line_endings(expected.as_bytes())))
 }
 
 /// Enforce the single-tool guard: refuse if the lock names a different tool
@@ -533,6 +537,7 @@ fn push_region_at(
     {
         return Ok(());
     }
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "successful marker repair already cached this exact host, including absent files; the repeated lookup cannot perform I/O or return Err")]
     let current = hosts.get_or_read(repo_root, &host)?;
     if let Some(declared) = composed_host
         && !declared.order.contains(&spec.id.as_str())
@@ -599,7 +604,8 @@ fn push_region_at(
                 composed.states.insert(host.clone(), ComposedHostState::Unsafe(reason.clone()));
                 composed.reported.insert(host.clone());
             }
-            refuse_region(plan, host, spec.id.as_str(), &reason, refusal.remedy);
+            let id = spec.id.as_str();
+            refuse_region(plan, host, id, &reason, refusal.remedy);
             return Ok(());
         }
     };
@@ -610,7 +616,8 @@ fn push_region_at(
     if item.decision == Decision::Write
         && let Some(refusal) = toml_introduction_refusal(current.as_deref(), request, &retiring)
     {
-        refuse_region(plan, host, spec.id.as_str(), &refusal.reason, refusal.remedy);
+        let id = spec.id.as_str();
+        refuse_region(plan, host, id, &refusal.reason, refusal.remedy);
         return Ok(());
     }
     // Fold actual writes into the accumulator so later regions compose.
@@ -833,7 +840,8 @@ fn repair_or_refuse(
     } else {
         "this region's marker lines do not form a matching pair, so the boundary of any body anvil already generated cannot be established"
     };
-    refuse_region(plan, host.to_owned(), id, reason, RefusalRemedy::MalformedMarkers);
+    let host = host.to_owned();
+    refuse_region(plan, host, id, reason, RefusalRemedy::MalformedMarkers);
     Ok(false)
 }
 
@@ -912,6 +920,7 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     // #[gamma::skip(literal.char_to_nul, tag = "timeout", reason = "a NUL line terminator prevents malformed marker recovery from reaching a stable boundary within the campaign budget")]
     let first_line = text[..first_line_end].trim_end_matches('\r');
     let key = opening.split_once('=').map(|(key, _)| key);
+    // #[gamma::skip(logical.and_remove_left, reason = "an empty opening can only match an empty first line, yielding offset zero either way; split_once proves opening starts with its returned key")]
     let carries_directive =
         !opening.is_empty() && (first_line == opening || key.is_some_and(|key| opening.starts_with(key) && first_line.starts_with(key)));
     RegionPlacement::At(if carries_directive { first_line.len() } else { 0 })
@@ -1304,9 +1313,10 @@ fn plan_removals(
                     // recorded: this refusal says a file was left alone, so it has
                     // to name the file that is actually there. A case-only rename
                     // is exactly where the two diverge.
+                    let refusal_host = resolved_host.clone();
                     refuse_region(
                         plan,
-                        resolved_host.clone(),
+                        refusal_host,
                         &key.id,
                         // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "changes only the terminal refusal text after retirement has already stopped; the subprocess exhausts its budget before a distinct verdict")]
                         "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
@@ -2226,6 +2236,26 @@ mod tests {
         }
 
         #[test]
+        fn scaffold_first_line_matching_does_not_accept_partial_parser_keys() {
+            for (scaffold, host, offset) in [
+                ("# syntax=docker/dockerfile:1\n", "# syntactic=different\nFROM base\n", 0),
+                (
+                    "# ordinary header\nlater\n",
+                    "# ordinary header\nFROM base\n",
+                    "# ordinary header".len(),
+                ),
+                ("", "\nFROM base\n", 0),
+                ("", "FROM base\n", 0),
+            ] {
+                assert_eq!(
+                    super::super::composed_placement(&["new"], scaffold, "new", Some(host)),
+                    RegionPlacement::At(offset),
+                    "{scaffold:?}, {host:?}"
+                );
+            }
+        }
+
+        #[test]
         fn a_scaffold_that_grew_still_places_below_its_first_line() {
             // A scaffold is written once and never reconciled, so a file created
             // by an earlier release carries only what that release seeded. If a
@@ -2882,6 +2912,164 @@ mod tests {
 
     fn empty_catalog() -> Catalog {
         Catalog::builder(CliMeta::new("anvil")).build().unwrap()
+    }
+
+    fn campaign_region(host: &str, id: &'static str, body: &str) -> RegionSpec {
+        RegionSpec {
+            host: HostSelector::Path(host.into()),
+            id: RegionId::new(id),
+            body: body.into(),
+            syntax: CommentSyntax::Hash,
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn planning_propagates_every_case_resolution_failure_boundary() {
+        let tmp = empty_workspace();
+        fs::write(tmp.path().join("blocked"), "").expect("blocking path exists");
+        let workspace = workspace::load_workspace(tmp.path()).expect("fixture workspace loads");
+        for artifact in [
+            Artifact::owned_file("blocked/file", "body"),
+            Artifact::region(campaign_region("blocked/host", "region", "body")),
+        ] {
+            let catalog = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(artifact)
+                .build()
+                .expect("fixture catalog is valid");
+            build_plan(tmp.path(), &workspace, &Manifest::default(), &[], &catalog)
+                .expect_err("owned and live region resolution errors propagate through planning");
+        }
+        let mut manifest = Manifest::default();
+        manifest.set_region("blocked/host", "retired", "checksum");
+        build_plan(tmp.path(), &workspace, &manifest, &[], &empty_catalog()).expect_err("retired marker resolution errors propagate");
+        for regions in [false, true] {
+            let mut manifest = Manifest::default();
+            if regions {
+                manifest.set_region("blocked/host", "retired", "checksum");
+            } else {
+                manifest.files.insert("blocked/file".into(), "checksum".into());
+                build_plan(tmp.path(), &workspace, &manifest, &[], &empty_catalog())
+                    .expect_err("the full plan propagates removal failures");
+            }
+            plan_removals(
+                tmp.path(),
+                &manifest,
+                &mut Plan::default(),
+                &mut HostTextCache::default(),
+                &ComposedHosts::default(),
+            )
+            .expect_err("retired file/region resolution errors propagate");
+        }
+        push_region_at(
+            tmp.path(),
+            &Manifest::default(),
+            &mut Plan::default(),
+            &mut HostTextCache::default(),
+            &mut ComposedHosts::default(),
+            "blocked/host",
+            &campaign_region("blocked/host", "region", "body"),
+        )
+        .expect_err("single-host region resolution errors propagate");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn live_region_discovery_continues_after_owned_file_artifacts() {
+        let tmp = empty_workspace();
+        let workspace = workspace::load_workspace(tmp.path()).expect("fixture workspace loads");
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file("owned", "body"))
+            .with_artifact(Artifact::region(campaign_region("host", "region", "body")))
+            .build()
+            .expect("fixture catalog is valid");
+        assert_eq!(
+            live_region_keys(tmp.path(), &workspace, &catalog, &HostTextCache::default()).expect("region discovery succeeds"),
+            BTreeSet::from([("host".to_owned(), "region".to_owned())])
+        );
+    }
+
+    #[test]
+    fn manifest_comparison_preserves_read_errors_absence_and_line_ending_equivalence() {
+        let error = manifest_matches(Err(ohno::app_err!("lock read unavailable")), "expected").expect_err("lock read errors propagate");
+        assert!(error.to_string().contains("lock read unavailable"), "{error}");
+        assert!(!manifest_matches(Ok(None), "").expect("absent lock is not current"));
+        assert!(manifest_matches(Ok(Some("same\r\n".into())), "same\n").expect("line endings are normalized"));
+        assert!(!manifest_matches(Ok(Some("other\n".into())), "same\n").expect("different locks are not current"));
+    }
+
+    #[test]
+    fn emptied_owned_regions_remain_retiring_after_the_checksum_changes() {
+        let text = "# >>> anvil-managed: retired\n \t\n# <<< anvil-managed: retired\n";
+        let mut previous = Manifest::default();
+        previous.set_region("host", "retired", "original-render-checksum");
+        let retiring = ComposedHosts::default().retiring_regions(&previous, "host", text, CommentSyntax::Hash);
+        assert_eq!(retiring, BTreeSet::from(["retired".to_owned()]));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn retirement_skips_refused_hosts_but_composes_all_later_removals_in_cache() {
+        let tmp = empty_workspace();
+        let body = "old\n";
+        let text =
+            "# >>> anvil-managed: first\nold\n# <<< anvil-managed: first\n# >>> anvil-managed: second\nold\n# <<< anvil-managed: second\n";
+        write(&tmp.path().join("later"), text);
+        write(&tmp.path().join("blocked"), text);
+        let mut previous = Manifest::default();
+        previous.set_region("blocked", "first", checksum_str(body));
+        previous.set_region("later", "first", checksum_str(body));
+        previous.set_region("later", "second", checksum_str(body));
+        let mut composed = ComposedHosts::default();
+        composed
+            .states
+            .insert("blocked".into(), ComposedHostState::Unsafe("refused".into()));
+        let mut plan = Plan::default();
+        let mut hosts = HostTextCache::default();
+        plan_removals(tmp.path(), &previous, &mut plan, &mut hosts, &composed).expect("nonrefused regions retire");
+        assert_eq!(plan.items().len(), 2);
+        assert!(plan.items().iter().all(|item| item.decision == Decision::Remove));
+        let remaining = hosts.cached("later").expect("removal caches the resulting host");
+        assert!(!remaining.contains("anvil-managed"));
+        assert!(!remaining.contains("old"));
+        assert!(!hosts.texts.contains_key("blocked"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn edited_legacy_lints_emit_one_refusal_for_all_replacement_regions() {
+        let tmp = empty_workspace();
+        let manifest_path = tmp.path().join("Cargo.toml");
+        let mut text = fs::read_to_string(&manifest_path).expect("workspace manifest exists");
+        text.push_str("# >>> anvil-managed: anvil-workspace-lints\n[workspace.lints]\nrust.changed = 'warn'\n# <<< anvil-managed: anvil-workspace-lints\n");
+        write(&manifest_path, &text);
+        let mut manifest = Manifest::default();
+        manifest.set_region("Cargo.toml", "anvil-workspace-lints", "not-the-current-checksum");
+        manifest.save(tmp.path()).expect("legacy ownership is recorded");
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(campaign_region(
+                "Cargo.toml",
+                "anvil-workspace-rust-lints",
+                "[workspace.lints.rust]\nchanged='warn'\n",
+            )))
+            .with_artifact(Artifact::region(campaign_region(
+                "Cargo.toml",
+                "anvil-workspace-clippy-lints",
+                "[workspace.lints.clippy]\nother='warn'\n",
+            )))
+            .build()
+            .expect("replacement catalog is valid");
+        let result = run_update(
+            &catalog,
+            &Cli {
+                dry_run: true,
+                ..local_only()
+            },
+            tmp.path(),
+        )
+        .expect("edited legacy contents are a refusal, not a run error");
+        assert_eq!(result.plan.refusals().len(), 1);
+        assert_eq!(fs::read_to_string(&manifest_path).expect("host remains readable"), text);
     }
 
     // Command-boundary and error-propagation contracts.

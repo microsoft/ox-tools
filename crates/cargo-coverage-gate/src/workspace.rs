@@ -291,7 +291,9 @@ fn unsupported_build_context_options(platform: &Platform) -> Vec<String> {
     // the rejected values so they remain available to the typed diagnostic.
     fn visit(expression: &CfgExpr, options: &mut Vec<String>) {
         match expression {
-            CfgExpr::Not(expression) => visit(expression, options),
+            CfgExpr::Not(expression) => {
+                visit(expression, options);
+            }
             CfgExpr::All(expressions) | CfgExpr::Any(expressions) => {
                 for expression in expressions {
                     visit(expression, options);
@@ -387,6 +389,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn threshold_errors_preserve_both_exact_range_endpoints() {
+        for value in [-1.0, 101.0] {
+            let error = extract_min_lines_percent(&json!({"min-lines-percent": value}), "campaign")
+                .expect_err("values outside the inclusive percentage range are errors");
+            let rendered = error.to_string();
+            assert!(rendered.contains("expected a value in 0.0..=100.0"), "{rendered}");
+            assert!(rendered.contains(&value.to_string()), "{rendered}");
+        }
+        for value in [0.0, 100.0] {
+            assert_eq!(
+                extract_min_lines_percent(&json!({"min-lines-percent": value}), "campaign").expect("endpoints are valid"),
+                Some(value)
+            );
+        }
+    }
+
+    #[test]
+    fn nested_build_context_options_collect_negation_and_every_branch() {
+        let platform = Platform::from_str("cfg(all(not(test), any(debug_assertions, feature = \"x\"), proc_macro))")
+            .expect("test cfg expression is valid");
+        assert_eq!(
+            unsupported_build_context_options(&platform),
+            ["debug_assertions", "feature", "proc_macro", "test"]
+        );
+    }
 
     fn test_target() -> TargetContext {
         TargetContext::from_parts(

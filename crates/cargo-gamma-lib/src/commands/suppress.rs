@@ -30,7 +30,10 @@ pub(super) fn suppress<H: Host>(host: &mut H, args: &SuppressArgs, _progress_whe
     }
     let selected = crate::paths::physical(&args.dir)?;
     let (root, base, _lock) = crate::exec::claim_campaign_state(&selected, args.cache_dir.as_deref())?;
-    let record = RunRecord::load_required(&base)?;
+    let record = match crate::exec::partial_testing_record(&base)? {
+        Some(record) => record,
+        None => RunRecord::load_required(&base)?,
+    };
     let (plan, stale) = plan_from_record(&root, &record, &eligible)?;
 
     for entry in &stale {
@@ -148,6 +151,7 @@ fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMa
             .into_iter()
             .collect();
         let selection = crate::ops::Selection::parse(&selectors.join(","))?;
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "affected is built from outcomes, so every affected file has at least one matching outcome and the package fallback is unreachable")]
         let package = outcomes
             .iter()
             .find(|outcome| &outcome.file == file)
@@ -178,7 +182,9 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     } = current_sources(root, record, &affected)?;
 
     for outcome in outcomes {
+        // #[gamma::skip(cond.always_false, reason = "contents contains only affected files, so omitting this fast-path still skips unaffected outcomes at contents.get below")]
         if !affected.contains_key(&outcome.file) {
+            // #[gamma::skip(loop.delete_continue, reason = "an unaffected file has no contents entry, so the subsequent contents.get guard still continues")]
             continue;
         }
         let is_eligible = eligible.iter().any(|entry| entry.outcome() == outcome.outcome);
@@ -238,8 +244,10 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
         let mut mutant = (*candidate).clone();
         mutant.outcome = outcome.outcome;
         mutant.suppression = outcome.suppression;
+        // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's elapsed_ms to zero")]
         mutant.elapsed_ms = 0;
         mutant.killed_by = None;
+        // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's note to None")]
         mutant.note = None;
         mutants.push(mutant);
     }
@@ -430,6 +438,15 @@ pub(super) fn reject_external_sources(root: &Utf8Path, paths: &[&Utf8Path]) -> c
 ///
 /// Shared with `unsuppress`, whose edit loop has the same shape and the same hazard.
 pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: bool) -> crate::Result<()> {
+    recoverable_with(root, paths, allow_dirty, uncommitted)
+}
+
+fn recoverable_with(
+    root: &Utf8Path,
+    paths: &[&Utf8Path],
+    allow_dirty: bool,
+    status: impl FnOnce(&Utf8Path, &[&Utf8Path]) -> Option<Vec<String>>,
+) -> crate::Result<()> {
     if allow_dirty {
         return Ok(());
     }
@@ -440,7 +457,7 @@ pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: boo
         return Ok(());
     }
 
-    let Some(dirty) = uncommitted(root, paths) else {
+    let Some(dirty) = status(root, paths) else {
         return Ok(());
     };
 
@@ -463,15 +480,23 @@ pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: boo
 /// asks it: a worktree, a submodule and an index format newer than any library understands all
 /// answer correctly, and a directory that is not a repository answers by failing.
 fn uncommitted(root: &Utf8Path, paths: &[&Utf8Path]) -> Option<Vec<String>> {
-    let output = Command::new("git")
+    uncommitted_with(root, paths, Command::output)
+}
+
+fn uncommitted_with(
+    root: &Utf8Path,
+    paths: &[&Utf8Path],
+    run: impl FnOnce(&mut Command) -> std::io::Result<std::process::Output>,
+) -> Option<Vec<String>> {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root.as_std_path())
         .args(["status", "--porcelain", "-z", "--no-renames", "--"])
         .args(paths.iter().map(|path| path.as_std_path()))
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null());
+    let output = run(&mut command).ok()?;
 
     if !output.status.success() {
         return None;
@@ -2114,6 +2139,697 @@ mod tests {
     }
 
     /// Runs git in `root`, reporting whether it could be run at all.
+    fn record_for(root: &Utf8Path, mutants: &[Mutant]) -> RunRecord {
+        let context = crate::discover::record_context(&crate::discover::RecordContext {
+            toolchain: Some("fixture"),
+            ..crate::discover::RecordContext::default()
+        })
+        .expect("explicit fixture toolchain supplies a context");
+        RunRecord::from_run(root, mutants, &context, &[root.join("src")])
+    }
+
+    fn change_first_entry(record: &RunRecord, change: impl FnOnce(&mut serde_json::Value)) -> RunRecord {
+        let mut value = serde_json::to_value(record).expect("record serialization");
+        let entry = value["files"]
+            .as_array_mut()
+            .expect("files array")
+            .iter_mut()
+            .find_map(|file| file["mutants"].as_array_mut().expect("mutants array").first_mut())
+            .expect("fixture records at least one entry");
+        change(entry);
+        serde_json::from_value(value).expect("alteration retains the persisted record's JSON schema")
+    }
+
+    #[test]
+    fn eligible_file_counts_use_any_selected_verdict_and_require_identity_only_for_selected_entries() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-eligible-table-", "pub fn answer() -> i32 { 41 + 42 + 43 }\n");
+        let mut mutants = collected_mutants_in(&root, "src/lib.rs", "literal.int_to_zero");
+        assert_eq!(mutants.len(), 3);
+        for (mutant, outcome) in mutants.iter_mut().zip([Outcome::Timeout, Outcome::OutOfMemory, Outcome::Killed]) {
+            mutant.outcome = outcome;
+        }
+        let record = record_for(&root, &mutants);
+        for (eligible, expected) in [
+            (vec![], 0),
+            (vec![crate::fix::Eligible::Timeout], 1),
+            (vec![crate::fix::Eligible::OutOfMemory], 1),
+            (vec![crate::fix::Eligible::Timeout, crate::fix::Eligible::OutOfMemory], 2),
+        ] {
+            let counts = eligible_files(&record, &eligible).expect("all sites are current");
+            assert_eq!(counts.len(), usize::from(expected > 0));
+            assert_eq!(counts.get(Utf8Path::new("src/lib.rs")).copied().unwrap_or(0), expected);
+        }
+        let legacy = change_first_entry(&record, |entry| {
+            entry["site"] = serde_json::Value::Null;
+            entry["outcome"] = serde_json::to_value(Outcome::Timeout).expect("outcome serialization");
+        });
+        let selected = [crate::fix::Eligible::Timeout];
+        let failure = eligible_files(&legacy, &selected).expect_err("selected legacy entries cannot be promoted");
+        assert!(failure.to_string().contains("predates persisted source identities"));
+        plan_from_record(&root, &legacy, &selected).unwrap_err();
+        let none_selected = eligible_files(&legacy, &[]).expect("unselected legacy entry is harmless");
+        assert!(none_selected.is_empty());
+        let invalid = change_first_entry(&record, |entry| {
+            entry["outcome"] = serde_json::to_value(Outcome::Timeout).expect("outcome serialization");
+            entry["site"]["digest"] = serde_json::json!("invalid");
+        });
+        let (_, stale) = plan_from_record(&root, &invalid, &[crate::fix::Eligible::Timeout, crate::fix::Eligible::OutOfMemory])
+            .expect("any selected verdict is eligible");
+        assert_eq!(stale.len(), 1);
+    }
+
+    #[test]
+    fn record_reconstruction_rejects_each_corrupt_identity_component_without_losing_later_sites() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-identity-table-", "pub fn answer() -> i32 { 42 }\n");
+        fs::write(root.join("src/z.rs"), "pub fn later() -> i32 { 77 }\n").expect("later source");
+        let mut first = recorded_mutant_in(&root, "src/lib.rs", "42", "", Outcome::Timeout);
+        let mut later = recorded_mutant_in(&root, "src/z.rs", "77", "", Outcome::Timeout);
+        first.package = "alpha".into();
+        later.package = "omega".into();
+        let record = record_for(&root, &[first.clone(), later.clone()]);
+        for field in [
+            "digest",
+            "item",
+            "occurrence",
+            "replacementIndex",
+            "replacement",
+            "shape",
+            "spanStart",
+            "spanEnd",
+            "original",
+            "id",
+        ] {
+            let changed = change_first_entry(&record, |entry| match field {
+                "digest" => entry["site"][field] = serde_json::json!("wrong-digest"),
+                "item" => {
+                    entry["site"]["item"] = serde_json::json!("different_item");
+                    entry["site"]["digest"] = serde_json::json!(format!(
+                        "{:032x}",
+                        crate::model::site_key(
+                            "different_item",
+                            &first.mutator,
+                            &crate::model::normalize_site_text(&first.original)
+                        )
+                    ));
+                }
+                "replacement" => entry["site"][field] = serde_json::json!("999"),
+                "shape" => entry["site"][field] = serde_json::to_value(crate::ops::collect::Shape::Stmt).expect("shape serialization"),
+                "original" => entry["site"][field] = serde_json::json!("42 "),
+                "id" => entry[field] = serde_json::json!("0123456789abcdef0123456789abcdef"),
+                _ => {
+                    let previous = entry["site"][field].as_u64().expect("integer identity field");
+                    entry["site"][field] = serde_json::json!(previous + 1);
+                }
+            });
+            let (plan, stale) =
+                plan_from_record(&root, &changed, &[crate::fix::Eligible::Timeout]).expect("corrupt sites are stale, not parse failures");
+            assert_eq!(plan.mutants.len(), 1, "{field}: {stale:?}");
+            assert_eq!(plan.mutants[0].id, later.id, "{field}");
+            assert_eq!(stale.len(), 1, "{field}");
+            assert!(stale[0].starts_with("src/lib.rs:"), "{field}: {stale:?}");
+            assert_eq!(plan.suppressed, 0);
+            assert_eq!(plan.sharded_out, 0);
+            assert_eq!(plan.settled_out, 0);
+            assert_eq!(
+                plan.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+                ["src/lib.rs", "src/z.rs"]
+            );
+        }
+        let (plan, stale) = plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("unaltered identity");
+        assert!(stale.is_empty());
+        assert_eq!(plan.mutants.len(), 2);
+        assert!(
+            plan.mutants
+                .iter()
+                .all(|mutant| mutant.elapsed_ms == 0 && mutant.note.is_none() && mutant.killed_by.is_none())
+        );
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|file| (file.path.as_str(), file.package.as_str()))
+                .collect::<Vec<_>>(),
+            [("src/lib.rs", "alpha"), ("src/z.rs", "omega")]
+        );
+        assert_eq!(plan.digests.len(), 2);
+    }
+
+    #[test]
+    fn malformed_unselected_sites_in_affected_files_are_skipped_without_spurious_stale_warnings() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-unselected-identity-", "pub fn answer() -> i32 { 41 + 42 }\n");
+        let first = recorded_mutant_in(&root, "src/lib.rs", "41", "", Outcome::Killed);
+        let second = recorded_mutant_in(&root, "src/lib.rs", "42", "", Outcome::Timeout);
+        let record = record_for(&root, &[first.clone(), second.clone()]);
+        for mode in ["missing", "invalid", "moved"] {
+            let mut value = serde_json::to_value(&record).expect("record serialization");
+            let entry = value["files"]
+                .as_array_mut()
+                .expect("files")
+                .iter_mut()
+                .flat_map(|file| file["mutants"].as_array_mut().expect("entries"))
+                .find(|entry| entry["id"].as_str() == Some(first.id.as_str()))
+                .expect("killed entry");
+            match mode {
+                "missing" => entry["site"] = serde_json::Value::Null,
+                "invalid" => entry["site"]["digest"] = serde_json::json!("invalid"),
+                _ => entry["site"]["occurrence"] = serde_json::json!(999),
+            }
+            for file in value["files"].as_array_mut().expect("files") {
+                file["mutants"]
+                    .as_array_mut()
+                    .expect("entries")
+                    .sort_by_key(|entry| usize::from(entry["id"].as_str() != Some(first.id.as_str())));
+            }
+            let changed: RunRecord = serde_json::from_value(value).expect("valid record schema");
+            let (plan, stale) =
+                plan_from_record(&root, &changed, &[crate::fix::Eligible::Timeout]).expect("only selected stale sites warn");
+            assert!(stale.is_empty(), "{mode}: {stale:?}");
+            assert_eq!(plan.mutants.len(), 1, "{mode}");
+            assert_eq!(plan.mutants[0].id, second.id, "{mode}");
+        }
+    }
+
+    #[test]
+    fn current_source_errors_and_mixed_selectors_are_reported_without_guessing() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-source-errors-", "pub fn answer() -> i32 { 42 + 43 }\n");
+        let mut mutants = collected_mutants_in(&root, "src/lib.rs", "literal.int_to_zero,arith.add_to_sub");
+        assert!(mutants.iter().any(|mutant| mutant.mutator.as_ref() == "arith.add_to_sub"));
+        for mutant in &mut mutants {
+            mutant.outcome = Outcome::Timeout;
+        }
+        let record = record_for(&root, &mutants);
+        let affected = eligible_files(&record, &[crate::fix::Eligible::Timeout]).expect("eligible sources");
+        let current = current_sources(&root, &record, &affected).expect("two selector families parsed separately");
+        assert_eq!(current.generated[Utf8Path::new("src/lib.rs")].len(), mutants.len());
+        assert!(
+            current.generated[Utf8Path::new("src/lib.rs")]
+                .iter()
+                .all(|mutant| mutant.package.as_ref() == "subject")
+        );
+        let unknown_selector = change_first_entry(&record, |entry| {
+            entry["site"]["mutator"] = serde_json::json!("not.a_mutator");
+        });
+        assert!(current_sources(&root, &unknown_selector, &affected).is_err());
+        for invalid in [b"pub fn broken( {".as_slice(), b"\xff".as_slice()] {
+            fs::write(root.join("src/lib.rs"), invalid).expect("invalid source fixture");
+            assert!(current_sources(&root, &record, &affected).is_err());
+            plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).unwrap_err();
+        }
+        fs::remove_file(root.join("src/lib.rs")).expect("remove invalid source");
+        let current = current_sources(&root, &record, &affected).expect("missing source is stale");
+        assert!(current.contents.is_empty());
+        assert!(current.generated.is_empty());
+        assert_eq!(current.stale.len(), 1);
+        assert!(current.stale[0].contains(&format!("{} eligible outcomes", mutants.len())));
+        fs::write(
+            root.join("src/lib.rs"),
+            "// #[gamma::skip(not.a_mutator)]\npub fn answer() -> i32 { 42 + 43 }\n",
+        )
+        .expect("invalid directive");
+        plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).unwrap_err();
+    }
+
+    #[test]
+    fn reconstruction_skips_unaffected_or_missing_files_but_keeps_later_eligible_files() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-later-files-", "pub fn answer() -> i32 { 42 }\n");
+        fs::write(root.join("src/z.rs"), "pub fn later() -> i32 { 77 }\n").expect("later source");
+        let later = recorded_mutant_in(&root, "src/z.rs", "77", "", Outcome::Timeout);
+        for first_outcome in [Outcome::Killed, Outcome::Timeout] {
+            let first = recorded_mutant(&root, "", first_outcome);
+            let record = record_for(&root, &[first, later.clone()]);
+            fs::remove_file(root.join("src/lib.rs")).expect("first source missing");
+            let (plan, stale) = plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("later source retained");
+            assert_eq!(plan.mutants.len(), 1);
+            assert_eq!(plan.mutants[0].id, later.id);
+            assert_eq!(stale.len(), usize::from(first_outcome == Outcome::Timeout));
+            assert_eq!(plan.files.len(), 1);
+            assert_eq!(plan.files[0].path.as_str(), "src/z.rs");
+            fs::write(root.join("src/lib.rs"), "pub fn answer() -> i32 { 42 }\n").expect("restore first source");
+        }
+    }
+
+    #[test]
+    fn reconstruction_preserves_ignored_provenance_but_resets_runtime_observations() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-recorded-policy-", "pub fn answer() -> i32 { 41 + 42 }\n");
+        let mut ignored = recorded_mutant_in(&root, "src/lib.rs", "41", "", Outcome::Ignored);
+        let policy = crate::model::Suppression {
+            channel: crate::model::Channel::Config,
+            reason: Some("retained ignored provenance".to_owned()),
+            tag: Some("equivalent".to_owned()),
+            line: None,
+        };
+        ignored.suppression = Some(policy.clone());
+        let mut timeout = recorded_mutant_in(&root, "src/lib.rs", "42", "", Outcome::Timeout);
+        timeout.elapsed_ms = 17;
+        timeout.note = Some("old runtime observation".to_owned());
+        let record = record_for(&root, &[ignored.clone(), timeout.clone()]);
+        let (plan, stale) = plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("current identities");
+        assert!(stale.is_empty());
+        assert_eq!(plan.mutants.len(), 2);
+        let ignored_now = plan
+            .mutants
+            .iter()
+            .find(|mutant| mutant.id == ignored.id)
+            .expect("ignored outcome retained");
+        assert_eq!(ignored_now.outcome, Outcome::Ignored);
+        assert_eq!(ignored_now.suppression, Some(policy));
+        let timeout_now = plan
+            .mutants
+            .iter()
+            .find(|mutant| mutant.id == timeout.id)
+            .expect("eligible outcome retained");
+        assert_eq!(timeout_now.outcome, Outcome::Timeout);
+        assert_eq!(timeout_now.elapsed_ms, 0);
+        assert!(timeout_now.suppression.is_none());
+        assert!(timeout_now.note.is_none());
+    }
+
+    #[test]
+    fn public_suppression_preserves_color_policy_and_propagates_input_and_stale_warning_failures() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-public-errors-", "pub fn answer() -> i32 { 42 }\n");
+        let mutant = recorded_mutant(&root, "", Outcome::Timeout);
+        store_record(&root, &[mutant]);
+        let mut args = dry_args(&root, "timeout");
+        args.apply = false;
+        args.allow_dirty = true;
+        for colored in [false, true] {
+            let mut host = Sink::default();
+            assert_eq!(
+                suppress(&mut host, &args, When::Never, Styler::new(colored)).expect("preview from ledger"),
+                EXIT_OK
+            );
+            assert_eq!(host.err().contains('\x1b'), colored);
+        }
+        args.eligible = "survived".to_owned();
+        let failure = suppress(&mut Sink::default(), &args, When::Never, Styler::new(false)).expect_err("survivor promotion is forbidden");
+        assert!(failure.is_usage());
+        args.eligible = "timeout".to_owned();
+        let original_dir = args.dir.clone();
+        args.dir = root.join("missing-directory");
+        suppress(&mut Sink::default(), &args, When::Never, Styler::new(false)).unwrap_err();
+        args.dir = original_dir;
+        fs::write(
+            root.join("src/lib.rs"),
+            "// #[gamma::skip(not.a_mutator)]\npub fn answer() -> i32 { 42 }\n",
+        )
+        .expect("invalid source policy");
+        suppress(&mut Sink::default(), &args, When::Never, Styler::new(false)).unwrap_err();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\nautolib = false\n\n[workspace]\n",
+        )
+        .expect("manifest retaining a runnable target when the eligible source is missing");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("remaining package target");
+        fs::remove_file(root.join("src/lib.rs")).expect("missing eligible source");
+        let mut host = DiagnosticFailure(crate::testing::FlakyHost::new(0));
+        let failure = suppress(&mut host, &args, When::Never, Styler::new(false)).expect_err("stale warning write failure");
+        assert!(failure.to_string().contains("broken pipe"), "{failure}");
+    }
+
+    #[test]
+    fn intended_set_requires_the_file_line_mutator_and_eligible_verdict_independently() {
+        let mut mutants = vec![
+            mutant("matching", 3, "arith.add_to_sub", Outcome::Timeout),
+            mutant("line", 4, "arith.add_to_sub", Outcome::Timeout),
+            mutant("mutator", 3, "cond.negate", Outcome::Timeout),
+            mutant("verdict", 3, "arith.add_to_sub", Outcome::Killed),
+            mutant("file", 3, "arith.add_to_sub", Outcome::Timeout),
+        ];
+        mutants[4].file = Utf8PathBuf::from("src/other.rs").into();
+        let edit = Edit {
+            file: Utf8PathBuf::from("src/lib.rs"),
+            line: 3,
+            mutators: std::iter::once("arith.add_to_sub".to_owned()).collect(),
+            tag: "timeout",
+        };
+        assert_eq!(
+            intended(&mutants, &[edit], &[crate::fix::Eligible::Timeout]),
+            std::iter::once("matching".to_owned()).collect()
+        );
+        assert!(intended(&mutants, &[], &[crate::fix::Eligible::Timeout]).is_empty());
+    }
+
+    #[test]
+    fn current_policy_preserves_only_ignored_provenance_and_checks_every_later_source() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-policy-table-", "pub fn answer() -> i32 { 42 }\n");
+        let original = fs::read_to_string(root.join("src/lib.rs")).expect("fixture source");
+        for outcome in [Outcome::Ignored, Outcome::Killed, Outcome::Timeout] {
+            let mut plan = plan_over(&root, &["src/absent.rs", "src/lib.rs"]);
+            plan.files[1].source = Some(original.clone());
+            let mut mutant = recorded_mutant(&root, "", outcome);
+            let recorded = crate::model::Suppression {
+                channel: crate::model::Channel::Config,
+                reason: Some("old policy".to_owned()),
+                tag: None,
+                line: None,
+            };
+            mutant.suppression = Some(recorded.clone());
+            plan.mutants = vec![mutant];
+            apply_source_policy(&mut plan).expect("current policy");
+            assert_eq!(plan.mutants[0].outcome, outcome);
+            assert_eq!(plan.mutants[0].suppression, (outcome == Outcome::Ignored).then_some(recorded));
+        }
+        let source = "// #[gamma::skip(literal.int_to_zero, reason = \"current policy\")]\npub fn answer() -> i32 { 42 }\n";
+        fs::write(root.join("src/lib.rs"), source).expect("current directive");
+        let mut plan = plan_over(&root, &["src/absent.rs", "src/lib.rs"]);
+        plan.files[1].source = Some(source.to_owned());
+        plan.mutants = vec![recorded_mutant(&root, "", Outcome::Timeout)];
+        apply_source_policy(&mut plan).expect("current directive overrides recorded state");
+        assert_eq!(plan.mutants[0].outcome, Outcome::Ignored);
+        assert_eq!(
+            plan.mutants[0].suppression.as_ref().and_then(|policy| policy.reason.as_deref()),
+            Some("current policy")
+        );
+        for invalid in [
+            "pub fn broken( {",
+            "// #[gamma::skip(not.a_mutator)]\npub fn answer() -> i32 { 42 }\n",
+        ] {
+            plan.files[1].source = Some(invalid.to_owned());
+            assert!(apply_source_policy(&mut plan).is_err());
+        }
+    }
+
+    struct DiagnosticFailure(crate::testing::FlakyHost);
+
+    impl Host for DiagnosticFailure {
+        fn output(&mut self) -> impl Write {
+            std::io::sink()
+        }
+        fn error(&mut self) -> impl Write {
+            self.0.error()
+        }
+        fn is_terminal(&self) -> bool {
+            false
+        }
+        fn terminal_width(&self) -> Option<u16> {
+            None
+        }
+    }
+
+    #[test]
+    fn preview_reports_colors_and_propagates_failure_of_either_diagnostic_line() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-preview-errors-", "pub fn answer() -> i32 { 42 }\n");
+        let mutant = recorded_mutant(&root, "", Outcome::Timeout);
+        let record = record_for(&root, &[mutant]);
+        let eligible = [crate::fix::Eligible::Timeout];
+        let (plan, stale) = plan_from_record(&root, &record, &eligible).expect("current plan");
+        assert!(stale.is_empty());
+        let mut args = dry_args(&root, "timeout");
+        args.apply = false;
+        args.allow_dirty = true;
+        let before = fs::read(root.join("src/lib.rs")).expect("original source");
+        for colored in [false, true] {
+            let mut host = Sink::default();
+            assert_eq!(
+                suppress_plan(&mut host, &args, &plan, &eligible, &record, Styler::new(colored)).expect("preview"),
+                EXIT_OK
+            );
+            assert_eq!(host.err().contains('\x1b'), colored);
+            let diagnostic = crate::report::unstyled(&host.err());
+            assert!(diagnostic.contains("proposed 1 skip directive in 1 file"));
+            assert!(diagnostic.contains("apply verifies the resulting mutant population"));
+            assert!(host.out().contains("gamma::skip(literal.int_to_zero"));
+            assert_eq!(fs::read(root.join("src/lib.rs")).expect("preview source"), before);
+        }
+        for limit in [0, 1] {
+            let mut host = DiagnosticFailure(crate::testing::FlakyHost::new(limit));
+            let failure = suppress_plan(&mut host, &args, &plan, &eligible, &record, Styler::new(false))
+                .expect_err("each preview line propagates diagnostic errors");
+            assert!(failure.to_string().contains("broken pipe"));
+        }
+        args.apply = true;
+        fs::remove_file(root.join("src/lib.rs")).expect("missing source during apply");
+        suppress_plan(&mut Sink::default(), &args, &plan, &eligible, &record, Styler::new(false)).unwrap_err();
+    }
+
+    #[test]
+    fn edit_loop_skips_unedited_missing_sources_and_validates_before_any_publication() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-edit-loop-table-", "pub fn answer() -> i32 { 42 }\n");
+        fs::write(root.join("src/z.rs"), "pub fn later() -> i32 { 77 }\n").expect("edited source");
+        let plan = plan_over(&root, &["src/missing.rs", "src/z.rs"]);
+        let edits = [edit_for("src/z.rs")];
+        let mut args = dry_args(&root, "timeout");
+        args.apply = false;
+        let mut host = Sink::default();
+        let mut written = Vec::new();
+        edit_files(&mut host, &args, &plan, &edits, "2026-01-02", &mut written, false).expect("only an edited file is read");
+        assert!(host.out().contains("src/z.rs"));
+        assert!(!host.out().contains("missing.rs"));
+        assert!(host.out().contains("gamma::skip(arith.add_to_sub"));
+        assert!(written.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("src/z.rs")).expect("preview leaves source alone"),
+            "pub fn later() -> i32 { 77 }\n"
+        );
+        fs::write(root.join("src/z.rs"), "pub fn invalid( {").expect("unparseable source");
+        let failure = edit_files(&mut Sink::default(), &args, &plan, &edits, "2026-01-02", &mut written, false)
+            .expect_err("generated source must parse before publication");
+        assert!(failure.to_string().contains("the generated directive would not parse"));
+        assert!(written.is_empty());
+    }
+
+    #[test]
+    fn verification_diagnostics_enumerate_only_present_classes_and_exact_source_lines() {
+        let mut before = plan_over(&Utf8PathBuf::new(), &[]);
+        before.mutants = (0..4)
+            .map(|index| mutant(&format!("id-{index}"), index + 1, "cond.negate", Outcome::Timeout))
+            .collect();
+        let scope = "\nSuppression directives apply to syntactic scopes, so one generated directive can cover matching mutants beyond its target site";
+        for (missing, collateral, released) in [(true, false, false), (false, true, false), (false, false, true), (true, true, true)] {
+            for count in [1, 3, 4] {
+                let ids: Vec<String> = before.mutants[..count].iter().map(|mutant| mutant.id.to_string()).collect();
+                let result = crate::fix::Verification {
+                    missing: if missing { ids.clone() } else { Vec::new() },
+                    collateral: if collateral { ids.clone() } else { Vec::new() },
+                    released: if released { ids } else { Vec::new() },
+                };
+                let details = before.mutants[..count.min(3)]
+                    .iter()
+                    .map(|mutant| format!("  {} (previous verdict: timeout)", mutant.describe()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let details = if count > 3 { format!("{details}\n  and 1 more") } else { details };
+                let mut findings = Vec::new();
+                if missing {
+                    findings.push(format!(
+                        "{count} intended {} not suppressed:\n{details}",
+                        if count == 1 { "mutant was" } else { "mutants were" }
+                    ));
+                }
+                if collateral {
+                    findings.push(format!(
+                        "{count} additional {} suppressed even though the previous verdict was not eligible:\n{details}",
+                        if count == 1 { "mutant would be" } else { "mutants would be" }
+                    ));
+                }
+                if released {
+                    findings.push(format!(
+                        "{count} existing {} no longer apply:\n{details}",
+                        if count == 1 { "suppression would" } else { "suppressions would" }
+                    ));
+                }
+                assert_eq!(
+                    unclean(&result, &before).to_string(),
+                    format!(
+                        "cargo-gamma refused the generated directives because verification found:\n- {}{}",
+                        findings.join("\n- "),
+                        if collateral { scope } else { "" }
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn git_status_adapter_preserves_exact_pathspecs_spawn_errors_and_failure_results() {
+        let root = Utf8Path::new("workspace");
+        let paths = [Utf8Path::new("src/a.rs"), Utf8Path::new("src/b.rs")];
+        let result = uncommitted_with(root, &paths, |command| {
+            assert_eq!(command.get_program(), "git");
+            assert_eq!(
+                command
+                    .get_args()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                [
+                    "-C",
+                    "workspace",
+                    "status",
+                    "--porcelain",
+                    "-z",
+                    "--no-renames",
+                    "--",
+                    "src/a.rs",
+                    "src/b.rs"
+                ]
+            );
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: b" M src/a.rs\0?? src/b.rs\0\0\xffbad\0xy\0".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(result, Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned(), "xy".to_owned()]));
+        assert_eq!(
+            uncommitted_with(root, &paths, |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            None
+        );
+        #[cfg(windows)]
+        let failed = {
+            use std::os::windows::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(1)
+        };
+        #[cfg(unix)]
+        let failed = {
+            use std::os::unix::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(1 << 8)
+        };
+        #[cfg(any(windows, unix))]
+        assert_eq!(
+            uncommitted_with(root, &paths, |_| Ok(std::process::Output {
+                status: failed,
+                stdout: b" M src/a.rs\0".to_vec(),
+                stderr: Vec::new()
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn recovery_and_external_path_guards_short_circuit_and_report_exact_usage_diagnostics() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-path-guards-", "pub fn answer() -> i32 { 42 }\n");
+        reject_external_sources(&root, &[Utf8Path::new("src/lib.rs")]).unwrap();
+        let failure = reject_external_sources(&root, &[Utf8Path::new("..")]).expect_err("ancestor directory is outside this fixture");
+        assert!(failure.to_string().contains("a source edit"), "{failure}");
+        for allow_dirty in [false, true] {
+            recoverable_with(&root, &[], allow_dirty, |_, _| {
+                panic!("an empty edit set never asks git for whole-repository status")
+            })
+            .expect("no edits");
+        }
+        let paths = [Utf8Path::new("src/lib.rs")];
+        recoverable_with(&root, &paths, true, |_, _| panic!("allow-dirty deliberately bypasses git")).expect("explicit permission");
+        for dirty in [
+            None,
+            Some(Vec::new()),
+            Some(vec!["src/lib.rs".to_owned()]),
+            Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]),
+        ] {
+            let expected = dirty.as_ref().map_or(0, Vec::len);
+            let result = recoverable_with(&root, &paths, false, |observed_root, observed_paths| {
+                assert_eq!(observed_root, root);
+                assert_eq!(observed_paths, paths);
+                dirty.clone()
+            });
+            if expected == 0 {
+                result.expect("unknown or clean status does not refuse");
+            } else {
+                let failure = result.expect_err("uncommitted files need deliberate permission");
+                assert!(failure.is_usage());
+                let description = if expected == 1 {
+                    "1 file about to be edited has uncommitted changes: src/lib.rs"
+                } else {
+                    "2 files about to be edited have uncommitted changes: src/a.rs, src/b.rs"
+                };
+                assert_eq!(
+                    failure.to_string(),
+                    format!("{description}. Commit or stash first, or pass `--allow-dirty` to edit anyway")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verification_wrappers_preserve_color_and_propagate_both_report_write_failures() {
+        let (_dir, root) = crate::fixtures::crate_dir("suppress-verification-colors-", "pub fn answer() -> i32 { 42 }\n");
+        let record = record_for(&root, &[recorded_mutant(&root, "", Outcome::Timeout)]);
+        let eligible = [crate::fix::Eligible::Timeout];
+        let (before, _) = plan_from_record(&root, &record, &eligible).expect("current plan");
+        for colored in [false, true] {
+            let mut host = Sink::default();
+            assert_eq!(
+                verify_record_or_revert(
+                    &mut host,
+                    &record,
+                    &eligible,
+                    &before,
+                    &BTreeSet::new(),
+                    Applied {
+                        directives: 7,
+                        written: Vec::new()
+                    },
+                    Styler::new(colored)
+                )
+                .expect("clean verification"),
+                EXIT_OK
+            );
+            assert_eq!(host.err().contains('\x1b'), colored);
+            let plain = crate::report::unstyled(&host.err());
+            assert!(plain.contains("Suppressed 7 directives in 0 files"));
+        }
+        for limit in [0, 1] {
+            let mut host = DiagnosticFailure(crate::testing::FlakyHost::new(limit));
+            let failure = finish_verification(
+                &mut host,
+                &before,
+                7,
+                Vec::new(),
+                Styler::new(false),
+                Ok(crate::fix::Verification::default()),
+            )
+            .expect_err("both report writes propagate errors");
+            assert!(failure.to_string().contains("broken pipe"));
+        }
+    }
+
+    #[test]
+    fn rollback_reports_restored_stranded_and_undurable_generations_without_zero_file_claims() {
+        for stranded in [false, true] {
+            for undurable in [false, true] {
+                let (_dir, root) = crate::fixtures::crate_dir("suppress-rollback-table-", "pub fn answer() -> i32 { 42 }\n");
+                let first = root.join("src/lib.rs");
+                let second = root.join("src/z.rs");
+                fs::write(&first, if stranded { "editor first" } else { "published first" }).expect("first generation");
+                fs::write(&second, "published second").expect("second generation");
+                let written = vec![
+                    WrittenFile::new(first.clone(), "original first".to_owned(), "published first".to_owned()),
+                    WrittenFile::new(second.clone(), "original second".to_owned(), "published second".to_owned()),
+                ];
+                if undurable {
+                    crate::elements::fail_next_directory_sync();
+                }
+                let text = reverted(&root, written, error!("original failure")).to_string();
+                assert_eq!(
+                    fs::read_to_string(&first).expect("first final generation"),
+                    if stranded { "editor first" } else { "original first" }
+                );
+                assert_eq!(fs::read_to_string(&second).expect("second restored generation"), "original second");
+                assert!(!text.contains("0 files"), "{text}");
+                assert_eq!(text.contains("injected directory sync failure"), undurable, "{text}");
+                assert_eq!(text.contains("changed after this command wrote them"), stranded, "{text}");
+                match (stranded, undurable) {
+                    (false, false) => assert_eq!(text, "original failure; every edit has been reverted"),
+                    (false, true) => assert!(
+                        text.starts_with("original failure; every edit has been reverted, but 1 file could not be made durable"),
+                        "{text}"
+                    ),
+                    (true, false) => assert_eq!(
+                        text,
+                        format!(
+                            "original failure; every edit has been reverted except 1 file, which changed after this command wrote them and were left alone: {first} (changed after this command wrote it and was left alone)"
+                        )
+                    ),
+                    (true, true) => {
+                        assert!(
+                            text.starts_with("original failure; every edit has been reverted except 1 file"),
+                            "{text}"
+                        );
+                        assert!(text.contains("; 1 file reverted edit could not be made durable"), "{text}");
+                    }
+                }
+            }
+        }
+    }
+
     fn git(root: &Utf8Path, args: &[&str]) -> bool {
         Command::new("git")
             .arg("-C")

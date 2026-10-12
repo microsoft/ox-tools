@@ -109,6 +109,7 @@ fn visit_json_tokens<'a>(arg: &'a str, mut visit: impl FnMut(usize, usize, &'a s
             );
         }
         visit(start, end, key)?;
+        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "without consuming the JSON placeholder the visitor rediscovers that same token forever; campaign log 8203")]
         cursor = end;
     }
     Ok(())
@@ -148,6 +149,7 @@ fn replace_json_arg(
 }
 
 fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: Vec<(&'static str, &'a str)>) -> String {
+    // #[gamma::skip(cond.always_true, reason = "adding an absent workspace token to the replacement list yields no find match and changes neither the chosen matches nor emitted bytes")]
     if arg.contains(WORKSPACE_RUST_VERSION_TOKEN) {
         let version = placeholders.workspace_rust_version().unwrap_or_default();
         replacements.push((WORKSPACE_RUST_VERSION_TOKEN, version));
@@ -278,6 +280,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 manifest,
                 ..
             } => {
+                // #[gamma::skip(collection.reverse_vec, reason = "these distinct braced tokens cannot match at the same offset, so min_by_key selects the same earliest token in every insertion order")]
                 let replacements = vec![
                     // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package name token was emptied")]
                     ("{name}", name.as_str()),
@@ -299,6 +302,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 target,
                 ..
             } => {
+                // #[gamma::skip(collection.reverse_vec, reason = "these distinct braced tokens cannot match at the same offset, so min_by_key selects the same earliest token in every insertion order")]
                 let replacements = vec![
                     // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode name token was emptied")]
                     ("{name}", name.as_str()),
@@ -332,6 +336,45 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_field_errors_preserve_the_original_nondefault_line() {
+        for (fields, reason) in [
+            (serde_json::json!({}), "field is missing"),
+            (serde_json::json!({"key": 7}), "field is not a string"),
+            (serde_json::json!({"key": "a\u{0}b"}), "field contains a NUL byte"),
+        ] {
+            let fields = fields.as_object().expect("fixture is an object");
+            let error = substitute_json_prevalidated(&args(&["prefix-{json:key}"]), fields, "campaign.jsonl", 37)
+                .expect_err("invalid fields must be rejected");
+            let text = error.to_string();
+            assert!(
+                text.contains("campaign.jsonl") && text.contains("37") && text.contains(reason),
+                "{text}"
+            );
+            assert!(!text.contains("36") && !text.contains("38"), "{text}");
+        }
+    }
+
+    #[test]
+    fn placeholder_error_precedence_and_mode_validation_are_stable() {
+        let error = validate_json_placeholders(&args(&["{target}-{packages}-{workspace-rust-version}"]))
+            .expect_err("Cargo placeholders are unavailable in JSON mode");
+        assert!(error.to_string().contains("`{target}`"), "{error}");
+        for mode in [Mode::PerPackage, Mode::PerTarget, Mode::Once] {
+            let error = validate_placeholders(&args(&["{json:actual}"]), mode).expect_err("JSON placeholders require JSON mode");
+            assert!(error.to_string().contains("{json:key}"), "{error}");
+        }
+        let target = Placeholders::Target {
+            name: "n".to_owned(),
+            spec: "n@1".to_owned(),
+            version: "1".to_owned(),
+            manifest: "Cargo.toml".to_owned(),
+            target: "binary".to_owned(),
+            workspace_rust_version: None,
+        };
+        substitute(&args(&["{packages}"]), &target).expect_err("per-target mode rejects once placeholders");
+    }
 
     fn pkg() -> Placeholders {
         Placeholders::Package {

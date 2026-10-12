@@ -89,13 +89,27 @@ pub(super) struct Types<'a> {
 impl Types<'_> {
     /// Resolves a source-visible path to a declaration name in the current package.
     ///
-    /// Bare unimported names are local. Qualified paths remain unknown rather than borrowing
-    /// evidence from an unrelated local declaration or alias with the same final segment.
+    /// Bare unimported names and unrenamed imports rooted at `crate`, `self`, or `super` are local.
+    /// Written qualified paths and renamed imports remain unknown: the name-only index cannot
+    /// distinguish declarations in different modules with the same final identifier.
     fn package_type_name(&self, ty: &Type) -> Option<String> {
+        if self.imports.contains_key("*") {
+            return None;
+        }
+
+        let written_name = match strip(ty) {
+            Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+                path.path.segments.first().map(|segment| segment.ident.to_string())
+            }
+            _ => None,
+        };
         let path = resolved_type_path(ty, self.imports)?;
         let last = path.last()?.clone();
 
-        (path.len() == 1 && !self.imports.contains_key("*")).then_some(last)
+        let local = path.len() == 1
+            || (written_name.as_deref() == Some(last.as_str())
+                && matches!(path.first().map(String::as_str), Some("crate" | "self" | "super")));
+        local.then_some(last)
     }
 
     fn package_has_default(&self, ty: &Type) -> bool {
@@ -131,6 +145,10 @@ impl Types<'_> {
             }
 
             let name = path.path.segments[0].ident.to_string();
+            if self.imports.contains_key(&name) || self.defaults.defines(&name) {
+                return changed.then_some(resolved);
+            }
+            // #[gamma::skip(cond.always_false, tag = "timeout", reason = "removing cycle detection makes mutually recursive generic aliases resolve forever")]
             if !visited.insert(name.clone()) {
                 return None;
             }
@@ -163,6 +181,10 @@ impl Types<'_> {
             let Some(name) = (path.path.segments.len() == 1).then(|| path.path.segments[0].ident.to_string()) else {
                 return resolved;
             };
+            if self.imports.contains_key(&name) || self.defaults.defines(&name) {
+                return resolved;
+            }
+            // #[gamma::skip(cond.always_false, tag = "timeout", reason = "removing cycle detection makes mutually recursive aliases resolve forever")]
             if !visited.insert(name.clone()) {
                 return ty;
             }
@@ -175,7 +197,11 @@ impl Types<'_> {
 
     pub(super) fn primitive_kind(&self, ty: &Type) -> Kind {
         let mut resolved = ty;
+        let mut visited = HashSet::default();
         loop {
+            if !visited.insert(core::ptr::from_ref(resolved)) {
+                return Kind::Unknown;
+            }
             resolved = self.resolve_alias(resolved);
             match strip(resolved) {
                 Type::Reference(reference) => resolved = &reference.elem,
@@ -361,9 +387,16 @@ impl Types<'_> {
     }
 
     pub(super) fn supports_primitive_kind(&self, ty: &Type, expected: Kind) -> bool {
+        self.supports_primitive_kind_with(ty, expected, &mut HashSet::default())
+    }
+
+    fn supports_primitive_kind_with(&self, ty: &Type, expected: Kind, visited: &mut HashSet<*const Type>) -> bool {
+        if !visited.insert(core::ptr::from_ref(ty)) {
+            return false;
+        }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
-            return self.supports_primitive_kind(&reference.elem, expected);
+            return self.supports_primitive_kind_with(&reference.elem, expected, visited);
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
             return false;
@@ -464,6 +497,220 @@ impl Types<'_> {
         self.supports_standard_type(ty, "String", "string", &["std", "alloc"])
     }
 
+    pub(super) fn supports_peekable_chars(&self, ty: &Type) -> bool {
+        self.supports_peekable_chars_with(ty, &mut HashSet::default())
+    }
+
+    fn supports_peekable_chars_with(&self, ty: &Type, visited: &mut HashSet<*const Type>) -> bool {
+        if !visited.insert(core::ptr::from_ref(ty)) {
+            return false;
+        }
+        if matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
+            let name = segment.ident.to_string();
+            self.abstracts.contains(&name) || self.defaulted.contains(&name)
+        })) {
+            return false;
+        }
+        let ty = self.resolve_alias(ty);
+        if let Type::Reference(reference) = strip(ty) {
+            return reference.mutability.is_some() && self.supports_peekable_chars_with(&reference.elem, visited);
+        }
+        let Type::Path(path) = strip(ty) else {
+            return false;
+        };
+        let Some(resolved) = resolved_type_path(ty, self.imports) else {
+            return false;
+        };
+        if !self.standard_root_unshadowed(&resolved)
+            || !matches!(resolved.as_slice(), [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "iter" && name == "Peekable")
+        {
+            return false;
+        }
+        let Some(segment) = path.path.segments.last() else {
+            return false;
+        };
+        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return false;
+        };
+        if arguments.args.len() != 1 {
+            return false;
+        }
+        let Some(GenericArgument::Type(element)) = arguments.args.first() else {
+            return false;
+        };
+        if matches!(strip(element), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
+            let name = segment.ident.to_string();
+            self.abstracts.contains(&name) || self.defaulted.contains(&name)
+        })) {
+            return false;
+        }
+        let Some(resolved) = resolved_type_path(element, self.imports) else {
+            return false;
+        };
+        self.standard_root_unshadowed(&resolved)
+            && matches!(resolved.as_slice(), [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "str" && name == "Chars")
+    }
+
+    pub(super) fn supports_char_api(&self) -> bool {
+        let ty: Type = syn::parse_quote!(char);
+        let Some(path) = resolved_type_path(&ty, self.imports) else {
+            return false;
+        };
+        !self.abstracts.iter().chain(self.defaulted).any(|name| name == "char")
+            && !self.defaults.defines("char")
+            && !self.imports.contains_key("*")
+            && self.standard_root_unshadowed(&path)
+            && (matches!(path.as_slice(), [name] if name == "char")
+                || matches!(path.as_slice(), [root, module, name]
+                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == "char"))
+    }
+
+    pub(super) fn supports_str_reference(&self, ty: &Type) -> bool {
+        if matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
+            let name = segment.ident.to_string();
+            self.abstracts.contains(&name) || self.defaulted.contains(&name)
+        })) {
+            return false;
+        }
+        let Type::Reference(reference) = strip(self.resolve_alias(ty)) else {
+            return false;
+        };
+        let Some(path) = resolved_type_path(&reference.elem, self.imports) else {
+            return false;
+        };
+        !self.abstracts.iter().chain(self.defaulted).any(|name| name == "str")
+            && !self.defaults.defines("str")
+            && !self.imports.contains_key("*")
+            && self.standard_root_unshadowed(&path)
+            && (matches!(path.as_slice(), [name] if name == "str")
+                || matches!(path.as_slice(), [root, module, name]
+                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == "str"))
+    }
+
+    /// Constructors whose empty value has the same allocation and state as their trait default.
+    pub(super) fn supports_empty_default_constructor(&self, ty: &Type) -> bool {
+        let Type::Path(path) = strip(ty) else {
+            return false;
+        };
+        if path.qself.is_some() {
+            return false;
+        }
+        let Some(first) = path.path.segments.first() else {
+            return false;
+        };
+        let name = first.ident.to_string();
+        if self.abstracts.contains(&name)
+            || self.defaulted.contains(&name)
+            || self.defaults.defines(&name)
+            || self.aliases.is_some_and(|aliases| aliases.contains_key(&name))
+        {
+            return false;
+        }
+        let Some(resolved) = resolved_type_path(ty, self.imports) else {
+            return false;
+        };
+        if !self.standard_root_unshadowed(&resolved) {
+            return false;
+        }
+        let Some(name) = resolved.last() else {
+            return false;
+        };
+        if resolved.len() == 1 && !matches!(name.as_str(), "Vec" | "String") {
+            return false;
+        }
+        let Some(arguments) = constructor_argument_count(&path.path) else {
+            return false;
+        };
+        if name == "String" {
+            return self.supports_string_api(ty) && arguments == 0;
+        }
+        // HashMap/HashSet defaults may construct observable hasher state; allocator parameters
+        // likewise make an empty collection's default more than an empty element list.
+        let max_arguments = if name == "BTreeMap" { 2 } else { 1 };
+        matches!(
+            name.as_str(),
+            "Vec" | "VecDeque" | "LinkedList" | "BinaryHeap" | "BTreeMap" | "BTreeSet"
+        ) && self.supports_collection_api(ty)
+            && arguments <= max_arguments
+    }
+
+    pub(super) fn standard_type_name(&self, ty: &Type) -> Option<String> {
+        resolved_type_path(ty, self.imports)?.last().cloned()
+    }
+
+    pub(super) fn supports_default_trait(&self, ty: &Type) -> bool {
+        let Type::Path(written) = ty else {
+            return false;
+        };
+        if written
+            .path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+            || written.path.segments.first().is_some_and(|segment| {
+                let name = segment.ident.to_string();
+                self.abstracts.contains(&name) || self.defaulted.contains(&name)
+            })
+        {
+            return false;
+        }
+        let Some(path) = resolved_type_path(ty, self.imports) else {
+            return false;
+        };
+        if !self.standard_root_unshadowed(&path) {
+            return false;
+        }
+        matches!(path.as_slice(), [name]
+            if name == "Default"
+                && !self.imports.contains_key("*")
+                && !self.defaults.defines(name)
+                && !self.abstracts.contains(name)
+                && !self.defaulted.contains(name))
+            || matches!(path.as_slice(), [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "default" && name == "Default")
+    }
+
+    pub(super) fn supports_bare_default_trait(&self) -> bool {
+        if let Some(imported) = self.imports.get("Default") {
+            return imported.as_ref().is_some_and(|path| {
+                let path = if path.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
+                    &path[1..]
+                } else {
+                    path.as_slice()
+                };
+                matches!(path, [root, module, name]
+                    if matches!(root.as_str(), "std" | "core") && module == "default" && name == "Default")
+                    && self.standard_root_unshadowed(path)
+            });
+        }
+        !self.imports.contains_key("*") && !self.defaults.defines("Default")
+    }
+
+    pub(super) fn standard_constructor_root(&self, ty: &Type) -> bool {
+        resolved_type_path(ty, self.imports).is_some_and(|path| self.standard_root_unshadowed(&path))
+    }
+
+    fn standard_root_unshadowed(&self, path: &[String]) -> bool {
+        let Some(root) = path.first() else {
+            return false;
+        };
+        if !matches!(root.as_str(), "std" | "core" | "alloc") {
+            return true;
+        }
+        self.imports.get(root).is_none_or(|imported| {
+            imported.as_ref().is_some_and(|imported| {
+                let imported = if imported.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
+                    &imported[1..]
+                } else {
+                    imported.as_slice()
+                };
+                matches!(imported, [name] if name == root)
+            })
+        })
+    }
+
     pub(super) fn supports_nonzero_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
@@ -521,9 +768,16 @@ impl Types<'_> {
     }
 
     pub(super) fn supports_iterator_trait(&self, ty: &Type, iterator_bounded: &[String]) -> bool {
+        self.supports_iterator_trait_with(ty, iterator_bounded, &mut HashSet::default())
+    }
+
+    fn supports_iterator_trait_with(&self, ty: &Type, iterator_bounded: &[String], visited: &mut HashSet<*const Type>) -> bool {
+        if !visited.insert(core::ptr::from_ref(ty)) {
+            return false;
+        }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
-            return reference.mutability.is_some() && self.supports_iterator_trait(&reference.elem, iterator_bounded);
+            return reference.mutability.is_some() && self.supports_iterator_trait_with(&reference.elem, iterator_bounded, visited);
         }
         if matches!(strip(ty), Type::Path(path)
             if path.path.get_ident().is_some_and(|ident| iterator_bounded.contains(&ident.to_string())))
@@ -813,6 +1067,28 @@ fn array_type(ty: &Type) -> &syn::TypeArray {
 /// to name the exception than to enumerate the rule.
 pub(super) const DEFAULTABLE_ERROR: &str = "fmt";
 
+pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
+    let mut segments = path.segments.iter().peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            if !matches!(segment.arguments, PathArguments::None) {
+                return None;
+            }
+            continue;
+        }
+        return match &segment.arguments {
+            PathArguments::None => Some(0),
+            PathArguments::AngleBracketed(arguments)
+                if arguments.args.iter().all(|argument| matches!(argument, GenericArgument::Type(_))) =>
+            {
+                Some(arguments.args.len())
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
 fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
     let Type::Path(path) = strip(ty) else {
         return None;
@@ -841,6 +1117,7 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
             let Some(prefix) = imported else {
                 return None;
             };
+            // #[gamma::skip(iter.first_to_last, reason = "the comparison is reached only for a one-element prefix, whose first and last element are identical")]
             if prefix.len() == 1 && prefix.first() == Some(first) {
                 break;
             }
@@ -984,6 +1261,593 @@ mod tests {
     use syn::{PathSegment, TypePath, parse_quote};
 
     use super::*;
+
+    #[test]
+    fn package_names_retain_only_unambiguous_unrenamed_local_bindings() {
+        let defaults = Defaults::of(&syn::parse_file("#[derive(Default)] struct Local;").unwrap());
+        for (prefix, written, expected) in [
+            (vec!["crate", "Local"], "Local", Some("Local")),
+            (vec!["self", "Local"], "Local", Some("Local")),
+            (vec!["super", "Local"], "Local", Some("Local")),
+            (vec!["other", "Local"], "Local", None),
+            (vec!["crate", "Local"], "Renamed", None),
+        ] {
+            let imports = HashMap::from_iter([(written.into(), Some(prefix.into_iter().map(str::to_owned).collect()))]);
+            let types = Types {
+                abstracts: &[],
+                defaulted: &[],
+                imports: &imports,
+                defaults: &defaults,
+                aliases: None,
+                self_type: None,
+                self_associated: None,
+            };
+            assert_eq!(
+                types.package_type_name(&syn::parse_str(written).unwrap()),
+                expected.map(str::to_owned),
+                "{written}"
+            );
+        }
+        for wildcard in [false, true] {
+            let mut imports = HashMap::default();
+            if wildcard {
+                let _previous = imports.insert("*".into(), None);
+            }
+            let types = Types {
+                abstracts: &[],
+                defaulted: &[],
+                imports: &imports,
+                defaults: &defaults,
+                aliases: None,
+                self_type: None,
+                self_associated: None,
+            };
+            assert_eq!(
+                types.package_type_name(&parse_quote!(Local)),
+                (!wildcard).then(|| "Local".to_owned())
+            );
+            for text in ["other::Local", "<T as Trait>::Local", "()", "&Local"] {
+                assert_eq!(types.package_type_name(&syn::parse_str(text).unwrap()), None, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_path_expansion_preserves_full_prefixes_absolute_paths_and_iteration_bound() {
+        let imports = HashMap::from_iter([
+            ("A".into(), Some(vec!["B".into()])),
+            ("B".into(), Some(vec!["core".into(), "option".into(), "Option".into()])),
+            ("Stable".into(), Some(vec!["Stable".into()])),
+            ("Unknown".into(), None),
+            ("Empty".into(), Some(vec![])),
+            ("Absolute".into(), Some(vec![ABSOLUTE_ROOT.into(), "A".into()])),
+        ]);
+        for (text, expected) in [
+            ("A<u8>", Some(vec!["core", "option", "Option"])),
+            ("A::Value", Some(vec!["core", "option", "Option", "Value"])),
+            ("Stable", Some(vec!["Stable"])),
+            ("Unknown", None),
+            ("Empty", None),
+            ("::A", Some(vec!["A"])),
+            ("Absolute", Some(vec!["A"])),
+            ("()", None),
+            ("<T as Trait>::Value", None),
+        ] {
+            assert_eq!(
+                resolved_type_path(&syn::parse_str(text).unwrap(), &imports),
+                expected.map(|path| path.into_iter().map(str::to_owned).collect()),
+                "{text}"
+            );
+        }
+        let cycle = HashMap::from_iter([("A".into(), Some(vec!["B".into()])), ("B".into(), Some(vec!["A".into()]))]);
+        assert_eq!(resolved_type_path(&parse_quote!(A), &cycle), Some(vec!["B".into()]));
+        assert_eq!(resolved_type_path(&parse_quote!(B), &cycle), Some(vec!["A".into()]));
+    }
+
+    #[test]
+    fn standard_api_evidence_requires_exact_root_module_name_and_arity() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, option, result, string, wrapper, cow, nonzero) in [
+            ("Option<u8>", true, false, false, false, false, false),
+            ("core::option::Option<u8>", true, false, false, false, false, false),
+            ("other::option::Option<u8>", false, false, false, false, false, false),
+            ("std::wrong::Option<u8>", false, false, false, false, false, false),
+            ("core::result::Result<u8, bool>", false, true, false, false, false, false),
+            ("alloc::string::String", false, false, true, false, false, false),
+            ("core::string::String", false, false, false, false, false, false),
+            ("alloc::boxed::Box<u8>", false, false, false, true, false, false),
+            ("std::rc::Rc<u8>", false, false, false, true, false, false),
+            ("alloc::sync::Arc<u8>", false, false, false, true, false, false),
+            ("std::rc::Box<u8>", false, false, false, false, false, false),
+            ("std::borrow::Cow<'static, str>", false, false, false, false, true, false),
+            ("core::num::NonZeroU8", false, false, false, false, false, true),
+            ("other::num::NonZeroU8", false, false, false, false, false, false),
+            ("()", false, false, false, false, false, false),
+        ] {
+            let ty = syn::parse_str::<Type>(text).unwrap();
+            assert_eq!(
+                (
+                    types.supports_option_api(&ty),
+                    types.supports_result_api(&ty),
+                    types.supports_string_api(&ty),
+                    types.supports_wrapper_api(&ty),
+                    types.supports_cow_api(&ty),
+                    types.supports_nonzero_api(&ty),
+                ),
+                (option, result, string, wrapper, cow, nonzero),
+                "{text}",
+            );
+        }
+        for (text, api, constructor, hasher) in [
+            ("std::vec::Vec<u8>", true, true, None),
+            ("alloc::collections::VecDeque<u8>", true, true, None),
+            ("std::collections::HashMap<u8, bool>", true, true, Some(2)),
+            ("std::collections::HashMap<u8, bool, H>", true, false, Some(2)),
+            ("std::collections::HashSet<u8>", true, true, Some(1)),
+            ("std::collections::HashSet<u8, H>", true, false, Some(1)),
+            ("std::collections::btree_map::BTreeMap<u8, bool>", true, true, None),
+            ("std::collections::btree_set::BTreeSet<u8>", true, true, None),
+            ("alloc::collections::binary_heap::BinaryHeap<u8>", true, true, None),
+            ("std::collections::linked_list::LinkedList<u8>", true, true, None),
+            ("std::collections::hash_set::HashMap<u8, bool>", false, false, None),
+            ("other::collections::HashSet<u8>", false, false, None),
+            ("rustc_hash::FxHashSet<u8>", true, true, None),
+            ("()", false, false, None),
+        ] {
+            let ty = syn::parse_str::<Type>(text).unwrap();
+            assert_eq!(types.supports_collection_api(&ty), api, "{text}");
+            assert_eq!(types.supports_collection_constructor(&ty), constructor, "{text}");
+            assert_eq!(types.collection_hasher_index(&ty), hasher, "{text}");
+        }
+        for name in [
+            "NonZeroU8",
+            "NonZeroU16",
+            "NonZeroU32",
+            "NonZeroU64",
+            "NonZeroU128",
+            "NonZeroUsize",
+            "NonZeroI8",
+            "NonZeroI16",
+            "NonZeroI32",
+            "NonZeroI64",
+            "NonZeroI128",
+            "NonZeroIsize",
+        ] {
+            assert!(types.supports_nonzero_api(&syn::parse_str::<Type>(name).unwrap()), "{name}");
+        }
+    }
+
+    #[test]
+    fn imported_and_shadowed_api_names_do_not_borrow_standard_evidence() {
+        let defaults = Defaults::of(&syn::parse_file("struct Option<T>(T); struct Vec<T>(T);").unwrap());
+        let imports = HashMap::from_iter([
+            ("Opt".to_owned(), Some(vec!["core".into(), "option".into(), "Option".into()])),
+            ("Foreign".to_owned(), Some(vec!["other".into(), "Option".into()])),
+            ("Ambiguous".to_owned(), None),
+            (
+                "Absolute".to_owned(),
+                Some(vec![ABSOLUTE_ROOT.into(), "core".into(), "option".into(), "Option".into()]),
+            ),
+        ]);
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        assert!(types.supports_option_api(&parse_quote!(Opt<u8>)));
+        assert!(types.supports_option_api(&parse_quote!(Absolute<u8>)));
+        assert!(!types.supports_option_api(&parse_quote!(Option<u8>)));
+        assert!(!types.supports_collection_api(&parse_quote!(Vec<u8>)));
+        assert!(!types.supports_option_api(&parse_quote!(Foreign<u8>)));
+        assert!(!types.supports_option_api(&parse_quote!(Ambiguous<u8>)));
+        assert!(types.import_changes_name(&parse_quote!(Opt<u8>)));
+        assert!(!types.import_changes_name(&parse_quote!(Unknown)));
+        assert_eq!(
+            resolved_type_path(&parse_quote!(::core::option::Option<u8>), &imports),
+            Some(vec!["core".into(), "option".into(), "Option".into()])
+        );
+    }
+
+    #[test]
+    fn proven_default_matrix_requires_every_payload_bound_and_array_boundary() {
+        let defaults = Defaults::of(
+            &syn::parse_file("struct Missing; #[derive(Default)] struct Present; #[derive(Default)] struct Generic<T>(T);").unwrap(),
+        );
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &["T".into()],
+            defaulted: &["D".into()],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, expected) in [
+            ("bool", true),
+            ("core::primitive::u32", true),
+            ("other::u32", false),
+            ("D", true),
+            ("T", false),
+            ("Present", true),
+            ("Missing", false),
+            ("Generic<u8>", true),
+            ("Generic<Missing>", false),
+            ("Option<Missing>", true),
+            ("Box<u8>", true),
+            ("Box<Missing>", false),
+            ("Box<T>", false),
+            ("Box<D>", true),
+            ("[Missing; 0]", true),
+            ("[u8; 1]", true),
+            ("[u8; 32]", true),
+            ("[u8; 33]", false),
+            ("[Missing; 1]", false),
+            ("[T; 1]", false),
+            ("[D; 1]", true),
+            ("[u8; N]", false),
+            ("(u8, Present)", true),
+            ("(u8, Missing)", false),
+            ("(Missing, u8)", false),
+            ("&str", false),
+            ("&[u8]", false),
+            ("&u8", false),
+            ("Result<u8,u8>", false),
+        ] {
+            assert_eq!(types.has_proven_default(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn alias_instantiation_and_self_projection_preserve_concrete_types_and_cycles() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([
+            (
+                "Byte".into(),
+                Some(Alias {
+                    parameters: vec![],
+                    target: parse_quote!(u8),
+                }),
+            ),
+            (
+                "Next".into(),
+                Some(Alias {
+                    parameters: vec![],
+                    target: parse_quote!(Byte),
+                }),
+            ),
+            (
+                "Wrap".into(),
+                Some(Alias {
+                    parameters: vec!["T".into()],
+                    target: parse_quote!(Option<T>),
+                }),
+            ),
+            (
+                "Pair".into(),
+                Some(Alias {
+                    parameters: vec!["T".into()],
+                    target: parse_quote!((T, [T; 2])),
+                }),
+            ),
+            (
+                "CycleA".into(),
+                Some(Alias {
+                    parameters: vec![],
+                    target: parse_quote!(CycleB),
+                }),
+            ),
+            (
+                "CycleB".into(),
+                Some(Alias {
+                    parameters: vec![],
+                    target: parse_quote!(CycleA),
+                }),
+            ),
+            ("Ambiguous".into(), None),
+        ]);
+        let self_type: Type = parse_quote!(Vec<u8>);
+        let associated = HashMap::from_iter([("Value".into(), parse_quote!(bool))]);
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: Some(&self_type),
+            self_associated: Some(&associated),
+        };
+        for (text, expected) in [
+            ("Next", Some(parse_quote!(u8))),
+            ("Wrap<u8>", Some(parse_quote!(Option<u8>))),
+            ("Pair<bool>", Some(parse_quote!((bool, [bool; 2])))),
+            ("CycleA", None),
+            ("CycleB", None),
+            ("Unknown", None),
+            ("Ambiguous", None),
+            ("()", None),
+            ("other::Wrap<u8>", None),
+            ("<T as Trait>::Wrap", None),
+        ] {
+            assert_eq!(types.instantiate_alias(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+        for (text, expected) in [("Next", "u8"), ("CycleA", "CycleA"), ("other::Byte", "other::Byte")] {
+            assert_eq!(
+                types.resolve_alias(&syn::parse_str(text).unwrap()),
+                &syn::parse_str::<Type>(expected).unwrap(),
+                "{text}"
+            );
+        }
+        assert_eq!(types.primitive_kind(&parse_quote!(&Next)), Kind::Unsigned);
+        for (text, expected) in [
+            ("Self", Some(&self_type)),
+            ("Self::Value", associated.get("Value")),
+            ("Other", None),
+            ("Other::Value", None),
+            ("Self::Missing", None),
+            ("Self::Value::Extra", None),
+            ("<Other as Trait>::Value", None),
+            ("<Self as Trait>::Value", None),
+            ("()", None),
+        ] {
+            assert_eq!(
+                types.concrete_self_type_or_associated(&syn::parse_str(text).unwrap()),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn iterator_reference_range_and_partial_array_evidence_has_exact_boundaries() {
+        let defaults = Defaults::of(&syn::parse_file("struct Missing;").unwrap());
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &["T".into()],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, expected) in [
+            ("I", true),
+            ("&mut I", true),
+            ("&I", false),
+            ("impl Iterator<Item=u8>", true),
+            ("impl core::iter::Iterator<Item=u8>", true),
+            ("impl other::Iterator<Item=u8>", false),
+            ("impl Clone", false),
+            ("u8", false),
+        ] {
+            assert_eq!(
+                types.supports_iterator_trait(&syn::parse_str(text).unwrap(), &["I".into()]),
+                expected,
+                "{text}"
+            );
+        }
+        for (text, expected) in [
+            ("Range<u8>", true),
+            ("Range<i8>", true),
+            ("core::ops::Range<i32>", true),
+            ("Range<f64>", false),
+            ("Range<bool>", false),
+            ("Range<u8,u8>", false),
+            ("other::ops::Range<u8>", false),
+            ("RangeInclusive<u8>", false),
+            ("u8", false),
+        ] {
+            assert_eq!(types.supports_range_iterator(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+        for (text, expected) in [
+            ("[u8; 32]", true),
+            ("[u8; 33]", false),
+            ("[u8; N]", true),
+            ("[T; 1]", false),
+            ("[Missing; 1]", false),
+            ("[&u8; 1]", false),
+            ("[Result<u8,u8>; 1]", false),
+            ("[NonZeroU8; 1]", false),
+            ("[&str; 1]", true),
+            ("[&[u8]; 1]", true),
+        ] {
+            assert_eq!(types.array_may_default(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn collection_default_evidence_distinguishes_custom_hashers_and_partial_local_shapes() {
+        let mut defaults = Defaults::of(
+            &syn::parse_file("struct Missing; struct Vec<T>(T); struct HashMap<K,V>(K,V); #[derive(Default)] struct Option<T>(T);")
+                .unwrap(),
+        );
+        let imports = HashMap::default();
+        for partial in [false, true] {
+            if partial {
+                defaults.mark_incomplete();
+            }
+            let types = Types {
+                abstracts: &[],
+                defaulted: &[],
+                imports: &imports,
+                defaults: &defaults,
+                aliases: None,
+                self_type: None,
+                self_associated: None,
+            };
+            for (text, complete) in [
+                ("Vec<u8>", false),
+                ("HashMap<u8,u8>", false),
+                ("Option<u8>", true),
+                ("HashSet<u8,Missing>", false),
+                ("std::collections::HashMap<u8,u8,Missing>", false),
+                ("HashSet<u8>", true),
+                ("std::collections::BTreeMap<u8,u8>", true),
+                ("[Missing;0]", true),
+                ("[u8;32]", true),
+                ("str", false),
+            ] {
+                let expected = if text == "Vec<u8>" || text == "HashMap<u8,u8>" {
+                    partial
+                } else if text == "Option<u8>" {
+                    !partial
+                } else if text.ends_with("Missing>") {
+                    partial
+                } else {
+                    complete
+                };
+                assert_eq!(
+                    types.has_default(&syn::parse_str(text).unwrap()),
+                    expected,
+                    "{text}, partial={partial}"
+                );
+                if text == "Vec<u8>" || text == "HashMap<u8,u8>" {
+                    assert_eq!(
+                        types.prefers_default_constructor(&syn::parse_str(text).unwrap()),
+                        partial,
+                        "{text}, partial={partial}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_standard_name_collisions_require_their_own_explicit_default_evidence() {
+        for derives in [false, true] {
+            let derive = if derives { "#[derive(Default)]" } else { "" };
+            let defaults = Defaults::of(
+                &syn::parse_file(&format!(
+                    "{derive} struct String; {derive} struct Option<T>(T); {derive} struct Vec<T>(T);
+                 {derive} struct HashMap<K,V>(K,V); struct Missing;"
+                ))
+                .unwrap(),
+            );
+            let imports = HashMap::default();
+            let types = Types {
+                abstracts: &[],
+                defaulted: &[],
+                imports: &imports,
+                defaults: &defaults,
+                aliases: None,
+                self_type: None,
+                self_associated: None,
+            };
+            for text in ["String", "Option<u8>", "Vec<u8>", "HashMap<u8,u8>"] {
+                assert_eq!(
+                    types.has_proven_default(&syn::parse_str(text).unwrap()),
+                    derives,
+                    "{text}, derives={derives}"
+                );
+                if text.starts_with("Vec") || text.starts_with("HashMap") {
+                    assert_eq!(
+                        types.has_default(&syn::parse_str(text).unwrap()),
+                        derives,
+                        "{text}, derives={derives}"
+                    );
+                }
+            }
+            for text in ["Option<Missing>", "Vec<Missing>", "HashMap<u8,Missing>", "HashMap<Missing,u8>"] {
+                assert!(
+                    !types.has_proven_default(&syn::parse_str(text).unwrap()),
+                    "{text}, derives={derives}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn renamed_collection_and_undefaulted_generic_evidence_has_exact_oracles() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        assert!(types.renamed_collection_has_default(&parse_quote!(rustc_hash::FxHashMap<u8,u8>)));
+        assert!(types.renamed_collection_has_default(&parse_quote!(rustc_hash::FxHashSet<u8>)));
+        assert!(!types.renamed_collection_has_default(&parse_quote!(other::FxHashSet<u8>)));
+        let generic: Generics = parse_quote!(<T, U: Default, V: Clone>);
+        assert_eq!(undefaulted_parameters(&generic, &DefaultPaths::default()), ["T", "V"]);
+    }
+
+    #[test]
+    fn foreign_error_and_iterator_bound_matrices_require_full_paths_and_bounds() {
+        let imports = HashMap::from_iter([
+            ("IoError".into(), Some(vec!["std".into(), "io".into(), "Error".into()])),
+            ("FormatError".into(), Some(vec!["core".into(), "fmt".into(), "Error".into()])),
+            ("Unknown".into(), None),
+            ("I".into(), Some(vec!["core".into(), "iter".into(), "Iterator".into()])),
+        ]);
+        for (text, expected) in [
+            ("std::io::Error", true),
+            ("IoError", true),
+            ("core::fmt::Error", false),
+            ("FormatError", false),
+            ("crate::Error", false),
+            ("self::Error", false),
+            ("super::Error", false),
+            ("Error", false),
+            ("Unknown", false),
+            ("std::io::Other", false),
+            ("()", false),
+        ] {
+            assert_eq!(is_foreign_error(&syn::parse_str(text).unwrap(), &imports), expected, "{text}");
+        }
+        let item: syn::ItemFn = parse_quote!(
+            fn f<'a, const N: usize, A: Clone, B: I<Item = u8>, C, D, E>()
+            where
+                C: core::iter::Iterator<Item = u8>,
+                D: other::Iterator<Item = u8>,
+                E: Clone,
+            {
+            }
+        );
+        assert_eq!(
+            Types::standard_iterator_bounded_parameters(&item.sig.generics, &imports),
+            ["B", "C"]
+        );
+        let defaults = Defaults::of(&syn::parse_file("struct Missing;").unwrap());
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (output, expected) in [
+            (parse_quote!(-> Result<u8, Missing>), true),
+            (parse_quote!(-> Result<u8, u8>), false),
+            (parse_quote!(-> Result<u8, std::io::Error>), true),
+            (parse_quote!(-> u8), false),
+            (syn::ReturnType::Default, false),
+        ] {
+            assert_eq!(returns_undefaultable_error(&output, &types), expected, "{output:?}");
+        }
+    }
 
     fn defaults(source: &str) -> Defaults {
         Defaults::of(&syn::parse_file(source).expect("test source should parse"))
@@ -1224,6 +2088,206 @@ mod tests {
         };
 
         assert!(!types.has_proven_default(&parse_quote!(Config)));
+    }
+
+    #[test]
+    fn a_same_crate_qualified_import_borrows_package_default_evidence() {
+        let defaults = defaults("struct Artifact;");
+        let abstracts = Vec::new();
+        let defaulted = Vec::new();
+        let aliases = HashMap::default();
+        let imports = HashMap::from_iter([(
+            "Artifact".to_owned(),
+            Some(vec!["crate".to_owned(), "catalog".to_owned(), "Artifact".to_owned()]),
+        )]);
+        let types = Types {
+            abstracts: &abstracts,
+            defaulted: &defaulted,
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: None,
+            self_associated: None,
+        };
+
+        assert!(types.lacks_default(&parse_quote!(Artifact)));
+    }
+
+    #[test]
+    fn recursive_reference_queries_share_alias_cycle_detection() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([
+            (
+                "A".to_owned(),
+                Some(Alias {
+                    parameters: Vec::new(),
+                    target: parse_quote!(&'static mut B),
+                }),
+            ),
+            (
+                "B".to_owned(),
+                Some(Alias {
+                    parameters: Vec::new(),
+                    target: parse_quote!(&'static mut A),
+                }),
+            ),
+        ]);
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: None,
+            self_associated: None,
+        };
+        let original = parse_quote!(A);
+        assert_eq!(types.primitive_kind(&original), Kind::Unknown);
+        assert!(!types.supports_primitive_kind(&original, Kind::Unsigned));
+        assert!(!types.supports_peekable_chars(&original));
+        assert!(!types.supports_iterator_trait(&original, &[]));
+    }
+
+    #[test]
+    fn resource_type_proofs_require_exact_standard_paths_and_generic_shapes() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, expected) in [
+            ("std::iter::Peekable<std::str::Chars<'static>>", true),
+            ("core::iter::Peekable<core::str::Chars<'static>>", true),
+            ("&mut std::iter::Peekable<std::str::Chars<'static>>", true),
+            ("&std::iter::Peekable<std::str::Chars<'static>>", false),
+            ("u8", false),
+            ("()", false),
+            ("std::iter::Peekable", false),
+            ("std::iter::Peekable<'static>", false),
+            ("std::iter::Peekable<std::str::Chars<'static>, u8>", false),
+            ("std::iter::Peekable<other::Chars<'static>>", false),
+            ("std::iter::Peekable<(u8,)>", false),
+            ("other::Peekable<std::str::Chars<'static>>", false),
+        ] {
+            assert_eq!(types.supports_peekable_chars(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+        for (text, expected) in [
+            ("&str", true),
+            ("&mut str", true),
+            ("&std::primitive::str", true),
+            ("&core::primitive::str", true),
+            ("str", false),
+            ("&u8", false),
+            ("&()", false),
+            ("&other::str", false),
+        ] {
+            assert_eq!(types.supports_str_reference(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+        let shadowed = Types {
+            abstracts: &["str".to_owned()],
+            ..types
+        };
+        assert!(!shadowed.supports_str_reference(&parse_quote!(&str)));
+        assert!(!shadowed.supports_peekable_chars(&parse_quote!(std::iter::Peekable<str>)));
+        let generic = Types {
+            abstracts: &["T".to_owned()],
+            ..types
+        };
+        assert!(!generic.supports_peekable_chars(&parse_quote!(T)));
+        assert!(!generic.supports_str_reference(&parse_quote!(T)));
+        assert!(!generic.supports_peekable_chars(&parse_quote!(std::iter::Peekable<T>)));
+        assert!(types.supports_char_api());
+        let shadowed = Types {
+            abstracts: &["char".to_owned()],
+            ..types
+        };
+        assert!(!shadowed.supports_char_api());
+    }
+
+    #[test]
+    fn standard_trait_and_constructor_proofs_reject_opaque_imports() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, expected) in [
+            ("Default", true),
+            ("std::default::Default", true),
+            ("core::default::Default", true),
+            ("Default<u8>", false),
+            ("&Default", false),
+            ("other::Default", false),
+        ] {
+            assert_eq!(types.supports_default_trait(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+        let mut empty: syn::TypePath = parse_quote!(Vec);
+        empty.path.segments.clear();
+        assert!(!types.supports_empty_default_constructor(&Type::Path(empty)));
+        for (text, expected) in [
+            ("&str", false),
+            ("<T as Trait>::Value", false),
+            ("std::collections::VecDeque<u8>", true),
+            ("std::collections::vec_deque::VecDeque<u8>", true),
+            ("std::collections::linked_list::LinkedList<u8>", true),
+            ("std::collections::hash_set::HashSet<u8>", false),
+            ("Vec<u8, Allocator>", false),
+        ] {
+            assert_eq!(
+                types.supports_empty_default_constructor(&syn::parse_str(text).unwrap()),
+                expected,
+                "{text}"
+            );
+        }
+        for (path, expected) in [
+            (None, false),
+            (Some(vec!["other".to_owned(), "Default".to_owned()]), false),
+            (Some(vec!["core".to_owned(), "default".to_owned(), "Default".to_owned()]), true),
+            (
+                Some(vec![
+                    ABSOLUTE_ROOT.to_owned(),
+                    "std".to_owned(),
+                    "default".to_owned(),
+                    "Default".to_owned(),
+                ]),
+                true,
+            ),
+        ] {
+            let imports = HashMap::from_iter([("Default".to_owned(), path)]);
+            let shadowed = Types {
+                imports: &imports,
+                ..types
+            };
+            assert_eq!(shadowed.supports_bare_default_trait(), expected);
+        }
+        let imports = HashMap::from_iter([("std".to_owned(), None)]);
+        let shadowed = Types {
+            imports: &imports,
+            ..types
+        };
+        assert!(!shadowed.supports_default_trait(&parse_quote!(std::default::Default)));
+        assert!(!shadowed.supports_empty_default_constructor(&parse_quote!(std::vec::Vec<u8>)));
+        let imports = HashMap::from_iter([("char".to_owned(), None)]);
+        assert!(
+            !Types {
+                imports: &imports,
+                ..types
+            }
+            .supports_char_api()
+        );
     }
 
     #[test]

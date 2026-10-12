@@ -104,8 +104,12 @@ impl Cache {
             }
         };
 
+        self.fresh_payload(filename, envelope, Utc::now())
+    }
+
+    fn fresh_payload<T>(&self, filename: &str, envelope: Envelope<T>, now: DateTime<Utc>) -> CacheResult<T> {
         // Handle future timestamps (clock skew) — treat as fresh data
-        let age = Utc::now().signed_duration_since(envelope.timestamp);
+        let age = now.signed_duration_since(envelope.timestamp);
         if age < TimeDelta::zero() {
             log::debug!(target: LOG_TARGET, "Cache timestamp is in the future for {filename} (clock skew detected), treating as fresh");
         } else {
@@ -214,6 +218,37 @@ mod tests {
 
     fn make_cache(dir: &Path, ttl_secs: u64) -> Cache {
         Cache::new(dir, Duration::from_secs(ttl_secs), false)
+    }
+
+    #[test]
+    fn cache_expiry_and_clock_skew_use_exact_nanosecond_boundaries() {
+        let now = DateTime::UNIX_EPOCH + TimeDelta::days(1);
+        for (ttl, age, fresh) in [
+            (60, TimeDelta::seconds(60) - TimeDelta::nanoseconds(1), true),
+            (60, TimeDelta::seconds(60), false),
+            (60, TimeDelta::seconds(60) + TimeDelta::nanoseconds(1), false),
+            (0, TimeDelta::nanoseconds(-1), true),
+            (0, TimeDelta::zero(), false),
+            (0, TimeDelta::nanoseconds(1), false),
+        ] {
+            let cache = make_cache(Path::new("scripted-cache"), ttl);
+            for payload in [EnvelopePayload::Data(42_u64), EnvelopePayload::NoData("absent".to_owned())] {
+                let envelope = Envelope {
+                    timestamp: now - age,
+                    payload,
+                };
+                let result = cache.fresh_payload("boundary.bin", envelope.clone(), now);
+                if fresh {
+                    match (&envelope.payload, result) {
+                        (EnvelopePayload::Data(expected), CacheResult::Data(actual)) => assert_eq!(*expected, actual),
+                        (EnvelopePayload::NoData(expected), CacheResult::NoData(actual)) => assert_eq!(*expected, actual),
+                        (_, actual) => panic!("unexpected fresh result: {actual:?}"),
+                    }
+                } else {
+                    assert!(matches!(result, CacheResult::Miss), "ttl={ttl}, age={age}, result={result:?}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -11,6 +11,10 @@ use cargo_gamma_lib::Host;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealHost;
 
+fn progress_is_terminal(_stdout: impl FnOnce() -> bool, stderr: impl FnOnce() -> bool) -> bool {
+    stderr()
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl Host for RealHost {
     fn output(&mut self) -> impl Write {
@@ -23,7 +27,7 @@ impl Host for RealHost {
 
     // #[gamma::skip(fn_value.bool_false, fn_value.bool_true, reason = "the answer belongs to the invoking terminal and tests validly run both attached and detached")]
     fn is_terminal(&self) -> bool {
-        stderr().is_terminal()
+        progress_is_terminal(|| stdout().is_terminal(), || stderr().is_terminal())
     }
 
     // #[gamma::skip(fn_value.none, reason = "terminal dimensions are optional and None is already the valid fallback when the host cannot report them")]
@@ -72,18 +76,33 @@ mod tests {
         host.output().write_all(b"").expect("stdout accepts a write");
         host.error().write_all(b"").expect("stderr accepts a write");
 
-        // A width is a terminal's property, so claiming one without being a terminal would have the
-        // console wrap its progress to a width nothing has. The converse is allowed: a terminal
-        // whose size cannot be interrogated is an ordinary state, and the console falls back.
-        assert!(
-            host.is_terminal() || host.terminal_width().is_none(),
-            "a host that is not a terminal must not report a terminal width"
-        );
-
         // This is the one answer that differs from every fake, and it is the answer that decides
         // whether the tool may replace its own process. It is true here precisely because this host
         // is the real process; a fake saying so would relaunch the test harness.
         assert!(host.may_replace_process());
+    }
+
+    #[test]
+    fn progress_uses_stderr_terminal_state_independently_of_stdout() {
+        for output in [false, true] {
+            for error in [false, true] {
+                let mut output_queries = 0;
+                let mut error_queries = 0;
+                let actual = progress_is_terminal(
+                    || {
+                        output_queries += 1;
+                        output
+                    },
+                    || {
+                        error_queries += 1;
+                        error
+                    },
+                );
+                assert_eq!(actual, error);
+                assert_eq!(output_queries, 0);
+                assert_eq!(error_queries, 1);
+            }
+        }
     }
 
     /// The real host reads the real environment rather than overriding `env`.

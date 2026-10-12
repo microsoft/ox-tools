@@ -39,6 +39,7 @@ struct CanonicalMutantId(crate::model::MutantId);
 
 impl CanonicalMutantId {
     fn parse(value: &str) -> Result<Self, InvalidMutantId> {
+        // #[gamma::skip(cond.always_true, tag = "outofmemory", reason = "accepting every subject as a canonical mutant id exhausted memory during campaign discovery")]
         if value.len() == crate::model::MUTANT_ID_HEX_LEN
             && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {

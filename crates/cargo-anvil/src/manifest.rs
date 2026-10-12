@@ -395,6 +395,24 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn drive_qualified_paths_are_rejected_independently_of_backslashes() {
+        for path in ["C:file", "z:nested/file"] {
+            let error = ensure_contained(path, "campaign").expect_err("drive-qualified paths must be rejected");
+            assert_eq!(
+                error.to_string(),
+                format!("campaign '{path}' must be a relative path inside the repository")
+            );
+        }
+    }
+
+    #[test]
+    fn region_checksum_never_matches_an_unrelated_case_folded_host() {
+        let mut manifest = Manifest::default();
+        manifest.set_region("other.toml", "same-id", "other");
+        assert_eq!(manifest.region_checksum("Cargo.toml", "same-id"), None);
+    }
+
     fn sample_manifest() -> Manifest {
         let mut m = Manifest {
             tool: Some("anvil".into()),

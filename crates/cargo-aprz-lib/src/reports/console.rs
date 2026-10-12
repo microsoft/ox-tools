@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use owo_colors::OwoColorize;
 use strum::IntoEnumIterator;
 use terminal_size::{Width, terminal_size};
+use unicode_width::UnicodeWidthStr as _;
 
 use super::{ReportableCrate, common};
 use crate::expr::Risk;
@@ -37,6 +38,16 @@ impl ConsoleOutputMode {
 }
 
 pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &ConsoleOutputMode, writer: &mut W) -> Result<()> {
+    generate_with_width(crates, use_colors, mode, writer, get_terminal_width)
+}
+
+fn generate_with_width<W: Write>(
+    crates: &[ReportableCrate],
+    use_colors: bool,
+    mode: &ConsoleOutputMode,
+    writer: &mut W,
+    mut terminal_width: impl FnMut() -> usize,
+) -> Result<()> {
     for (index, crate_info) in crates.iter().enumerate() {
         if index > 0 && (mode.metrics || mode.reasons) {
             writeln!(writer)?;
@@ -96,10 +107,10 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &C
 
                 // Compute max metric name length for alignment
                 // #[gamma::skip(literal.int_increment, reason = "metric_names is nonempty whenever its category exists, so the unwrap_or fallback is unreachable")]
-                let max_name_len = metric_names.iter().map(|name| name.len()).max().unwrap_or(0);
+                let max_name_len = metric_names.iter().map(|name| name.width()).max().unwrap_or(0);
 
                 // Get terminal width and calculate available space for values
-                let term_width = get_terminal_width();
+                let term_width = terminal_width();
                 // Indent for metric lines: "  " (2) + metric_name + " : " (3)
                 let value_indent = 2 + max_name_len + 3;
 
@@ -119,7 +130,8 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &C
                         .expect("wrap_text always emits at least one line, even for empty input");
 
                     // Write first line with metric name
-                    writeln!(writer, "  {:<width$} : {}", metric.name(), first_line, width = max_name_len)?;
+                    let padding = max_name_len - metric.name().width();
+                    writeln!(writer, "  {}{:padding$} : {}", metric.name(), "", first_line)?;
 
                     // Write continuation lines
                     for line in wrapped_lines.iter().skip(1) {
@@ -152,18 +164,15 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
 
     let mut lines = Vec::new();
     let mut current_line = String::new();
+    let mut current_width = 0;
     let mut is_first_line = true;
 
     for word in text.split_whitespace() {
-        let word_len = word.len();
+        let word_len = word.width();
 
         // Check if adding this word would exceed the width
         let separator_len = usize::from(!current_line.is_empty()); // space before word
-        let line_width = if is_first_line {
-            current_line.len()
-        } else {
-            indent + current_line.len()
-        };
+        let line_width = indent + current_width;
 
         if !current_line.is_empty() && line_width + separator_len + word_len > width {
             // Start a new line
@@ -174,18 +183,21 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
                 lines.push(format!("{:indent$}{}", "", current_line, indent = indent));
             }
             current_line = word.to_string();
+            current_width = word_len;
         } else {
             // Add word to current line
-            // #[gamma::skip(cond.always_true, reason = "the true branch and the empty-lines fallback both append the same empty string when current_line is empty")]
             if !current_line.is_empty() {
                 current_line.push(' ');
             }
             current_line.push_str(word);
+            current_width += separator_len + word_len;
         }
     }
 
     // Add the last line
-    if !current_line.is_empty() {
+    if
+    // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "current_line is empty only when no words were read; the true branch then appends the same one empty first line as the empty-lines fallback")]
+    !current_line.is_empty() {
         if is_first_line {
             lines.push(current_line);
         } else {
@@ -198,6 +210,69 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
     }
 
     lines
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod display_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::metrics::{MetricDef, MetricValue};
+
+    #[test]
+    fn wrapping_counts_display_columns_for_accented_combining_and_wide_text() {
+        for text in ["\u{e9}\u{e9} aa bb", "e\u{301}e\u{301} aa bb", "\u{4e2d} aa bb"] {
+            let lines = wrap_text(text, 7, 2);
+            let first = text.rsplit_once(' ').unwrap().0;
+            assert_eq!(lines, [first.to_owned(), "  bb".to_owned()]);
+            assert_eq!(lines.iter().map(|line| line.width()).collect::<Vec<_>>(), [5, 4]);
+        }
+    }
+
+    #[test]
+    fn metric_names_align_by_display_columns() {
+        static WIDE: MetricDef = MetricDef {
+            name: "\u{4e2d}",
+            description: "",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        static COMBINING: MetricDef = MetricDef {
+            name: "e\u{301}",
+            description: "",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        let crate_info = ReportableCrate::new(
+            "fixture".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            vec![
+                Metric::with_value(&WIDE, MetricValue::String("aa bb cc".into())),
+                Metric::with_value(&COMBINING, MetricValue::String("aa bb cc".into())),
+            ],
+            None,
+        );
+        let mut output = String::new();
+        generate_with_width(
+            &[crate_info],
+            false,
+            &ConsoleOutputMode {
+                appraisal: false,
+                reasons: false,
+                metrics: true,
+            },
+            &mut output,
+            || 12,
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            "\nMetadata\n  \u{4e2d} : aa bb\n       cc\n  e\u{301}  : aa bb\n       cc\n"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +315,36 @@ mod tests {
             Metric::with_value(&VERSION_DEF, MetricValue::String(version.into())),
         ];
         ReportableCrate::new(name.into(), Arc::new(version.parse().unwrap()), metrics, evaluation)
+    }
+
+    #[test]
+    fn report_metric_wrapping_uses_the_exact_terminal_width() {
+        let mode = ConsoleOutputMode {
+            appraisal: false,
+            reasons: false,
+            metrics: true,
+        };
+        let crate_info = ReportableCrate::new(
+            "fixture".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            vec![Metric::with_value(
+                &DESCRIPTION_DEF,
+                MetricValue::String("aaaa bbbb cccc dddd".into()),
+            )],
+            None,
+        );
+        let indent = "description".len() + 5;
+        for (width, expected) in [
+            (34, format!("  description : aaaa bbbb cccc\n{}dddd\n", " ".repeat(indent))),
+            (35, "  description : aaaa bbbb cccc dddd\n".to_string()),
+        ] {
+            let mut output = String::new();
+            generate_with_width(std::slice::from_ref(&crate_info), false, &mode, &mut output, || width).unwrap();
+            assert!(output.contains(&expected), "width {width}: {output:?}");
+            for line in output.lines().filter(|line| line.starts_with("  ")) {
+                assert!(line.len() <= width, "width {width}: {line:?}");
+            }
+        }
     }
 
     #[test]
@@ -347,7 +452,7 @@ mod tests {
     #[test]
     fn test_wrap_text_exact_fit() {
         let text = "word1 word2 word3";
-        let lines = wrap_text(text, 17, 5);
+        let lines = wrap_text(text, 22, 5);
         assert_eq!(lines.len(), 1);
     }
 
@@ -510,7 +615,10 @@ mod tests {
 
         let continuation_lines = wrap_text("aaaaa aaaaa bbbb c", 14, 4);
 
-        assert_eq!(continuation_lines, vec!["aaaaa aaaaa".to_owned(), "    bbbb c".to_owned()]);
+        assert_eq!(
+            continuation_lines,
+            vec!["aaaaa".to_owned(), "    aaaaa bbbb".to_owned(), "    c".to_owned()]
+        );
     }
 
     #[test]
@@ -730,7 +838,7 @@ mod tests {
     fn wrap_text_indents_every_continuation_after_the_first_line() {
         assert_eq!(
             wrap_text("aaaaa bbbbb ccccc ddddd", 11, 2),
-            vec!["aaaaa bbbbb".to_owned(), "  ccccc".to_owned(), "  ddddd".to_owned()]
+            vec!["aaaaa".to_owned(), "  bbbbb".to_owned(), "  ccccc".to_owned(), "  ddddd".to_owned()]
         );
     }
 

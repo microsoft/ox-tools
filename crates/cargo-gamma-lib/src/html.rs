@@ -290,6 +290,66 @@ mod tests {
         assert!(!escaped.contains('>'));
     }
 
+    struct FailingWriter {
+        remaining: usize,
+    }
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected write failure"));
+            }
+            let written = self.remaining.min(buf.len());
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected flush failure"))
+        }
+    }
+
+    #[test]
+    fn script_escaping_propagates_prefix_escape_tail_and_flush_failures() {
+        use std::io::Write as _;
+
+        for remaining in [0, 2, 3, 8, 9, 14, 16] {
+            let mut writer = EscapeScript {
+                inner: FailingWriter { remaining },
+            };
+            let cause = writer
+                .write_all(b"abc<>tail")
+                .expect_err("the output is longer than each byte budget");
+            assert_eq!(cause.kind(), io::ErrorKind::PermissionDenied, "budget {remaining}");
+        }
+        let mut writer = EscapeScript {
+            inner: FailingWriter { remaining: usize::MAX },
+        };
+        assert_eq!(
+            writer.flush().expect_err("the injected inner flush always fails").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn page_streaming_propagates_failures_in_every_section() {
+        let report = report();
+        let page = render(&report).expect("the fixture serializes into memory");
+        let viewer_at = page.find("<script>").expect("the page contains the viewer script");
+        let report_at = page.find("app.report = ").expect("the page assigns its report");
+        for remaining in [
+            0,
+            viewer_at,
+            viewer_at + VIEWER.len() / 2,
+            report_at,
+            report_at + "app.report = ".len() + 10,
+            page.len() - 10,
+        ] {
+            let cause = stream(&report, &mut FailingWriter { remaining }).expect_err("the byte budget ends before the complete page");
+            assert_eq!(cause.kind(), io::ErrorKind::PermissionDenied, "budget {remaining}");
+        }
+    }
+
     /// The streamed page is byte-for-byte the string form, and it is published atomically — so
     /// writing the report to disk by streaming cannot change the page a browser opens.
     #[test]

@@ -475,6 +475,7 @@ mod tests {
             create_test_crate("scored", "1.0.0", Some(Appraisal::new(Risk::Low, outcomes.clone(), 4, 4, 100.0))),
             create_test_crate("unscored", "1.0.0", Some(Appraisal::required_check_failure(outcomes))),
             create_test_crate("unevaluated", "1.0.0", None),
+            ReportableCrate::new("missing-metrics".into(), Arc::new("1.0.0".parse().unwrap()), vec![], None),
         ];
 
         let mut counter = FailAfter {

@@ -155,6 +155,29 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn display_propagates_writer_failures_in_message_and_cause() {
+        struct FailingWriter {
+            remaining: usize,
+        }
+
+        impl fmt::Write for FailingWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                if s.len() > self.remaining {
+                    return Err(fmt::Error);
+                }
+                self.remaining -= s.len();
+                Ok(())
+            }
+        }
+
+        let error = Error::new("message").caused_by(io::Error::other("cause"));
+        for remaining in [0, "message".len(), "message: ".len()] {
+            let result = fmt::write(&mut FailingWriter { remaining }, format_args!("{error}"));
+            assert_eq!(result, Err(fmt::Error), "writer budget {remaining}");
+        }
+    }
+
     /// A freshly built error carries the message given to it and starts out neither a usage error
     /// nor skippable, with no cause attached.
     #[test]

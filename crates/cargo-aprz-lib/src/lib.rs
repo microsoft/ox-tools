@@ -30,11 +30,15 @@ pub type Result<T, E = ohno::AppError> = core::result::Result<T, E>;
 pub(crate) type HashMap<K, V> = rustc_hash::FxHashMap<K, V>;
 pub(crate) type HashSet<V> = rustc_hash::FxHashSet<V>;
 
+// #[gamma::skip(fn_value.default, parameter.default_shadow, tag = "equivalent", reason = "all callers use map entries, not initial capacity; both constructions return the same empty FxHashMap and insertion grows it as needed")]
 pub(crate) fn hash_map_with_capacity<K, V>(capacity: usize) -> HashMap<K, V> {
+    // #[gamma::skip(expr.increment, tag = "equivalent", reason = "reserving an extra map slot changes allocation only, not its keys, values, or hasher")]
     HashMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 
+// #[gamma::skip(fn_value.default, parameter.default_shadow, tag = "equivalent", reason = "all callers use set membership, not initial capacity; both constructions return the same empty FxHashSet and insertion grows it as needed")]
 pub(crate) fn hash_set_with_capacity<V>(capacity: usize) -> HashSet<V> {
+    // #[gamma::skip(expr.increment, tag = "equivalent", reason = "reserving an extra set slot changes allocation only, not its members or hasher")]
     HashSet::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 

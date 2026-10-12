@@ -18,7 +18,7 @@ use super::when::When;
 use crate::config::Config;
 use crate::discover::Plan;
 use crate::error::{Error, error};
-use crate::exec;
+use crate::exec::{self, RecordPreparation};
 use crate::model::{Mutant, Outcome};
 use crate::report::{Listings, Progress, Stats, Styler, encode_controls, quantity};
 #[cfg(any(test, feature = "internals"))]
@@ -56,6 +56,10 @@ fn stats(session: &exec::Session, elapsed: Duration) -> Stats {
 
 /// Loads `gamma.toml` and folds it into `args`.
 pub(super) fn configure<H: Host>(host: &mut H, args: &mut RunArgs, styler: Styler) -> crate::Result<()> {
+    if args.resume_testing {
+        Config::resolve_reporting_gates(&args.select)?.apply_reporting_gates(args);
+        return Ok(());
+    }
     // Said before anything is loaded, because the settings in that file are about to not happen and
     // the run would otherwise look like it honoured them.
     if Config::foreign_present(&args.select.dir) && !args.select.config.no_config && args.select.config.path.is_none() {
@@ -124,6 +128,31 @@ fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::
         dropped_test_packages: dropped.to_vec(),
         merge_provenance: None,
     }
+}
+
+fn report_info(
+    args: &RunArgs,
+    retained: Option<&crate::elements::RunInfo>,
+    tests: Option<usize>,
+    dropped: &[String],
+) -> crate::elements::RunInfo {
+    let mut info = retained.cloned().unwrap_or_else(|| run_info(args, tests, dropped));
+    info.tests = tests;
+    info.dropped_test_packages = dropped.to_vec();
+    info
+}
+
+fn resumed_report_info(retained: Option<&crate::elements::RunInfo>) -> crate::elements::RunInfo {
+    retained.cloned().unwrap_or_else(|| crate::elements::RunInfo {
+        started_at: 0,
+        mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
+        merged: true,
+        shard: None,
+        tests: None,
+        not_built: None,
+        dropped_test_packages: Vec::new(),
+        merge_provenance: None,
+    })
 }
 
 fn seconds_since_epoch(at: SystemTime) -> u64 {
@@ -196,6 +225,7 @@ fn emit_reports<H: Host>(
         args,
         plan,
         &ReportContents {
+            retained_info: None,
             source_root: None,
             advice,
             tests,
@@ -206,6 +236,7 @@ fn emit_reports<H: Host>(
 }
 
 struct ReportContents<'a> {
+    retained_info: Option<&'a crate::elements::RunInfo>,
     source_root: Option<&'a Utf8Path>,
     advice: Option<&'a str>,
     tests: Option<usize>,
@@ -225,7 +256,7 @@ fn emit_reports_from<H: Host>(
         plan,
         contents.source_root,
         crate::elements::Thresholds::default(),
-        Some(run_info(args, contents.tests, contents.dropped)),
+        Some(report_info(args, contents.retained_info, contents.tests, contents.dropped)),
     )?;
     let mut stream = host.error();
 
@@ -404,6 +435,12 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
 // #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
+    #[cfg(target_os = "linux")]
+    if args.resume_testing
+        && let Some(code) = resume_relaunch(host, args)?
+    {
+        return Ok(code);
+    }
     let Executed { plan, stuck } = measured(host, args, progress_when, styler)?;
 
     // A build the tool could not make compile is not a run that passed, whatever the mutants it did
@@ -516,6 +553,46 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     }
 
     Ok(EXIT_OK)
+}
+
+#[cfg(target_os = "linux")]
+fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i32>> {
+    resume_relaunch_with(
+        args,
+        host.may_replace_process(),
+        exec::relaunch::relaunched(),
+        || exec::memory_support().is_ok(),
+        || {
+            let selected = crate::paths::physical(&args.select.dir)?;
+            let (_, base, lock) = exec::claim_testing_state(&selected, args.measure.cache_dir.as_deref())?;
+            let (state, _) = exec::TestingState::load(&base)?;
+            drop(lock);
+            Ok(state.session.metered)
+        },
+        || {
+            exec::relaunch::relaunch().map_err(|refusal| {
+                error!(
+                    "cannot resume the campaign's memory-controlled tests without cgroup delegation ({refusal:?}); \
+                 run cargo-gamma inside a delegated systemd user scope"
+                )
+            })
+        },
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resume_relaunch_with(
+    args: &RunArgs,
+    may_replace: bool,
+    relaunched: bool,
+    supported: impl FnOnce() -> bool,
+    saved_metered: impl FnOnce() -> crate::Result<bool>,
+    relaunch: impl FnOnce() -> crate::Result<Option<i32>>,
+) -> crate::Result<Option<i32>> {
+    if !may_replace || args.measure.no_relaunch || relaunched || supported() || !saved_metered()? {
+        return Ok(None);
+    }
+    relaunch()
 }
 
 fn flaky_excess(args: &RunArgs, flaky: u32) -> Option<usize> {
@@ -661,13 +738,6 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
     })
 }
 
-struct RecordPreparation {
-    base: Utf8PathBuf,
-    context: crate::discover::ContextDigest,
-    inputs: crate::discover::WorkspaceSnapshot,
-    killers: crate::discover::Killers,
-}
-
 impl RecordPreparation {
     fn for_run(args: &RunArgs, survey: &crate::discover::Survey, context: crate::discover::ContextDigest) -> Self {
         let base = exec::campaign_base(&survey.root, &survey.target, args.measure.cache_dir.as_deref());
@@ -679,6 +749,7 @@ impl RecordPreparation {
         );
 
         Self {
+            report_info: Some(run_info(args, None, &[])),
             base,
             context,
             inputs,
@@ -704,7 +775,10 @@ fn postprocessing_contexts(
 ) -> Option<(crate::discover::ContextDigest, Option<crate::discover::ContextDigest>)> {
     (!args.dry_run).then(|| {
         let reusable = incremental_enabled(args).then(|| observed.clone()).flatten();
-        (observed.unwrap_or_default(), reusable)
+        (
+            observed.unwrap_or_else(crate::discover::ContextDigest::from_inherited_environment),
+            reusable,
+        )
     })
 }
 
@@ -713,6 +787,17 @@ fn store_completed_record(
     plan: &Plan,
     learning: Option<&crate::exec::Killers>,
 ) -> crate::Result<(bool, bool)> {
+    let (base, stored) = publish_completed_record(prepared, plan, learning)?;
+    let reachable =
+        exec::remember_campaign_base(&plan.root, &base) && exec::campaign_base_from_state(&plan.root, None).as_ref() == Some(&base);
+    Ok(postprocessing_advice(&plan.root, &stored, reachable))
+}
+
+fn publish_completed_record(
+    prepared: RecordPreparation,
+    plan: &Plan,
+    learning: Option<&crate::exec::Killers>,
+) -> crate::Result<(Utf8PathBuf, crate::discover::RunRecord)> {
     let Some(mut record) =
         crate::discover::RunRecord::from_completed_plan_snapshot(plan, &prepared.context, prepared.inputs, &prepared.killers)
     else {
@@ -726,10 +811,8 @@ fn store_completed_record(
     }
 
     let stored = record.store_completed(&prepared.base)?;
-    let reachable = exec::remember_campaign_base(&plan.root, &prepared.base)
-        && exec::campaign_base_from_state(&plan.root, None).as_ref() == Some(&prepared.base);
-
-    Ok(postprocessing_advice(&plan.root, &stored, reachable))
+    exec::finish_testing_record(&prepared.base)?;
+    Ok((prepared.base, stored))
 }
 
 fn store_incomplete_convergence(prepared: &RecordPreparation, plan: &Plan) -> crate::Result<()> {
@@ -924,6 +1007,9 @@ fn adopt(
 // #[gamma::skip(all, reason = "the command orchestrator coordinates subprocesses, cache locks, terminal state, and cleanup; its externally observable branches are covered by integration tests, while isolated mutations are platform/resource dependent")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
+    if args.resume_testing {
+        return resumed_testing(host, args, progress_when, styler);
+    }
     let started = Instant::now();
     let selection = args.select.selection()?;
     let shard = args.select.shard()?;
@@ -1062,7 +1148,10 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         pause_after_cache_adoption(&survey.root, lock_identity);
     }
     let mut failed = exec::FailedMeasurement::default();
-    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks, &mut failed);
+    if let Some(record) = &record {
+        exec::invalidate_testing(&record.base)?;
+    }
+    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks, &mut failed, record.as_ref());
 
     // A phase that failed never got to say what it found, so the line it opened is still waiting
     // for an ending. Close it before the error is printed, or the error arrives as the rest of
@@ -1115,6 +1204,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     // only ever cost the next run some time.
     let mut promotable = false;
     let mut suppressible = false;
+    let retained_info = record.as_ref().and_then(|record| record.report_info.clone());
     if let Some(prepared) = record {
         let record_locks = if built.is_none() {
             match exec::claim_cache(&plan.root, &survey.target, args.measure.cache_dir.as_deref()) {
@@ -1192,6 +1282,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         args,
         &plan,
         &ReportContents {
+            retained_info: retained_info.as_ref(),
             source_root: Some(&built.work.report_source_root()),
             advice: Some(&panel),
             tests: built.session.tests,
@@ -1219,6 +1310,172 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
 fn should_claim_cache(persisting_record: bool, dry_run: bool) -> bool {
     persisting_record && !dry_run
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn resumed_testing<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
+    let started = Instant::now();
+    let selected = crate::paths::physical(&args.select.dir)?;
+    let (root, base, lock) = exec::claim_testing_state(&selected, args.measure.cache_dir.as_deref())?;
+    let (state, valid_bytes) = exec::TestingState::load(&base)?;
+    if state.session.metered {
+        exec::memory_support().map_err(|cause| {
+            error!(
+                "cannot resume the campaign's memory-controlled tests on this host; restore memory-control support or start a new campaign"
+            )
+            .caused_by(cause)
+        })?;
+    }
+    if !exec::same_existing_path(&state.plan.root, &root) {
+        return Err(error!(
+            "cannot resume testing: the saved campaign belongs to a different workspace; start a new campaign"
+        ));
+    }
+    validate_resumed_environment(&state.plan.mutants, || state.record.context.validate_inherited_environment())?;
+    state.validate_artifacts()?;
+    let record = state.record.clone();
+    let retained_info = resumed_report_info(record.report_info.as_ref());
+    let work = exec::Workspace::resume_testing(&state.plan.root, &state.record.base, state.workspace.clone(), lock, valid_bytes)?;
+    let reporting_args = prepare_resumed_reporting(host, args, &state, &work, styler)?;
+    let visible = progress_when.resolve(host.is_terminal());
+    let mut verdict_log = VerdictLog::default();
+    verdict_log.resume(&base)?;
+    let mut events = ConsoleEvents {
+        progress: Progress::new(visible, styler, host.terminal_width()),
+        dashboard: Dashboard::new(visible && args.dashboard, host.terminal_width(), styler),
+        host,
+        styler,
+        show_build: false,
+        verdict_log,
+    };
+    let settled = events
+        .progress
+        .restore_outcomes(state.plan.mutants.iter().map(|mutant| mutant.outcome));
+    writeln!(
+        events.host.error(),
+        "{} testing with {} retained",
+        styler.verb("Resuming"),
+        quantity(settled, "settled mutant")
+    )?;
+    let outcome = exec::resume_testing(state, work, &mut events);
+    let log_failure = events.finish_verdict_log().err();
+    if outcome.is_err() {
+        events.abandon();
+    }
+    let exec::Measured {
+        plan,
+        built,
+        stuck,
+        dropped,
+        learning,
+    } = outcome?;
+    events.dashboard.finish(events.host);
+    events.progress.finish(events.host);
+    let announced = events.progress.is_enabled();
+    let host = events.host;
+    let (base, stored) = publish_completed_record(record, &plan, learning.as_ref())?;
+    let reachable = exec::remember_campaign_base(&plan.root, &base);
+    let (promotable, suppressible) = postprocessing_advice(&plan.root, &stored, reachable);
+    let mut built = built.ok_or_else(|| error!("resumed testing returned no prepared workspace"))?;
+    built.work.snapshot_report_sources(&plan)?;
+    let wall = started.elapsed();
+    let mut footer = listings(args, announced, Some(promotable), Some(suppressible));
+    footer.stats = Some(stats(&built.session, wall));
+    crate::report::summarize(host, &plan, styler, footer)?;
+    crate::report::session_notes(host, &built.session, false, false, styler)?;
+    let panel = summary_panel(&reporting_args, &plan, &built.session, &stuck, &dropped, wall);
+    emit_reports_from(
+        host,
+        args,
+        &plan,
+        &ReportContents {
+            retained_info: Some(&retained_info),
+            source_root: Some(&built.work.report_source_root()),
+            advice: Some(&panel),
+            tests: built.session.tests,
+            dropped: &dropped,
+        },
+        styler,
+    )?;
+    emit_advice(host, &reporting_args, &plan, &built.session, wall, styler)?;
+    emit_diag(host, &reporting_args, &plan, Some(&built.session), started, styler)?;
+    report_dropped(host, &dropped, styler)?;
+    report_stuck(host, &stuck, styler)?;
+    warn_auxiliary(host, log_failure.as_ref(), styler);
+    if let Err(failure) = built.work.teardown() {
+        writeln!(host.error(), "{} {failure}", styler.warning())?;
+    }
+    Ok(Executed { plan: Some(plan), stuck })
+}
+
+fn validate_resumed_environment(mutants: &[Mutant], validate: impl FnOnce() -> crate::Result<()>) -> crate::Result<()> {
+    if mutants.iter().any(|mutant| mutant.outcome == Outcome::Pending) {
+        validate()?;
+    }
+    Ok(())
+}
+
+fn prepare_resumed_reporting<H: Host>(
+    host: &mut H,
+    args: &RunArgs,
+    state: &exec::TestingState,
+    work: &exec::Workspace,
+    styler: Styler,
+) -> crate::Result<RunArgs> {
+    if state.record.report_info.is_none() {
+        writeln!(
+            host.error(),
+            "{} the legacy checkpoint has no report provenance; its report uses an unknown timestamp and cannot withdraw other report populations",
+            styler.warning()
+        )?;
+    }
+    if state.settings.mutators.is_none() {
+        writeln!(
+            host.error(),
+            "{} the legacy checkpoint has no original mutator selection; diagnostics list the frozen population's mutators instead",
+            styler.warning()
+        )?;
+    }
+    Ok(resumed_reporting_args(
+        args,
+        state.settings.jobs,
+        state.settings.mutators.as_deref(),
+        &state.plan.mutants,
+        state.record.report_info.as_ref().and_then(|info| info.shard.as_ref()),
+        work.reporting_profile(),
+    ))
+}
+
+fn resumed_reporting_args(
+    args: &RunArgs,
+    jobs: usize,
+    selection: Option<&str>,
+    population: &[crate::model::Mutant],
+    shard: Option<&crate::elements::ShardInfo>,
+    profile: Option<&str>,
+) -> RunArgs {
+    let mut reporting = RunArgs {
+        artifact_dir: args.artifact_dir.clone(),
+        diag: args.diag,
+        diag_names: args.diag_names,
+        ..RunArgs::default()
+    };
+    reporting.measure.jobs = Some(jobs);
+    reporting.measure.profile = profile.map(str::to_owned);
+    reporting.select.mutators = Some(selection.map_or_else(
+        || {
+            let mut mutators: Vec<_> = population.iter().map(|mutant| mutant.mutator.as_ref()).collect();
+            mutators.sort_unstable();
+            mutators.dedup();
+            mutators.join(",")
+        },
+        str::to_owned,
+    ));
+    if let Some(shard) = shard {
+        reporting.select.shard_count = Some(shard.count);
+        reporting.select.shard_index = Some(shard.index);
+    }
+    reporting
 }
 
 fn clear_baseline_failures(artifact_dir: &Utf8Path) -> crate::Result<()> {
@@ -1563,6 +1820,50 @@ mod miri_tests {
     use super::*;
 
     #[test]
+    fn resumed_reporting_uses_frozen_execution_and_live_reporting_options() {
+        let mut live = RunArgs {
+            artifact_dir: Some("reports".into()),
+            diag: true,
+            diag_names: crate::diag::Redaction::Names,
+            ..RunArgs::default()
+        };
+        live.measure.jobs = Some(99);
+        live.measure.profile = Some("test".to_owned());
+        live.select.mutators = Some("invalid-live-selection".to_owned());
+        live.select.shard_count = Some(0);
+        live.select.shard_index = Some(99);
+        let shard = crate::elements::ShardInfo { count: 3, index: 1 };
+        let frozen = resumed_reporting_args(&live, 7, Some("relational.lt_to_le"), &[], Some(&shard), Some("gamma"));
+        assert_eq!(frozen.measure.jobs, Some(7));
+        assert_eq!(frozen.measure.profile.as_deref(), Some("gamma"));
+        assert_eq!(frozen.select.selection().unwrap().sorted(), ["relational.lt_to_le"]);
+        assert_eq!(frozen.select.shard().unwrap(), Some((3, 1)));
+        assert_eq!(frozen.artifact_dir, live.artifact_dir);
+        assert!(frozen.diag);
+        assert!(matches!(frozen.diag_names, crate::diag::Redaction::Names));
+        assert_eq!(live.measure.jobs, Some(99));
+    }
+
+    #[test]
+    fn legacy_resumed_reporting_uses_population_without_live_selection_or_shards() {
+        let mut live = RunArgs::default();
+        live.select.mutators = Some("relational".to_owned());
+        live.select.shard_count = Some(5);
+        live.select.shard_index = Some(2);
+        let first = crate::fixtures::mutant_at("first", "src/lib.rs", 1, "relational.lt_to_le", Outcome::Pending);
+        let second = crate::fixtures::mutant_at("second", "src/lib.rs", 2, "arith.add_to_sub", Outcome::Killed);
+        let frozen = resumed_reporting_args(&live, 4, None, &[first.clone(), second, first], None, None);
+        assert_eq!(frozen.measure.jobs, Some(4));
+        assert_eq!(frozen.measure.profile, None);
+        assert_eq!(
+            frozen.select.selection().unwrap().sorted(),
+            ["arith.add_to_sub", "relational.lt_to_le"]
+        );
+        assert_eq!(frozen.select.shard().unwrap(), None);
+        assert!(!frozen.diag);
+    }
+
+    #[test]
     fn exact_mutant_ids_are_validated_and_deduplicated() {
         let selected = requested_mutants(&["deadbeefcafe".to_owned(), "0123456789ab".to_owned()]).expect("valid IDs");
 
@@ -1618,6 +1919,70 @@ mod tests {
     use crate::discover::TargetFile;
     use crate::exec::Session;
     use crate::fixtures;
+
+    #[test]
+    fn resume_delegation_uses_frozen_metering_and_preserves_child_exit_status() {
+        let mut args = RunArgs::default();
+        args.measure.memory = Some(exec::MemoryControl::Off);
+        let code = resume_relaunch_with(&args, true, false, || false, || Ok(true), || Ok(Some(73))).unwrap();
+        assert_eq!(code, Some(73), "live settings must not disable a metered checkpoint's delegation");
+        assert_eq!(
+            resume_relaunch_with(
+                &args,
+                true,
+                false,
+                || false,
+                || Ok(false),
+                || panic!("an unmetered checkpoint needs no delegated scope")
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resume_relaunch_with(&args, true, false, || false, || Ok(true), || Err(error!("delegation unavailable")))
+                .unwrap_err()
+                .to_string(),
+            "delegation unavailable"
+        );
+        assert_eq!(
+            resume_relaunch_with(
+                &args,
+                true,
+                false,
+                || false,
+                || Err(error!("checkpoint unreadable")),
+                || panic!("invalid state must not relaunch")
+            )
+            .unwrap_err()
+            .to_string(),
+            "checkpoint unreadable"
+        );
+    }
+
+    #[test]
+    fn resume_delegation_skips_relaunch_for_supported_disabled_or_recursive_invocations() {
+        for (may_replace, no_relaunch, relaunched, supported) in [
+            (false, false, false, false),
+            (true, true, false, false),
+            (true, false, true, false),
+            (true, false, false, true),
+        ] {
+            let mut args = RunArgs::default();
+            args.measure.no_relaunch = no_relaunch;
+            assert_eq!(
+                resume_relaunch_with(
+                    &args,
+                    may_replace,
+                    relaunched,
+                    || supported,
+                    || panic!("the skip path must not claim or read campaign state"),
+                    || panic!("the skip path must not relaunch")
+                )
+                .unwrap(),
+                None
+            );
+        }
+    }
 
     /// Lays out an empty single-package `subject` workspace in `dir` and returns its root.
     ///
@@ -1712,11 +2077,13 @@ mod tests {
             ..RunArgs::default()
         };
         let (record_context, reusable) = postprocessing_contexts(&args, None).expect("real runs prepare a record");
+        assert!(record_context.states(crate::discover::Term::Environment));
         let (plan, _directory) = private_plan();
         let base = plan.root.join("campaign-state");
         let _locks = exec::claim_cache(&plan.root, &plan.root.join("target"), Some(&base)).expect("owned campaign cache");
         let inputs = crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false);
         let prepared = RecordPreparation {
+            report_info: None,
             base: base.clone(),
             context: record_context,
             inputs,
@@ -1747,6 +2114,7 @@ mod tests {
         let base = plan.root.join("target/campaign-state");
         fs::create_dir_all(&base).expect("campaign base");
         let prepared = RecordPreparation {
+            report_info: None,
             inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
             base: base.clone(),
             context: crate::discover::record_context(&crate::discover::RecordContext {
@@ -1783,6 +2151,7 @@ mod tests {
         .collect();
         crate::discover::RunRecord::store_probes(&base, &stale);
         let prepared = RecordPreparation {
+            report_info: None,
             inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
             base: base.clone(),
             context: crate::discover::record_context(&crate::discover::RecordContext {
@@ -1818,6 +2187,7 @@ mod tests {
         let base = plan.root.join("campaign-state");
         let _locks = exec::claim_cache(&plan.root, &plan.root.join("target"), Some(&base)).expect("owned campaign cache");
         let prepared = RecordPreparation {
+            report_info: None,
             inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
             base: base.clone(),
             context: crate::discover::ContextDigest::default(),
@@ -1850,6 +2220,7 @@ mod tests {
         assert_eq!(exec::campaign_base_from_state(&plan.root, None), Some(base.clone()));
         let inputs = crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], true);
         let prepared = RecordPreparation {
+            report_info: None,
             base: base.clone(),
             context: crate::discover::ContextDigest::default(),
             inputs,
@@ -1889,6 +2260,7 @@ mod tests {
         let mut plan = plan();
         let base = plan.root.join("campaign-state");
         let prepared = RecordPreparation {
+            report_info: None,
             inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
             base,
             context: crate::discover::ContextDigest::default(),
@@ -2144,6 +2516,39 @@ mod tests {
         assert!(info.not_built.is_none());
         assert_eq!(info.dropped_test_packages, ["unavailable"]);
         assert!(info.merge_provenance.is_none());
+    }
+
+    #[test]
+    fn resumed_report_provenance_preserves_shard_age_and_other_shards() {
+        let retained = crate::fixtures::report_with(Some((1, 3)), 100, Vec::new()).config.unwrap();
+        let info = resumed_report_info(Some(&retained));
+        let info = report_info(&RunArgs::default(), Some(&info), Some(17), &["dropped".to_owned()]);
+        let mut expected = retained;
+        expected.tests = Some(17);
+        expected.dropped_test_packages = vec!["dropped".to_owned()];
+        assert_eq!(serde_json::to_value(&info).unwrap(), serde_json::to_value(expected).unwrap());
+        let mut resumed = crate::fixtures::report_with(None, 300, vec![crate::fixtures::mutant_result_at("older", 1, "Killed")]);
+        resumed.config = Some(info);
+        let other = crate::fixtures::report_with(Some((0, 3)), 110, vec![crate::fixtures::mutant_result_at("other", 2, "Survived")]);
+        let merged = crate::merge::merge(&[("resumed".to_owned(), resumed), ("other".to_owned(), other)], 300, Some(50));
+        assert_eq!(
+            (merged.withdrawn, merged.stale, merged.fresh, merged.shard_count),
+            (0, 2, 0, Some(3))
+        );
+        assert_eq!(merged.shards_seen, std::collections::BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn legacy_resume_reports_cannot_refresh_evidence_or_withdraw_other_populations() {
+        let info = resumed_report_info(None);
+        assert_eq!(info.started_at, 0);
+        assert!(info.merged);
+        assert!(info.shard.is_none());
+        let mut resumed = crate::fixtures::report_with(None, 300, vec![crate::fixtures::mutant_result_at("older", 1, "Killed")]);
+        resumed.config = Some(info);
+        let other = crate::fixtures::report_with(Some((0, 3)), 110, vec![crate::fixtures::mutant_result_at("other", 2, "Survived")]);
+        let merged = crate::merge::merge(&[("legacy".to_owned(), resumed), ("other".to_owned(), other)], 300, Some(50));
+        assert_eq!((merged.withdrawn, merged.stale, merged.fresh), (0, 2, 0));
     }
 
     #[test]
@@ -2597,6 +3002,39 @@ mod tests {
         assert!(err.contains("── diag ─"), "{err}");
     }
 
+    #[test]
+    fn resumed_reporting_artifacts_describe_frozen_settings() {
+        let directory = workdir("resumed-reporting-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf8");
+        let mut live = RunArgs {
+            artifact_dir: Some(root.clone()),
+            ..RunArgs::default()
+        };
+        live.measure.jobs = Some(99);
+        live.measure.profile = Some("test".to_owned());
+        let shard = crate::elements::ShardInfo { count: 3, index: 1 };
+        let frozen = resumed_reporting_args(&live, 7, Some("relational.lt_to_le"), &[], Some(&shard), Some("gamma"));
+        let plan = plan();
+        let mut measured = session();
+        measured.baseline_wall = Duration::from_secs(20);
+        let mut host = Sink::default();
+        emit_advice(&mut host, &frozen, &plan, &measured, Duration::from_mins(2), Styler::new(false)).unwrap();
+        emit_diag(&mut host, &frozen, &plan, Some(&measured), Instant::now(), Styler::new(false)).unwrap();
+        let advice = fs::read_to_string(root.join("gamma-perf-advice.md")).unwrap();
+        assert!(advice.contains("at 7 jobs"), "{advice}");
+        assert!(!advice.contains("under Cargo's default test profile"), "{advice}");
+        assert!(!advice.contains("under test"), "{advice}");
+        let diagnostics: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("gamma-diagnostics.json")).unwrap()).unwrap();
+        assert_eq!(diagnostics["config"]["jobs"], 7);
+        assert_eq!(diagnostics["config"]["mutators"], serde_json::json!(["relational.lt_to_le"]));
+        assert_eq!(diagnostics["config"]["shard"], serde_json::json!([1, 3]));
+        let panel = summary_panel(&frozen, &plan, &measured, &[], &[], Duration::from_mins(2));
+        assert!(panel.contains("at 7 jobs"), "{panel}");
+        assert!(!panel.contains("under test"), "{panel}");
+        assert!(summary_panel(&live, &plan, &measured, &[], &[], Duration::from_mins(2)).contains("under test"));
+    }
+
     /// The bundle exists to be attached to an issue, which only works if it is already on disk by
     /// the time anyone decides the run was worth reporting.
     #[test]
@@ -2847,6 +3285,71 @@ mod tests {
         assert!(host.err().contains("Hint"), "{}", host.err());
         assert!(host.err().contains("is not supported or read"), "{}", host.err());
         assert!(host.err().contains("configure gamma.toml explicitly"), "{}", host.err());
+    }
+
+    #[test]
+    fn resumed_environment_is_checked_only_when_mutants_remain_pending() {
+        for outcomes in [vec![], vec![Outcome::Killed, Outcome::Survived], vec![Outcome::NoCoverage]] {
+            let mutants: Vec<_> = outcomes.into_iter().map(|outcome| mutant(0, outcome, 0)).collect();
+            validate_resumed_environment(&mutants, || panic!("completed verdicts inherit no new environment")).unwrap();
+        }
+        for outcomes in [vec![Outcome::Pending], vec![Outcome::Killed, Outcome::Pending]] {
+            let mutants: Vec<_> = outcomes.into_iter().map(|outcome| mutant(0, outcome, 0)).collect();
+            let mut checked = false;
+            validate_resumed_environment(&mutants, || {
+                checked = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(checked);
+            let failure = validate_resumed_environment(&mutants, || Err(error!("scripted environment mismatch"))).unwrap_err();
+            assert_eq!(failure.to_string(), "scripted environment mismatch");
+        }
+    }
+
+    #[test]
+    fn unavailable_cache_context_still_records_environment_without_enabling_reuse() {
+        let (record_context, reusable) = postprocessing_contexts(&RunArgs::default(), None).unwrap();
+        assert!(record_context.states(crate::discover::Term::Environment));
+        assert!(record_context.term(crate::discover::Term::Toolchain).is_empty());
+        assert!(reusable.is_none());
+        assert!(
+            postprocessing_contexts(
+                &RunArgs {
+                    dry_run: true,
+                    ..RunArgs::default()
+                },
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resume_configuration_loads_only_reporting_gates() {
+        let dir = workdir("run-resume-gates-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        fs::write(
+            root.join("gamma.toml"),
+            "min-score = 80.0\nmax-flaky = 2\njobs = 12\nno-confirm = true\n",
+        )
+        .unwrap();
+        for disabled in [false, true] {
+            let mut args = RunArgs {
+                resume_testing: true,
+                select: crate::commands::SelectArgs {
+                    dir: root.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            args.select.config.no_config = disabled;
+            configure(&mut Sink::default(), &mut args, Styler::new(false)).unwrap();
+            assert_eq!(args.min_score, if disabled { None } else { Some(80.0) });
+            assert_eq!(args.max_flaky, if disabled { None } else { Some(2) });
+            assert_eq!(args.measure.jobs, None);
+            assert!(!args.no_confirm);
+        }
     }
 
     /// Asking not to read config suppresses the note along with the loading.

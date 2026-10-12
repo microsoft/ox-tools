@@ -151,3 +151,87 @@ fn judge_one(package: &Package, declared: &Declared, plain: &Evidence, all: &Evi
             .map_or(Some(Verdict::Unused), |()| None),
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn declaration(name: &str, section: Section) -> Declared {
+        Declared {
+            name: name.to_owned(),
+            section,
+            target: None,
+            feature_referenced: false,
+        }
+    }
+
+    fn package(name: &str, declared: Vec<Declared>) -> Package {
+        Package {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest_path: PathBuf::from(name).join("Cargo.toml"),
+            declared,
+            allowed: BTreeSet::new(),
+            has_doctests: false,
+        }
+    }
+
+    #[test]
+    fn skipped_packages_and_declarations_never_stop_later_findings() {
+        let unselected = package("unselected", vec![declaration("first", Section::Normal)]);
+        let selected = package(
+            "selected",
+            vec![
+                declaration("ambiguous", Section::Normal),
+                declaration("ambiguous", Section::Development),
+                declaration("last", Section::Normal),
+            ],
+        );
+        let selection = BTreeSet::from([selected.manifest_path.clone()]);
+        let findings = judge(
+            &[unselected, selected],
+            &selection,
+            &Evidence::default(),
+            &Evidence::default(),
+            &DoctestEvidence::default(),
+            &BTreeSet::new(),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].package, "selected");
+        assert_eq!(findings[0].name, "last");
+        assert_eq!(findings[0].verdict, Verdict::Unused);
+    }
+
+    #[test]
+    fn each_exemption_skips_only_its_own_declaration() {
+        for exemption in ["feature", "workspace", "package"] {
+            let mut fixture = package(
+                "fixture",
+                vec![declaration("exempt", Section::Normal), declaration("last", Section::Normal)],
+            );
+            let mut allowed = BTreeSet::new();
+            match exemption {
+                "feature" => fixture.declared[0].feature_referenced = true,
+                "workspace" => {
+                    allowed.insert("exempt".to_owned());
+                }
+                "package" => {
+                    fixture.allowed.insert("exempt".to_owned());
+                }
+                _ => unreachable!("the exemption table contains only supported exemptions"),
+            }
+            let selection = BTreeSet::from([fixture.manifest_path.clone()]);
+            let findings = judge(
+                &[fixture],
+                &selection,
+                &Evidence::default(),
+                &Evidence::default(),
+                &DoctestEvidence::default(),
+                &allowed,
+            );
+            assert_eq!(findings.len(), 1, "{exemption}");
+            assert_eq!(findings[0].name, "last", "{exemption}");
+        }
+    }
+}

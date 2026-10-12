@@ -56,8 +56,10 @@ configuration and therefore audits the whole file.
   shadow evidence is also kept per lexical scope, so a wildcard import or local
   trait in one module or block does not weaken otherwise proven candidates in
   a sibling module or function.
-  Unambiguous bare local names resolve to package declarations; qualified local
-  paths, aliases, and unresolved dependency paths remain unknown.
+  Unambiguous bare local names, including unrenamed imports rooted at `crate`,
+  `self`, or `super`, resolve to package declarations. Source-written qualified
+  local paths, renamed local imports, aliases, and unresolved dependency paths
+  remain unknown.
   A `Self::Assoc` projection is resolved
   through the enclosing impl when that impl declares the associated type;
   unresolved trait-associated types remain abstract. An unresolved concrete
@@ -132,6 +134,82 @@ configuration and therefore audits the whole file.
   for opaque `impl Trait` returns. Regex mutation is confined to string
   literals passed to a path ending in `Regex::new`; both the original and each
   replacement must parse with `regex-syntax`.
+- Proven no-ops are omitted under every selector, including `all`. For
+  `call_result.default`, a separate positive callee index recognizes only a
+  directly named, non-async free function whose declaration is lexically
+  visible and returns implicit unit or the literal type `()`. This does not
+  reuse the optimistic file-wide return-type index as name-resolution proof.
+  Duplicate free-function names, any same-named import, pattern binding,
+  constant, static, struct constructor, or foreign item anywhere in the file,
+  visible wildcard imports, and opaque statement/item
+  macros or potentially transforming local attributes in an enclosing scope
+  defeat the proof. Module boundaries do not
+  inherit bare function names. Qualified calls, qualified-self paths,
+  parenthesized callees, function pointers, return aliases, and functions with
+  potentially transforming attributes remain outside this proof. The
+  replacement's bare `Default` must also resolve to the standard trait.
+  Disabled implicit preludes and generic parameters named `Default` do not
+  supply that proof. Renamed external crates also participate in path resolution,
+  so aliasing a dependency to `std` cannot manufacture standard-type evidence.
+  Only result defaulting is omitted: deleting the unit call still changes its
+  side effects and remains eligible.
+- Early-return defaulting additionally recognizes zero-argument standard
+  `new` and `default` constructors for `Vec`, `String`, `VecDeque`,
+  `LinkedList`, `BinaryHeap`, `BTreeSet`, and `BTreeMap`, when both constructor
+  and expected return type resolve to the same supported standard type.
+  Standard imports, including renamed type/module imports, can supply this
+  evidence; bare non-prelude collection names cannot. Explicit allocator
+  parameters, lifetime/const/associated generic arguments, parenthesized path
+  arguments, constructor type aliases, qualified-self calls, custom/shadowed
+  paths, and unknown types do not supply proof. `bool::default()` and
+  `Option::default()` also require standard type evidence, rather than terminal
+  identifier spelling. Source-resolved trait-default spellings retain their
+  existing recognition, with qualified-self calls left unknown.
+  `HashMap` and `HashSet` constructors are deliberately excluded because
+  hasher state is observable. Capacity and allocation mutations are unchanged:
+  empty elements do not prove equal capacity, allocator state, or allocation
+  failure behavior.
+- Array and `vec!` reversal already require at least two parsed elements.
+  Consequently singleton literals, even with effectful or destructor-bearing
+  elements, have no reversal candidate; repeated-element lengths and arbitrary
+  receiver lengths are not inferred. No operand commutativity, range, or
+  dataflow-equivalence theorem is used. Semantic admission filters reserve
+  identity occurrences before withholding candidates, preserving the
+  identities of later same-text sites; existing token-identical replacements
+  continue to be rejected before occurrence allocation.
+- Mutations that introduce proven stalled loops or unbounded retained-memory
+  growth are also omitted, under every selector, without a verdict, suppression
+  count, or score contribution. These are resource-safety exclusions, not
+  equivalence claims. The proof reconstructs the proposed loop and accepts only
+  invariant conditions over source-resolved, owned primitive scalar bindings,
+  scalar operations that cannot panic and preserve those bindings, and constant
+  branches without an escape. Removing a sole `break`, deleting the only
+  scalar advance, or changing that advance to zero can establish the proof.
+  Standard owned `String` appends of character or string literals are additionally
+  recognized: a nonempty append on every repeated iteration proves unbounded
+  retained growth, without predicting whether allocation failure, capacity
+  overflow, or a timeout ends execution first. Empty appends do not prove growth.
+  Source-resolved `Peekable<Chars>` values (including uniquely borrowed ones and
+  `.chars().peekable()` on proven string-slice bindings) support an additional
+  exhaustion proof. A predicate that remains true at EOF, followed only by
+  harmless `next()` calls and supported scalar/string operations, cannot restore
+  progress at EOF. Pure character predicates over `peek()` also remain invariant
+  if a mutation removes consumption. Generic or custom iterators, callback
+  factories, effectful predicates, resets, and panicking unwraps remain unknown.
+  Already-proven problematic original loops are not used to omit unrelated edits.
+  Unknown calls, macros, transforming attributes, local declarations and drops,
+  other references, overloaded operations, arithmetic that might overflow, unknown
+  branches, nested loops, and other possible escapes defeat this narrow proof.
+  Loops over 4096 source bytes remain unfiltered to bound proof work.
+  Resource aliases resolve in their declaring lexical scope, not through a
+  file-wide terminal name. Imported or ambiguous alias identities remain unknown,
+  and recursive alias/reference queries stop at cycles. Proofs reuse the original
+  AST and literal tokens; probing candidate text does not retain additional
+  proc-macro source-map entries.
+  Source identity indexes are built even for narrow selectors so shadows and
+  opaque scopes cannot disappear merely because another mutator was deselected.
+  Omitted candidates reserve their identity occurrences so remaining identities
+  do not change.
 - The discovery pre-pass is confined to code discovery would mutate: not
   configured out and not test-only, including field-level gates.
 - A stated value is reported as an error where discovery would never read it —

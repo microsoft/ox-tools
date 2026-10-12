@@ -112,6 +112,24 @@ impl Progress {
         self.dirty = true;
     }
 
+    pub(crate) fn set_remaining_total(&mut self, remaining: usize) {
+        self.total = self.done.saturating_add(remaining);
+        self.dirty = true;
+    }
+
+    pub(crate) fn restore_outcomes(&mut self, outcomes: impl IntoIterator<Item = Outcome>) -> usize {
+        self.set_total(0);
+        for outcome in outcomes {
+            if !matches!(
+                outcome,
+                Outcome::Pending | Outcome::CompileError | Outcome::Ignored | Outcome::NotBuilt
+            ) {
+                self.record(outcome);
+            }
+        }
+        self.done
+    }
+
     const fn normalized_width(width: Option<u16>) -> usize {
         match width {
             Some(width) => {
@@ -438,6 +456,12 @@ impl Progress {
     }
 
     /// Redraws the progress bar if enough time has passed and something changed.
+    pub(crate) fn draw_now<H: Host>(&mut self, host: &mut H) {
+        self.last_draw = None;
+        self.dirty = true;
+        self.tick(host);
+    }
+
     pub fn tick<H: Host>(&mut self, host: &mut H) {
         if !self.enabled || !self.dirty {
             return;

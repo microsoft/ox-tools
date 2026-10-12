@@ -119,7 +119,8 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
         for (target_name, target) in targets.iter().filter_map(|(name, target)| Some((name, target.as_table_like()?))) {
             for (table, section) in DEP_TABLES {
                 if let Some(item) = target.get(table).and_then(Item::as_table_like) {
-                    collect_declared(item, section, Some(target_name), &feature_references, &mut declared);
+                    let target = Some(target_name);
+                    collect_declared(item, section, target, &feature_references, &mut declared);
                 }
             }
         }
@@ -158,6 +159,7 @@ struct FeatureReferences {
 
 fn feature_references(doc: &DocumentMut) -> FeatureReferences {
     let Some(features) = doc.get("features").and_then(Item::as_table_like) else {
+        // #[gamma::skip(return_value.default, reason = "Default::default is inferred as FeatureReferences and calls this same derived Default implementation")]
         return FeatureReferences::default();
     };
     let feature_names: BTreeSet<&str> = features.iter().map(|(name, _)| name).collect();
@@ -169,6 +171,7 @@ fn feature_references(doc: &DocumentMut) -> FeatureReferences {
         .flatten()
         .filter_map(Value::as_str)
     {
+        // #[gamma::skip(logical.and_remove_left, reason = "feature_dependency returns Some for every value containing a slash, so the else branch already proves the slash test true")]
         if let Some(name) = feature_dependency(value) {
             references.explicit.insert(name.to_owned());
         } else if !value.contains('/') && !feature_names.contains(value) {
@@ -412,6 +415,42 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn extern_names_normalize_every_hyphen_and_non_table_targets_are_ignored() {
+        let manifest = "[dependencies]\nmy-hyphen-name = \"1\"\n[target]\ninvalid = 7\n"
+            .parse()
+            .expect("fixture TOML is valid");
+        let declarations = declared_dependencies(&manifest);
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].extern_name(), "my_hyphen_name");
+    }
+
+    #[test]
+    fn feature_dependency_forms_split_only_the_actual_slash_separator() {
+        for (feature, expected) in [
+            ("dep:direct", Some("direct")),
+            ("dependency/enabled", Some("dependency")),
+            ("dependency?/enabled", Some("dependency")),
+            ("prefixxdependency/enabled", Some("prefixxdependency")),
+            ("prefix\0dependency/enabled", Some("prefix\0dependency")),
+            ("local-feature", None),
+            ("containsx", None),
+        ] {
+            assert_eq!(feature_dependency(feature), expected, "{feature:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_dependency_feature_paths_are_not_implicit_optional_features() {
+        let manifest =
+            "[dependencies]\noptional = {version = \"1\", optional = true}\n[features]\nfixture = [\"optional/\", \"other/x\"]\n"
+                .parse()
+                .expect("fixture TOML is valid");
+        let references = feature_references(&manifest);
+        assert!(references.implicit_optional.is_empty());
+        assert!(references.explicit.contains("optional"));
+    }
 
     #[test]
     fn declarations_include_target_specific_sections() {

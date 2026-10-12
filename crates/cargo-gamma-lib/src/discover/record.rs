@@ -18,6 +18,7 @@ use super::killers::Killers;
 use super::workspace_snapshot::WorkspaceSnapshot;
 use super::{Plan, input};
 use crate::cfg::Build;
+use crate::error::error;
 use crate::model::{MUTANT_ID_VERSION, Mutant, MutantId, Outcome, normalize_site_text};
 use crate::{HashMap, HashSet};
 
@@ -297,6 +298,36 @@ pub struct ContextDigest {
 }
 
 impl ContextDigest {
+    // #[gamma::skip(all, reason = "the process-global environment adapter delegates to injected environment-only digest tests")]
+    pub(crate) fn from_inherited_environment() -> Self {
+        Self::from_environment(&inherited_environment())
+    }
+
+    fn from_environment(environment: &[(Vec<u8>, Vec<u8>)]) -> Self {
+        Self {
+            environment: Some(environment_digest(environment)),
+            ..Self::default()
+        }
+    }
+
+    // #[gamma::skip(all, reason = "the process-global inherited environment is checked through injected digest validation; tests must not mutate it")]
+    pub(crate) fn validate_inherited_environment(&self) -> crate::Result<()> {
+        self.validate_environment(&environment_digest(&inherited_environment()))
+    }
+
+    fn validate_environment(&self, current: &str) -> crate::Result<()> {
+        match self.environment.as_deref() {
+            Some(saved) if saved == current => Ok(()),
+            Some(_) => Err(error!(
+                "cannot resume testing: the inherited environment differs from the saved campaign; \
+                 restore the original environment or start a new campaign"
+            )),
+            None => Err(error!(
+                "cannot resume testing: the saved campaign did not record its inherited environment; start a new campaign"
+            )),
+        }
+    }
+
     /// The digest of one term, which is the empty string for a term this digest does not state.
     #[must_use]
     pub fn term(&self, term: Term) -> &str {
@@ -574,7 +605,7 @@ impl From<&GeneralizedHints> for CompactGeneralizedHints {
             .flat_map(|item| item.candidates.iter().map(|ranked| ranked.candidate.clone()))
             .chain(hints.test_sets.iter().flatten().cloned())
             .collect();
-        killers.sort_by(|left, right| (&left.package, &left.target, &left.test).cmp(&(&right.package, &right.target, &right.test)));
+        killers.sort_by(compare_killers);
         killers.dedup();
 
         let mut binary_identities: Vec<BinaryHint> = hints
@@ -582,7 +613,7 @@ impl From<&GeneralizedHints> for CompactGeneralizedHints {
             .iter()
             .flat_map(|file| file.candidates.iter().map(|ranked| ranked.candidate.clone()))
             .collect();
-        binary_identities.sort_by(|left, right| (&left.package, &left.target).cmp(&(&right.package, &right.target)));
+        binary_identities.sort_by(compare_binaries);
         binary_identities.dedup();
 
         let items = hints
@@ -594,7 +625,7 @@ impl From<&GeneralizedHints> for CompactGeneralizedHints {
                 candidates: item
                     .candidates
                     .iter()
-                    .map(|ranked| ranked.map_candidate(index_of(&killers, &ranked.candidate)))
+                    .map(|ranked| ranked.map_candidate(index_of(&killers, &ranked.candidate, compare_killers)))
                     .collect(),
             })
             .collect();
@@ -606,14 +637,14 @@ impl From<&GeneralizedHints> for CompactGeneralizedHints {
                 candidates: file
                     .candidates
                     .iter()
-                    .map(|ranked| ranked.map_candidate(index_of(&binary_identities, &ranked.candidate)))
+                    .map(|ranked| ranked.map_candidate(index_of(&binary_identities, &ranked.candidate, compare_binaries)))
                     .collect(),
             })
             .collect();
         let test_sets = hints
             .test_sets
             .iter()
-            .map(|tests| tests.iter().map(|killer| index_of(&killers, killer)).collect())
+            .map(|tests| tests.iter().map(|killer| index_of(&killers, killer, compare_killers)).collect())
             .collect();
 
         Self {
@@ -682,10 +713,17 @@ impl TryFrom<CompactGeneralizedHints> for GeneralizedHints {
     }
 }
 
-fn index_of<T: PartialEq>(pool: &[T], entry: &T) -> u32 {
+fn compare_killers(left: &Killer, right: &Killer) -> core::cmp::Ordering {
+    (&left.package, &left.target, &left.test).cmp(&(&right.package, &right.target, &right.test))
+}
+
+fn compare_binaries(left: &BinaryHint, right: &BinaryHint) -> core::cmp::Ordering {
+    (&left.package, &left.target).cmp(&(&right.package, &right.target))
+}
+
+fn index_of<T>(pool: &[T], entry: &T, compare: impl Fn(&T, &T) -> core::cmp::Ordering) -> u32 {
     let index = pool
-        .iter()
-        .position(|known| known == entry)
+        .binary_search_by(|known| compare(known, entry))
         .expect("the identity pool was built from every referenced entry");
 
     u32::try_from(index).expect("an identity index cannot exceed the number of entries retained in the bounded artifact")
@@ -712,9 +750,11 @@ impl GeneralizedHints {
         match self.version {
             1 => {
                 for candidate in self.items.iter_mut().flat_map(|item| &mut item.candidates) {
+                    // #[gamma::skip(call_result.default, reason = "reset returns unit and call_result.default retains every field reset")]
                     reset(candidate);
                 }
                 for candidate in self.binaries.iter_mut().flat_map(|file| &mut file.candidates) {
+                    // #[gamma::skip(call_result.default, reason = "reset returns unit and call_result.default retains every field reset")]
                     reset(candidate);
                 }
             }
@@ -1233,6 +1273,7 @@ impl RunRecord {
 
         Ok(serde_json::from_str::<Self>(&text)
             .ok()
+            // #[gamma::skip(logical.and_remove_left, reason = "the version-only pass above already returned an error for every successfully parsed foreign version; full-record deserialization reads the same version field")]
             .filter(|record| record.version == VERSION && record.paths_are_workspace_relative()))
     }
 
@@ -1400,6 +1441,7 @@ impl RunRecord {
             file.mutants.retain(|entry| entry.outcome == Outcome::CompileError);
         }
         merged.files.retain(|file| !file.mutants.is_empty());
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "RunRecord serializes only strings, integer/bool fields, sequences, and maps with string keys; its custom serializers also emit only those JSON-compatible values")]
         let text = serde_json::to_string(&merged)
             .map_err(|cause| crate::error::error!("could not serialize incomplete compiler learning").caused_by(cause))?;
 
@@ -1815,6 +1857,7 @@ impl RunRecord {
             .map_err(|failure| crate::error::error!("refusing to overwrite campaign state `{}`", base.join(FILE)).caused_by(failure))?
             .unwrap_or_default();
         let merged = self.absorbing(&earlier);
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "RunRecord serializes only strings, integer/bool fields, sequences, and maps with string keys; its custom serializers also emit only those JSON-compatible values")]
         let text = serde_json::to_string(&merged)
             .map_err(|cause| crate::error::error!("could not serialize completed campaign state").caused_by(cause))?;
 
@@ -2318,12 +2361,6 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
     );
     policy_parts.push(policy.as_bytes());
 
-    let mut environment_parts = Vec::with_capacity(environment.len().saturating_mul(2));
-    for (name, value) in environment {
-        environment_parts.push(name.as_slice());
-        environment_parts.push(value.as_slice());
-    }
-
     let identity_version = MUTANT_ID_VERSION.to_le_bytes();
 
     Some(ContextDigest {
@@ -2337,8 +2374,17 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         tool: term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version]),
         tests: term(Term::Tests, &test_parts),
         policy: term(Term::Policy, &policy_parts),
-        environment: Some(term(Term::Environment, &environment_parts)),
+        environment: Some(environment_digest(environment)),
     })
+}
+
+fn environment_digest(environment: &[(Vec<u8>, Vec<u8>)]) -> String {
+    let mut parts = Vec::with_capacity(environment.len().saturating_mul(2));
+    for (name, value) in environment {
+        parts.push(name.as_slice());
+        parts.push(value.as_slice());
+    }
+    term(Term::Environment, &parts)
 }
 
 /// The process environment that reaches a test binary without gamma naming it.
@@ -2416,6 +2462,665 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn context_difference_table_ignores_unstated_axes_and_reports_every_changed_axis_in_order() {
+        let baseline = ContextDigest {
+            target: Some(String::new()),
+            config: Some(String::new()),
+            environment: Some(String::new()),
+            ..ContextDigest::default()
+        };
+        let mut all = serde_json::to_value(&baseline).expect("context JSON");
+        for term in Term::ALL {
+            let mut value = serde_json::to_value(&baseline).expect("context JSON");
+            value[term.name()] = serde_json::json!("changed");
+            let changed: ContextDigest = serde_json::from_value(value).expect("same context schema");
+            assert_eq!(baseline.differences(&changed), [*term]);
+            assert_eq!(changed.differences(&baseline), [*term]);
+            all[term.name()] = serde_json::json!("changed");
+        }
+        let changed: ContextDigest = serde_json::from_value(all).expect("all stated axes changed");
+        assert_eq!(baseline.differences(&changed), Term::ALL);
+        assert!(baseline.differences(&baseline).is_empty());
+        for term in [Term::Target, Term::Config, Term::Environment] {
+            let mut value = serde_json::to_value(&baseline).expect("context JSON");
+            value[term.name()] = serde_json::Value::Null;
+            let unstated: ContextDigest = serde_json::from_value(value).expect("optional term");
+            let mut different = serde_json::to_value(&baseline).expect("context JSON");
+            different[term.name()] = serde_json::json!("changed");
+            let stated: ContextDigest = serde_json::from_value(different).expect("stated term");
+            assert!(unstated.differences(&stated).is_empty());
+            assert!(stated.differences(&unstated).is_empty());
+        }
+    }
+
+    #[test]
+    fn rustflag_precedence_and_target_encodings_preserve_each_delimiter_and_name() {
+        for encoded in [None, Some("encoded".to_owned())] {
+            for plain in [None, Some("plain".to_owned())] {
+                for configured in [None, Some("configured".to_owned())] {
+                    let chosen = encoded.clone().or_else(|| plain.clone()).or_else(|| configured.clone());
+                    assert_eq!(rustflags_in(encoded.clone(), plain.clone(), configured.clone(), &[]), chosen);
+                    let targets = [
+                        ("target.a".to_owned(), "one two".to_owned()),
+                        ("target.b".to_owned(), "three".to_owned()),
+                    ];
+                    assert_eq!(
+                        rustflags_in(encoded.clone(), plain.clone(), configured.clone(), &targets),
+                        Some(format!("{}\ntarget.a=one two\ntarget.b=three", chosen.unwrap_or_default()))
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            rustflags_in(Some(String::new()), Some("ignored".to_owned()), None, &[]),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn site_identity_schema_errors_and_update_errors_preserve_exact_explanations_and_sources() {
+        let base = serde_json::json!({"file":"src/lib.rs", "item":"subject::answer", "mutator":"literal.int_to_zero", "occurrence":0});
+        for (digest, normalized, expected) in [
+            (None, None, "site identity contains neither digest nor normalizedText"),
+            (Some("digest"), Some("42"), "site identity contains both digest and normalizedText"),
+        ] {
+            let mut value = base.clone();
+            if let Some(digest) = digest {
+                value["digest"] = serde_json::json!(digest);
+            }
+            if let Some(normalized) = normalized {
+                value["normalizedText"] = serde_json::json!(normalized);
+            }
+            assert_eq!(
+                serde_json::from_value::<SiteIdentity>(value)
+                    .expect_err("invalid identity schema")
+                    .to_string(),
+                expected
+            );
+        }
+        serde_json::from_str::<SiteIdentity>("[]").unwrap_err();
+        let path = Utf8PathBuf::from("state.json");
+        let unsupported = UpdateLoadError::UnsupportedVersion {
+            path: path.clone(),
+            version: 99,
+        };
+        assert_eq!(
+            unsupported.to_string(),
+            format!("`state.json` has unsupported version 99; expected {VERSION}; remove it or use a compatible cargo-gamma version")
+        );
+        assert!(unsupported.source().is_none());
+        let large = UpdateLoadError::TooLarge { path: path.clone() };
+        assert_eq!(
+            large.to_string(),
+            format!("`state.json` is larger than the {} bytes cargo-gamma will retain", input::MAX_BYTES)
+        );
+        assert!(large.source().is_none());
+        let read = UpdateLoadError::Read {
+            path,
+            cause: io::Error::new(io::ErrorKind::PermissionDenied, "fixture denied"),
+        };
+        assert_eq!(read.to_string(), "`state.json` could not be read: fixture denied");
+        let source = read.source().expect("read failures retain their original I/O cause");
+        assert_eq!(
+            source.downcast_ref::<io::Error>().expect("I/O source").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "the table keeps all persisted-input refusal cases together")]
+    fn loading_tables_distinguish_missing_invalid_oversize_foreign_and_unsafe_artifacts() {
+        let (_dir, root) = workspace("record-loading-table-", "");
+        RunRecord::load_required(&root).unwrap_err();
+        assert!(RunRecord::load_raw(&root).is_none());
+        assert!(RunRecord::load_for_update(&root, FILE).expect("missing state").is_none());
+        for invalid in [b"not JSON".as_slice(), b"\xff".as_slice()] {
+            fs::write(root.join(FILE), invalid).expect("invalid state bytes");
+            RunRecord::load_required(&root).unwrap_err();
+            assert!(RunRecord::load_raw(&root).is_none());
+            let update = RunRecord::load_for_update(&root, FILE);
+            if invalid == b"not JSON" {
+                assert!(update.expect("corrupt JSON may be replaced").is_none());
+            } else {
+                assert!(matches!(update, Err(UpdateLoadError::Read { .. })));
+            }
+        }
+        File::create(root.join(FILE))
+            .expect("oversize file")
+            .set_len(input::MAX_BYTES + 1)
+            .expect("oversize length");
+        assert!(
+            RunRecord::load_required(&root)
+                .expect_err("oversize explicit input")
+                .to_string()
+                .contains("exceeds the supported size")
+        );
+        assert!(RunRecord::load_raw(&root).is_none());
+        assert!(matches!(
+            RunRecord::load_for_update(&root, FILE),
+            Err(UpdateLoadError::TooLarge { .. })
+        ));
+        let valid = RunRecord {
+            version: VERSION,
+            ..RunRecord::default()
+        };
+        fs::write(root.join(FILE), serde_json::to_vec(&valid).expect("record JSON")).expect("valid state");
+        RunRecord::load_required(&root).unwrap();
+        assert!(RunRecord::load_raw(&root).is_some());
+        assert!(RunRecord::load_for_update(&root, FILE).expect("valid update").is_some());
+        let foreign = RunRecord {
+            version: VERSION + 1,
+            ..RunRecord::default()
+        };
+        fs::write(root.join(FILE), serde_json::to_vec(&foreign).expect("foreign JSON")).expect("foreign state");
+        assert!(
+            RunRecord::load_required(&root)
+                .expect_err("unsupported explicit version")
+                .to_string()
+                .contains("unsupported version")
+        );
+        assert!(RunRecord::load_raw(&root).is_none());
+        assert!(matches!(
+            RunRecord::load_for_update(&root, FILE),
+            Err(UpdateLoadError::UnsupportedVersion { .. })
+        ));
+        for path in ["", "../outside.rs", "src/../outside.rs"] {
+            assert!(!safe_relative_path(Utf8Path::new(path)));
+            let unsafe_record = RunRecord {
+                version: VERSION,
+                files: vec![RecordedFile {
+                    path: path.into(),
+                    package: "subject".to_owned(),
+                    digest: String::new(),
+                    size: 0,
+                    mutants: Vec::new(),
+                }],
+                ..RunRecord::default()
+            };
+            fs::write(root.join(FILE), serde_json::to_vec(&unsafe_record).expect("unsafe JSON")).expect("unsafe state");
+            RunRecord::load_required(&root).unwrap_err();
+            assert!(RunRecord::load_raw(&root).is_none());
+            assert!(
+                RunRecord::load_for_update(&root, FILE)
+                    .expect("unsafe state can be replaced")
+                    .is_none()
+            );
+        }
+        assert!(safe_relative_path(Utf8Path::new("src/answer.rs")));
+        let mut entry: Entry = serde_json::from_value(
+            serde_json::json!({"id":"0123456789abcdef0123456789abcdef","outcome":"Killed","killer_file":"../outside.rs"}),
+        )
+        .expect("entry schema");
+        entry.killer_file = Some("../outside.rs".into());
+        let unsafe_killer = RunRecord {
+            version: VERSION,
+            files: vec![RecordedFile {
+                path: "src/lib.rs".into(),
+                package: "subject".to_owned(),
+                digest: String::new(),
+                size: 0,
+                mutants: vec![entry],
+            }],
+            ..valid
+        };
+        assert!(!unsafe_killer.paths_are_workspace_relative());
+        fs::write(root.join(FILE), serde_json::to_vec(&unsafe_killer).expect("unsafe killer JSON")).expect("unsafe killer state");
+        assert!(RunRecord::load_raw(&root).is_none());
+        assert!(
+            RunRecord::load_for_update(&root, FILE)
+                .expect("unsafe killer can be replaced")
+                .is_none()
+        );
+    }
+
+    fn ranked<T>(candidate: T) -> RankedHint<T> {
+        RankedHint {
+            candidate,
+            seeds: 0,
+            hits: 4,
+            misses: 3,
+            measured_ms: 120,
+            samples: 7,
+            order: 2,
+        }
+    }
+
+    #[test]
+    fn compact_hint_pools_preserve_multiple_identities_order_and_reject_out_of_bounds_indexes() {
+        let first = Killer {
+            package: "a".to_owned(),
+            target: "lib".to_owned(),
+            test: "first".to_owned(),
+        };
+        let second = Killer {
+            package: "b".to_owned(),
+            target: "test".to_owned(),
+            test: "second".to_owned(),
+        };
+        let first_binary = BinaryHint {
+            package: "a".to_owned(),
+            target: "lib".to_owned(),
+        };
+        let second_binary = BinaryHint {
+            package: "b".to_owned(),
+            target: "test".to_owned(),
+        };
+        let hints = GeneralizedHints {
+            version: GENERALIZED_HINTS_VERSION,
+            items: vec![ItemHints {
+                file: "src/lib.rs".into(),
+                item: "subject::answer".to_owned(),
+                candidates: vec![ranked(second.clone()), ranked(first.clone()), ranked(second.clone())],
+            }],
+            binaries: vec![FileBinaryHints {
+                file: "src/lib.rs".into(),
+                candidates: vec![
+                    ranked(second_binary.clone()),
+                    ranked(first_binary.clone()),
+                    ranked(second_binary.clone()),
+                ],
+            }],
+            test_sets: vec![vec![second.clone(), first.clone()]],
+            reach: Vec::new(),
+        };
+        let compact = CompactGeneralizedHints::from(&hints);
+        assert_eq!(compact.killers, [first, second]);
+        assert_eq!(compact.binary_identities, [first_binary, second_binary]);
+        assert_eq!(
+            compact.items[0].candidates.iter().map(|hint| hint.candidate).collect::<Vec<_>>(),
+            [1, 0, 1]
+        );
+        assert_eq!(
+            compact.binaries[0].candidates.iter().map(|hint| hint.candidate).collect::<Vec<_>>(),
+            [1, 0, 1]
+        );
+        assert_eq!(compact.test_sets, [vec![1, 0]]);
+        assert_eq!(GeneralizedHints::try_from(compact).expect("valid pool references"), hints);
+        for target in ["items", "binaries", "testSets"] {
+            let mut value = serde_json::to_value(&hints).expect("compact JSON");
+            if target == "testSets" {
+                value[target][0][0] = serde_json::json!(2);
+            } else {
+                value[target][0]["candidates"][0]["candidate"] = serde_json::json!(2);
+            }
+            let failure = serde_json::from_value::<GeneralizedHints>(value).expect_err("pool-length index is out of bounds");
+            assert_eq!(failure.to_string(), "generalized hints reference an identity outside their pool");
+        }
+    }
+
+    #[test]
+    fn compact_hint_encoding_is_byte_identical_to_linear_pool_resolution() {
+        fn linear_index<T: PartialEq>(pool: &[T], entry: &T) -> u32 {
+            u32::try_from(
+                pool.iter()
+                    .position(|known| known == entry)
+                    .expect("fixture pools contain each reference"),
+            )
+            .expect("fixture indexes fit in u32")
+        }
+        let killers = (0..512)
+            .rev()
+            .map(|index| Killer {
+                package: format!("package-{}", index % 3),
+                target: format!("test:target-{}", index % 5),
+                test: format!("tests::case_{index}"),
+            })
+            .collect::<Vec<_>>();
+        let binaries = killers.iter().map(|killer| BinaryHint {
+            package: killer.package.clone(),
+            target: killer.target.clone(),
+        });
+        let hints = GeneralizedHints {
+            version: GENERALIZED_HINTS_VERSION,
+            items: vec![ItemHints {
+                file: "src/lib.rs".into(),
+                item: "subject".to_owned(),
+                candidates: killers.iter().cycle().take(1024).cloned().map(ranked).collect(),
+            }],
+            binaries: vec![FileBinaryHints {
+                file: "src/lib.rs".into(),
+                candidates: binaries.map(ranked).collect(),
+            }],
+            test_sets: killers.chunks(16).map(<[Killer]>::to_vec).collect(),
+            reach: Vec::new(),
+        };
+        let mut expected = CompactGeneralizedHints::from(&hints);
+        expected
+            .killers
+            .sort_by(|left, right| (&left.package, &left.target, &left.test).cmp(&(&right.package, &right.target, &right.test)));
+        expected
+            .binary_identities
+            .sort_by(|left, right| (&left.package, &left.target).cmp(&(&right.package, &right.target)));
+        for (encoded, source) in expected.items.iter_mut().zip(&hints.items) {
+            encoded.candidates = source
+                .candidates
+                .iter()
+                .map(|hint| hint.map_candidate(linear_index(&expected.killers, &hint.candidate)))
+                .collect();
+        }
+        for (encoded, source) in expected.binaries.iter_mut().zip(&hints.binaries) {
+            encoded.candidates = source
+                .candidates
+                .iter()
+                .map(|hint| hint.map_candidate(linear_index(&expected.binary_identities, &hint.candidate)))
+                .collect();
+        }
+        expected.test_sets = hints
+            .test_sets
+            .iter()
+            .map(|tests| tests.iter().map(|killer| linear_index(&expected.killers, killer)).collect())
+            .collect();
+        assert_eq!(
+            serde_json::to_vec(&hints).expect("indexed encoding"),
+            serde_json::to_vec(&expected).expect("linear encoding")
+        );
+        assert_eq!(
+            serde_json::to_vec(&GeneralizedHints::default()).expect("empty hints"),
+            br#"{"version":0,"killers":[],"binaryIdentities":[],"items":[],"binaries":[],"testSets":[],"reach":[]}"#
+        );
+    }
+
+    #[test]
+    fn compact_pool_lookup_uses_logarithmic_comparisons() {
+        let pool = (0..65_536).collect::<Vec<u32>>();
+        for entry in [0, 1, 32_767, 32_768, 65_535] {
+            let comparisons = std::cell::Cell::new(0);
+            assert_eq!(
+                index_of(&pool, &entry, |left, right| {
+                    comparisons.set(comparisons.get() + 1);
+                    left.cmp(right)
+                }),
+                entry
+            );
+            assert!(comparisons.get() <= 17, "pool lookup must not scan the population");
+        }
+    }
+
+    #[test]
+    fn migration_resets_both_hint_tiers_and_reach_support_uses_an_exclusive_pool_bound() {
+        for version in [1, 2, GENERALIZED_HINTS_VERSION, 99] {
+            let mut hints = GeneralizedHints {
+                version,
+                items: vec![ItemHints {
+                    file: "src/lib.rs".into(),
+                    item: "answer".to_owned(),
+                    candidates: vec![ranked(Killer {
+                        package: "a".to_owned(),
+                        target: "lib".to_owned(),
+                        test: "first".to_owned(),
+                    })],
+                }],
+                binaries: vec![FileBinaryHints {
+                    file: "src/lib.rs".into(),
+                    candidates: vec![ranked(BinaryHint {
+                        package: "a".to_owned(),
+                        target: "lib".to_owned(),
+                    })],
+                }],
+                test_sets: vec![vec![]],
+                reach: vec![ReachCluster {
+                    site: SiteIdentity::from_mutant(&fixtures::mutant()),
+                    test_set: 0,
+                }],
+            }
+            .migrated();
+            assert_eq!(hints.version, if version <= 2 { GENERALIZED_HINTS_VERSION } else { version });
+            let item = &hints.items[0].candidates[0];
+            let binary = &hints.binaries[0].candidates[0];
+            let expected = if version == 1 { (1, 0, 0, 0, 0, 2) } else { (0, 4, 3, 120, 7, 2) };
+            assert_eq!(
+                (item.seeds, item.hits, item.misses, item.measured_ms, item.samples, item.order),
+                expected
+            );
+            assert_eq!(
+                (
+                    binary.seeds,
+                    binary.hits,
+                    binary.misses,
+                    binary.measured_ms,
+                    binary.samples,
+                    binary.order
+                ),
+                expected
+            );
+            assert_eq!(hints.supported().is_some(), version != 99);
+            hints.reach[0].test_set = 1;
+            assert!(hints.supported().is_none());
+        }
+    }
+
+    #[test]
+    fn checked_plan_snapshot_sorts_deduplicates_roots_and_honors_current_generation_requirement() {
+        let (_dir, root) = cache_workspace("record-plan-root-table-");
+        let mut plan = cache_plan(
+            &root,
+            vec![package_mutant("a-unviable", "a", "crates/a/src/lib.rs", Outcome::CompileError)],
+            true,
+        );
+        plan.specs
+            .insert("alias".to_owned(), (Utf8PathBuf::from("crates/b"), "0.1.0".to_owned()));
+        plan.reach.get_mut("a").expect("package a reach").insert("alias".to_owned());
+        let inputs = RunRecord::snapshot(&root, &root.join(FILE));
+        let record = RunRecord::from_plan_snapshot_checked(&plan, &envelope(), inputs.clone(), &Killers::default(), true)
+            .expect("unchanged generation");
+        assert_eq!(
+            record.compilation_roots["a"],
+            [Utf8PathBuf::from("crates/a"), Utf8PathBuf::from("crates/b")]
+        );
+        fs::write(root.join("crates/a/src/lib.rs"), "pub fn changed() {}\n").expect("different source generation");
+        assert!(RunRecord::from_plan_snapshot_checked(&plan, &envelope(), inputs.clone(), &Killers::default(), true).is_none());
+        assert!(RunRecord::from_plan_snapshot_checked(&plan, &envelope(), inputs, &Killers::default(), false).is_some());
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the matrix exercises every persisted-verdict provenance condition"
+    )]
+    fn killed_revalidation_requires_every_provenance_and_snapshot_condition() {
+        let (_dir, root) = workspace("record-killed-revalidation-", "pub fn answer() {}\n");
+        let index = killers(&root, "mod tests { #[test] fn caught() {} }\n");
+        let record = from_run(&root, &[killed("caught-mutant", Some("tests::caught"))], &envelope());
+        let entry = record
+            .files
+            .iter()
+            .flat_map(|file| &file.mutants)
+            .next()
+            .expect("recorded killed mutant")
+            .clone();
+        assert_eq!(entry.killer_file.as_deref(), Some(Utf8Path::new("src/tests.rs")));
+        let inputs = record.inputs.clone();
+        let files: HashMap<&Utf8Path, &RecordedFile> = record.files.iter().map(|file| (file.path.as_path(), file)).collect();
+        assert!(still_killed(&entry, &index, &files, &root, &inputs));
+        let nested_root = root.join("nested");
+        for missing in [
+            "name",
+            "recorded-path",
+            "unknown-test",
+            "outside-root",
+            "moved-path",
+            "missing-file",
+        ] {
+            let mut changed = entry.clone();
+            match missing {
+                "name" => changed.killed_by = None,
+                "recorded-path" => changed.killer_file = None,
+                "unknown-test" => changed.killed_by = Some("tests::absent".to_owned()),
+                "moved-path" => changed.killer_file = Some("src/other.rs".into()),
+                _ => {}
+            }
+            let empty = HashMap::default();
+            assert!(
+                !still_killed(
+                    &changed,
+                    &index,
+                    if missing == "missing-file" { &empty } else { &files },
+                    if missing == "outside-root" { nested_root.as_path() } else { &root },
+                    &inputs
+                ),
+                "{missing}"
+            );
+        }
+        let file = record
+            .files
+            .iter()
+            .find(|file| file.path == "src/tests.rs")
+            .expect("recorded test source");
+        assert!(is_unchanged(file, &inputs));
+        for dimension in ["missing", "size", "digest"] {
+            let mut changed_inputs = inputs.clone();
+            match dimension {
+                "missing" => changed_inputs.files.retain(|current| current.path != file.path),
+                "size" => {
+                    changed_inputs
+                        .files
+                        .iter_mut()
+                        .find(|current| current.path == file.path)
+                        .expect("current source")
+                        .size += 1;
+                }
+                _ => {
+                    changed_inputs
+                        .files
+                        .iter_mut()
+                        .find(|current| current.path == file.path)
+                        .expect("current source")
+                        .digest = "different".to_owned();
+                }
+            }
+            assert!(!is_unchanged(file, &changed_inputs), "{dimension}");
+            assert!(!still_killed(&entry, &index, &files, &root, &changed_inputs), "{dimension}");
+        }
+        let mut changed_file = file.clone();
+        changed_file.digest = "new digest".to_owned();
+        let mut changed_inputs = inputs;
+        changed_inputs
+            .files
+            .iter_mut()
+            .find(|current| current.path == file.path)
+            .expect("current source")
+            .digest = changed_file.digest.clone();
+        let mut changed_files = files.clone();
+        changed_files.insert(changed_file.path.as_path(), &changed_file);
+        assert!(is_unchanged(&changed_file, &changed_inputs));
+        assert!(
+            !still_killed(&entry, &index, &changed_files, &root, &changed_inputs),
+            "matching current bytes do not replace the killer index's observed digest"
+        );
+        let mut legacy_reusable = from_run(&root, &[killed("caught-mutant", Some("tests::caught"))], &envelope());
+        legacy_reusable
+            .files
+            .iter_mut()
+            .flat_map(|file| &mut file.mutants)
+            .for_each(|entry| entry.reusable = true);
+        assert!(legacy_reusable.settled(&root, Trust::Free, &index, &record.context).0.is_empty());
+        assert_eq!(
+            legacy_reusable
+                .settled(&root, Trust::Settled, &index, &record.context)
+                .0
+                .get(&entry.id),
+            Some(&Outcome::Killed)
+        );
+    }
+
+    #[test]
+    fn untracked_build_inputs_make_the_snapshot_incomplete_even_when_every_known_file_is_readable() {
+        let (_dir, root) = workspace("record-untracked-snapshot-", "pub fn answer() {}\n");
+        assert!(RunRecord::snapshot_with_external(&root, &root.join(FILE), &[], false).is_complete());
+        assert!(!RunRecord::snapshot_with_external(&root, &root.join(FILE), &[], true).is_complete());
+    }
+
+    #[test]
+    fn record_publication_error_stages_preserve_prior_bytes_and_raise_their_owned_notes() {
+        let (_dir, root) = workspace("record-publication-error-table-", "pub fn answer() {}\n");
+        let record = from_run(&root, &[unviable("compiler")], &envelope());
+        let foreign = RunRecord {
+            version: VERSION + 1,
+            ..from_run(&root, &[unviable("compiler")], &envelope())
+        };
+        let bytes = serde_json::to_vec(&foreign).expect("foreign JSON");
+        fs::write(root.join(FILE), &bytes).expect("foreign completed record");
+        fs::write(root.join(INCOMPLETE_FILE), &bytes).expect("foreign partial record");
+        assert!(
+            record
+                .store_completed(&root)
+                .expect_err("foreign completed record is not overwritten")
+                .to_string()
+                .contains("refusing to overwrite campaign state")
+        );
+        assert!(
+            record
+                .store_incomplete_convergence(&root)
+                .expect_err("foreign partial record is not overwritten")
+                .to_string()
+                .contains("refusing to overwrite incomplete campaign learning")
+        );
+        assert_eq!(fs::read(root.join(FILE)).expect("prior completed bytes"), bytes);
+        assert_eq!(fs::read(root.join(INCOMPLETE_FILE)).expect("prior partial bytes"), bytes);
+        let notes = crate::notes::Run::new();
+        let _scope = crate::notes::enter(Some(&notes));
+        RunRecord::store_probes(&root, &HashMap::default());
+        let raised = crate::notes::drain();
+        assert_eq!(raised.len(), 1);
+        assert!(raised[0].starts_with("did not overwrite campaign state:"));
+        fs::remove_file(root.join(FILE)).expect("remove foreign completed record");
+        fs::remove_file(root.join(INCOMPLETE_FILE)).expect("remove foreign partial record");
+        let blocked = root.join(".blocked-stage");
+        fs::create_dir(&blocked).expect("blocked staging destination");
+        crate::elements::next_scratch_path(blocked.clone());
+        RunRecord::store_probes(&root, &HashMap::default());
+        let raised = crate::notes::drain();
+        assert_eq!(raised.len(), 1);
+        assert!(raised[0].starts_with("could not save run-record hints:"));
+        assert!(!root.join(FILE).exists());
+        crate::elements::next_scratch_path(blocked.clone());
+        assert!(
+            record
+                .store_incomplete_convergence(&root)
+                .expect_err("partial publication staging fails")
+                .to_string()
+                .contains("could not save incomplete compiler learning")
+        );
+        assert!(!root.join(INCOMPLETE_FILE).exists());
+        crate::elements::next_scratch_path(blocked);
+        assert!(
+            record
+                .store_completed(&root)
+                .expect_err("completed publication staging fails")
+                .to_string()
+                .contains("could not save completed campaign state")
+        );
+        assert!(!root.join(FILE).exists());
+        fs::create_dir(root.join(INCOMPLETE_FILE)).expect("directory cannot be cleared by remove_file");
+        assert!(
+            record
+                .store_completed(&root)
+                .expect_err("failed partial-state removal is reported")
+                .to_string()
+                .contains("could not clear incomplete campaign learning")
+        );
+    }
+
+    #[test]
+    fn incomplete_convergence_retains_only_nonempty_compiler_evidence_files() {
+        let (_dir, root) = workspace("record-incomplete-file-retention-", "pub fn answer() {}\n");
+        fs::write(root.join("src/other.rs"), "pub fn other() {}\n").expect("test-derived file");
+        let record = from_run(
+            &root,
+            &[unviable("compiler"), mutant("survivor", "src/other.rs", Outcome::Survived)],
+            &envelope(),
+        );
+        let stored = record.store_incomplete_convergence(&root).expect("partial compiler evidence");
+        assert_eq!(stored.files.len(), 1);
+        assert_eq!(stored.files[0].path.as_str(), "src/lib.rs");
+        assert_eq!(stored.files[0].mutants.len(), 1);
+        assert_eq!(stored.files[0].mutants[0].outcome, Outcome::CompileError);
+        let loaded = RunRecord::load_incomplete(&root);
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].mutants[0].id.as_str(), "compiler");
+    }
 
     #[test]
     fn record_iteration_skips_empty_files_and_visits_every_later_entry() {
@@ -3655,6 +4360,60 @@ mod tests {
             record.settled(&root, Trust::Free, &Killers::default(), &after).0.is_empty(),
             "a changed inherited environment must recompile an unviable mutant"
         );
+    }
+
+    #[test]
+    fn resume_requires_a_recorded_and_unchanged_inherited_environment() {
+        let before = [(b"SUBJECT_MODE".to_vec(), b"before".to_vec())];
+        let after = [(b"SUBJECT_MODE".to_vec(), b"after".to_vec())];
+        let mut saved = context_in(&plain(), None, &before).unwrap();
+        assert_eq!(environment_digest(&before), term(Term::Environment, &[b"SUBJECT_MODE", b"before"]));
+        saved.validate_environment(&environment_digest(&before)).unwrap();
+        let failure = saved.validate_environment(&environment_digest(&after)).unwrap_err();
+        assert!(failure.to_string().contains("restore the original environment"), "{failure}");
+        saved.environment = None;
+        let failure = saved.validate_environment(&environment_digest(&before)).unwrap_err();
+        assert!(
+            failure.to_string().contains("did not record its inherited environment"),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn environment_only_context_is_resumable_without_a_named_toolchain_but_not_reusable() {
+        let environment = [(b"SUBJECT_MODE".to_vec(), b"before".to_vec())];
+        assert!(
+            context_in(
+                &Context {
+                    toolchain: None,
+                    ..plain()
+                },
+                None,
+                &environment
+            )
+            .is_none(),
+            "an unknown compiler must still disable incremental reuse"
+        );
+        let saved = ContextDigest::from_environment(&environment);
+        let restored: ContextDigest = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(saved, restored);
+        assert!(restored.toolchain.is_empty());
+        restored.validate_environment(&environment_digest(&environment)).unwrap();
+        assert!(
+            restored
+                .validate_environment(&environment_digest(&[(b"SUBJECT_MODE".to_vec(), b"after".to_vec())]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn environment_digest_preserves_names_values_and_pair_order() {
+        let environment = [(b"FIRST".to_vec(), b"one".to_vec()), (b"SECOND".to_vec(), b"two".to_vec())];
+        assert_eq!(
+            environment_digest(&environment),
+            term(Term::Environment, &[b"FIRST", b"one", b"SECOND", b"two"]),
+        );
+        assert_eq!(environment_digest(&[]), term(Term::Environment, &[]));
     }
 
     #[test]

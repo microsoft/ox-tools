@@ -33,6 +33,7 @@ pub const fn capacity() -> usize {
 }
 
 #[cfg(windows)]
+// #[gamma::skip(fn_value.bool_true, tag = "timeout", reason = "returning success without releasing the suspended Windows child leaves output collection waiting forever; campaign log 3610")]
 fn resume_child(child: u32) -> bool {
     #[cfg(any(test, feature = "fault-injection"))]
     if faults::fired(faults::Fault::JobResume) {
@@ -43,6 +44,7 @@ fn resume_child(child: u32) -> bool {
 }
 
 #[cfg(windows)]
+// #[gamma::skip(fn_value.ok, tag = "timeout", reason = "skipping assignment and resumption leaves the CREATE_SUSPENDED Windows child waiting forever; campaign log 3361")]
 fn assign_and_resume(job: &Job, child: &Child) -> Result<(), PlatformError> {
     #[cfg(any(test, feature = "fault-injection"))]
     let assigned = !faults::fired(faults::Fault::JobAssign) && job.assign(child);
@@ -58,6 +60,7 @@ fn assign_and_resume(job: &Job, child: &Child) -> Result<(), PlatformError> {
     // The child has been waiting since it was created. It is now inside the new job, where
     // termination can reach every descendant it creates.
     // #[gamma::skip(cond.always_false, reason = "pretending the suspended child was resumed leaves it waiting forever")]
+    // #[gamma::skip(cond.always_true, tag = "timeout", reason = "forcing this condition true skips resume_child, leaving the Windows child suspended; campaign log 3922")]
     if resume_child(child.id()) {
         Ok(())
     } else {
@@ -500,10 +503,18 @@ impl From<io::Error> for OutputError {
 /// Returns [`OutputError::Containment`] when the boundary cannot be prepared or cannot adopt the
 /// child, and [`OutputError::Io`] when spawning, waiting, reading a pipe, or creating or joining a
 /// reader thread fails.
-pub fn output(mut command: Command, request: MemoryRequest) -> Result<Output, OutputError> {
+pub fn output(command: Command, request: MemoryRequest) -> Result<Output, OutputError> {
+    output_with(command, request, prepare)
+}
+
+fn output_with(
+    mut command: Command,
+    request: MemoryRequest,
+    prepare_command: impl FnOnce(Command, MemoryRequest) -> Result<PreparedCommand, PlatformError>,
+) -> Result<Output, OutputError> {
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let prepared = prepare(command, request)?;
+    let prepared = prepare_command(command, request)?;
     let spawned = prepared.spawn().map_err(|failure| {
         let (cause, _prepared) = failure.into_parts();
 
@@ -982,16 +993,27 @@ impl ProcessTree {
     /// stream could not be read, the platform's subtree boundary or Unix process group could not
     /// be terminated, or the child could not be observed or reaped. A reader-thread panic is
     /// reported as [`io::ErrorKind::Other`].
-    pub fn wait_with_output(mut self) -> io::Result<Output> {
-        let stdout = output_reader(self.take_stdout(), STDOUT_READER_THREAD)?;
+    pub fn wait_with_output(self) -> io::Result<Output> {
+        self.wait_with_output_using(
+            |pipe| output_reader(pipe, STDOUT_READER_THREAD),
+            |pipe| output_reader(pipe, STDERR_READER_THREAD),
+        )
+    }
+
+    fn wait_with_output_using(
+        mut self,
+        start_stdout: impl FnOnce(Option<ChildStdout>) -> io::Result<Option<OutputReader>>,
+        start_stderr: impl FnOnce(Option<ChildStderr>) -> io::Result<Option<OutputReader>>,
+    ) -> io::Result<Output> {
+        let stdout = start_stdout(self.take_stdout())?;
         #[cfg(any(test, feature = "fault-injection"))]
         let stderr = if faults::fired(faults::Fault::StderrReader) {
             Err(io::Error::other("stderr reader creation failed as requested by a test"))
         } else {
-            output_reader(self.take_stderr(), STDERR_READER_THREAD)
+            start_stderr(self.take_stderr())
         };
         #[cfg(not(any(test, feature = "fault-injection")))]
-        let stderr = output_reader(self.take_stderr(), STDERR_READER_THREAD);
+        let stderr = start_stderr(self.take_stderr());
         let stderr = match stderr {
             Ok(stderr) => stderr,
             Err(cause) => {
@@ -1325,8 +1347,7 @@ impl ProcessTree {
         // #[gamma::skip(stmt.delete_call, reason = "release has no effect on non-Unix mutation hosts; Unix tests assert termination frees the watched slot before reaping")]
         self.release();
 
-        let reaped = child.wait()?;
-        killed?;
+        let reaped = reaped_after_cleanup(child.wait(), killed)?;
 
         #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::Terminate) {
@@ -1446,7 +1467,9 @@ fn discard_output_reader(reader: Option<&OutputReader>) {
 }
 
 fn discard_output_before_error(error: io::Error, stdout: Option<&OutputReader>, stderr: Option<&OutputReader>) -> io::Error {
+    // #[gamma::skip(call_result.default, reason = "discard_output_reader returns unit; cleanup still executes and () is replaced with ()")]
     discard_output_reader(stdout);
+    // #[gamma::skip(call_result.default, reason = "discard_output_reader returns unit; cleanup still executes and () is replaced with ()")]
     discard_output_reader(stderr);
     error
 }
@@ -1585,6 +1608,12 @@ fn kill_if_running(child: &mut Child) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(kill_error) => resolve_kill_failure(kill_error, &child.try_wait()),
     }
+}
+
+fn reaped_after_cleanup(reaped: io::Result<ExitStatus>, killed: io::Result<()>) -> io::Result<ExitStatus> {
+    let reaped = reaped?;
+    killed?;
+    Ok(reaped)
 }
 
 fn resolve_kill_failure(kill_error: io::Error, status: &io::Result<Option<ExitStatus>>) -> io::Result<()> {
@@ -1837,6 +1866,37 @@ mod tests {
         let reason = subtree.terminate().expect_err("an absent leader was already reaped");
 
         assert_eq!(reason.to_string(), "the subtree leader was already reaped");
+        assert!(subtree.take_stdout().is_none(), "no leader means no stdout pipe");
+        assert!(subtree.take_stderr().is_none(), "no leader means no stderr pipe");
+    }
+
+    #[test]
+    fn error_cleanup_discards_both_independent_capture_buffers() {
+        let make_reader = || OutputReader {
+            thread: thread::spawn(|| Ok(())),
+            bytes: Arc::new(Mutex::new(vec![1, 2, 3])),
+            retaining: Arc::new(AtomicBool::new(true)),
+        };
+        let stdout = make_reader();
+        let stderr = make_reader();
+        let error = discard_output_before_error(io::Error::other("primary"), Some(&stdout), Some(&stderr));
+        assert_eq!(error.to_string(), "primary");
+        for reader in [stdout, stderr] {
+            assert!(!reader.retaining.load(Ordering::Acquire));
+            assert!(reader.bytes.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+            reader.thread.join().expect("reader terminates").expect("reader completes");
+        }
+    }
+
+    #[test]
+    fn reader_thread_panics_return_stream_context_instead_of_panicking() {
+        let reader = OutputReader {
+            thread: thread::spawn(|| panic!("injected capture thread panic")),
+            bytes: Arc::new(Mutex::new(Vec::new())),
+            retaining: Arc::new(AtomicBool::new(true)),
+        };
+        let error = join_output_reader(Some(reader), "campaign-stream").expect_err("a reader panic is an I/O error");
+        assert_eq!(error.to_string(), "the campaign-stream reader thread panicked");
     }
 
     #[test]
@@ -3201,6 +3261,12 @@ mod tests {
         let reason = ProcessTree::adopt(spawned).expect_err("the adoption and cleanup faults are reported");
 
         assert!(reason.to_string().contains("cleanup of the refused child also failed"), "{reason}");
+        assert_eq!(
+            std::error::Error::source(&reason)
+                .expect("cleanup failure is retained as the cause")
+                .to_string(),
+            "abandonment cleanup failed as requested by a test"
+        );
     }
 
     /// Once a real interrupt has begun, a fresh window refuses to open — proven with a real signal
@@ -3375,6 +3441,155 @@ mod tests {
         let spawned = prepared.spawn().expect("spawn");
 
         ProcessTree::adopt(spawned).expect("adoption")
+    }
+
+    #[test]
+    fn contained_output_forwards_memory_policy_and_propagates_both_containment_failures() {
+        let request = MemoryRequest {
+            meter: true,
+            limit: Some(1234),
+        };
+        let reason = output_with(no_op_command(), request, |command, forwarded| {
+            drop(command);
+            assert_eq!(forwarded.meter, request.meter);
+            assert_eq!(forwarded.limit, request.limit);
+            Err(PlatformError::new_static(Situation::Refused, "policy preparation failed"))
+        })
+        .expect_err("preparation errors remain containment errors");
+        assert!(matches!(reason, OutputError::Containment(_)));
+        assert!(reason.to_string().contains("policy preparation failed"), "{reason}");
+        let _adopt = faults::arm(faults::Fault::Adopt);
+        let reason = output(no_op_command(), MemoryRequest::default()).expect_err("adoption failures remain containment errors");
+        assert!(matches!(reason, OutputError::Containment(_)));
+        assert!(reason.to_string().contains("would not take the child"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_backoff_propagates_interrupt_window_reopening_failure() {
+        let prepared = prepare(no_op_command(), MemoryRequest::default()).expect("preparation opens a window");
+        let _window = faults::arm(faults::Fault::Window);
+        let reason = prepared
+            .backoff(Duration::ZERO)
+            .expect_err("failed window reopening must return an error");
+        assert!(reason.to_string().contains("being interrupted"), "{reason}");
+    }
+
+    #[test]
+    fn unproven_cleanup_preserves_primary_failure_without_retrying_termination() {
+        for unproven in [false, true] {
+            let mut subtree = captured_no_op_subtree();
+            subtree.output_cleanup_unproven = unproven;
+            let _wait = faults::arm(faults::Fault::OutputWait);
+            let _terminate = faults::arm(faults::Fault::Terminate);
+            let reason = subtree.wait_with_output().expect_err("output wait errors propagate");
+            assert!(
+                reason.to_string().contains(if unproven {
+                    "output wait failed"
+                } else {
+                    "subtree termination failed"
+                }),
+                "{reason}"
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn output_wait_propagates_observation_failure_instead_of_panicking() {
+        let mut subtree = captured_no_op_subtree();
+        let _status = faults::arm(faults::Fault::TryWait);
+        let reason = wait_for_output(&mut subtree).expect_err("observation failure propagates through output waiting");
+        assert!(reason.to_string().contains("child status failed"), "{reason}");
+    }
+
+    #[test]
+    fn output_capture_propagates_each_reader_start_and_join_failure() {
+        for failing_stream in ["stdout-start", "stdout-read", "stderr-read", "stderr-start-with-stdout-read"] {
+            let subtree = captured_no_op_subtree();
+            let reason = subtree
+                .wait_with_output_using(
+                    |pipe| {
+                        drop(pipe);
+                        if failing_stream == "stdout-start" {
+                            return Err(io::Error::other("stdout start failed"));
+                        }
+                        if matches!(failing_stream, "stdout-read" | "stderr-start-with-stdout-read") {
+                            return Ok(Some(OutputReader {
+                                thread: thread::spawn(|| Err(io::Error::other("stdout read failed"))),
+                                bytes: Arc::new(Mutex::new(Vec::new())),
+                                retaining: Arc::new(AtomicBool::new(true)),
+                            }));
+                        }
+                        output_reader(Some(io::empty()), "campaign-stdout")
+                    },
+                    |pipe| {
+                        drop(pipe);
+                        if failing_stream == "stderr-start-with-stdout-read" {
+                            return Err(io::Error::other("stderr start failed"));
+                        }
+                        if failing_stream == "stderr-read" {
+                            return Ok(Some(OutputReader {
+                                thread: thread::spawn(|| Err(io::Error::other("stderr read failed"))),
+                                bytes: Arc::new(Mutex::new(Vec::new())),
+                                retaining: Arc::new(AtomicBool::new(true)),
+                            }));
+                        }
+                        output_reader(Some(io::empty()), "campaign-stderr")
+                    },
+                )
+                .expect_err("every reader failure returns an error instead of panicking");
+            let expected = if failing_stream == "stdout-start" {
+                "stdout start failed"
+            } else if failing_stream == "stderr-read" {
+                "stderr read failed"
+            } else {
+                "stdout read failed"
+            };
+            assert!(reason.to_string().contains(expected), "{reason}");
+        }
+    }
+
+    #[test]
+    fn reaping_preserves_wait_failure_precedence_and_cleanup_failure() {
+        let status = no_op_command().status().expect("the helper exits successfully");
+        for (wait_failed, kill_failed) in [(true, false), (false, true), (true, true)] {
+            let wait = if wait_failed {
+                Err(io::Error::other("wait failed"))
+            } else {
+                Ok(status)
+            };
+            let kill = if kill_failed {
+                Err(io::Error::other("kill failed"))
+            } else {
+                Ok(())
+            };
+            let reason = reaped_after_cleanup(wait, kill).expect_err("either error propagates");
+            assert_eq!(reason.to_string(), if wait_failed { "wait failed" } else { "kill failed" });
+        }
+        assert_eq!(
+            reaped_after_cleanup(Ok(status), Ok(())).expect("successful cleanup returns the status"),
+            status
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_sweep_of_an_exited_leader_marks_cleanup_unproven() {
+        let mut subtree = captured_no_op_subtree();
+        subtree
+            .child
+            .as_mut()
+            .expect("the leader is owned")
+            .wait()
+            .expect("the helper exits");
+        let _sweep = faults::arm(faults::Fault::Sweep);
+        let reason = subtree.observe().expect_err("the exited leader's sweep failure propagates");
+        assert!(reason.to_string().contains("subtree sweep failed"), "{reason}");
+        assert!(
+            subtree.output_cleanup_unproven,
+            "failed sweeps cannot prove inherited pipes were released"
+        );
     }
 
     fn captured_gated_subtree() -> (ProcessTree, tempfile::TempDir, camino::Utf8PathBuf, camino::Utf8PathBuf) {

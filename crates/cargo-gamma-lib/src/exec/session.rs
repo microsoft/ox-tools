@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::build::Round;
 use super::test_binary::TestBinary;
 
 /// What happened during a run, beyond the verdicts written back onto the mutants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     /// The sum of the test binaries' baseline durations, used to calibrate mutant budgets.
     pub baseline: Duration,
@@ -138,7 +139,7 @@ pub struct Session {
 /// components of the testing window. Neither set sums to its aggregate — compiling sits between the
 /// copy and the baseline, and bookkeeping sits between the census and the sweep — so this is a
 /// profile of where a slow run is slow, not a reconciliation of the totals it lives beside.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Phases {
     /// What duplicating the workspace into the scratch tree cost, before a line of it was
     /// instrumented. Part of [`Session::build`].
@@ -163,7 +164,7 @@ pub struct Phases {
 }
 
 /// Whether case-level reachability optimization ran and produced complete evidence.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CensusStatus {
     /// The user did not request the experimental optimization.
     #[default]
@@ -199,7 +200,7 @@ impl CensusStatus {
 /// repaid during the sweep by running fewer tests per mutant. Whether that trade is positive
 /// depends on the workspace, and these figures show which way it went rather than folding the cost
 /// invisibly into the build.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CensusCost {
     /// How long the whole census took, across every binary and every test.
     pub elapsed: Duration,
@@ -236,7 +237,7 @@ pub struct CensusCost {
 /// The launch count is what turns the cost model's `build + Σ(launch + prefix)` from a formula into
 /// a measurement; the probe count is what says whether the killer hints and the census are earning
 /// their keep, since a probe is a launch the run only made because a hint pointed at it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SweepCost {
     /// How long the sweep took, across every mutant and every binary it ran.
     pub elapsed: Duration,
@@ -294,10 +295,180 @@ pub struct SweepCost {
     pub reach_launches_saved: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PackageSweepCost {
     pub package: Arc<str>,
     pub mutants: usize,
     pub first_started_ms: u64,
     pub settled_ms: u64,
+}
+
+impl SweepCost {
+    pub(super) fn combine(previous: Option<Self>, current: Option<Self>) -> Option<Self> {
+        let Some(mut total) = previous else { return current };
+        let Some(current) = current else { return Some(total) };
+        let offset = u64::try_from(total.elapsed.as_millis()).unwrap_or(u64::MAX);
+        total.elapsed = total.elapsed.saturating_add(current.elapsed);
+        macro_rules! add_counts {
+            ($($field:ident),+ $(,)?) => {
+                $(total.$field = total.$field.saturating_add(current.$field);)+
+            };
+        }
+
+        add_counts!(
+            launches,
+            probes,
+            exact_probes,
+            exact_hits,
+            generalized_probes,
+            generalized_hits,
+            generalized_rejected,
+            exact_candidates,
+            generalized_candidates,
+            item_candidates,
+            reach_candidates,
+            file_candidates,
+            census_candidates,
+            item_probes,
+            item_hits,
+            reach_probes,
+            reach_hits,
+            file_probes,
+            file_hits,
+            item_rejected,
+            reach_rejected,
+            file_rejected,
+            census_probes,
+            census_hits,
+            whole_selections,
+            case_selections,
+            hinted_selections,
+            hinted_fallbacks,
+            uncovered_selections,
+            available_tests,
+            selected_tests,
+            launches_saved,
+            reach_launches_saved,
+        );
+        let mut packages: BTreeMap<_, _> = total
+            .packages
+            .into_iter()
+            .map(|package| (Arc::clone(&package.package), package))
+            .collect();
+        for mut package in current.packages {
+            package.first_started_ms = package.first_started_ms.saturating_add(offset);
+            package.settled_ms = package.settled_ms.saturating_add(offset);
+            if let Some(prior) = packages.get_mut(&package.package) {
+                prior.mutants = prior.mutants.saturating_add(package.mutants);
+                prior.first_started_ms = prior.first_started_ms.min(package.first_started_ms);
+                prior.settled_ms = prior.settled_ms.max(package.settled_ms);
+            } else {
+                packages.insert(Arc::clone(&package.package), package);
+            }
+        }
+        total.packages = packages.into_values().collect();
+        Some(total)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use core::time::Duration;
+
+    use super::{PackageSweepCost, SweepCost};
+
+    fn cost(count: usize, elapsed: u64, packages: &[(&str, usize, u64, u64)]) -> SweepCost {
+        let mut value = serde_json::to_value(SweepCost::default()).unwrap();
+        for field in value.as_object_mut().unwrap().values_mut() {
+            if field.is_number() {
+                *field = serde_json::json!(count);
+            }
+        }
+        let mut cost: SweepCost = serde_json::from_value(value).unwrap();
+        cost.elapsed = Duration::from_millis(elapsed);
+        cost.packages = packages
+            .iter()
+            .map(|&(package, mutants, first_started_ms, settled_ms)| PackageSweepCost {
+                package: package.into(),
+                mutants,
+                first_started_ms,
+                settled_ms,
+            })
+            .collect();
+        cost
+    }
+
+    #[test]
+    fn cumulative_sweep_merges_every_counter_and_offsets_package_spans() {
+        let prior = cost(2, 100, &[("b", 2, 10, 90)]);
+        let segment = cost(3, 50, &[("b", 1, 5, 40), ("a", 2, 0, 50)]);
+        let expected = cost(5, 150, &[("a", 2, 100, 150), ("b", 3, 10, 140)]);
+        let total = SweepCost::combine(Some(prior), Some(segment)).unwrap();
+        assert_eq!(serde_json::to_value(&total).unwrap(), serde_json::to_value(&expected).unwrap());
+        let third = cost(1, 10, &[("a", 1, 0, 10)]);
+        let expected = cost(6, 160, &[("a", 3, 100, 160), ("b", 3, 10, 140)]);
+        let total = SweepCost::combine(Some(total), Some(third)).unwrap();
+        assert_eq!(serde_json::to_value(&total).unwrap(), serde_json::to_value(&expected).unwrap());
+        let unchanged = SweepCost::combine(Some(total), None).unwrap();
+        assert_eq!(serde_json::to_value(unchanged).unwrap(), serde_json::to_value(expected).unwrap());
+        assert!(SweepCost::combine(None, None).is_none());
+        let fresh = cost(1, 10, &[]);
+        assert_eq!(
+            serde_json::to_value(SweepCost::combine(None, Some(fresh)).unwrap()).unwrap(),
+            serde_json::to_value(cost(1, 10, &[])).unwrap(),
+        );
+    }
+
+    #[test]
+    fn cumulative_sweep_merges_large_overlapping_package_sets_in_name_order() {
+        let mut prior = cost(1, 100, &[]);
+        prior.packages = (0..1000)
+            .rev()
+            .map(|index| PackageSweepCost {
+                package: format!("package-{index:04}").into(),
+                mutants: 1,
+                first_started_ms: 10,
+                settled_ms: 90,
+            })
+            .collect();
+        let mut segment = cost(1, 50, &[]);
+        segment.packages = (500..1500)
+            .rev()
+            .map(|index| PackageSweepCost {
+                package: format!("package-{index:04}").into(),
+                mutants: 2,
+                first_started_ms: 5,
+                settled_ms: 40,
+            })
+            .collect();
+        let total = SweepCost::combine(Some(prior), Some(segment)).unwrap();
+        assert_eq!(total.packages.len(), 1500);
+        for (index, package) in total.packages.iter().enumerate() {
+            assert_eq!(package.package.as_ref(), format!("package-{index:04}"));
+            assert_eq!(
+                package.mutants,
+                if index < 500 {
+                    1
+                } else if index < 1000 {
+                    3
+                } else {
+                    2
+                }
+            );
+            assert_eq!(package.first_started_ms, if index < 1000 { 10 } else { 105 });
+            assert_eq!(package.settled_ms, if index < 500 { 90 } else { 140 });
+        }
+    }
+
+    #[test]
+    fn cumulative_sweep_saturates_counts_elapsed_and_package_offsets() {
+        let prior = cost(usize::MAX, 1, &[("a", usize::MAX, 0, u64::MAX)]);
+        let mut segment = cost(1, 1, &[("a", 1, u64::MAX, u64::MAX)]);
+        segment.elapsed = Duration::MAX;
+        let total = SweepCost::combine(Some(prior), Some(segment)).unwrap();
+        let mut expected = cost(usize::MAX, 1, &[("a", usize::MAX, 0, u64::MAX)]);
+        expected.elapsed = Duration::MAX;
+        assert_eq!(serde_json::to_value(total).unwrap(), serde_json::to_value(expected).unwrap());
+    }
 }

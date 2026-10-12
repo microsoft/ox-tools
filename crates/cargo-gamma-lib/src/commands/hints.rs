@@ -34,11 +34,17 @@ use crate::report::{Styler, quantity};
 pub(super) fn hints<H: Host>(host: &mut H, args: &HintsArgs, styler: Styler) -> crate::Result<i32> {
     let selected = crate::paths::physical(&args.dir)?;
     let (root, base, _lock) = crate::exec::claim_campaign_state(&selected, args.cache_dir.as_deref())?;
-    let record = if args.replace {
-        RunRecord::load_required(&base)?
-    } else {
-        RunRecord::load(&base)
-    };
+    let record = promotion_record(
+        args.replace,
+        || crate::exec::partial_testing_record(&base),
+        |strict| {
+            if strict {
+                RunRecord::load_required(&base)
+            } else {
+                Ok(RunRecord::load(&base))
+            }
+        },
+    )?;
     let (existing, generation) = Hints::load_for_promotion(&root, args.replace)?;
     let (promoted, omitted) = Hints::promoted_record(&record);
     let merged = if args.replace {
@@ -102,4 +108,86 @@ pub(super) fn hints<H: Host>(host: &mut H, args: &HintsArgs, styler: Styler) -> 
     )?;
 
     Ok(EXIT_OK)
+}
+
+fn promotion_record(
+    replace: bool,
+    partial: impl FnOnce() -> crate::Result<Option<RunRecord>>,
+    completed: impl FnOnce(bool) -> crate::Result<RunRecord>,
+) -> crate::Result<RunRecord> {
+    if replace {
+        return completed(true);
+    }
+    match partial()? {
+        Some(record) => Ok(record),
+        None => completed(false),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::error::error;
+
+    #[test]
+    fn replacement_requires_completed_evidence_without_reading_partial_state() {
+        let failure = promotion_record(
+            true,
+            || panic!("replacement must never consult the interrupted campaign"),
+            |strict| {
+                assert!(strict, "replacement must strictly load a completed record");
+                Err(error!("missing completed ledger"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "missing completed ledger");
+        let record = promotion_record(
+            true,
+            || panic!("replacement must never consult the interrupted campaign"),
+            |strict| {
+                assert!(strict);
+                Ok(RunRecord::default())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(record).unwrap(),
+            serde_json::to_value(RunRecord::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn ordinary_promotion_prefers_partial_evidence_and_keeps_completed_fallback_best_effort() {
+        let partial = promotion_record(
+            false,
+            || Ok(Some(RunRecord::default())),
+            |_| panic!("partial evidence must take precedence over older completed evidence"),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(partial).unwrap(),
+            serde_json::to_value(RunRecord::default()).unwrap()
+        );
+        let completed = promotion_record(
+            false,
+            || Ok(None),
+            |strict| {
+                assert!(!strict, "ordinary promotion retains best-effort completed-record loading");
+                Ok(RunRecord::default())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(completed).unwrap(),
+            serde_json::to_value(RunRecord::default()).unwrap()
+        );
+        let failure = promotion_record(
+            false,
+            || Err(error!("corrupt interrupted checkpoint")),
+            |_| panic!("a corrupt interrupted checkpoint must not fall back to old evidence"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "corrupt interrupted checkpoint");
+    }
 }

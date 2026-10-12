@@ -529,6 +529,10 @@ fn settle_suspicions(attempt: Attempt<'_>, mut run: impl FnMut(Attempt<'_>) -> V
 /// mutant switched off. A suite that fails either way was not detecting anything.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, test: Option<String>) -> Verdict {
+    confirm_kill_with(attempt, test, |attempt| observe(work, binary, attempt).verdict)
+}
+
+fn confirm_kill_with(attempt: Attempt<'_>, test: Option<String>, observe: impl FnOnce(Attempt<'_>) -> Verdict) -> Verdict {
     // Nothing to exonerate. A run with no mutant active has already answered the question the
     // confirmation would ask, and asking it again would only pay for the same answer.
     if attempt.active.is_none() {
@@ -544,7 +548,7 @@ fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, tes
         },
     );
 
-    match observe(work, binary, exonerating_attempt).verdict {
+    match observe(exonerating_attempt) {
         // The suite is green without the mutant and red with it. That is a detection, and the only
         // observation in this match that is one.
         Verdict::Passed => Verdict::Failed(test),
@@ -586,7 +590,11 @@ fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, tes
 /// Confirms that nextest's inability to enumerate tests was caused by the active mutant.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn confirm_enumeration(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, output: String) -> Verdict {
-    match observe(work, binary, attempt.exonerating()).verdict {
+    confirm_enumeration_with(attempt, output, |attempt| observe(work, binary, attempt).verdict)
+}
+
+fn confirm_enumeration_with(attempt: Attempt<'_>, output: String, observe: impl FnOnce(Attempt<'_>) -> Verdict) -> Verdict {
+    match observe(attempt.exonerating()) {
         Verdict::Passed => Verdict::TestEnumerationFailed(output),
         Verdict::Failed(test) => Verdict::Flaky(test),
         Verdict::Unmetered(reason) => Verdict::Unmetered(reason),
@@ -606,11 +614,13 @@ fn confirm_enumeration(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
 /// test, and both come out as a kill with no killer. A reader chasing an unnamed kill would
 /// otherwise spend the search on the suite rather than on the pipe.
 fn announce_partial(binary: &TestBinary) {
-    announce(&format!(
+    let message = format!(
         "the output of `{}` could not be read to the end, so the failing test may be named in text \
          this run never saw. The exit status still decided the verdict.",
         binary.path
-    ));
+    );
+    // #[gamma::skip(call_result.default, reason = "announce returns unit and this mutator retains the diagnostic publication before replacing unit with unit")]
+    announce(&message);
 }
 
 /// Writes one diagnostic line, for the running command to say through its own `Host`.
@@ -926,6 +936,7 @@ fn run_with(
     } else {
         Some("1")
     };
+    // #[gamma::skip(call_result.default, reason = "configure returns unit and this mutator retains all command mutations before replacing unit with unit")]
     configure(&mut command, binary, launch, threads, active, attempt.census);
 
     let spawned = match start_or_verdict(command, binary, request) {
@@ -1232,6 +1243,7 @@ fn termination(status: ExitStatus) -> Termination {
 /// Named rather than called inline only so that the error arm below it can be reached from a test.
 /// Outside test builds, [`ProcessTree::observe`] performs Unix's non-reaping observation and owns the
 /// sweep, release, and final reap as one lifecycle.
+// #[gamma::skip(fn_value.ok, tag = "timeout", reason = "always reporting no process exit prevents supervision from observing completion")]
 fn ask_after(subtree: &mut ProcessTree) -> io::Result<Option<ExitStatus>> {
     #[cfg(test)]
     if faults::fired(Fault::Wait) {
@@ -3893,6 +3905,100 @@ mod tests {
         // Neither a kill nor a survivor, and the test that failed travels with it: that name is the
         // only thing anybody can act on here.
         assert_eq!(verdict, Verdict::Flaky(Some("a::b".to_owned())), "{verdict:?}");
+    }
+
+    #[test]
+    fn confirmation_matrix_preserves_killers_enumeration_output_and_failed_exonerations() {
+        let attempt = Attempt {
+            active: Some(7),
+            timeout: Some(Duration::from_secs(30)),
+            stall: Stall::NONE,
+            request: MemoryRequest::default(),
+            only: Only::All,
+            census: None,
+        };
+        for test in [None, Some("original".to_owned())] {
+            let check = |actual: Attempt<'_>, expected: Only<'_>| {
+                assert_eq!(actual.active, None);
+                assert_eq!(actual.only, expected);
+                assert_eq!(actual.timeout, attempt.timeout);
+                assert_eq!(actual.stall.budget, attempt.stall.budget);
+                assert_eq!(actual.request, attempt.request);
+                assert_eq!(actual.census, attempt.census);
+            };
+            assert_eq!(
+                confirm_kill_with(attempt, test.clone(), |actual| {
+                    check(actual, test.as_deref().map_or(Only::All, Only::One));
+                    Verdict::Passed
+                }),
+                Verdict::Failed(test.clone())
+            );
+            assert_eq!(
+                confirm_enumeration_with(attempt, "enumeration diagnostic".to_owned(), |actual| {
+                    check(actual, Only::All);
+                    Verdict::Passed
+                }),
+                Verdict::TestEnumerationFailed("enumeration diagnostic".to_owned())
+            );
+            assert_eq!(
+                confirm_kill_with(attempt, test.clone(), |actual| {
+                    check(actual, test.as_deref().map_or(Only::All, Only::One));
+                    Verdict::Failed(Some("observed".to_owned()))
+                }),
+                Verdict::Flaky(test.clone().or_else(|| Some("observed".to_owned())))
+            );
+            assert_eq!(
+                confirm_enumeration_with(attempt, "enumeration diagnostic".to_owned(), |actual| {
+                    check(actual, Only::All);
+                    Verdict::Failed(Some("observed".to_owned()))
+                }),
+                Verdict::Flaky(Some("observed".to_owned()))
+            );
+        }
+        for infrastructure in [Verdict::Unjudged, Verdict::Unmetered] {
+            assert_eq!(
+                confirm_kill_with(attempt, Some("original".to_owned()), |_| infrastructure(
+                    "injected failure".to_owned()
+                )),
+                infrastructure("injected failure".to_owned())
+            );
+            assert_eq!(
+                confirm_enumeration_with(attempt, "diagnostic".to_owned(), |_| infrastructure("injected failure".to_owned())),
+                infrastructure("injected failure".to_owned())
+            );
+        }
+        assert_eq!(
+            confirm_kill_with(attempt.exonerating(), Some("original".to_owned()), |_| {
+                panic!("an unmutated failure must not launch another exoneration");
+            }),
+            Verdict::Failed(Some("original".to_owned()))
+        );
+    }
+
+    #[test]
+    fn nextest_infrastructure_diagnostic_retains_exact_tail_line_boundary() {
+        let text = (0..DIAGNOSTIC_TAIL_LINES + 2)
+            .map(|i| format!("diagnostic-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = (2..DIAGNOSTIC_TAIL_LINES + 2)
+            .map(|i| format!("diagnostic-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            nextest_runner_failure(Some(94), &text),
+            format!("`cargo nextest` exited with code 94, which does not describe a test run:\n{expected}")
+        );
+    }
+
+    #[test]
+    fn retained_output_tail_reports_exact_capacity_as_a_complete_replacement() {
+        for size in [OUTPUT_TAIL_CAP - 1, OUTPUT_TAIL_CAP, OUTPUT_TAIL_CAP + 1] {
+            let mut tail = VecDeque::new();
+            let bytes: Vec<u8> = (0..size).map(|i| u8::try_from(i % 251).expect("byte modulus fits")).collect();
+            assert_eq!(retain_output_tail(&mut tail, &bytes), size >= OUTPUT_TAIL_CAP);
+            assert_eq!(tail.into_iter().collect::<Vec<_>>(), bytes[size.saturating_sub(OUTPUT_TAIL_CAP)..]);
+        }
     }
 
     /// The exonerating run's own overrun is never handed back as the mutant's verdict.
