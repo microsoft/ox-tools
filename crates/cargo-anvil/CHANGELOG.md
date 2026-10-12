@@ -7,6 +7,29 @@
 - ✨ Features
 
   - support managed TOML array entries ([#235](https://github.com/microsoft/ox-tools/pull/235))
+  - Add `TomlArrayRegionSpec` and `CatalogBuilder::with_toml_array_region`
+    so custom catalogs can manage required string entries without owning
+    the enclosing TOML array or table. `Catalog::toml_array_path` exposes
+    the selector for a region.
+  - Preserve repository-owned entries, comments, table headers, and
+    surrounding formatting during adoption, updates, and retirement.
+    Adoption moves one matching unmanaged string per required entry into
+    the managed region; extra copies remain repository-owned.
+  - Validate array-host composition before producing an applicable plan.
+    Invalid TOML, overlapping ownership, and structural dependencies
+    refuse without applying unrelated pending writes.
+
+- Upgrade notes
+
+  - Array regions are opt-in for custom catalogs. Hosts must have a
+    `.toml` suffix and use hash comments. Selectors contain literal key
+    components through normal TOML tables.
+  - Templates must contain at least one string entry and end with a
+    comma. Generated compound values, inline-table scaffolding, and
+    automatic migration from whole-table regions are not supported.
+  - The `.anvil.lock` schema remains version 1. Array selectors contribute
+    to custom catalog checksums; the built-in catalog and its generated
+    infrastructure remain unchanged.
 
 ## [0.13.0] - 2026-09-24
 
