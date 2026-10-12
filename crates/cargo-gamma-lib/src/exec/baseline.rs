@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn completed_measurements_are_distinct_from_missing_baselines() {
-        assert_eq!(measured_duration(Duration::ZERO), MIN_MEASURED_DURATION);
+        assert_eq!(measured_duration(Duration::ZERO), Duration::from_nanos(1));
         assert_eq!(measured_duration(Duration::from_millis(1)), Duration::from_millis(1));
     }
 }
