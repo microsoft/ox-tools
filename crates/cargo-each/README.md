@@ -69,6 +69,7 @@ and exclusion wins. Metadata values containing whitespace or Boolean syntax
 can be double-quoted. Expression atoms:
 
 * `lib` / `bin` / `target-kind:<kind>` — target-kind membership.
+* `doctest` — Cargo reports at least one target with doctests enabled.
 * `publishable` — Cargo permits publishing the package.
 * `feature:<name>` — the package declares the feature.
 * `dep:<name>` — the member declares `<name>` as a dependency.

@@ -5,8 +5,8 @@
 //!
 //! Enumerates workspace members and captures, for each, the facts the
 //! selection and filter layers need: package identity, publication state,
-//! features, dependencies, targets, and the freeform `package.metadata`
-//! block.
+//! doctest capability, features, dependencies, targets, and the freeform
+//! `package.metadata` block.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,6 +43,8 @@ pub(crate) struct Member {
     pub(crate) manifest_path: PathBuf,
     /// Whether Cargo permits publishing this package.
     pub(crate) publishable: bool,
+    /// Whether Cargo reports at least one target with doctests enabled.
+    pub(crate) doctest: bool,
     /// Features declared by this package.
     pub(crate) features: BTreeSet<String>,
     /// Cargo targets declared by this package.
@@ -126,6 +128,7 @@ impl Workspace {
                     rust_version: pkg.rust_version.clone(),
                     manifest_path: pkg.manifest_path.clone().into_std_path_buf(),
                     publishable: pkg.publish.as_ref().is_none_or(|registries| !registries.is_empty()),
+                    doctest: pkg.targets.iter().any(|target| target.doctest),
                     features: pkg.features.keys().cloned().collect(),
                     targets,
                     dependencies,
@@ -297,6 +300,7 @@ mod tests {
             rust_version: Some(rust_version.parse().expect("the test Rust version is semver")),
             manifest_path,
             publishable: true,
+            doctest: true,
             features: BTreeSet::new(),
             targets: Vec::new(),
             dependencies: BTreeSet::new(),

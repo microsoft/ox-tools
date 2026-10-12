@@ -68,7 +68,7 @@ pub(crate) struct EachArgs {
     // --- filtering ---
     /// Keep only members matching this Boolean expression. Repeatable;
     /// expressions are AND-combined. Supports `not`, `and`, `or`, and
-    /// parentheses over predicates such as `target-kind:<kind>`,
+    /// parentheses over predicates such as `doctest`, `target-kind:<kind>`,
     /// `publishable`, `feature:<name>`, `dep:<name>`, and
     /// `metadata:<key>[=<value>]`.
     #[arg(long = "filter", value_name = "EXPR")]

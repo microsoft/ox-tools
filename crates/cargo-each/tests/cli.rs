@@ -73,6 +73,35 @@ fn default_members_fixture() -> (TempDir, PathBuf) {
     (tmp, manifest)
 }
 
+/// Write a workspace that distinguishes Cargo's resolved doctest capability
+/// from target kind and publication state.
+fn doctest_fixture() -> (TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"enabled-lib\", \"disabled-lib\", \"bin-only\", \"macros\", \"private-lib\"]\n",
+    )
+    .expect("write workspace root");
+
+    write_lib(root, "enabled-lib", "0.1.0", "");
+    write_lib(root, "disabled-lib", "0.1.0", "\n[lib]\ndoctest = false\n");
+    write_bin(root, "bin-only", "");
+    write_lib(root, "private-lib", "0.1.0", "publish = false\n");
+
+    let macros = root.join("macros");
+    fs::create_dir_all(macros.join("src")).expect("mkdir proc-macro src");
+    fs::write(
+        macros.join("Cargo.toml"),
+        "[package]\nname = \"macros\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+    )
+    .expect("write proc-macro manifest");
+    fs::write(macros.join("src/lib.rs"), "// fixture\n").expect("write proc-macro lib");
+
+    let manifest = root.join("Cargo.toml");
+    (tmp, manifest)
+}
+
 fn write_lib(root: &Path, name: &str, version: &str, extra: &str) {
     let dir = root.join(name);
     fs::create_dir_all(dir.join("src")).expect("mkdir src");
@@ -874,6 +903,48 @@ fn filter_lib_drops_bin_only_member() {
                 .and(predicate::str::contains("tool gamma"))
                 .and(predicate::str::contains("tool beta").not()),
         );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn doctest_filter_uses_cargo_resolved_capability() {
+    let (_tmp, manifest) = doctest_fixture();
+    each(&manifest)
+        .args(["--workspace", "--filter", "doctest", "--dry-run", "--", "tool", "{name}"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("tool enabled-lib")
+                .and(predicate::str::contains("tool macros"))
+                .and(predicate::str::contains("tool private-lib"))
+                .and(predicate::str::contains("tool disabled-lib").not())
+                .and(predicate::str::contains("tool bin-only").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn doctest_filter_composes_and_repeated_filters_intersect() {
+    let (_tmp, manifest) = doctest_fixture();
+    for filters in [
+        ["--filter", "doctest and publishable", "", ""],
+        ["--filter", "doctest", "--filter", "publishable"],
+    ] {
+        let args = filters.into_iter().filter(|arg| !arg.is_empty());
+        each(&manifest)
+            .arg("--workspace")
+            .args(args)
+            .args(["--dry-run", "--", "tool", "{name}"])
+            .assert()
+            .success()
+            .stdout(
+                predicate::str::contains("tool enabled-lib")
+                    .and(predicate::str::contains("tool macros"))
+                    .and(predicate::str::contains("tool private-lib").not())
+                    .and(predicate::str::contains("tool disabled-lib").not())
+                    .and(predicate::str::contains("tool bin-only").not()),
+            );
+    }
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
