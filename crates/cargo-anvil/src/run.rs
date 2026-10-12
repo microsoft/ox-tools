@@ -360,6 +360,19 @@ fn array_host_inputs(
         }
     }
     for artifact in catalog.artifacts() {
+        if let Artifact::Region(spec) = artifact
+            && spec.syntax != CommentSyntax::Hash
+        {
+            for host in region_host_paths(workspace, spec) {
+                let host = (hosts.resolve)(repo_root, host)?;
+                if paths.contains_key(&host) {
+                    bail!(
+                        "region '{}' has comment syntax incompatible with its TOML array host: {host}",
+                        spec.id
+                    );
+                }
+            }
+        }
         if let Artifact::OwnedFile(spec) = artifact {
             let path = (hosts.resolve)(repo_root, spec.path)?;
             if paths.keys().any(|host| host.eq_ignore_ascii_case(&path)) {
@@ -1744,6 +1757,65 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.to_string(), "duplicate resolved region identity: Cargo.toml [same]");
+        }
+    }
+
+    #[test]
+    fn toml_array_plan_rejects_resolved_syntax_aliases_before_planning() {
+        for selector in [
+            HostSelector::WorkspaceCargoToml,
+            HostSelector::SingleCrateCargoToml,
+            HostSelector::EachMemberManifest,
+        ] {
+            let workspace = Workspace {
+                members: vec![workspace::WorkspaceMember {
+                    manifest_relpath: "Cargo.toml".to_owned(),
+                }],
+                has_workspace_table: selector != HostSelector::SingleCrateCargoToml,
+            };
+            for reverse in [false, true] {
+                for swap in [false, true] {
+                    let literal = HostSelector::Path("Cargo.toml".to_owned());
+                    let array = crate::catalog::TomlArrayRegionSpec {
+                        region: RegionSpec {
+                            host: if swap { literal.clone() } else { selector.clone() },
+                            id: RegionId::new("entries"),
+                            body: "\"required\",\n".to_owned(),
+                            syntax: CommentSyntax::Hash,
+                        },
+                        path: vec!["items".to_owned()],
+                    };
+                    let ordinary = Artifact::region(RegionSpec {
+                        host: if swap { selector.clone() } else { literal },
+                        id: RegionId::new("ordinary"),
+                        body: String::new(),
+                        syntax: CommentSyntax::SlashSlash,
+                    });
+                    let builder = Catalog::builder(Catalog::anvil().cli().clone());
+                    let catalog = if reverse {
+                        builder.with_artifact(ordinary).with_toml_array_region(array)
+                    } else {
+                        builder.with_toml_array_region(array).with_artifact(ordinary)
+                    }
+                    .build()
+                    .unwrap();
+                    let mut hosts = memory_hosts();
+                    hosts.set("Cargo.toml", String::new());
+                    let error = build_plan_with_hosts(
+                        Path::new("in-memory-array-tests"),
+                        &workspace,
+                        &Manifest::default(),
+                        &[],
+                        &catalog,
+                        &mut hosts,
+                    )
+                    .unwrap_err();
+                    assert_eq!(
+                        error.to_string(),
+                        "region 'ordinary' has comment syntax incompatible with its TOML array host: Cargo.toml"
+                    );
+                }
+            }
         }
     }
 

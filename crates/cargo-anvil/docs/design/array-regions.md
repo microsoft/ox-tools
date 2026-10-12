@@ -10,12 +10,15 @@ while leaving the repository's other plugins alone.
 - Hosts have a `.toml` suffix, case insensitive. Workspace/member manifest
   selectors remain available. After expansion, duplicate `(host, region id)`
   identities are errors, including aliases between different selectors.
+  All regions sharing a resolved array host must use hash comments.
   Unresolved case aliases for the same array host also refuse.
 - Selectors are nonempty lists of literal key components, not dotted
   expressions. Quoted keys work. Parents must be normal TOML tables, not
   inline tables or arrays of tables.
-- Generated bodies contain TOML **strings**, whitespace, and hash comments.
-  Every nonempty body ends its last entry with a comma. Actual full-line
+- Generated bodies contain at least one TOML **string**, allowing whitespace
+  and hash comments. Empty string values are valid; zero-entry templates
+  (including whitespace-only or comment-only templates) are rejected on build,
+  including replacements. The last entry ends with a comma. Actual full-line
   ownership sentinels in a template are rejected; marker-looking multiline
   string contents are data, not boundaries.
 - The host must already parse, or be absent. A missing table or array is
@@ -49,6 +52,12 @@ TOML-aware scanner, derived from the host suffix.
 The lock remains **schema 1**: no scanner provenance or array selectors are
 persisted. Selectors are static catalog metadata and participate in the
 catalog checksum, but not the region's identity.
+Rejecting zero-entry templates does not change empty on-disk body regeneration
+or retirement. After declaration removal, array placement is inferred from
+the current TOML structure, not historical provenance. A historical body that
+the user empties and moves outside its array cannot be identified as an array
+region; ordinary retirement behavior, including separator blank removal,
+applies there. No historical-placement guarantee is made for such edits.
 
 ## Composition and deterministic refusal
 

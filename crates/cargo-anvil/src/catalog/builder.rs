@@ -212,8 +212,9 @@ impl CatalogBuilder {
     /// The path must contain at least one TOML key component (not a dotted
     /// expression); quoted or empty TOML keys are supported as literal components.
     /// The host must have a `.toml` suffix (case insensitive).
-    /// The region must use hash comments and contain only TOML string entries
-    /// and comments, with a trailing comma after the last entry.
+    /// The region must use hash comments and contain at least one TOML string
+    /// entry, allowing whitespace and comments, with a trailing comma after the
+    /// last entry. Empty string values are valid; empty generated bodies are not.
     /// Actual full-line managed-region sentinel comments are not valid body content;
     /// marker-looking string values remain valid entries.
     /// Invalid specifications are reported by [`Self::build`].
@@ -280,8 +281,8 @@ impl CatalogBuilder {
     /// `without_artifact` call violated its add/override/remove invariant, or
     /// if an owned file under `justfiles/` is not a `.just` recipe. TOML array
     /// regions also fail validation for an empty selector path, non-hash syntax,
-    /// invalid TOML entry bodies, generated ownership sentinel comments, or a
-    /// missing final comma on a nonempty body.
+    /// empty or invalid TOML entry bodies, generated ownership sentinel comments,
+    /// or a missing final comma.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));

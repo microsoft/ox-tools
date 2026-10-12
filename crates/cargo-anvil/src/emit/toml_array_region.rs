@@ -66,7 +66,13 @@ fn body_array(body: &str) -> Result<Array, ManagedRegionRefusal> {
             RefusalRemedy::InvalidGeneratedToml,
         ));
     }
-    if !array.is_empty() && !array.trailing_comma() {
+    if array.is_empty() {
+        return Err(refusal(
+            "generated array bodies must contain at least one string entry",
+            RefusalRemedy::InvalidGeneratedToml,
+        ));
+    }
+    if !array.trailing_comma() {
         return Err(refusal(
             "TOML array-entry bodies must end with a trailing comma",
             RefusalRemedy::InvalidGeneratedToml,
@@ -1362,6 +1368,45 @@ mod tests {
         spec.path = vec!["array".to_owned()];
         spec.region.syntax = CommentSyntax::SlashSlash;
         assert_eq!(validate_spec(&spec).unwrap_err().remedy, RefusalRemedy::InvalidGeneratedToml);
+    }
+
+    #[test]
+    fn generated_templates_require_entries_but_allow_empty_string_values() {
+        for body in ["", " \t\r\n", "# guidance only\n"] {
+            let mut empty = spec();
+            empty.region.body = body.to_owned();
+            for replace in [false, true] {
+                let builder = Catalog::builder(Catalog::anvil().cli().clone());
+                let result = if replace {
+                    builder
+                        .with_toml_array_region(spec())
+                        .replace_artifact(Artifact::region(empty.region.clone()))
+                } else {
+                    builder.with_toml_array_region(empty.clone())
+                }
+                .build();
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "invalid catalog for 'anvil':\n  - TOML array region 'entries': generated array bodies must contain at least one string entry"
+                );
+            }
+        }
+        for body in ["\"\",\n", "\"required\",\n"] {
+            let mut valid = spec();
+            valid.region.body = body.to_owned();
+            Catalog::builder(Catalog::anvil().cli().clone())
+                .with_toml_array_region(valid.clone())
+                .build()
+                .unwrap();
+            let output = plan_toml_array_region(&Manifest::default(), None, "config.toml", &valid)
+                .unwrap()
+                .spliced_host
+                .unwrap();
+            assert_eq!(
+                output,
+                format!("[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  {body}  # <<< anvil-managed: entries\n]\n")
+            );
+        }
     }
 
     #[test]
