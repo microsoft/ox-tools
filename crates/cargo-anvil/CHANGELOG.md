@@ -38,10 +38,6 @@
 
 ## [0.13.0] - 2026-10-08
 
-Release notes completed from the changes between `cargo-anvil-v0.12.0`
-and `cargo-anvil-v0.13.0`. These changes are already in 0.13.0, not new
-features of 0.14.0.
-
 - ✨ Features
 
   - Select `.cargo/mutants.<os>.toml` for both mutation recipes when
