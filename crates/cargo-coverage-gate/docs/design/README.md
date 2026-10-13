@@ -48,7 +48,7 @@ lower-coverage code.
 7. **Released-surface measurement**: tests still execute and cover production
    code, but source that can only belong to test/example/bench/build-script
    targets, plus item regions that provably require `cfg(test)`, never enters
-   the denominator or uploaded report.
+   the denominator or the LCOV report `run` publishes.
 8. **Open source**: ships from `github.com/microsoft/ox-tools` to crates.io.
 
 ## 3. Non-Goals
@@ -59,9 +59,9 @@ lower-coverage code.
 - Diff coverage (per-line annotation of changed lines). Different concern,
   different consumers (review tooling like Codecov); this tool answers a
   separable question.
-- Uploading coverage to Codecov / ADO Coverage UI. The surrounding CI
-  templates perform the upload, but they upload the byte-exact filtered LCOV
-  files `run` publishes and evaluates.
+- Uploading coverage to Codecov / ADO Coverage UI. The surrounding CI owns the
+  upload step. Integrations should upload the byte-exact filtered LCOV files
+  `run` publishes and evaluates.
 - Cross-crate aggregation policies (e.g. "workspace total must stay above
   N"). If a repo wants that, run the existing
   `cargo llvm-cov --fail-under-lines` flag in parallel; the two are
@@ -164,7 +164,8 @@ hand, so every change appears in a PR diff and is reviewed.
   build and test execution.
 - `--coverage-dir <path>` — artifact directory, default
   `target/coverage`. Each configuration gets a distinct released-surface LCOV
-  file. Those exact files feed evaluation and CI uploads.
+  file. Those exact files feed evaluation and are the intended CI upload
+  inputs.
 - `--no-coverage-target <triple>` — explicitly run plain nextest without
   coverage collection or gating when the effective target matches. Repeatable;
   the default list is empty. The effective target is the explicit `--target`
@@ -551,7 +552,7 @@ XML, or Codecov's custom JSON. We pick lcov because it matches every
 other coverage UI fed by the same data:
 
 - Codecov ingests lcov uploads directly.
-- ADO's generated integration ingests lcov directly.
+- ADO's coverage task can ingest lcov directly.
 - `cargo llvm-cov report --codecov` emits Codecov's custom JSON, also
   derived from lcov.
 

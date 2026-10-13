@@ -154,7 +154,7 @@ compatible. `cargo coverage-gate run` collects `all-features` and
 `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
 writes released-surface-filtered `lcov-all-features.info` and
 `lcov-no-default.info` under `target/coverage`, and evaluates those exact
-files in-process. They are therefore also the artifacts CI uploads to
+files in-process. CI integrations can upload those same artifacts to
 Codecov or Azure DevOps. Collection can
 be limited with repeatable `--package` selectors; no selectors means the
 workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
@@ -234,7 +234,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb0DIMhctsVv4b38zQPaD6NUEbzfxZzljMh9IbKE_W6UwpTplhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbd7_obJnCg6wbCNN1yTyuFUobLnFHKLU-WqAbfsFhb2tDDgxhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_lcov.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

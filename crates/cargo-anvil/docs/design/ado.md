@@ -907,9 +907,6 @@ emits one LCOV report per feature configuration — `lcov-all-features.info` and
 `target/coverage/lcov-*.info` wildcard to select both and let the task coalesce them.
 `PublishCodeCoverageResults@2` accepts LCOV directly, which lets the same report feed
 the local coverage gate, Codecov, and ADO without a second cargo-llvm-cov export.
-The files are already filtered by cargo-coverage-gate to released lib/bin source:
-test/example/bench/build-script targets and item regions that require `cfg(test)`
-are absent, while any surface that can ship in a non-test build remains.
 
 ```yaml
 - task: PublishCodeCoverageResults@2

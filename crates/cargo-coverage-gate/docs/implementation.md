@@ -61,8 +61,8 @@ The optional `run` mode keeps collection and evaluation separated internally:
    feature-only gates, and `cfg(not(test))` remain.
 6. The filtered LCOV is staged beside its stable per-configuration path under
    `--coverage-dir` and renamed into place only after complete filtering. The
-   evaluator reads those exact stable files, so the gate, Codecov, and Azure
-   DevOps consume byte-identical released-surface reports.
+   evaluator reads those exact stable files, so callers can give Codecov and
+   Azure DevOps byte-identical released-surface reports.
    `no-default-features` maps to `lcov-no-default.info`.
 
 The Windows response-file retry also writes only to scratch. Successful retry
@@ -143,7 +143,7 @@ leaving errors and summary-file rendering intact.
 - Every successful input source is reachable from a Cargo target, and every
   retained source is attributable to one workspace member.
 - Published `run` artifacts are already filtered; evaluation never gates a
-  different in-memory view from the file that upload steps consume.
+  different in-memory view from the file made available to upload steps.
 - Package counters describe the complete attributed input, independent of the
   rendered location limit.
 - Both renderers consume the same status-specific diagnostics and preserve

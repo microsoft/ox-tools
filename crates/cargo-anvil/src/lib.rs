@@ -253,12 +253,9 @@
 //!
 //! [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate)
 //! metadata controls workspace and package thresholds, target-specific policy,
-//! and intentional exclusions. The generated check delegates collection,
-//! released-surface filtering, stable LCOV publication, and policy evaluation
-//! to `cargo coverage-gate run`. Ordinary test code, examples, benches, and
-//! build scripts execute normally but do not enter released lib/bin coverage
-//! reports. Coverage enforcement is local; hosted services consume those exact
-//! filtered files as optional reporting rather than the source of the verdict.
+//! and intentional exclusions. Coverage enforcement is local to the generated
+//! check; a hosted coverage service is optional reporting rather than the
+//! source of the verdict.
 //!
 //! ### Miri
 //!
