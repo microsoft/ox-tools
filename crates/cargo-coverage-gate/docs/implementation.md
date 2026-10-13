@@ -118,15 +118,17 @@ at the filtered-report parsing/attribution stages.
    explicitly because they require the complete Cargo build configuration.
    A file is retained when at least one released path reaches it; release
    reachability wins when a test target also shares the file.
+   Every released source is validated against workspace-member directories
+   during this walk, even when no LCOV section mentions it.
 3. rust-analyzer syntax identifies test-only item ranges. Compiler-owned
    `test`/`bench` attributes are intrinsic; qualified framework attributes are
    matched against the exact workspace `test-attributes` policy. A `cfg` is test-only
    only when it cannot hold with `test = false`: `all(...)` requires just one
    test-only operand, `any(...)` requires every operand, and `not(...)` is
-   retained. Line, branch, and function records inside excluded ranges are
-   removed together. Unreadable/unparseable sources, paths with no Cargo target
-   owner, stale line numbers, ambiguous modules, and unsupported path
-   attributes are operational errors rather than reasons to drop counters.
+   retained. Line records inside excluded ranges are removed.
+   Unreadable/unparseable sources, paths with no Cargo target owner, stale line
+   numbers, ambiguous modules, and unsupported path attributes are operational
+   errors rather than reasons to drop counters.
    Distinct `SF:` spellings that normalize to the same LCOV section key are
    also rejected instead of replacing one section's counters.
    Filtered output removes function and branch records entirely because the

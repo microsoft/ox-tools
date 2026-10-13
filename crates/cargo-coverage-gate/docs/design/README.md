@@ -451,8 +451,9 @@ For each requested feature configuration, `run`:
    cargo-llvm-cov;
 5. reconstructs Cargo target ownership from metadata and Rust module
    declarations, removes non-release target sources and provably test-only
-   item regions from line/function/branch records, and fails explicitly if a
-   source cannot be resolved, read, parsed, or safely owned;
+   line records, omits function and branch records because ownership proof is
+   line-granular, and fails explicitly if a source cannot be resolved, read,
+   parsed, or safely owned;
 6. atomically publishes the filtered report to its stable consumer path under
    `--coverage-dir` and passes that exact path to the evaluator.
 
@@ -545,9 +546,10 @@ the released Cargo surface:
   `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
   `cfg(not(test))` remain.
 
-Filtering removes matching line, branch, and function records so downstream
-coverage UIs see the same surface as the gate. A source/path/parse state the
-tool cannot classify safely is exit `2`, not a silent exclusion.
+Filtering removes matching line records so downstream coverage UIs see the same
+released line surface as the gate. Function and branch records are omitted
+entirely because the proof is line-granular. A source/path/parse state the tool
+cannot classify safely is exit `2`, not a silent exclusion.
 
 For each remaining `SF:` section the tool counts:
 
@@ -624,11 +626,13 @@ policy attribution use the same path namespace. A file under
 `workspace_root/crates/alpha/src/lib.rs` belongs to the member whose
 manifest is `workspace_root/crates/alpha/Cargo.toml`.
 
-Released files outside every workspace member directory are rejected because
-the package policy they should affect cannot be determined safely. Upstream
+During Cargo-target/module graph construction, every released source is
+validated against workspace-member directories even if no tracefile mentions
+it. Released files outside every member are rejected because the package policy
+they should affect cannot be determined safely. Separately, upstream
 cargo-llvm-cov filename exclusions should keep dependency/sysroot sources out
-of the report; if one leaks through, the gate fails loudly with the offending
-path.
+of the report; if one leaks through without a supported graph edge, the gate
+fails loudly with the offending path.
 
 ### 6.3 Aggregation
 
@@ -919,10 +923,10 @@ multiple workspaces invoke the tool once per workspace.
 The LCOV tracefile format has no version number. It is a line-oriented
 record format that has been stable across the LCOV project for over a
 decade, with new record types added over time (function `FN:` /
-`FNDA:`, branch `BRDA:`, etc.). The line gate reads `SF:` and `DA:`;
-released-surface publication also reads line-bearing function and branch
-records so excluded test regions disappear from uploaded reports. Summary
-records are recomputed when filtered LCOV is serialized.
+`FNDA:`, branch `BRDA:`, etc.). The line gate reads `SF:` and `DA:`.
+Released-surface publication removes function and branch records because its
+ownership proof is line-granular. Summary records are recomputed when filtered
+LCOV is serialized.
 
 If a tracefile contains no `SF:` sections, every in-scope package is evaluated
 as having no attributed data. The effective package policies determine the

@@ -182,14 +182,15 @@
 //! per-invocation scratch, so collection never runs workspace-wide
 //! `cargo llvm-cov clean` or deletes shared report and test artifacts. Ordinary
 //! Cargo and cargo-llvm-cov target variables point at that same private
-//! configuration directory, including metadata-derived test paths. Ordinary
-//! reports write directly to their stable `--coverage-dir` path. On Windows
-//! error 206, the report child uses deterministic Windows quoting and the
-//! validated `llvm-cov export` arguments are retried through a response file.
-//! That exceptional export is staged beside the stable path and published only
-//! after success or a valid no-data conversion. Concurrent collection must use
-//! distinct coverage directories; private profile isolation does not serialize
-//! stable artifact writers.
+//! configuration directory, including metadata-derived test paths. Raw reports
+//! are written inside that scratch space, released-surface filtered, staged
+//! beside their stable `--coverage-dir` paths, and atomically published only
+//! after filtering succeeds. On Windows error 206, the report child uses
+//! deterministic Windows quoting and retries the validated `llvm-cov export`
+//! arguments through a response file in the same scratch space before entering
+//! that publication pipeline. Concurrent collection must use distinct coverage
+//! directories; private profile isolation does not serialize stable artifact
+//! writers.
 //!
 //! `--lcov` may be repeated; each tracefile is released-surface filtered and
 //! then the tracefiles are merged at the line level
@@ -560,6 +561,32 @@ mod tests {
         let filtered =
             filter_lcov_many(&[], Some(Path::new("missing-workspace/Cargo.toml"))).expect("empty filtering is a documented no-op");
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
+    fn empty_evaluation_validates_released_surface_policy() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n\
+             [workspace.metadata.coverage-gate]\ntest-attributes = \"tokio::test\"\n",
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            tmp.path().join("alpha/Cargo.toml"),
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
+        )
+        .expect("write member manifest");
+        fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
+
+        let error = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[])
+            .expect_err("empty evaluation must still validate filtering policy")
+            .to_string();
+        assert!(error.contains("test-attributes"), "{error}");
+        assert!(error.contains("array of Rust attribute paths"), "{error}");
     }
 
     #[test]

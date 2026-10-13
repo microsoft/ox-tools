@@ -191,14 +191,15 @@ Every feature configuration uses a fresh target beneath private
 per-invocation scratch, so collection never runs workspace-wide
 `cargo llvm-cov clean` or deletes shared report and test artifacts. Ordinary
 Cargo and cargo-llvm-cov target variables point at that same private
-configuration directory, including metadata-derived test paths. Ordinary
-reports write directly to their stable `--coverage-dir` path. On Windows
-error 206, the report child uses deterministic Windows quoting and the
-validated `llvm-cov export` arguments are retried through a response file.
-That exceptional export is staged beside the stable path and published only
-after success or a valid no-data conversion. Concurrent collection must use
-distinct coverage directories; private profile isolation does not serialize
-stable artifact writers.
+configuration directory, including metadata-derived test paths. Raw reports
+are written inside that scratch space, released-surface filtered, staged
+beside their stable `--coverage-dir` paths, and atomically published only
+after filtering succeeds. On Windows error 206, the report child uses
+deterministic Windows quoting and retries the validated `llvm-cov export`
+arguments through a response file in the same scratch space before entering
+that publication pipeline. Concurrent collection must use distinct coverage
+directories; private profile isolation does not serialize stable artifact
+writers.
 
 `--lcov` may be repeated; each tracefile is released-surface filtered and
 then the tracefiles are merged at the line level
@@ -248,7 +249,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbI5zQ4nImPVIbg4VG6chextIbJTOHJKSGqqkbr0CkiPTmlYdhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbjhKDRVsI_GsbwKJr3jm-DEUbqaNA07Eb2ecbn7mA27Tk66xhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_lcov.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

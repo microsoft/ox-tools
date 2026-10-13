@@ -363,7 +363,7 @@ pub(crate) struct UnownedCoverageSourceError {
 /// directory, which the package-attribution layer cannot classify safely.
 #[ohno::error]
 #[display(
-    "released LCOV source `{path}` is outside every workspace member directory; \
+    "released Rust source `{path}` is outside every workspace member directory; \
      move it under its owning package or use a package-local module path"
 )]
 pub(crate) struct UnattributableReleasedSourceError {

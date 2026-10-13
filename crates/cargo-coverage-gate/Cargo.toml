@@ -26,6 +26,14 @@ all-features = true
 # we are forced to re-expose.
 allowed_external_types = ["ohno::*"]
 
+# `unicode-ident` is a deliberate compatibility bound, never referenced from this crate's
+# code. See the dependency comment below.
+[package.metadata.cargo-udeps.ignore]
+normal = ["unicode-ident"]
+
+[package.metadata.unused-deps]
+allowed = ["unicode-ident"]
+
 # The gate filters test-only source regions and non-release Cargo targets before measuring this
 # crate. This floor records the lowest cross-platform released-surface result from the coverage-gate
 # CI matrix; raise it only after that matrix improves.
@@ -46,6 +54,9 @@ ohno = { workspace = true, features = ["app-err"] }
 ra_ap_syntax = { workspace = true }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+# Never named in this crate's code. It bounds the `unicode-ident` selected by
+# `ra_ap_syntax` -> `ra-ap-rustc_lexer`; see the workspace dependency comment.
+unicode-ident = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Windows production paths carry mutation annotations; tests on every host annotate test-only helpers.

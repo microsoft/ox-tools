@@ -69,7 +69,7 @@ struct SourceAnalysis {
 struct IndexedSource {
     analysis: SourceAnalysis,
     edition: Edition,
-    released: bool,
+    released_path: Option<PathBuf>,
     visits: u8,
 }
 
@@ -78,10 +78,10 @@ impl IndexedSource {
         self.visits & visit_bit(surface, role) != 0
     }
 
-    fn add_visit(&mut self, surface: Surface, role: SourceRole) {
+    fn add_visit(&mut self, surface: Surface, role: SourceRole, released_path: Option<PathBuf>) {
         self.visits |= visit_bit(surface, role);
-        if surface == Surface::Released {
-            self.released = true;
+        if let Some(path) = released_path {
+            let _ = self.released_path.get_or_insert(path);
         }
     }
 }
@@ -100,7 +100,6 @@ fn visit_bit(surface: Surface, role: SourceRole) -> u8 {
 #[derive(Debug)]
 struct SourceIndex {
     workspace_root: PathBuf,
-    member_dirs: Vec<MemberDirectory>,
     files: BTreeMap<PathBuf, IndexedSource>,
 }
 
@@ -225,6 +224,7 @@ impl SourceIndex {
 
         let mut files: BTreeMap<PathBuf, IndexedSource> = BTreeMap::new();
         while let Some(pending) = queue.pop_front() {
+            let released_path = released_source_attributed_path(&member_dirs, &pending)?;
             if let Some(indexed) = files.get_mut(&pending.path) {
                 if indexed.edition != pending.edition {
                     return Err(ConflictingSourceEditionError::new(
@@ -237,7 +237,7 @@ impl SourceIndex {
                 if indexed.has_visit(pending.surface, pending.role) {
                     continue;
                 }
-                indexed.add_visit(pending.surface, pending.role);
+                indexed.add_visit(pending.surface, pending.role, released_path);
                 let declarations = source_declarations(&pending.path, &indexed.analysis, pending.role, &test_attributes)?;
                 enqueue_declarations(&mut queue, declarations, pending.edition, pending.surface)?;
                 continue;
@@ -248,22 +248,18 @@ impl SourceIndex {
             let mut indexed = IndexedSource {
                 analysis,
                 edition: pending.edition,
-                released: false,
+                released_path: None,
                 visits: 0,
             };
-            indexed.add_visit(pending.surface, pending.role);
+            indexed.add_visit(pending.surface, pending.role, released_path);
             let _ = files.insert(pending.path.clone(), indexed);
             enqueue_declarations(&mut queue, declarations, pending.edition, pending.surface)?;
         }
 
-        Ok(Self {
-            workspace_root,
-            member_dirs,
-            files,
-        })
+        Ok(Self { workspace_root, files })
     }
 
-    fn source_for_lcov(&self, path: &Path) -> Result<(&IndexedSource, PathBuf), CoverageGateError> {
+    fn source_for_lcov(&self, path: &Path) -> Result<&IndexedSource, CoverageGateError> {
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -274,15 +270,24 @@ impl SourceIndex {
             .files
             .get(&resolved)
             .ok_or_else(|| UnownedCoverageSourceError::new(path.display().to_string()))?;
-        Ok((source, resolved))
+        Ok(source)
     }
+}
 
-    fn attributed_path(&self, path: &Path) -> Option<PathBuf> {
-        self.member_dirs.iter().find_map(|directory| {
-            path.strip_prefix(&directory.canonical)
-                .ok()
-                .map(|relative| directory.reported.join(relative))
-        })
+fn attributed_path(member_dirs: &[MemberDirectory], path: &Path) -> Option<PathBuf> {
+    member_dirs.iter().find_map(|directory| {
+        path.strip_prefix(&directory.canonical)
+            .ok()
+            .map(|relative| directory.reported.join(relative))
+    })
+}
+
+fn released_source_attributed_path(member_dirs: &[MemberDirectory], pending: &PendingSource) -> Result<Option<PathBuf>, CoverageGateError> {
+    match pending.surface {
+        Surface::NonReleased => Ok(None),
+        Surface::Released => attributed_path(member_dirs, &pending.path)
+            .map(Some)
+            .ok_or_else(|| UnattributableReleasedSourceError::new(pending.path.display().to_string()).into()),
     }
 }
 
@@ -359,13 +364,29 @@ fn analyze_source_text(
     test_attributes: &BTreeSet<String>,
 ) -> Result<SourceAnalysis, CoverageGateError> {
     let parse = SourceFile::parse(source, edition);
+    let line_starts = line_starts(source);
     if !parse.errors().is_empty() {
-        let diagnostics = parse.errors().iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
+        let diagnostics = parse
+            .errors()
+            .iter()
+            .map(|error| {
+                let offset: usize = error.range().start().into();
+                let line_index = offset_to_line(&line_starts, offset);
+                let line_start = line_starts[line_index];
+                let column = source
+                    .get(line_start..offset)
+                    .expect("parser error ranges are guaranteed to lie within the parsed source")
+                    .chars()
+                    .count()
+                    + 1;
+                format!("{error} at {}:{column}", line_index + 1)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(ParseCoverageSourceError::new(path.display().to_string(), diagnostics).into());
     }
     let tree = parse.tree();
     let root = tree.syntax();
-    let line_starts = line_starts(source);
     let test_ranges = root
         .descendants()
         .filter_map(ast::Attr::cast)
@@ -724,17 +745,14 @@ enum SourceDisposition<'a> {
 
 fn filter_report(report: lcov::Report, sources: &SourceIndex) -> Result<String, CoverageGateError> {
     filter_report_with(report, |path| {
-        let (source, resolved_path) = sources.source_for_lcov(path)?;
-        if !source.released {
+        let source = sources.source_for_lcov(path)?;
+        let Some(source_file) = &source.released_path else {
             return Ok(SourceDisposition::Exclude {
                 line_count: source.analysis.line_count,
             });
-        }
-        let source_file = sources
-            .attributed_path(&resolved_path)
-            .ok_or_else(|| UnattributableReleasedSourceError::new(path.display().to_string()))?;
+        };
         Ok(SourceDisposition::Include {
-            source_file,
+            source_file: source_file.clone(),
             line_count: source.analysis.line_count,
             test_only_lines: &source.analysis.test_only_lines,
         })
@@ -807,6 +825,7 @@ pub(crate) fn filter_many(inputs: &[&str], manifest_path: Option<&Path>) -> Resu
 
 pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata: &Metadata) -> Result<Vec<String>, CoverageGateError> {
     if reports.is_empty() {
+        configured_test_attributes(metadata)?;
         return Ok(Vec::new());
     }
     let sources = SourceIndex::from_metadata(metadata)?;
@@ -966,6 +985,44 @@ mod tests {
             .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &configured)))
             .collect::<Vec<_>>();
         assert_eq!(configured_marks, [false, true]);
+    }
+
+    #[test]
+    fn released_sources_require_workspace_member_attribution() {
+        let member_dirs = [MemberDirectory {
+            canonical: PathBuf::from("/workspace/member"),
+            reported: PathBuf::from("/workspace/member"),
+        }];
+        let inside = PendingSource {
+            path: PathBuf::from("/workspace/member/src/lib.rs"),
+            edition: Edition::Edition2024,
+            surface: Surface::Released,
+            role: SourceRole::CrateRoot,
+        };
+        assert_eq!(
+            released_source_attributed_path(&member_dirs, &inside).expect("member source is attributable"),
+            Some(PathBuf::from("/workspace/member/src/lib.rs"))
+        );
+
+        let outside = PendingSource {
+            path: PathBuf::from("/workspace/shared.rs"),
+            edition: Edition::Edition2024,
+            surface: Surface::Released,
+            role: SourceRole::PathModule,
+        };
+        let error = released_source_attributed_path(&member_dirs, &outside)
+            .expect_err("released source outside every member must fail")
+            .to_string();
+        assert!(error.contains("outside every workspace member"), "{error}");
+
+        let non_release = PendingSource {
+            surface: Surface::NonReleased,
+            ..outside
+        };
+        assert_eq!(
+            released_source_attributed_path(&member_dirs, &non_release).expect("non-release sources need no package attribution"),
+            None
+        );
     }
 
     #[test]
@@ -1267,10 +1324,16 @@ mod tests {
         let section = report.sections.values().next().expect("filtered section remains");
         assert!(section.functions.is_empty());
 
-        let error = analyze_source_text(&lib, "pub fn broken( {\n", Edition::Edition2024, &BTreeSet::new())
-            .expect_err("invalid Rust source must fail")
-            .to_string();
+        let error = analyze_source_text(
+            &lib,
+            "pub fn valid() {}\npub fn broken( {\n",
+            Edition::Edition2024,
+            &BTreeSet::new(),
+        )
+        .expect_err("invalid Rust source must fail")
+        .to_string();
         assert!(error.contains("could not parse Rust source"), "{error}");
+        assert!(error.contains("at 2:"), "{error}");
 
         let error = filter_many(&["not lcov"], None)
             .expect_err("malformed LCOV must fail before metadata discovery")
@@ -1300,23 +1363,19 @@ mod tests {
 
     #[test]
     fn attributed_paths_use_the_longest_member_and_reported_namespace() {
-        let index = SourceIndex {
-            workspace_root: PathBuf::from("/canonical"),
-            member_dirs: vec![
-                MemberDirectory {
-                    canonical: PathBuf::from("/canonical/outer/nested"),
-                    reported: PathBuf::from("/reported/nested"),
-                },
-                MemberDirectory {
-                    canonical: PathBuf::from("/canonical/outer"),
-                    reported: PathBuf::from("/reported/outer"),
-                },
-            ],
-            files: BTreeMap::new(),
-        };
+        let member_dirs = [
+            MemberDirectory {
+                canonical: PathBuf::from("/canonical/outer/nested"),
+                reported: PathBuf::from("/reported/nested"),
+            },
+            MemberDirectory {
+                canonical: PathBuf::from("/canonical/outer"),
+                reported: PathBuf::from("/reported/outer"),
+            },
+        ];
 
         assert_eq!(
-            index.attributed_path(Path::new("/canonical/outer/nested/src/lib.rs")),
+            attributed_path(&member_dirs, Path::new("/canonical/outer/nested/src/lib.rs")),
             Some(PathBuf::from("/reported/nested/src/lib.rs"))
         );
     }
