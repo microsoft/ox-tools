@@ -102,9 +102,9 @@ leaving errors and summary-file rendering intact.
 
 ## Diagnostic pipeline
 
-The CLI and `evaluate_released_surface*` use the complete pipeline below. Raw
-`evaluate*` compatibility APIs skip source discovery/filtering and begin at
-the filtered-report parsing/attribution stages.
+The CLI and ordinary `evaluate*` APIs use the complete pipeline below.
+Explicit `evaluate_raw*` APIs skip source discovery/filtering and begin at the
+filtered-report parsing/attribution stages.
 
 1. Each LCOV input is parsed before source discovery. Malformed LCOV therefore
    fails without touching source state.

@@ -405,11 +405,13 @@ cargo coverage-gate \
   --lcov target/coverage/lcov-no-default.info
 ```
 
-Library callers choose explicitly between compatibility and released-surface
-semantics. `evaluate*` preserves raw LCOV attribution for existing consumers;
-`evaluate_released_surface*` applies the same filtering as the CLI. The
-standalone `filter_released_surface_lcov*` functions expose the filtered
-artifacts without evaluating policy.
+Library callers get released-surface semantics from the ordinary `evaluate*`
+and `filter_lcov*` APIs. Callers that intentionally need every attributed LCOV
+line, including tests and non-release targets, use the explicitly named
+`evaluate_raw*` escape hatch. Raw evaluation is useful for inspecting
+instrumentation itself, debugging target ownership, or building a report whose
+policy deliberately includes test harness source; it is not the production
+gate's default.
 
 ### 5.6 Collection sequence
 
@@ -504,8 +506,8 @@ LH:82
 end_of_record
 ```
 
-Before counting, the CLI and `evaluate_released_surface*` APIs filter every
-section to the released Cargo surface:
+Before counting, the CLI and ordinary `evaluate*` APIs filter every section to
+the released Cargo surface:
 
 - target roots classified as libraries (`lib`, `rlib`, `dylib`, `cdylib`,
   `staticlib`, and `proc-macro`) or `bin` are released roots;
@@ -585,7 +587,7 @@ Cargo target root through supported module declarations. A source reached only
 from a non-release target is removed. An unresolvable, unreadable, unparseable
 source, a source with no Cargo target owner, or a stale source reference is a
 configuration/operational error (exit `2`) rather than a counter the tool
-silently hides. Raw `evaluate*` compatibility APIs bypass this filtering.
+silently hides. Explicit `evaluate_raw*` APIs bypass this filtering.
 
 For each retained `SF:` path, the tool canonicalizes the source and determines
 which workspace member owns it by **longest-prefix match** against canonical
@@ -899,6 +901,13 @@ If a tracefile contains no `SF:` sections, every in-scope package is evaluated
 as having no attributed data. The effective package policies determine the
 result as described in §6.3. Structural parse errors (e.g., malformed `DA:`
 records) are hard errors with exit code 2.
+
+The released-surface default is an intentional public-API break: the next
+publication containing this design must be `0.7.0`, not another `0.6.x`
+release. Existing library callers that deliberately relied on raw LCOV
+attribution migrate from `evaluate*` to the corresponding `evaluate_raw*`
+function. CLI behavior and the ordinary `evaluate*` family then share one
+opinionated production-coverage contract.
 
 #### Tooling requirements
 

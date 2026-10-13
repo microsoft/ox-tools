@@ -9,7 +9,7 @@ use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target, evaluate_released_surface_many_for_target};
+use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target, evaluate_raw_many_for_target};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::CoverageGateArgs;
@@ -29,7 +29,7 @@ pub(crate) fn evaluate_paths(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<ExitCode, AppError> {
-    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Raw)
+    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Unfiltered)
 }
 
 pub(crate) fn evaluate_filtered_paths(
@@ -38,13 +38,13 @@ pub(crate) fn evaluate_filtered_paths(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<ExitCode, AppError> {
-    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Released)
+    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Filtered)
 }
 
 #[derive(Debug, Clone, Copy)]
 enum InputSurface {
-    Raw,
-    Released,
+    Unfiltered,
+    Filtered,
 }
 
 fn evaluate_paths_with_surface(
@@ -62,8 +62,8 @@ fn evaluate_paths_with_surface(
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
     let report = match surface {
-        InputSurface::Raw => evaluate_released_surface_many_for_target(&lcov_refs, None, gated_packages, target),
-        InputSurface::Released => evaluate_many_for_target(&lcov_refs, None, gated_packages, target),
+        InputSurface::Unfiltered => evaluate_many_for_target(&lcov_refs, None, gated_packages, target),
+        InputSurface::Filtered => evaluate_raw_many_for_target(&lcov_refs, None, gated_packages, target),
     }
     .into_app_err("failed to evaluate coverage")?;
     finish_evaluation(args, &report, write_text_output, write_summary_file)
