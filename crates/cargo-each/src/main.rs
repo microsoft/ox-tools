@@ -78,7 +78,10 @@
 //!   `{json:key}`.
 //! - `--each-target <KIND>`: run once per matching Cargo target, using
 //!   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
-//!   `--target-required-feature` further narrows targets.
+//!   repeated `--target-filter` expressions are AND-combined after kind
+//!   selection. Target-filter atoms are `name:<glob>`,
+//!   `required-feature:<name>`, and
+//!   `name-in-metadata:<dotted.key>`.
 //!
 //! `--keep-going` runs every invocation and exits non-zero if any failed
 //! (default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package,
@@ -202,7 +205,7 @@
 //! Run every Cargo test target that requires the `loom` feature:
 //!
 //! ```text
-//! cargo each --workspace --each-target test --target-required-feature loom -- \
+//! cargo each --workspace --each-target test --target-filter required-feature:loom -- \
 //!     cargo test -p {name} --test {target} --features loom
 //! ```
 

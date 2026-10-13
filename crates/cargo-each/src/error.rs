@@ -30,6 +30,7 @@
     LoadMetadataError,
     UnknownSelectorError,
     InvalidFilterExpressionError,
+    InvalidTargetMetadataError,
     InvalidTargetKindError,
     PlaceholderMisuseError,
     ChdirConflictsWithOnceError,
@@ -63,12 +64,20 @@ pub(crate) struct UnknownSelectorError {
     pub(crate) selector: String,
 }
 
-/// A `--filter` expression could not be parsed.
+/// A `--filter` or `--target-filter` expression could not be parsed.
 #[ohno::error]
 #[display("invalid filter expression `{expression}`: {reason}")]
 pub(crate) struct InvalidFilterExpressionError {
     pub(crate) expression: String,
     pub(crate) reason: String,
+}
+
+/// A metadata value used by `name-in-metadata:` is not a string array.
+#[ohno::error]
+#[display("package `{package}` metadata `{key}` must be an array of strings when used by `name-in-metadata:{key}`")]
+pub(crate) struct InvalidTargetMetadataError {
+    pub(crate) package: String,
+    pub(crate) key: String,
 }
 
 /// A `--each-target` value is not a supported Cargo target kind.

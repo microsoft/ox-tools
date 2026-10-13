@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use cargo_metadata::semver::Version;
 
 use crate::error::{EachError, InvalidPackageFileLineError, PackageFileReadError, PackageFileUtf8Error, UnknownSelectorError};
+use crate::filter::glob_matches;
 use crate::workspace::{Member, Workspace};
 
 /// A parsed package selection, before it is resolved against a workspace.
@@ -291,29 +292,6 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
 ///
 /// Uses dynamic programming, so ambiguous `*` backtracking remains bounded by
 /// `O(len(pattern) * len(name))`.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let name: Vec<char> = name.chars().collect();
-    let mut previous = vec![false; name.len() + 1];
-    previous[0] = true;
-
-    for pattern_char in pattern.chars() {
-        let mut current = vec![false; name.len() + 1];
-        if pattern_char == '*' {
-            current[0] = previous[0];
-        }
-        for (index, name_char) in name.iter().enumerate() {
-            current[index + 1] = if pattern_char == '*' {
-                previous[index + 1] || current[index]
-            } else {
-                previous[index] && (pattern_char == '?' || pattern_char == *name_char)
-            };
-        }
-        previous = current;
-    }
-
-    previous[name.len()]
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {

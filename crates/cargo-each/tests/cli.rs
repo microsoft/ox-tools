@@ -37,10 +37,11 @@ fn fixture() -> (TempDir, PathBuf) {
         root,
         "alpha",
         "0.1.0",
-        "\n[features]\nloom = []\n\n[[test]]\nname = \"loom-test\"\npath = \"tests/loom.rs\"\nrequired-features = [\"loom\"]\n",
+        "\n[features]\nloom = []\n\n[package.metadata.cargo-each]\nexcluded-targets = [\"loom-test\"]\n\n[[test]]\nname = \"loom-test\"\npath = \"tests/loom.rs\"\nrequired-features = [\"loom\"]\n\n[[test]]\nname = \"ordinary-test\"\npath = \"tests/ordinary.rs\"\n",
     );
     fs::create_dir_all(root.join("alpha/tests")).expect("mkdir alpha tests");
     fs::write(root.join("alpha/tests/loom.rs"), "#[test]\nfn loom_test() {}\n").expect("write loom test");
+    fs::write(root.join("alpha/tests/ordinary.rs"), "#[test]\nfn ordinary_test() {}\n").expect("write ordinary test");
     write_bin(root, "beta", "\n[dev-dependencies]\nalpha = { path = \"../alpha\" }\n");
     fs::create_dir_all(root.join("beta/examples")).expect("mkdir beta examples");
     fs::write(root.join("beta/examples/demo.rs"), "fn main() {}\n").expect("write beta example");
@@ -955,8 +956,8 @@ fn per_target_mode_filters_required_features_and_substitutes_target() {
             "--workspace",
             "--each-target",
             "test",
-            "--target-required-feature",
-            "loom",
+            "--target-filter",
+            "required-feature:loom",
             "--dry-run",
             "--",
             "echo",
@@ -969,6 +970,193 @@ fn per_target_mode_filters_required_features_and_substitutes_target() {
                 .and(predicate::str::contains("beta").not())
                 .and(predicate::str::contains("epsilon").not()),
         );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_filters_support_boolean_composition() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--each-target",
+            "example",
+            "--target-filter",
+            "required-feature:loom or name:demo",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo alpha::loom-test")
+                .and(predicate::str::contains("echo beta::demo"))
+                .and(predicate::str::contains("ordinary-test").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn repeated_target_filters_are_and_combined() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "name:*test",
+            "--target-filter",
+            "not name:ordinary-*",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("loom-test").and(predicate::str::contains("ordinary-test").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_metadata_list_can_be_excluded_with_not() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "not name-in-metadata:cargo-each.excluded-targets",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ordinary-test").and(predicate::str::contains("loom-test").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn missing_target_metadata_list_matches_under_not() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "beta",
+            "--each-target",
+            "example",
+            "--target-filter",
+            "not name-in-metadata:cargo-each.excluded-targets",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn malformed_target_metadata_list_is_a_usage_error_before_execution() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n").expect("write workspace root");
+    write_lib(
+        root,
+        "alpha",
+        "0.1.0",
+        "\n[package.metadata.cargo-each]\nexcluded-targets = \"alpha\"\n",
+    );
+    each(&root.join("Cargo.toml"))
+        .args([
+            "--workspace",
+            "--each-target",
+            "lib",
+            "--target-filter",
+            "not name-in-metadata:cargo-each.excluded-targets",
+            "--",
+            "cargo-each-command-that-must-not-run",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(
+            predicate::str::contains("failed to build command plan")
+                .and(predicate::str::contains("must be an array of strings"))
+                .and(predicate::str::contains("cargo-each.excluded-targets")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn empty_target_filter_result_is_a_successful_noop() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "name:no-such-target",
+            "--",
+            "cargo-each-command-that-must-not-run",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("selection resolved to no work"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_filter_requires_target_mode() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--target-filter",
+            "required-feature:loom",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--each-target"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_required_feature_is_no_longer_a_cli_option() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--target-required-feature",
+            "loom",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("unexpected argument '--target-required-feature'"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1009,26 +1197,6 @@ fn per_target_and_once_are_mutually_exclusive() {
         .assert()
         .failure()
         .code(2);
-}
-
-#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
-#[test]
-fn target_required_feature_requires_target_mode() {
-    let (_tmp, manifest) = fixture();
-    each(&manifest)
-        .args([
-            "--workspace",
-            "--target-required-feature",
-            "loom",
-            "--dry-run",
-            "--",
-            "echo",
-            "{name}",
-        ])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("--each-target"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
