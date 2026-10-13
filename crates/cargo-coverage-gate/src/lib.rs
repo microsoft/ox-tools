@@ -265,6 +265,10 @@ pub use error::CoverageGateError;
 /// Cargo metadata, and record ordering and summary records may differ from the
 /// input.
 ///
+/// The result is already released-surface filtered. To evaluate that returned
+/// text without repeating source analysis, pass it to [`evaluate_raw`] (or its
+/// multi-input counterpart).
+///
 /// # Example
 ///
 /// ```no_run
@@ -610,5 +614,9 @@ mod tests {
         let evaluated = evaluate_raw(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
             .expect("raw evaluation must preserve manifest/package forwarding without source validation");
         assert_eq!(evaluated.verdict(), Verdict::Pass);
+
+        let error = evaluate(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
+            .expect_err("ordinary evaluation must apply released-surface source validation");
+        assert!(error.to_string().contains("failed to resolve Rust source path"));
     }
 }
