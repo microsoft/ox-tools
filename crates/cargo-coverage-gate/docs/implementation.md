@@ -112,7 +112,10 @@ the filtered-report parsing/attribution stages.
    It enumerates every workspace target and classifies released
    libraries (including proc macros and explicit library crate types) and bins
    separately from every other target kind. A module walk follows plain
-   `mod name;`, `name/mod.rs`, inline modules, and `#[path = "..."]` edges.
+   `mod name;`, `name/mod.rs`, inline modules, and `#[path = "..."]` edges
+   using Rust's distinct crate-root, plain-module, and path-module child
+   directories. Conditional `cfg_attr(..., path = "...")` edges fail
+   explicitly because they require the complete Cargo build configuration.
    A file is retained when at least one released path reaches it; release
    reachability wins when a test target also shares the file.
 3. rust-analyzer syntax identifies test-only item ranges. A `cfg` is test-only
@@ -122,6 +125,8 @@ the filtered-report parsing/attribution stages.
    removed together. Unreadable/unparseable sources, paths with no Cargo target
    owner, stale line numbers, ambiguous modules, and unsupported path
    attributes are operational errors rather than reasons to drop counters.
+   Distinct `SF:` spellings that normalize to the same LCOV section key are
+   also rejected instead of replacing one section's counters.
 4. The LCOV parser merges filtered reports by source path and line number. A line is
    coverable when it has a distinct `DA:` record. Hit counts determine the
    covered subset, while sorted coverable and uncovered line numbers remain
@@ -147,6 +152,8 @@ the filtered-report parsing/attribution stages.
 - Uncovered lines are a subset of coverable lines.
 - Every successful input source is reachable from a Cargo target, and every
   retained source is attributable to one workspace member.
+- Retained LCOV source paths are rewritten into the owning member's
+  cargo-metadata path namespace before package attribution.
 - Published `run` artifacts are already filtered; evaluation never gates a
   different in-memory view from the file made available to upload steps.
 - Package counters describe the complete attributed input, independent of the

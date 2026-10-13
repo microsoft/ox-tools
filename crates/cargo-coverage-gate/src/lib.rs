@@ -262,7 +262,9 @@ pub use error::CoverageGateError;
 /// resolves relative `SF:` paths against the Cargo workspace root. When
 /// `manifest_path` is `None`, Cargo discovers the workspace from the current
 /// directory. The returned LCOV is parsed and serialized canonically, so
-/// record ordering and summary records may differ from the input.
+/// retained `SF:` paths are normalized to the owning member path reported by
+/// Cargo metadata, and record ordering and summary records may differ from the
+/// input.
 ///
 /// # Example
 ///

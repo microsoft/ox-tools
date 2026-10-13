@@ -55,8 +55,10 @@ use serde_json::Value;
     ConflictingSourceEditionError,
     AmbiguousModuleSourceError,
     InvalidModulePathAttributeError,
+    ConditionalModulePathError,
     UnownedCoverageSourceError,
     UnattributableReleasedSourceError,
+    NormalizedSourceCollisionError,
     CoverageLineOutOfRangeError,
     MissingFunctionStartLineError,
     InvalidPackageSelectorError,
@@ -306,6 +308,19 @@ pub(crate) struct InvalidModulePathAttributeError {
     pub attribute: String,
 }
 
+/// A module selected its source file through `cfg_attr`, which requires
+/// evaluating the complete build configuration rather than only `cfg(test)`.
+#[ohno::error]
+#[display(
+    "module `{module}` declared in `{declaring}` uses conditional path attribute `{attribute}`; \
+     conditional module paths are not supported by released-surface filtering"
+)]
+pub(crate) struct ConditionalModulePathError {
+    pub declaring: String,
+    pub module: String,
+    pub attribute: String,
+}
+
 /// An LCOV source file was not reachable from any Cargo target root.
 #[ohno::error]
 #[display(
@@ -324,6 +339,17 @@ pub(crate) struct UnownedCoverageSourceError {
      move it under its owning package or use a package-local module path"
 )]
 pub(crate) struct UnattributableReleasedSourceError {
+    pub path: String,
+}
+
+/// Two LCOV sections became the same key after source-path normalization.
+#[ohno::error]
+#[display(
+    "multiple LCOV sections for test `{test_name}` normalize to source `{path}`; \
+     produce one consistent source path per file"
+)]
+pub(crate) struct NormalizedSourceCollisionError {
+    pub test_name: String,
     pub path: String,
 }
 

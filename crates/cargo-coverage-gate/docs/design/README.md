@@ -513,6 +513,9 @@ section to the released Cargo surface:
   non-release roots;
 - out-of-line modules are followed through normal Rust resolution, inline
   module directories, and `#[path = "..."]`;
+- conditional module paths expressed through `cfg_attr(..., path = "...")`
+  are rejected explicitly because selecting the released file requires the
+  complete Cargo build configuration;
 - a file reached by both classes remains released;
 - within a released file, `#[test]`, `#[bench]`, `#[cfg(test)]`, and
   predicates such as `#[cfg(all(test, unix))]` are removed, while
@@ -584,11 +587,11 @@ source, a source with no Cargo target owner, or a stale source reference is a
 configuration/operational error (exit `2`) rather than a counter the tool
 silently hides. Raw `evaluate*` compatibility APIs bypass this filtering.
 
-For each retained `SF:` path, the tool determines which workspace member owns
-it by **longest-prefix match** against the
-workspace members' manifest directories as reported by `cargo metadata`
-(no further canonicalization is performed; the matcher trusts the
-metadata-reported paths). A file under
+For each retained `SF:` path, the tool canonicalizes the source and determines
+which workspace member owns it by **longest-prefix match** against canonical
+workspace-member directories. It then writes the path relative to the owning
+member's directory as reported by `cargo metadata`, so the filtered LCOV and
+policy attribution use the same path namespace. A file under
 `workspace_root/crates/alpha/src/lib.rs` belongs to the member whose
 manifest is `workspace_root/crates/alpha/Cargo.toml`.
 

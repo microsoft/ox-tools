@@ -262,6 +262,7 @@ fn one_crate_below_threshold_exits_1() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
     let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
+    let missed = format!("{}: 61-100", Path::new("src").join("lib.rs").display());
 
     coverage_gate(tmp.path())
         .args(["--lcov", &lcov_path])
@@ -270,7 +271,7 @@ fn one_crate_below_threshold_exits_1() {
         .stdout(predicate::str::contains("FAIL"))
         .stdout(predicate::str::contains("1 package below threshold"))
         .stdout(predicate::str::contains("beta: 60/100 lines covered; 40 uncovered."))
-        .stdout(predicate::str::contains("src/lib.rs: 61-100"));
+        .stdout(predicate::str::contains(missed));
 }
 
 #[test]
