@@ -148,9 +148,8 @@ unused_lifetimes = "warn"
 # `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
 # with the catalog's `-D warnings` cloud-workflow policy, any custom cfg name
 # becomes a hard build failure. Pre-declare the cfgs that
-# `cargo llvm-cov` sets so narrow intentional exclusions can use
-# `#[cfg_attr(coverage_nightly, coverage(off))]`. Ordinary test-only source
-# needs no annotation because cargo-coverage-gate filters it by target/cfg semantics.
+# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
+# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
 # Adopters who need additional cfg names take ownership of this one
 # assignment (edit the check-cfg array); anvil's drift detector will
 # emit a `.anvil-proposed` sibling on future catalog bumps so the

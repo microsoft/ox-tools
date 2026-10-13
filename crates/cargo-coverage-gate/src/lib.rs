@@ -145,7 +145,7 @@
 //! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
 //! writes released-surface-filtered `lcov-all-features.info` and
 //! `lcov-no-default.info` under `target/coverage`, and evaluates those exact
-//! files in-process. They are therefore also the artifacts CI uploads to
+//! files in-process. CI integrations can upload those same artifacts to
 //! Codecov or Azure DevOps. Collection can
 //! be limited with repeatable `--package` selectors; no selectors means the
 //! workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`

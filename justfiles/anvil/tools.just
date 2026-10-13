@@ -846,10 +846,9 @@ anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-valid
 
 # llvm-tools ships the llvm-profdata / llvm-cov binaries that
 # cargo-llvm-cov shells out to. Required on the nightly toolchain
-# because anvil runs coverage on nightly. cargo-coverage-gate filters ordinary
-# test-only source automatically; the cfg remains available for narrow,
-# intentional `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions that
-# are not identifiable from Cargo target or `cfg(test)` semantics.
+# because anvil runs coverage on nightly (so cargo-llvm-cov sets the
+# `cfg(coverage_nightly)` that the workspace's
+# `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
 # Use the canonical `llvm-tools` name (not the legacy `llvm-tools-preview`
 # alias). Detection probes the sysroot for the `llvm-profdata` binary
 # (see `_check-component`), so the component name only matters for the
