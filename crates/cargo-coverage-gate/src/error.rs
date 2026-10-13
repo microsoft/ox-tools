@@ -56,11 +56,13 @@ use serde_json::Value;
     AmbiguousModuleSourceError,
     InvalidModulePathAttributeError,
     ConditionalModulePathError,
+    InvalidTestAttributesValueError,
+    InvalidTestAttributePathError,
+    PackageScopedTestAttributesError,
     UnownedCoverageSourceError,
     UnattributableReleasedSourceError,
     NormalizedSourceCollisionError,
     CoverageLineOutOfRangeError,
-    MissingFunctionStartLineError,
     InvalidPackageSelectorError,
     UnknownPackageSelectorError
 )]
@@ -321,6 +323,32 @@ pub(crate) struct ConditionalModulePathError {
     pub attribute: String,
 }
 
+/// `coverage-gate.test-attributes` was not an array of Rust attribute paths.
+#[ohno::error]
+#[display("{source}: `coverage-gate.test-attributes` must be an array of Rust attribute paths, got {value}")]
+pub(crate) struct InvalidTestAttributesValueError {
+    pub source: String,
+    pub value: serde_json::Value,
+}
+
+/// One configured test attribute was not a Rust path.
+#[ohno::error]
+#[display("invalid coverage-gate test attribute path `{value}`")]
+pub(crate) struct InvalidTestAttributePathError {
+    pub value: String,
+}
+
+/// Test-attribute policy was configured per package, where shared source could
+/// receive conflicting classifications.
+#[ohno::error]
+#[display(
+    "{package}: `coverage-gate.test-attributes` is workspace-scoped; \
+     move it to `[workspace.metadata.coverage-gate]`"
+)]
+pub(crate) struct PackageScopedTestAttributesError {
+    pub package: String,
+}
+
 /// An LCOV source file was not reachable from any Cargo target root.
 #[ohno::error]
 #[display(
@@ -363,18 +391,6 @@ pub(crate) struct CoverageLineOutOfRangeError {
     pub path: String,
     pub line: u32,
     pub line_count: usize,
-}
-
-/// LCOV function data lacked the start line required to remove test-only
-/// functions from the published report.
-#[ohno::error]
-#[display(
-    "LCOV function `{function}` in `{path}` has no start line; \
-     regenerate the report with cargo-llvm-cov so test-only functions can be filtered safely"
-)]
-pub(crate) struct MissingFunctionStartLineError {
-    pub path: String,
-    pub function: String,
 }
 
 /// A `--package` selector is not valid Cargo glob syntax.
@@ -495,5 +511,18 @@ mod tests {
         let stale = CoverageLineOutOfRangeError::new("src/lib.rs".to_owned(), 9_u32, 3_usize).to_string();
         assert!(stale.contains("line 9"));
         assert!(stale.contains("regenerate coverage"));
+    }
+
+    #[test]
+    fn test_attribute_policy_errors_are_actionable() {
+        let invalid_value = InvalidTestAttributesValueError::new("workspace".to_owned(), Value::from("tokio::test")).to_string();
+        assert!(invalid_value.contains("array of Rust attribute paths"));
+
+        let invalid_path = InvalidTestAttributePathError::new("tokio::test()".to_owned()).to_string();
+        assert!(invalid_path.contains("tokio::test()"));
+
+        let package_scoped = PackageScopedTestAttributesError::new("alpha".to_owned()).to_string();
+        assert!(package_scoped.contains("workspace-scoped"));
+        assert!(package_scoped.contains("workspace.metadata.coverage-gate"));
     }
 }

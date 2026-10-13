@@ -103,8 +103,8 @@ leaving errors and summary-file rendering intact.
 ## Diagnostic pipeline
 
 The CLI and ordinary `evaluate*` APIs use the complete pipeline below.
-Explicit `evaluate_raw*` APIs skip source discovery/filtering and begin at the
-filtered-report parsing/attribution stages.
+Explicit `evaluate_unfiltered*` APIs skip source discovery/filtering and begin
+at the filtered-report parsing/attribution stages.
 
 1. Each LCOV input is parsed before source discovery. Malformed LCOV therefore
    fails without touching source state.
@@ -118,7 +118,9 @@ filtered-report parsing/attribution stages.
    explicitly because they require the complete Cargo build configuration.
    A file is retained when at least one released path reaches it; release
    reachability wins when a test target also shares the file.
-3. rust-analyzer syntax identifies test-only item ranges. A `cfg` is test-only
+3. rust-analyzer syntax identifies test-only item ranges. Compiler-owned
+   `test`/`bench` attributes are intrinsic; qualified framework attributes are
+   matched against the exact workspace `test-attributes` policy. A `cfg` is test-only
    only when it cannot hold with `test = false`: `all(...)` requires just one
    test-only operand, `any(...)` requires every operand, and `not(...)` is
    retained. Line, branch, and function records inside excluded ranges are
@@ -127,6 +129,8 @@ filtered-report parsing/attribution stages.
    attributes are operational errors rather than reasons to drop counters.
    Distinct `SF:` spellings that normalize to the same LCOV section key are
    also rejected instead of replacing one section's counters.
+   Filtered output removes function and branch records entirely because the
+   available proof is line-granular.
 4. The LCOV parser merges filtered reports by source path and line number. A line is
    coverable when it has a distinct `DA:` record. Hit counts determine the
    covered subset, while sorted coverable and uncovered line numbers remain

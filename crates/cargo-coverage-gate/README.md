@@ -87,6 +87,19 @@ from `min-lines-percent = 0`, which keeps passing if the package grows
 coverable code. The two keys are mutually exclusive, and
 `expect-no-coverable-lines` is package-scoped only.
 
+#### Qualified test attributes
+
+Compiler-owned `#[test]` and `#[bench]` attributes are recognized
+intrinsically. Qualified framework attributes are exact workspace policy,
+never inferred from a final `test`/`bench` path segment:
+
+```toml
+[workspace.metadata.coverage-gate]
+test-attributes = ["my_runtime::test"]
+```
+
+The list has no qualified defaults and cannot be set per package.
+
 #### Target-specific policies
 
 A package can replace its base policy for a Cargo-style target selector:
@@ -221,7 +234,7 @@ let code = report.verdict().as_exit_code();
 artifacts without evaluating policy. [`evaluate`][__link3], [`evaluate_many`][__link4], and
 [`evaluate_many_for_target`][__link5] apply that filtering before evaluating policy.
 Callers that intentionally need unfiltered attribution use the explicitly
-named `evaluate_raw*` functions.
+named `evaluate_unfiltered*` functions.
 Evaluation returns an [`EvaluatedReport`][__link6], which renders as plain
 text via [`EvaluatedReport::render_text`][__link7] or GitHub-flavored Markdown via
 [`EvaluatedReport::render_markdown`][__link8] and reduces to a [`Verdict`][__link9] via
@@ -235,7 +248,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbJdmE95HQbqwb4daqP17NKBAbGwnIeMUtJrobaMFRKVCy_9NhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbI5zQ4nImPVIbg4VG6chextIbJTOHJKSGqqkbr0CkiPTmlYdhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_lcov.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

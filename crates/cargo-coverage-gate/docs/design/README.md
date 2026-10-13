@@ -212,11 +212,32 @@ The base schema accepts `min-lines-percent`, an integer or float percentage
 (`0.0`–`100.0` inclusive), or the package-only
 `expect-no-coverable-lines` assertion described below. Future extensions can
 add `min-functions` and `min-regions` symmetrically.
+Workspace metadata additionally accepts the source-classification
+`test-attributes` list described below.
 
 The built-in default of `100.0` means **gating is on by default**: a new
 package with no metadata anywhere will only pass if every measured line is
 covered. To opt a package out of gating, set `min-lines-percent = 0.0` explicitly
 (at the package or workspace level). There is no implicit opt-out.
+
+#### Qualified test attributes
+
+The compiler-owned `#[test]` and `#[bench]` attributes are always test-only.
+Qualified or custom attribute macros are never inferred from their final name:
+an attribute such as `#[company::test]` may generate released code.
+
+Workspaces explicitly list framework attributes that are known to expand to
+test-only functions:
+
+```toml
+[workspace.metadata.coverage-gate]
+test-attributes = ["my_runtime::test"]
+```
+
+The entries are exact Rust attribute paths. The list is workspace-scoped so a
+source file shared by multiple packages receives one classification;
+package-scoped `test-attributes` is a configuration error. There are no
+qualified built-in defaults.
 
 #### `expect-no-coverable-lines`: empty crates vs. opt-out
 
@@ -408,7 +429,7 @@ cargo coverage-gate \
 Library callers get released-surface semantics from the ordinary `evaluate*`
 and `filter_lcov*` APIs. Callers that intentionally need every attributed LCOV
 line, including tests and non-release targets, use the explicitly named
-`evaluate_raw*` escape hatch. Raw evaluation is useful for inspecting
+`evaluate_unfiltered*` escape hatch. Unfiltered evaluation is useful for inspecting
 instrumentation itself, debugging target ownership, or building a report whose
 policy deliberately includes test harness source; it is not the production
 gate's default.
@@ -536,9 +557,10 @@ For each remaining `SF:` section the tool counts:
 - The line numbers of all `DA:` records and of the zero-count subset,
   retained for failure diagnostics.
 
-Function (`FN:`/`FNDA:`) and branch (`BRDA:`) records are retained for upload
-but do not affect the line gate. They are filtered alongside `DA:` records so
-test-only details do not remain visible in Codecov or ADO.
+Function (`FN:`/`FNDA:`) and branch (`BRDA:`) records are removed from filtered
+LCOV. The filter's proof is line-based and cannot safely disambiguate mixed
+released/test-only syntax that shares one source line. The resulting artifact
+is deliberately line-coverage-only, matching the gate's policy surface.
 
 #### Multiple tracefiles
 
@@ -587,7 +609,12 @@ Cargo target root through supported module declarations. A source reached only
 from a non-release target is removed. An unresolvable, unreadable, unparseable
 source, a source with no Cargo target owner, or a stale source reference is a
 configuration/operational error (exit `2`) rather than a counter the tool
-silently hides. Explicit `evaluate_raw*` APIs bypass this filtering.
+silently hides. Explicit `evaluate_unfiltered*` APIs bypass this filtering.
+
+The module graph does not infer ownership through `include!`, macro-generated
+module declarations, or build-script-generated source inclusion. If such a
+path appears in LCOV without a supported Cargo target or module edge, filtering
+fails with the offending source path rather than hiding its counters.
 
 For each retained `SF:` path, the tool canonicalizes the source and determines
 which workspace member owns it by **longest-prefix match** against canonical
@@ -905,8 +932,9 @@ records) are hard errors with exit code 2.
 The released-surface default is an intentional public-API break: the next
 publication containing this design must be `0.7.0`, not another `0.6.x`
 release. Existing library callers that deliberately relied on raw LCOV
-attribution migrate from `evaluate*` to the corresponding `evaluate_raw*`
-function. CLI behavior and the ordinary `evaluate*` family then share one
+attribution migrate from `evaluate*` to the corresponding
+`evaluate_unfiltered*` function. CLI behavior and the ordinary `evaluate*`
+family then share one
 opinionated production-coverage contract.
 
 #### Tooling requirements
