@@ -886,11 +886,7 @@ fn negated_metadata_filter_drops_matching_member() {
         ])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("tool gamma")
-                .not()
-                .and(predicate::str::contains("tool alpha")),
-        );
+        .stdout("tool alpha\ntool beta\ntool delta\ntool epsilon\n");
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1461,7 +1457,7 @@ fn once_with_negated_filter_uses_explicit_packages_not_workspace() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--package").and(predicate::str::contains("--workspace").not()));
+        .stdout("cargo x --package alpha@0.1.0 --package beta@0.1.0 --package delta@1.2.3-beta.1+build --package epsilon@0.1.0\n");
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

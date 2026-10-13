@@ -2,11 +2,28 @@
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-10-12
+## [0.5.0] - 2026-10-13
+
+- ⚠️ Breaking
+
+  - remove --exclude-filter; use --filter 'not ...'
 
 - ✨ Features
 
+  - resume interrupted campaigns and streamline mutant testing ([#248](https://github.com/microsoft/ox-tools/pull/248))
   - add doctest capability filter
+
+- ✔️ Tasks
+
+  - release v0.5.0
+
+- ♻️ Code Refactoring
+
+  - unify package filtering
+
+- 🧩 Miscellaneous
+
+  - Merge remote-tracking branch 'origin/main' into makolnek-microsoft-cargo-each-doctest-filter
 
 ## [0.4.0] - 2026-10-06
 

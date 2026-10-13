@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-12
+
+- ✨ Features
+
+  - resume interrupted campaigns and streamline mutant testing ([#248](https://github.com/microsoft/ox-tools/pull/248))
+  - improve campaign scheduling and UX ([#208](https://github.com/microsoft/ox-tools/pull/208))
+  - optimize campaigns and harden mutation results ([#198](https://github.com/microsoft/ox-tools/pull/198))
+  - optimize mutation campaigns ([#187](https://github.com/microsoft/ox-tools/pull/187))
+
+- 🐛 Bug Fixes
+
+  - preserve nonzero measured baselines ([#238](https://github.com/microsoft/ox-tools/pull/238))
+  - address post-merge review feedback ([#236](https://github.com/microsoft/ox-tools/pull/236))
+  - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
+  - skip bin-only doctest scopes ([#218](https://github.com/microsoft/ox-tools/pull/218))
+  - support standalone toolchains in environment tests ([#194](https://github.com/microsoft/ox-tools/pull/194))
+
+- 🧩 Miscellaneous
+
+  - Release cargo-gamma 0.3.0 ([#227](https://github.com/microsoft/ox-tools/pull/227))
+  - Address Sander's 'Tsunami of Feedback' ([#221](https://github.com/microsoft/ox-tools/pull/221))
+
 ## [0.2.0] - 2026-09-03
 
 - 🐛 Bug Fixes
