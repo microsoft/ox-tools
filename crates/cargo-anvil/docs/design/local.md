@@ -177,9 +177,9 @@ anvil-full: anvil-pr anvil-scheduled
 
 `tools.just` houses six layers of recipes:
 
-1. **`anvil-tool-cargo-spellcheck-source-deps-check`** — probe for `libclang`, which
-   `cargo-spellcheck` needs when built from source. Best-effort presence check; on
-   missing deps emits per-OS install hints and exits non-zero. No auto-install. See
+1. **Setup capabilities** — provision or diagnose system dependencies that a catalog
+   tool needs when built from source. The current
+   `anvil-setup-capability-libclang` capability serves `cargo-spellcheck`. See
    §3.3.1.
 2. **Private helpers** (`_install-tool`, `_check-tool`, `_install-toolchain`,
    `_check-toolchain`, `_install-component`, `_check-component`) — the single
@@ -358,23 +358,36 @@ requires. anvil is not a general-purpose dev-env doctor. Repository-specific
 system deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong
 in the adopter's `setup.yml` customization, not in the anvil catalog.
 
-Detection (`anvil-tool-cargo-spellcheck-source-deps-check`) uses presence-only probes -- file existence
-in standard install dirs plus the `LIBCLANG_PATH` env var override. No version
-checks: system libs upgrade independently of the catalog and any reasonably modern
-libclang satisfies clang-sys.
+Detection (`anvil-setup-capability-libclang`) uses presence-only probes -- file
+existence in standard install dirs (including versioned `/usr/lib/llvm-N/lib`
+directories) plus the `LIBCLANG_PATH` env var override. No version checks: system
+libs upgrade independently of the catalog and any reasonably modern libclang
+satisfies clang-sys.
 
-On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
-scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
-package-manager choice stay with the user. The cargo-spellcheck install recipe passes
-`anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
+When the capability is missing on a GitHub-hosted Linux runner, Anvil provisions
+`libclang-dev` through the runner's non-interactive `apt-get` contract and verifies
+that the installed library is discoverable. This is deliberately lazy: the
+capability runs only when a source build is about to occur, so a successful prebuilt
+installation pays no system-package cost. Capabilities return any discovered
+build environment through Anvil's temporary JSON environment contract;
+`_install-tool` applies those variables only to the pending source build. The
+libclang capability returns `LIBCLANG_PATH`, which makes versioned Ubuntu package
+locations deterministic instead of relying on `clang-sys` search heuristics.
+
+On local, self-hosted, macOS, and Windows environments, a missing capability prints
+per-OS install hints (apt-get / tdnf / brew / scoop / winget) and exits non-zero.
+Anvil does not assume admin policy or package-manager choice for environments it
+does not own. The cargo-spellcheck install recipe passes
+`anvil-setup-capability-libclang` to `_install-tool` as its source prerequisite.
 The prerequisite runs for an explicit source-build `install` backend and when `binstall`
 cannot provide a binary. Anvil disables binstall's own compile strategy and performs the
 source fallback itself, so missing libclang surfaces as a clear hint before compilation
 instead of a cryptic clang-sys build error 10 minutes into the install.
 
-Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
-wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like
-any other template edit.
+Each source-build system dependency owns a reusable `anvil-setup-capability-*`
+recipe, and each tool that needs it wires the capability into `_install-tool`.
+Catalog changes propagate to adopters via `cargo anvil` like any other template
+edit.
 
 ### 3.4 Per-check warnings
 

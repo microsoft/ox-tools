@@ -192,6 +192,9 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
 }
+if ($env:FAKE_CARGO_LIBCLANG_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_LIBCLANG_LOG -Value $env:LIBCLANG_PATH
+}
 if ($args -contains 'each') {
     $featureExit = if ($args -contains '--no-default-features') {
         $env:FAKE_EACH_NO_DEFAULT_EXIT
@@ -2041,11 +2044,17 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
 [script("pwsh", "-NoProfile")]
 source-prereq:
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value 'source-prereq'
+    if ($env:FAKE_CAPABILITY_LIBCLANG_PATH) {
+        @{ LIBCLANG_PATH = $env:FAKE_CAPABILITY_LIBCLANG_PATH } |
+            ConvertTo-Json -Compress |
+            Set-Content -LiteralPath $env:ANVIL_SETUP_CAPABILITY_ENV_FILE -Encoding UTF8
+    }
     exit [int]$env:FAKE_PREREQ_EXIT
 "#,
     );
     write(&justfile_path, &justfile);
     let log = tmp.path().join("cargo.log");
+    let libclang_log = tmp.path().join("libclang.log");
 
     let fallback = run_just(
         tmp.path(),
@@ -2055,6 +2064,8 @@ source-prereq:
             ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
             ("FAKE_PREREQ_EXIT", OsStr::new("0")),
             ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+            ("FAKE_CAPABILITY_LIBCLANG_PATH", OsStr::new("/opt/libclang")),
+            ("FAKE_CARGO_LIBCLANG_LOG", libclang_log.as_os_str()),
         ],
     );
     assert!(
@@ -2077,6 +2088,11 @@ source-prereq:
         .position(|line| line.contains("install --locked cargo-spellcheck --version =0.15.7"))
         .expect("Anvil must perform the controlled source install at the exact pin");
     assert!(binstall < prerequisite && prerequisite < source_install);
+    assert_eq!(
+        fs::read_to_string(&libclang_log).unwrap().trim(),
+        "/opt/libclang",
+        "source capability environment must reach the controlled Cargo install"
+    );
 
     fs::remove_file(&log).unwrap();
     let prerequisite_failure = run_just(

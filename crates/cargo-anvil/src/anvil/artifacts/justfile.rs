@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn tools_just_template_is_not_empty() {
-        assert!(TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"));
+        assert!(TOOLS_JUST.contains("anvil-setup-capability-libclang"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn spellcheck_checks_source_prerequisites_before_source_builds() {
+    fn spellcheck_provisions_source_capabilities_before_source_builds() {
         assert!(
             TOOLS_JUST.contains("if ($sourcePrereq)"),
             "binstall compile strategy must only be disabled for tools with source prerequisites"
@@ -390,13 +390,35 @@ mod tests {
             "binstall must not compile before Anvil checks source prerequisites"
         );
         assert!(
-            TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"),
-            "spellcheck installer must run libclang validation before source builds"
+            TOOLS_JUST.contains("anvil-setup-capability-libclang"),
+            "spellcheck installer must run the libclang capability before source builds"
         );
+        for needle in [
+            "$env:GITHUB_ACTIONS -eq 'true'",
+            "$env:RUNNER_ENVIRONMENT -eq 'github-hosted'",
+            "sudo apt-get install -y libclang-dev",
+            "Get-ChildItem -Path '/usr/lib' -Directory -Filter 'llvm-*'",
+        ] {
+            assert!(
+                TOOLS_JUST.contains(needle),
+                "libclang capability is missing GitHub-hosted Linux provisioning contract '{needle}'"
+            );
+        }
+        for needle in [
+            "ANVIL_SETUP_CAPABILITY_ENV_FILE",
+            "ConvertFrom-Json",
+            "Set-Item -Path \"Env:$($property.Name)\"",
+            "@{ LIBCLANG_PATH = $libclangDir }",
+        ] {
+            assert!(
+                TOOLS_JUST.contains(needle),
+                "source capability environment propagation is missing contract '{needle}'"
+            );
+        }
         let checks = all_check_bodies();
         assert!(
-            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-tool-cargo-spellcheck-source-deps-check"),
-            "spellcheck setup must not require libclang before binstall"
+            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-setup-capability-libclang"),
+            "spellcheck setup must not provision libclang before binstall"
         );
         assert!(
             !TOOLS_JUST.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64") && !checks.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),

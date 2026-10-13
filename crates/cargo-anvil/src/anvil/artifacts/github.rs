@@ -236,6 +236,11 @@ mod tests {
         assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
+        assert_eq!(
+            SETUP_ACTION.matches("GITHUB_TOKEN: ${{ github.token }}").count(),
+            2,
+            "both setup binstall call sites must use GitHub's authenticated API quota"
+        );
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));

@@ -829,6 +829,20 @@ prerequisites provision the selected compiler and tools. Its
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
   input here, so a `pr-fast` matrix leg never installs cargo-mutants.
 
+Catalog tools may declare lazy source-build setup capabilities. The setup recipe
+invokes one only after prebuilt installation fails and immediately before its
+controlled `cargo install` fallback. On GitHub-hosted Linux, the reusable
+`libclang` capability provisions `libclang-dev` with `apt-get`, discovers the
+versioned LLVM library directory, and applies `LIBCLANG_PATH` to that source build.
+Successful prebuilt installs do not install the package. Self-hosted runners and
+other operating systems retain diagnostic-only capability checks rather than
+granting Anvil an implicit package-management policy.
+
+Both cargo-binstall call sites receive the workflow's built-in `GITHUB_TOKEN`.
+Release discovery therefore uses GitHub's authenticated API quota instead of the
+low unauthenticated limit; the token remains read-only under the generated
+workflow's default `contents: read` permission.
+
 Before invoking Just, the action registers the generated
 `just-problem-matcher.json`. Just already prints the exact failed dependency
 recipe (for example, ``error: recipe `anvil-license-headers` failed with exit
@@ -998,9 +1012,12 @@ benefit in that setting.
 
 The setup action uses `sudo rm -rf` only when `free-disk-space` is explicitly enabled
 and the runner reports `runner.environment == 'github-hosted'`. It never performs disk
-cleanup on self-hosted runners. Other composite-action steps install tools and invoke
-`just`. The reusable workflow propagates only what the root workflow passes (and only
-the inputs explicitly declared).
+cleanup on self-hosted runners. A lazy source-build capability may also use `sudo
+apt-get` on GitHub-hosted Linux to provision a catalog tool's declared system
+dependency; the same capability is diagnostic-only on self-hosted runners. Other
+composite-action steps install tools and invoke `just`. The reusable workflow
+propagates only what the root workflow passes (and only the inputs explicitly
+declared).
 
 Recommended root workflow shape:
 
