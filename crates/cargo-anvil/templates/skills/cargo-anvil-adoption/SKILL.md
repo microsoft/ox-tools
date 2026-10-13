@@ -80,9 +80,10 @@ Resolve differences at the policy source:
 - Preserve license, source, advisory, ban, and duplicate-dependency policy in
   `deny.toml` or the relevant tool configuration.
 - Move spelling exceptions into `.spelling`.
-- Express coverage thresholds and opt-outs through cargo-coverage-gate metadata
-  or narrowly scoped source attributes. Do not preserve a second coverage
-  exclusion list when the Anvil gate cannot read it.
+- Express coverage thresholds and opt-outs through cargo-coverage-gate
+  metadata. Its generated run filters test-only source and non-release Cargo
+  targets automatically; do not preserve a second coverage exclusion list or
+  require unstable `coverage(off)` annotations on ordinary tests.
 - Record intentional external public types in the package metadata understood
   by cargo-check-external-types.
 - Ensure the root MSRV and stable toolchain selection are intentional and

@@ -45,7 +45,11 @@ lower-coverage code.
 6. **Portable collection orchestration**: an optional mode runs the supported
    cargo-llvm-cov/nextest sequence and evaluates the result, so repositories do
    not carry platform-specific coverage scripts.
-7. **Open source**: ships from `github.com/microsoft/ox-tools` to crates.io.
+7. **Released-surface measurement**: tests still execute and cover production
+   code, but source that can only belong to test/example/bench/build-script
+   targets, plus item regions that provably require `cfg(test)`, never enters
+   the denominator or uploaded report.
+8. **Open source**: ships from `github.com/microsoft/ox-tools` to crates.io.
 
 ## 3. Non-Goals
 
@@ -55,9 +59,9 @@ lower-coverage code.
 - Diff coverage (per-line annotation of changed lines). Different concern,
   different consumers (review tooling like Codecov); this tool answers a
   separable question.
-- Uploading coverage to Codecov / ADO Coverage UI. Those uploads use the
-  byte-exact lcov / cobertura files cargo-llvm-cov emits and are wired by
-  the surrounding CI templates. This tool stays out of upload paths.
+- Uploading coverage to Codecov / ADO Coverage UI. The surrounding CI
+  templates perform the upload, but they upload the byte-exact filtered LCOV
+  files `run` publishes and evaluates.
 - Cross-crate aggregation policies (e.g. "workspace total must stay above
   N"). If a repo wants that, run the existing
   `cargo llvm-cov --fail-under-lines` flag in parallel; the two are
@@ -117,8 +121,9 @@ Flags:
 
 - `--lcov <path>` — path to a cargo-llvm-cov lcov tracefile. May be
   repeated (`--lcov a.info --lcov b.info`); the tracefiles are merged at
-  the line level (line sets combined, coverage retained when any input
-  has a hit) before gating, so multiple feature-config exports (`--all-features`,
+  the line level after each is filtered to released Cargo lib/bin source
+  (line sets combined, coverage retained when any input has a hit) before
+  gating, so multiple feature-config exports (`--all-features`,
   `--no-default-features`) can be gated together without a separate,
   platform-specific merge step (`lcov -a` is Linux-only). Defaults to a
   single `target/coverage/lcov.info` when omitted (matching the
@@ -158,8 +163,8 @@ hand, so every change appears in a PR diff and is reviewed.
 - `--jobs <N>` — positive concurrency forwarded consistently to nextest's
   build and test execution.
 - `--coverage-dir <path>` — artifact directory, default
-  `target/coverage`. Each configuration gets a distinct LCOV file so CI can
-  upload completed outputs even if evaluation later fails.
+  `target/coverage`. Each configuration gets a distinct released-surface LCOV
+  file. Those exact files feed evaluation and CI uploads.
 - `--no-coverage-target <triple>` — explicitly run plain nextest without
   coverage collection or gating when the effective target matches. Repeatable;
   the default list is empty. The effective target is the explicit `--target`
@@ -414,8 +419,12 @@ For each requested feature configuration, `run`:
    selection, delegating raw-profile merging, ordinary and nested trybuild
    object discovery, and the complete default filename exclusions to
    cargo-llvm-cov;
-5. ordinarily writes that report directly to its stable consumer path under
-   `--coverage-dir` and passes the same path to the evaluator.
+5. reconstructs Cargo target ownership from metadata and Rust module
+   declarations, removes non-release target sources and provably test-only
+   item regions from line/function/branch records, and fails explicitly if a
+   source cannot be resolved, read, parsed, or safely owned;
+6. atomically publishes the filtered report to its stable consumer path under
+   `--coverage-dir` and passes that exact path to the evaluator.
 
 The selected package set is resolved to exact `name@version` specs before
 subprocess execution. With no selection options, the collector passes
@@ -454,13 +463,12 @@ Windows response-file tokenizer; it never executes the diagnostic as shell
 syntax. This preserves upstream object discovery and exclusions instead of
 maintaining a second, necessarily incomplete implementation.
 
-The exceptional response-file export writes to a temporary file beside the
-stable LCOV path and captures stderr. A successful export is renamed over the
-stable path. The same complete paired no-coverage-data diagnostic used by the
-ordinary report path publishes a valid empty file. Every other fallback
-failure removes the temporary file, leaves any previously completed stable
-artifact unchanged, and exits `2`. The response file lives in per-invocation
-scratch and is removed with that scratch.
+The exceptional response-file export writes to per-invocation scratch and
+captures stderr. A successful export and the same complete paired
+no-coverage-data conversion used by the ordinary report path both pass through
+released-surface filtering before stable publication. Every other fallback
+failure removes temporary files, leaves any previously completed stable
+artifact unchanged, and exits `2`.
 
 Failure in any collection phase is operational failure, not missing coverage,
 and exits `2`. A successful, structurally valid empty LCOV export continues to
@@ -489,7 +497,25 @@ LH:82
 end_of_record
 ```
 
-For each `SF:` section the tool counts:
+Before counting, the tool filters every section to the released Cargo surface:
+
+- target roots classified as libraries (`lib`, `rlib`, `dylib`, `cdylib`,
+  `staticlib`, and `proc-macro`) or `bin` are released roots;
+- test, example, bench, custom-build, unknown, and every other target kind are
+  non-release roots;
+- out-of-line modules are followed through normal Rust resolution, inline
+  module directories, and `#[path = "..."]`;
+- a file reached by both classes remains released;
+- within a released file, `#[test]`, `#[bench]`, `#[cfg(test)]`, and
+  predicates such as `#[cfg(all(test, unix))]` are removed, while
+  `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
+  `cfg(not(test))` remain.
+
+Filtering removes matching line, branch, and function records so downstream
+coverage UIs see the same surface as the gate. A source/path/parse state the
+tool cannot classify safely is exit `2`, not a silent exclusion.
+
+For each remaining `SF:` section the tool counts:
 
 - `lines_total` — number of distinct `DA:` records (executable lines
   the instrumentation knows about).
@@ -497,14 +523,14 @@ For each `SF:` section the tool counts:
 - The line numbers of all `DA:` records and of the zero-count subset,
   retained for failure diagnostics.
 
-Records other than `SF:` / `DA:` / `LF:` / `LH:` (function `FN:`,
-branch `BRDA:`, etc.) are accepted by the parser but not used; the
-gate is a line-coverage tool.
+Function (`FN:`/`FNDA:`) and branch (`BRDA:`) records are retained for upload
+but do not affect the line gate. They are filtered alongside `DA:` records so
+test-only details do not remain visible in Codecov or ADO.
 
 #### Multiple tracefiles
 
-`--lcov` may be supplied more than once. The tool parses each tracefile
-and merges them at the line level **before** computing per-package
+`--lcov` may be supplied more than once. The tool filters each tracefile
+independently, then parses and merges them at the line level **before** computing per-package
 aggregates: the `DA:` line set is the union across inputs, and a line is
 `covered` if it was hit in *any* input. Execution-count magnitudes are not
 combined because the gate consumes only the covered/uncovered predicate.
@@ -525,8 +551,7 @@ XML, or Codecov's custom JSON. We pick lcov because it matches every
 other coverage UI fed by the same data:
 
 - Codecov ingests lcov uploads directly.
-- ADO ingests cobertura, which cargo-llvm-cov derives from lcov
-  internally (same line set).
+- ADO's generated integration ingests lcov directly.
 - `cargo llvm-cov report --codecov` emits Codecov's custom JSON, also
   derived from lcov.
 
@@ -544,20 +569,25 @@ upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
 
 ### 6.2 File-to-package attribution
 
-For each `SF:` path in the tracefile, the tool determines which
-workspace member owns it by **longest-prefix match** against the
+Filtering first requires every `SF:` path to be reachable from a Cargo target
+root through supported module declarations. A source reached only from a
+non-release target is removed. An unresolvable, unreadable, unparseable source,
+a source with no Cargo target owner, or a stale source reference is a configuration/operational error
+(exit `2`) rather than a counter the tool silently hides.
+
+For each retained `SF:` path, the tool determines which workspace member owns
+it by **longest-prefix match** against the
 workspace members' manifest directories as reported by `cargo metadata`
 (no further canonicalization is performed; the matcher trusts the
 metadata-reported paths). A file under
 `workspace_root/crates/alpha/src/lib.rs` belongs to the member whose
 manifest is `workspace_root/crates/alpha/Cargo.toml`.
 
-Files that match no member (typically generated code outside the workspace
-tree, sysroot files like `std`/`core` that leaked into the report, or
-proc-macro expansions with synthesized paths) are dropped with a single
-aggregated warning per run (one line, total count, not per-file), so
-constant low-volume noise stays bounded. They are not folded into any
-package's totals.
+Released files outside every workspace member directory are rejected because
+the package policy they should affect cannot be determined safely. Upstream
+cargo-llvm-cov filename exclusions should keep dependency/sysroot sources out
+of the report; if one leaks through, the gate fails loudly with the offending
+path.
 
 ### 6.3 Aggregation
 
@@ -729,7 +759,7 @@ package's `Cargo.toml`. A removed package's threshold disappears with its
 ### 8.1 GitHub Actions
 
 The intended call site is from a reusable workflow that already publishes
-the lcov / cobertura artifacts. After the test step:
+the filtered lcov artifacts. After the test step:
 
 ```yaml
 - name: Coverage gate
@@ -744,6 +774,11 @@ scoping, drop the variable and gate every workspace member every run.
 
 The job picks up `$GITHUB_STEP_SUMMARY` automatically and writes the
 verdict table to the workflow-run page above the job log.
+
+Coverage services must receive the filtered LCOV files without a second
+test-path or `test-util` ignore list. Test-only source is already absent, and a
+service-side ignore would make its displayed denominator differ from the local
+gate.
 
 ### 8.2 Azure DevOps
 
@@ -843,10 +878,10 @@ multiple workspaces invoke the tool once per workspace.
 The LCOV tracefile format has no version number. It is a line-oriented
 record format that has been stable across the LCOV project for over a
 decade, with new record types added over time (function `FN:` /
-`FNDA:`, branch `BRDA:`, etc.). The tool reads only `SF:` (source
-file) and `DA:` (line count) records; everything else is ignored, so
-new record types added by future cargo-llvm-cov releases will not
-break parsing.
+`FNDA:`, branch `BRDA:`, etc.). The line gate reads `SF:` and `DA:`;
+released-surface publication also reads line-bearing function and branch
+records so excluded test regions disappear from uploaded reports. Summary
+records are recomputed when filtered LCOV is serialized.
 
 If a tracefile contains no `SF:` sections, every in-scope package is evaluated
 as having no attributed data. The effective package policies determine the
@@ -861,7 +896,7 @@ Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
 - `#[coverage(off)]` is gated behind `feature(coverage_attribute)`,
   which is nightly-only. On stable, files annotated with
   `#[cfg_attr(coverage_nightly, coverage(off))]` are still measured
-  and any uncovered match arms / test code inflate the denominator.
+  and intentionally excluded non-testable paths inflate the denominator.
 - cargo-llvm-cov 0.6.x did not propagate `#[coverage(off)]` into its
   JSON / lcov output even on nightly. Versions 0.7+ fix this. Older
   versions silently report inflated line counts, which then surface

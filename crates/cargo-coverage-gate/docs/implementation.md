@@ -52,14 +52,23 @@ The optional `run` mode keeps collection and evaluation separated internally:
    argument quoting. On error 206 only, the collector parses that diagnostic,
    validates the `llvm-cov export` shape, and re-quotes the arguments for an
    LLVM response file without invoking a shell.
-5. Each report is written directly to its stable per-configuration path under
-   `--coverage-dir`, then that same path is passed to the ordinary in-process
-   evaluator. The Windows response-file retry is the exception: because LLVM
-   exports to stdout, it writes a sibling temporary file, captures stderr, and
-   renames the temporary file over the stable path only after successful
-   export or the valid paired no-data conversion. Other retry failures preserve
-   a previously completed stable artifact. `no-default-features` maps to
-   `lcov-no-default.info`.
+5. Each raw report is written inside per-invocation scratch. The released
+   source surface is then reconstructed from Cargo target roots and Rust
+   out-of-line module declarations. Sources reachable only from tests,
+   examples, benches, build scripts, or other non-release targets are removed.
+   Within released files, syntax ranges are removed only when their attributes
+   prove they require `test`; `cfg(any(test, feature = "test-util"))`,
+   feature-only gates, and `cfg(not(test))` remain.
+6. The filtered LCOV is staged beside its stable per-configuration path under
+   `--coverage-dir` and renamed into place only after complete filtering. The
+   evaluator reads those exact stable files, so the gate, Codecov, and Azure
+   DevOps consume byte-identical released-surface reports.
+   `no-default-features` maps to `lcov-no-default.info`.
+
+The Windows response-file retry also writes only to scratch. Successful retry
+output and the valid paired no-data conversion pass through the same source
+filter before publication. Other retry failures preserve a previously
+completed stable artifact.
 
 Instrumented target isolation does not serialize or duplicate stable
 `--coverage-dir` artifacts. Concurrent invocations that select the same
@@ -93,19 +102,34 @@ leaving errors and summary-file rendering intact.
 
 ## Diagnostic pipeline
 
-1. The LCOV parser merges reports by source path and line number. A line is
+1. Each LCOV input is parsed before source discovery. Malformed LCOV therefore
+   fails without touching source state.
+2. Cargo metadata enumerates every workspace target and classifies released
+   libraries (including proc macros and explicit library crate types) and bins
+   separately from every other target kind. A module walk follows plain
+   `mod name;`, `name/mod.rs`, inline modules, and `#[path = "..."]` edges.
+   A file is retained when at least one released path reaches it; release
+   reachability wins when a test target also shares the file.
+3. rust-analyzer syntax identifies test-only item ranges. A `cfg` is test-only
+   only when it cannot hold with `test = false`: `all(...)` requires just one
+   test-only operand, `any(...)` requires every operand, and `not(...)` is
+   retained. Line, branch, and function records inside excluded ranges are
+   removed together. Unreadable/unparseable sources, paths with no Cargo target
+   owner, stale line numbers, ambiguous modules, and unsupported path
+   attributes are operational errors rather than reasons to drop counters.
+4. The LCOV parser merges filtered reports by source path and line number. A line is
    coverable when it has a distinct `DA:` record. Hit counts determine the
    covered subset, while sorted coverable and uncovered line numbers remain
    available for diagnostics.
-2. Attribution maps each source file to the most specific workspace member
+5. Attribution maps each source file to the most specific workspace member
    whose manifest directory contains it. Aggregation computes exact package
    counters from the attributed files.
-3. Verdict evaluation selects diagnostic locations by status. Numeric failures
+6. Verdict evaluation selects diagnostic locations by status. Numeric failures
    select uncovered lines, unexpected-coverable-lines failures select all
    coverable lines, and passing or no-data outcomes select none. Paths are made
    relative to the package manifest directory when possible, then diagnostics
    are ordered by package, path, and line.
-4. The terminal and Markdown renderers share the same detail and range
+7. The terminal and Markdown renderers share the same detail and range
    formatting. Each renderer emits at most 100 locations per package and
    computes the omitted count from the complete diagnostic set, so truncation
    does not alter aggregate counts or conceal how much output was omitted.
@@ -116,6 +140,10 @@ leaving errors and summary-file rendering intact.
   number, and ascending because `FileReport` construction explicitly sorts
   them.
 - Uncovered lines are a subset of coverable lines.
+- Every successful input source is reachable from a Cargo target, and every
+  retained source is attributable to one workspace member.
+- Published `run` artifacts are already filtered; evaluation never gates a
+  different in-memory view from the file that upload steps consume.
 - Package counters describe the complete attributed input, independent of the
   rendered location limit.
 - Both renderers consume the same status-specific diagnostics and preserve

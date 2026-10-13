@@ -44,6 +44,17 @@ use serde_json::Value;
     ResolveTargetError,
     ParseLcovError,
     ReadLcovError,
+    ResolveCoverageSourceError,
+    ReadCoverageSourceError,
+    ParseCoverageSourceError,
+    UnsupportedSourceEditionError,
+    ConflictingSourceEditionError,
+    AmbiguousModuleSourceError,
+    InvalidModulePathAttributeError,
+    UnownedCoverageSourceError,
+    UnattributableReleasedSourceError,
+    CoverageLineOutOfRangeError,
+    MissingFunctionStartLineError,
     InvalidPackageSelectorError,
     UnknownPackageSelectorError
 )]
@@ -220,6 +231,122 @@ pub(crate) struct ReadLcovError {
     pub path: String,
 }
 
+/// A Rust source path needed for coverage filtering could not be resolved to
+/// its canonical path.
+#[ohno::error]
+#[display("failed to resolve Rust source path `{path}` while filtering coverage")]
+#[from(std::io::Error)]
+pub(crate) struct ResolveCoverageSourceError {
+    pub path: String,
+}
+
+/// A Rust source file needed for coverage filtering could not be read as
+/// UTF-8.
+#[ohno::error]
+#[display("failed to read Rust source `{path}` while filtering coverage")]
+#[from(std::io::Error)]
+pub(crate) struct ReadCoverageSourceError {
+    pub path: String,
+}
+
+/// rust-analyzer's parser rejected a source file that contributed to the
+/// Cargo target graph.
+#[ohno::error]
+#[display("could not parse Rust source `{path}` while filtering coverage: {diagnostics}")]
+pub(crate) struct ParseCoverageSourceError {
+    pub path: String,
+    pub diagnostics: String,
+}
+
+/// Cargo reported a Rust edition newer than the source parser understands.
+#[ohno::error]
+#[display("Rust source `{path}` uses unsupported edition `{edition}`; update cargo-coverage-gate")]
+pub(crate) struct UnsupportedSourceEditionError {
+    pub path: String,
+    pub edition: String,
+}
+
+/// One source file was reached by Cargo targets that parse it under different
+/// Rust editions.
+#[ohno::error]
+#[display(
+    "Rust source `{path}` is shared by targets using conflicting editions `{first}` and `{second}`; \
+     use one edition for every target that includes the file"
+)]
+pub(crate) struct ConflictingSourceEditionError {
+    pub path: String,
+    pub first: String,
+    pub second: String,
+}
+
+/// Both conventional files for one out-of-line module exist.
+#[ohno::error]
+#[display("module `{module}` declared in `{declaring}` is ambiguous: both `{first}` and `{second}` exist")]
+pub(crate) struct AmbiguousModuleSourceError {
+    pub declaring: String,
+    pub module: String,
+    pub first: String,
+    pub second: String,
+}
+
+/// A `#[path]` attribute on an out-of-line module was not a single Rust
+/// string literal.
+#[ohno::error]
+#[display(
+    "module `{module}` declared in `{declaring}` has unsupported `#[path]` attribute `{attribute}`; \
+     expected exactly one string literal"
+)]
+pub(crate) struct InvalidModulePathAttributeError {
+    pub declaring: String,
+    pub module: String,
+    pub attribute: String,
+}
+
+/// An LCOV source file was not reachable from any Cargo target root.
+#[ohno::error]
+#[display(
+    "LCOV source `{path}` is not reachable from any Cargo target; \
+     declare it through a target root or supported `mod`/`#[path] mod` declaration"
+)]
+pub(crate) struct UnownedCoverageSourceError {
+    pub path: String,
+}
+
+/// A released target reached a source file outside every workspace member
+/// directory, which the package-attribution layer cannot classify safely.
+#[ohno::error]
+#[display(
+    "released LCOV source `{path}` is outside every workspace member directory; \
+     move it under its owning package or use a package-local module path"
+)]
+pub(crate) struct UnattributableReleasedSourceError {
+    pub path: String,
+}
+
+/// An LCOV line-bearing record referenced a line beyond the source file.
+#[ohno::error]
+#[display(
+    "LCOV source `{path}` references line {line}, but the source has {line_count} lines; \
+     regenerate coverage from the current source tree"
+)]
+pub(crate) struct CoverageLineOutOfRangeError {
+    pub path: String,
+    pub line: u32,
+    pub line_count: usize,
+}
+
+/// LCOV function data lacked the start line required to remove test-only
+/// functions from the published report.
+#[ohno::error]
+#[display(
+    "LCOV function `{function}` in `{path}` has no start line; \
+     regenerate the report with cargo-llvm-cov so test-only functions can be filtered safely"
+)]
+pub(crate) struct MissingFunctionStartLineError {
+    pub path: String,
+    pub function: String,
+}
+
 /// A `--package` selector is not valid Cargo glob syntax.
 #[ohno::error]
 #[display("invalid `--package` selector `{selector}`")]
@@ -327,5 +454,16 @@ mod tests {
         assert!(rendered.contains("alpha"));
         assert!(rendered.contains("x86_64-pc-windows-msvc"));
         assert!(rendered.contains("cfg(windows)"));
+    }
+
+    #[test]
+    fn coverage_filter_errors_point_to_corrective_action() {
+        let unowned = UnownedCoverageSourceError::new("generated.rs".to_owned()).to_string();
+        assert!(unowned.contains("Cargo target"));
+        assert!(unowned.contains("mod"));
+
+        let stale = CoverageLineOutOfRangeError::new("src/lib.rs".to_owned(), 9_u32, 3_usize).to_string();
+        assert!(stale.contains("line 9"));
+        assert!(stale.contains("regenerate coverage"));
     }
 }
