@@ -61,6 +61,15 @@ verdicts, incremental reuse, reporting, and command dispatch.
 Replaceable facade, cache, supervision, and test mechanics are recorded in the
 [implementation guide](../IMPLEMENTATION.md).
 
+Mutation selection and declaration evidence have separate scopes. `--file`,
+`--exclude-file` (including configuration exclusions), and `--in-diff` restrict
+which sources produce mutants, not which package declarations can inform them.
+The survey reads excluded sources for module declarations and `Default`
+evidence before emitting candidates, preserving implementations in other files
+without losing negative evidence for unrelated local types. Evidence remains
+package-local. An unanalyzable source disables negative evidence only for its
+own package and is reported even when excluded from mutation.
+
 The default storage layout keeps the synchronized source, vendored runtime, and
 stable workspace lock under the platform cache home. Cargo artifacts, census
 data, and reusable campaign records live under
@@ -137,6 +146,11 @@ stable cargo-gamma phase line.
 Each Cargo output stream is retained up to 256 MiB for artifact and diagnostic
 processing, and each logical line is bounded at 1 MiB. The buffers grow with
 observed output rather than reserving those ceilings for every invocation.
+
+Each completed baseline observation records at least one nanosecond. Zero
+remains reserved for binaries for which no baseline was measured, including
+`--no-baseline` runs, even when the platform clock cannot distinguish the start
+and end of a very fast observation.
 
 Each failed baseline observation retains a bounded 64 KiB, 2,000-line tail from
 stdout and stderr, along with the process exit code or signal when available.
@@ -267,15 +281,16 @@ Checked-in hints use grouped YAML schema version 4. `cargo gamma hints` reads
 the persisted campaign record directly: after resolving and validating the
 current workspace identity, it performs no source walk, parse, or mutation
 discovery, and therefore accepts no mutant selection flags: it promotes the
-completed campaign population exactly as recorded. The completed ledger may
+completed or interrupted testing campaign population exactly as recorded. The completed ledger may
 retain unchanged outcomes from earlier narrow campaigns for incremental reuse,
 but it separately records the latest
 campaign population so promotion cannot remove or republish hints for those
 carried outcomes. Incremental promotion upserts exact and generalized knowledge
 while preserving unrelated entries and exact hints for `pending`, `notbuilt`,
 or `ignored` mutants that the campaign did not judge; explicit `--replace` is
-the destructive whole-artifact operation and requires a valid completed
-campaign record before changing an existing artifact. Generalized item, file,
+the destructive whole-artifact operation and requires a valid persisted
+completed campaign record before changing an existing artifact. It never uses
+an interrupted checkpoint to replace the whole artifact. Generalized item, file,
 and reach
 knowledge is projected onto the completed record's persisted file and site
 identities before either merge mode, so replacement cannot republish scheduling
@@ -329,6 +344,99 @@ workspace lock is held from ledger selection through source publication and
 verification, so a finishing campaign cannot replace the evidence part-way
 through a suppression. It never rewrites the campaign
 record or progress log.
+
+### Testing-only resume
+
+`cargo gamma run --resume-testing` continues only a campaign interrupted in its
+mutant-testing sweep. It uses the existing copied, instrumented workspace and
+compiled binaries without rediscovery, synchronization, instrumentation,
+building, baseline measurement, or census collection. Selection, ordinals,
+oracle, test arguments, budgets, resource declarations, launch environment,
+and case-level reachability remain frozen. Live checkout edits, including
+promoted hints and suppression edits, do not change the resumed campaign.
+Reporting flags and score gates apply to the resumed result. Live `gamma.toml`
+is loaded only for `min-score` and `max-flaky`, with command-line gates taking
+precedence; execution settings remain frozen. Repeated interrupts and resumes
+are supported.
+The reporting-only configuration schema recognizes the same top-level keys as
+a fresh run but ignores the values of known execution settings, even when they
+would be invalid for a fresh run. Unknown keys, reporting gates and TOML syntax
+still require valid input.
+Resume announces `Planning` and completes with `Planned` for the remaining
+mutants before testing starts; it does not print an unlabelled population count.
+The testing running total and outcome counters include verdicts retained from
+earlier testing segments. Planning still counts only the remaining work.
+The resume announcement uses the same restored progress counters as the status
+numerator, excluding ignored, compiler-unviable, and not-built outcomes.
+The total is retained test outcomes plus the remaining pending mutants, not
+the entire discovered population.
+The initial testing status is painted immediately before worker setup and
+test execution, without waiting for a mutant to finish.
+
+The private campaign cache retains a versioned `testing-session.json` snapshot,
+an authoritative `testing-verdicts.jsonl` journal, and `testing-phase.json`.
+A fresh measured run invalidates resumability before changing its workspace;
+the testing phase becomes resumable only after the prepared snapshot and empty
+journal are durably published. The coordinator appends and syncs each completed
+verdict and exact probe, without signal-handler I/O or worker checkpoint writes.
+Every completed outcome is retained, including survivors, resource failures,
+and flakes. Unfinished work has no verdict and remains pending. An interrupted
+final journal append is discarded; corruption in a complete entry is an error.
+The phase marker binds the snapshot's digest, and each complete journal entry
+has its own integrity checksum.
+The human-readable progress and bounded selection journals are auxiliary.
+Resume recreates either missing log, preserves complete existing entries, and
+discards an interrupted, unterminated selection-log tail before appending.
+An existing selection retention marker remains effective. Real filesystem errors
+are reported rather than silently ignored. Finishing the sweep remains
+resumable until the completed ledger is durable; recovery after the last
+verdict launches no mutants. Completed ledger publication ends resumability.
+Checkpoint publication failures stop testing, wake resource-admission waiters,
+and join the workers; no failed or subsequently drained verdict is publicly
+reported as settled. Only the durable prefix is retained by the next resume.
+
+On Linux, a frozen metered campaign reacquires systemd cgroup delegation when
+the invoking shell lacks it, before claiming the prepared testing workspace.
+The state-read lock is released before relaunching. Live memory configuration
+does not override frozen metering, and an already-delegated invocation, an explicit
+relaunch opt-out, or the relaunch recursion guard prevents another relaunch.
+
+Resume requires the same tool version, platform, workspace identity, and
+unchanged prepared sources, runtime, test executables, dynamic libraries,
+build-script output trees, package executables, and nextest metadata.
+The copied workspace's and package directories' `target` trees are generated
+output, not frozen source (package directories have a sibling `Cargo.toml`):
+tests may create, change, or remove temporary workspaces there. It is excluded
+from the source-tree scan, including when reading older checkpoints that
+captured such files. Explicitly captured build-script output trees, package
+executables, and test binaries remain checked even when located under that tree.
+Other source directories named `target` remain part of the frozen source tree.
+Resume checks the recorded files, not whether the tree gained new files:
+tests may create temporary inputs anywhere in their working directory.
+New files are permitted without rediscovery or rebuilding; recorded prepared
+inputs still fail validation if missing or changed.
+Missing, incompatible, corrupt, completed, or pre-testing state is rejected
+with an actionable error, never replaced with a fresh campaign. Workspace and
+redirected-cache locks protect resume just as they protect a fresh run.
+The snapshot retains Cargo-derived test environments, including build-script
+values, in the private cache; arbitrary inherited process environment is not
+copied. Their saved digest must match the current inherited environment before
+any pending tests run. A changed or unrecorded inherited environment refuses
+resume with instructions to restore it or start a new campaign. The digest is
+persisted even when the compiler identity is unavailable and incremental reuse
+is disabled. When no mutants remain pending, ledger-publication recovery does
+not require the inherited environment to match because it launches no tests.
+
+After interruption, ordinary `hints` merging and `suppress` prefer the active campaign's partial
+ledger over any older completed record. Pending entries are not treated as
+verdicts; only recorded evidence is actionable. These commands retain their
+existing source-generation and transactional-edit safeguards. `unsuppress`
+continues to inspect current source policy independently. Final reports are
+published only after the sweep completes; a partial checkpoint is not a
+completed mutation score. Sweep timing and launch diagnostics on a resumed
+run combine the durable active-time prefix with the current testing segment;
+package spans exclude downtime. Verdict elapsed times are retained for all
+completed mutants.
 
 Reports use a retained source snapshot in a fresh sidecar under cargo-gamma's
 private cache, outside the synchronized campaign workspace. The snapshot is

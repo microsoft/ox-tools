@@ -29,7 +29,7 @@ fn adjust_lock_flags(args: &[String]) -> Vec<String> {
 /// A run converges through checks and bounded proofs, generates test binaries once, and then
 /// executes those binaries thousands of times. These settings decide what gets compiled and what
 /// the compiled programs are asked to do.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CargoOptions {
     /// Feature arguments, already rendered in the form cargo accepts.
     pub features: Vec<String>,

@@ -55,6 +55,7 @@ fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
     let config = Config::load(config_path, Some(&config_path.to_path_buf()))?;
 
     // Validate that all expressions can be evaluated against default metrics (only if any are defined)
+    // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "evaluating an empty policy produces no expression outcomes, so the validation loop remains empty and returns the same success")]
     if has_expressions(&config) {
         let appraisal = evaluate(
             &config.high_risk,

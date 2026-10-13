@@ -234,6 +234,7 @@ impl Provider {
         }
 
         // Track requests for each supported host
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "the call returns unit and still increments all request counters before unit is replaced with unit")]
         track_repo_requests(tracker, repos_by_host.values().map(Vec::len));
 
         // Process each supported host in parallel
@@ -336,6 +337,7 @@ impl Provider {
             tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
             let formatted_time = wait_until.with_timezone(&chrono::Local).format("%T").to_string();
             log::warn!(target: LOG_TARGET, "Hit {} rate limit for repository '{repo_spec}'", host.display_name);
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "the call returns unit and still prints its message before unit is replaced with unit")]
             print_to_tracker_if_needed(tracker, log::log_enabled!(log::Level::Warn), || {
                 format!("{} rate limit exceeded: Waiting until {formatted_time}...", host.display_name)
             });
@@ -367,24 +369,46 @@ impl Provider {
         formatted_time: String,
         progress_interval: Duration,
     ) {
+        Self::report_rate_limit_progress_with(
+            tracker,
+            display_name,
+            wait_until,
+            &formatted_time,
+            || async {
+                tokio::time::sleep(progress_interval).await;
+                (throttler.is_paused(), Utc::now())
+            },
+            || log::log_enabled!(log::Level::Info),
+        )
+        .await;
+    }
+
+    async fn report_rate_limit_progress_with<F: Future<Output = (bool, DateTime<Utc>)>>(
+        tracker: RequestTracker,
+        display_name: &str,
+        wait_until: DateTime<Utc>,
+        formatted_time: &str,
+        mut next_tick: impl FnMut() -> F,
+        info_enabled: impl Fn() -> bool,
+    ) {
         loop {
-            tokio::time::sleep(progress_interval).await;
-            if !throttler.is_paused() {
+            let (paused, now) = next_tick().await;
+            if !paused {
                 tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Active);
                 log::info!(target: LOG_TARGET, "{display_name} rate limit lifted, resuming requests");
-                print_to_tracker_if_needed(&tracker, log::log_enabled!(log::Level::Info), || {
+                print_to_tracker_if_needed(&tracker, info_enabled(), || {
                     format!("{display_name} rate limit lifted, resuming requests")
                 });
                 break;
             }
-            let remaining = wait_until - Utc::now();
+            let remaining = wait_until - now;
             let remaining_mins = remaining.num_minutes();
             if should_report_remaining_minutes(remaining_mins) {
                 log::info!(
                     target: LOG_TARGET,
                     "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                 );
-                print_to_tracker_if_needed(&tracker, log::log_enabled!(log::Level::Info), || {
+                print_to_tracker_if_needed(&tracker, info_enabled(), || {
                     format!("{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}")
                 });
             }
@@ -448,6 +472,7 @@ impl Provider {
         } else {
             repo_data.subscribers_count
         }
+        // #[gamma::skip(relational.ge_to_gt, literal.int_increment, tag = "equivalent", reason = "rejecting zero instead of retaining it still yields zero through map_or; negative and positive counts are unchanged")]
         .filter(|&count| count >= 0)
         .map_or(0, i64::cast_unsigned);
 
@@ -558,6 +583,7 @@ impl Provider {
             // Use a minimal RateLimitInfo with reset_at=now so fetch_with_retry
             // doesn't extend the existing (short) pause with primary rate limit info
             // from successful pagination pages.
+            // #[gamma::skip(cond.always_true, tag = "timeout", reason = "the campaign turned every pagination response into a rate limit, so fetching restarted indefinitely")]
             if self.throttler.is_paused() {
                 return HostingApiResult::RateLimited(RateLimitInfo {
                     remaining: 0,
@@ -567,6 +593,7 @@ impl Provider {
 
             if page_num == MAX_ISSUE_PAGES {
                 log::debug!(target: LOG_TARGET, "Reached maximum issue page limit ({MAX_ISSUE_PAGES}) for '{owner}/{repo}', stopping pagination after {} issues", all_issues.len());
+                // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "equivalent", reason = "this is the final iteration of 1..=MAX_ISSUE_PAGES, so breaking, continuing, and falling through return the same pages and request count")]
                 break;
             }
         }
@@ -629,6 +656,7 @@ fn compute_age_stats(seconds_iter: impl Iterator<Item = f64>) -> AgeStats {
 #[expect(clippy::cast_sign_loss, reason = "values are filtered to be non-negative")]
 fn compute_age_stats_from_vec(seconds: &mut [f64]) -> AgeStats {
     seconds.sort_by(|a, b| a.partial_cmp(b).expect("no NaN values should be present"));
+    // #[gamma::skip(literal.int_decrement, tag = "equivalent", reason = "for nonempty input max(0) and max(1) agree; for empty input both 0/1 and NaN from 0/0 cast to the same zero-valued day statistics")]
     let sample_count = seconds.len().max(1) as f64;
 
     AgeStats {
@@ -667,9 +695,11 @@ struct IssueFamilyAccumulator {
 impl IssueFamilyAccumulator {
     #[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
     fn push(&mut self, issue: &CachedIssue, now: DateTime<Utc>, cutoffs: Cutoffs) {
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
         increment_window(&mut self.opened, issue.created_at, cutoffs);
 
         if let Some(closed_at) = issue.closed_at {
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
             increment_window(&mut self.closed, closed_at, cutoffs);
 
             // Age statistics partition issues by current state, so a reopened issue
@@ -729,13 +759,16 @@ struct PullRequestAccumulator {
 impl PullRequestAccumulator {
     #[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
     fn push(&mut self, pull: &CachedIssue, now: DateTime<Utc>, cutoffs: Cutoffs) {
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
         increment_window(&mut self.opened, pull.created_at, cutoffs);
 
         if let Some(closed_at) = pull.closed_at {
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
             increment_window(&mut self.closed, closed_at, cutoffs);
         }
 
         if let Some(merged_at) = pull.merged_at {
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
             increment_window(&mut self.merged, merged_at, cutoffs);
             self.merged_ages
                 .push((merged_at - pull.created_at).num_seconds() as f64, merged_at, cutoffs);
@@ -939,6 +972,7 @@ where
 #[expect(clippy::cast_possible_truncation, reason = "value is clamped to 0-100")]
 #[expect(clippy::cast_sign_loss, reason = "value is non-negative")]
 fn labeled_issue_ratio(labeled: u64, issue_count: u64) -> u32 {
+    // #[gamma::skip(literal.int_decrement, tag = "equivalent", reason = "with no issues labeled is also zero, so 0/1 and NaN from 0/0 both cast to zero; nonempty denominators are unchanged")]
     ((labeled as f64 / issue_count.max(1) as f64) * 100.0).round().clamp(0.0, 100.0) as u32
 }
 
@@ -1032,6 +1066,170 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingProgress {
         messages: Mutex<Vec<String>>,
+    }
+
+    #[derive(Debug)]
+    struct CapturingLogger;
+
+    static CAPTURING_LOGGER: CapturingLogger = CapturingLogger;
+    static CAPTURED_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            CAPTURED_LOGS
+                .lock()
+                .expect("no capture callback panics while holding the mutex")
+                .push(record.args().to_string());
+        }
+
+        fn flush(&self) {}
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot execute the isolated logger subprocess")]
+    fn pagination_and_rate_limit_messages_follow_the_full_state_matrix() {
+        let module = module_path!().split_once("::").expect("test module has a crate prefix").1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("CARGO_APRZ_HOSTING_CAPTURE", "1")
+            .args([
+                "--exact",
+                &format!("{module}::helper_capture_pagination_and_rate_limit_messages"),
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hosting state matrix completed"));
+    }
+
+    #[tokio::test]
+    #[ignore = "executed in an isolated process by pagination_and_rate_limit_messages_follow_the_full_state_matrix"]
+    async fn helper_capture_pagination_and_rate_limit_messages() {
+        if std::env::var_os("CARGO_APRZ_HOSTING_CAPTURE").is_none() {
+            return;
+        }
+        log::set_logger(&CAPTURING_LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Debug);
+        let make_provider = |directory: &std::path::Path, github_url: &str| {
+            Provider::new(
+                None,
+                None,
+                Cache::new(directory, Duration::from_hours(1), false),
+                Arc::new(BugLabelMatcher::default()),
+                &Endpoints::default().with_github_url(github_url),
+            )
+            .unwrap()
+        };
+        for pages in [1, 2, 10] {
+            CAPTURED_LOGS.lock().unwrap().clear();
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::path("/repos/owner/repo"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "stargazers_count": 1, "forks_count": 0, "subscribers_count": 0
+                })))
+                .mount(&server)
+                .await;
+            for page in 1..=pages {
+                let response = wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "created_at": "2024-01-01T00:00:00Z", "closed_at": null,
+                    "state": "open", "pull_request": null, "labels": []
+                }]));
+                let response = if page < pages || pages == 10 {
+                    response.insert_header("link", r#"<https://example.invalid/next>; rel="next""#)
+                } else {
+                    response
+                };
+                wiremock::Mock::given(wiremock::matchers::path("/repos/owner/repo/issues"))
+                    .and(wiremock::matchers::query_param("page", page.to_string()))
+                    .respond_with(response)
+                    .mount(&server)
+                    .await;
+            }
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let provider = make_provider(directory.path(), &server.uri());
+            let (host, client) = github_client(&provider);
+            let result = provider.fetch_hosting_data_for_repo(client, host, &github_repo_spec()).await;
+            assert!(matches!(result.result, ProviderResult::Found(_)));
+            let noun = if pages == 1 { "request" } else { "requests" };
+            let logs = CAPTURED_LOGS.lock().unwrap().clone();
+            assert!(
+                logs.iter().any(|line| line
+                    == &format!(
+                        "Completed one repository API request and {pages} issue API {noun} to GitHub for 'https://github.com/owner/repo'"
+                    )),
+                "{logs:?}"
+            );
+            assert_eq!(
+                logs.iter().filter(|line| line.contains("Reached maximum issue page limit")).count(),
+                usize::from(pages == 10)
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), usize::try_from(pages).unwrap() + 1);
+        }
+
+        log::set_max_level(log::LevelFilter::Off);
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let provider = make_provider(directory.path(), "http://127.0.0.1:1");
+        let progress = Arc::new(RecordingProgress::default());
+        let erased: Arc<dyn Progress> = Arc::<RecordingProgress>::clone(&progress);
+        let tracker = RequestTracker::new(&erased);
+        let (host, _) = github_client(&provider);
+        let now = Utc::now();
+        let until = now + chrono::Duration::seconds(90);
+        let formatted = until.with_timezone(&chrono::Local).format("%T").to_string();
+        provider.begin_rate_limit_pause(host, &github_repo_spec(), &tracker, now, until);
+        assert_eq!(
+            progress.messages(),
+            [format!("GitHub rate limit exceeded: Waiting until {formatted}...")]
+        );
+
+        println!("hosting state matrix completed");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_reporting_uses_scripted_ticks_without_wall_clock_deadlines() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        for seconds in [90, 30, -30] {
+            for logged in [false, true] {
+                let progress = Arc::new(RecordingProgress::default());
+                let erased: Arc<dyn Progress> = Arc::<RecordingProgress>::clone(&progress);
+                let tracker = RequestTracker::new(&erased);
+                let mut ticks = [(true, now), (true, now), (false, now)].into_iter();
+                Provider::report_rate_limit_progress_with(
+                    tracker,
+                    "GitHub",
+                    now + chrono::Duration::seconds(seconds),
+                    "fixed reset",
+                    || std::future::ready(ticks.next().expect("the reporter must stop at the first unpaused tick")),
+                    || logged,
+                )
+                .await;
+                assert!(
+                    ticks.next().is_none(),
+                    "the reporter must await each tick before checking the pause"
+                );
+                let mut expected = Vec::new();
+                if !logged {
+                    if seconds == 90 {
+                        expected.extend([
+                            "GitHub rate limit: ~1 minute(s) remaining until fixed reset".to_owned(),
+                            "GitHub rate limit: ~1 minute(s) remaining until fixed reset".to_owned(),
+                        ]);
+                    }
+                    expected.push("GitHub rate limit lifted, resuming requests".to_owned());
+                }
+                assert_eq!(progress.messages(), expected);
+            }
+        }
     }
 
     impl RecordingProgress {
@@ -1324,6 +1522,46 @@ mod tests {
 
     fn fixed_now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid")
+    }
+
+    #[test]
+    fn issue_and_pull_ages_round_down_at_exact_day_boundaries() {
+        let now = fixed_now();
+        let cutoffs = Cutoffs::new(now);
+        for seconds in [86_399, 86_400, 172_799, 172_800] {
+            let created = now - chrono::Duration::seconds(seconds);
+            let expected = u32::try_from(seconds / 86_400).unwrap();
+            for closed in [false, true] {
+                let mut issues = IssueFamilyAccumulator::default();
+                issues.push(&issue(created, closed.then_some(now), &[]), now, cutoffs);
+                let stats = issues.finish();
+                let ages = if closed { stats.closed_age } else { stats.open_age };
+                assert_eq!(
+                    (ages.avg, ages.p50, ages.p75, ages.p90, ages.p95),
+                    (expected, expected, expected, expected, expected)
+                );
+
+                let mut pulls = PullRequestAccumulator::default();
+                pulls.push(&pull(created, closed.then_some(now), closed.then_some(now)), now, cutoffs);
+                let stats = pulls.finish();
+                let ages = if closed { stats.merged_age } else { stats.open_age };
+                assert_eq!(
+                    (ages.avg, ages.p50, ages.p75, ages.p90, ages.p95),
+                    (expected, expected, expected, expected, expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aggregation_visits_each_issue_and_pull_exactly_once() {
+        let now = fixed_now();
+        let records = repo(vec![issue(now, None, &["bug"]), pull(now, None, None), issue(now, Some(now), &[])]);
+        let mut visits = 0;
+        let data = aggregate_hosting_data_at(&records, &bug_patterns(), now, || visits += 1);
+        assert_eq!(visits, records.issues.len());
+        assert_eq!(data.open_issues, 1);
+        assert_eq!(data.open_prs, 1);
     }
 
     fn compute_hosting_data(repo: &CachedRepo, bug_labels: &BugLabelMatcher) -> HostingData {
@@ -2120,6 +2358,10 @@ mod tests {
 
         assert!(matches!(result.result, ProviderResult::Unavailable(_)));
         assert_eq!(tracker.topic_state(TrackedTopic::Repos), (1, 1, TopicStatus::Done));
+        let fresh_tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
+        let crate_spec = CrateSpec::from_arcs_with_repo(Arc::from("tracked-crate"), Arc::new(Version::new(1, 0, 0)), github_repo_spec());
+        assert_eq!(provider.get_hosting_data(vec![crate_spec].into(), &fresh_tracker).await.count(), 1);
+        assert_eq!(fresh_tracker.topic_state(TrackedTopic::Repos), (1, 1, TopicStatus::Done));
     }
 
     #[tokio::test]
@@ -2167,7 +2409,10 @@ mod tests {
         let (_, client) = github_client(&provider);
         let result = provider.get_issues_and_pulls(client, "owner", "repo").await;
 
-        assert!(matches!(result, HostingApiResult::RateLimited(_)));
+        let HostingApiResult::RateLimited(rate_limit) = result else {
+            panic!("pagination must report the concurrent throttle pause");
+        };
+        assert_eq!(rate_limit.remaining, 0);
         assert_eq!(server.received_requests().await.map_or(0, |r| r.len()), 1);
     }
 

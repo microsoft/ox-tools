@@ -393,12 +393,25 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
+      - name: Resolve current PR title
+        id: pr_title
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          retries: 3
+          script: |
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            core.setOutput("title", pullRequest.title);
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-fast
           impact_mode: consume   # scoped checks read the downloaded cache
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_TITLE: ${{ steps.pr_title.outputs.title }}
 
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
@@ -638,9 +651,23 @@ names outside `[a-z0-9-]+`; `anvil-run-group` invokes Just only when that setup
 step succeeds, so validation necessarily precedes use of the value in the log
 path and recipe name.
 
-The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
-`BASE_REF` on the `pr-mutants` group step. They are environment variables rather
-than action inputs because only the recipes consume them.
+The reusable workflow resolves the current pull-request title through GitHub's
+REST API immediately before each `pr-fast` matrix leg runs, then sets the result
+as `PR_TITLE` on the group step. The event payload supplies only the stable pull
+request number: rerunning an older workflow attempt after a title edit therefore
+validates the live title rather than the title captured when the run was first
+created. The lookup is skipped for `merge_group`, where an empty `PR_TITLE`
+preserves the recipe's non-PR no-op, and API failures fail the matrix leg rather
+than silently skipping validation. Resolving per leg avoids a separate metadata
+job and its runner startup for one inexpensive API request.
+
+The lookup uses the action's bounded exponential-backoff support with three
+retries. Its default non-retryable status list keeps permission and not-found
+responses immediately fatal while tolerating transient API failures.
+
+The workflow also sets `BASE_REF` on the `pr-mutants` group step. These values
+are environment variables rather than action inputs because only the recipes
+consume them.
 
 The recipes themselves consume the downloaded impact cache (via
 `_anvil-impact-include`) and only the PR-context env vars they need; the catalog
@@ -1186,11 +1213,14 @@ Conditions explained:
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
 `pull-requests: write` on the `validation` job that calls
 `anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
-of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
-use `pull-requests: write`. Merge-group executions share this caller but cannot
-reach the pull-request-only write steps. Fork PRs cannot reach them either,
-regardless of whether an administrator has enabled write tokens for fork
-workflows.
+of its jobs inherit that caller ceiling. `pr-fast` requires at least
+`pull-requests: read` on `pull_request` runs for the live-title lookup; a missing
+permission fails the required group rather than silently skipping title
+validation. The guarded sticky-comment steps additionally require write access.
+Merge-group executions share this caller but cannot reach either
+pull-request-only path. Fork PRs can read their current title, but cannot reach
+the comment steps regardless of whether an administrator has enabled write
+tokens for fork workflows.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains

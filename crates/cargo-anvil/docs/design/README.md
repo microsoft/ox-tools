@@ -241,6 +241,8 @@ The tool produces a small set of files. They fall into three categories:
   `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`, `//` hosts use the
   equivalent line comments, and XML/MSBuild hosts use
   `<!-- >>> anvil-managed: <id> -->` … `<!-- <<< anvil-managed: <id> -->`.
+  XML region IDs may not contain `--`, and a new region in an existing MSBuild
+  project is inserted before the complete-line `</Project>` closing element.
   The pair delimits the region body and identifies it by stable ID; the manifest
   tracks the last-rendered checksum per `(host, id)`. Outside the sentinels, the
   user's content is preserved byte-for-byte — except that first adoption into a

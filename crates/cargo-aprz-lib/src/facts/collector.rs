@@ -142,33 +142,11 @@ impl Collector {
     }
 
     async fn query_providers(&self, crates_data: Vec<(CrateSpec, ProviderResult<CratesData>)>) -> Vec<CrateFacts> {
+        query_providers_with(crates_data, |facts, specs| self.query_found(facts, specs)).await
+    }
+
+    async fn query_found(&self, mut facts_map: HashMap<CrateSpec, CrateFacts>, all_queryable_specs: Arc<[CrateSpec]>) -> Vec<CrateFacts> {
         let request_tracker = RequestTracker::new(&self.progress);
-
-        let mut facts_map: HashMap<CrateSpec, CrateFacts> = crates_data
-            .into_iter()
-            .map(|(crate_spec, crates_result)| {
-                let facts = CrateFacts {
-                    crate_spec: crate_spec.clone(),
-                    crates_data: crates_result,
-                    hosting_data: ProviderResult::Unavailable("not queried".into()),
-                    advisory_data: ProviderResult::Unavailable("not queried".into()),
-                    codebase_data: ProviderResult::Unavailable("not queried".into()),
-                    coverage_data: ProviderResult::Unavailable("not queried".into()),
-                    docs_data: ProviderResult::Unavailable("not queried".into()),
-                };
-                (crate_spec, facts)
-            })
-            .collect();
-
-        let all_queryable_specs: Arc<[CrateSpec]> = facts_map
-            .iter()
-            .filter(|(_, facts)| facts.crates_data.is_found())
-            .map(|(crate_spec, _)| crate_spec.clone())
-            .collect();
-
-        if all_queryable_specs.is_empty() {
-            return facts_map.into_values().collect();
-        }
 
         // Phase 1: Run advisory, hosting, codebase, and coverage providers in parallel.
         let (advisory_iter, hosting_iter, codebase_iter, coverage_iter) = tokio::join!(
@@ -202,6 +180,37 @@ impl Collector {
         update_facts!(docs_iter, docs_data);
 
         facts_map.into_values().collect()
+    }
+}
+
+async fn query_providers_with<F: core::future::Future<Output = Vec<CrateFacts>>>(
+    crates_data: Vec<(CrateSpec, ProviderResult<CratesData>)>,
+    query: impl FnOnce(HashMap<CrateSpec, CrateFacts>, Arc<[CrateSpec]>) -> F,
+) -> Vec<CrateFacts> {
+    let facts_map: HashMap<CrateSpec, CrateFacts> = crates_data
+        .into_iter()
+        .map(|(crate_spec, crates_result)| {
+            let facts = CrateFacts {
+                crate_spec: crate_spec.clone(),
+                crates_data: crates_result,
+                hosting_data: ProviderResult::Unavailable("not queried".into()),
+                advisory_data: ProviderResult::Unavailable("not queried".into()),
+                codebase_data: ProviderResult::Unavailable("not queried".into()),
+                coverage_data: ProviderResult::Unavailable("not queried".into()),
+                docs_data: ProviderResult::Unavailable("not queried".into()),
+            };
+            (crate_spec, facts)
+        })
+        .collect();
+    let specs: Arc<[CrateSpec]> = facts_map
+        .iter()
+        .filter(|(_, facts)| facts.crates_data.is_found())
+        .map(|(spec, _)| spec.clone())
+        .collect();
+    if specs.is_empty() {
+        facts_map.into_values().collect()
+    } else {
+        query(facts_map, specs).await
     }
 }
 
@@ -462,7 +471,7 @@ mod portable_tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{Collector, CrateSpec, create_cache_dir};
+    use super::{Collector, CrateSpec, create_cache_dir, query_providers_with};
     use crate::facts::cache::Cache;
     use crate::facts::crates::{CrateOverallData, CrateVersionData};
     use crate::facts::progress::Progress;
@@ -814,6 +823,58 @@ mod portable_tests {
     }
 
     #[tokio::test]
+    async fn collector_new_propagates_cache_lock_errors_before_contacting_providers() {
+        let cache_dir = tempfile::tempdir_in(".").unwrap();
+        std::fs::create_dir(cache_dir.path().join("cache.lock")).unwrap();
+        let result = Collector::new(
+            None,
+            None,
+            cache_dir.path(),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            false,
+            Arc::new(BugLabelMatcher::default()),
+            NoOpProgress,
+            &Endpoints::default(),
+        )
+        .await;
+        let error = result.expect_err("a directory cannot be opened as a writable cache-lock file");
+        assert!(format!("{error:#}").contains("opening cache lock file"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn collector_initialization_retains_distinct_coverage_and_documentation_endpoints() {
+        let cache_dir = tempfile::tempdir_in(".").unwrap();
+        let server = MockServer::start().await;
+        mount_minimal_dump(&server).await;
+        mark_advisory_cache_fresh(cache_dir.path());
+        let coverage = "http://coverage.example.invalid/custom";
+        let docs = "http://docs.example.invalid/custom";
+        let endpoints = local_endpoints(&server).with_coverage_url(coverage).with_docs_url(docs);
+        let collector = Collector::new(
+            None,
+            None,
+            cache_dir.path(),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            false,
+            Arc::new(BugLabelMatcher::default()),
+            NoOpProgress,
+            &endpoints,
+        )
+        .await
+        .unwrap();
+        assert!(format!("{:?}", collector.coverage_provider).contains(&format!("base_url: {coverage:?}")));
+        assert!(format!("{:?}", collector.docs_provider).contains(&format!("base_url: {docs:?}")));
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn collector_new_propagates_crates_provider_errors() {
         let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
@@ -977,24 +1038,24 @@ mod portable_tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn query_providers_leaves_unavailable_crates_unqueried() {
-        let server = MockServer::start().await;
-        let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
-        let collector = new_fixture_collector(cache_dir.path(), NoOpProgress, &server).await;
         let spec = CrateSpec::from_arcs(Arc::from("unavailable-crate"), Arc::new(Version::new(1, 0, 0)));
 
-        let facts = collector
-            .query_providers(vec![(spec, ProviderResult::Unavailable("crate was unavailable".into()))])
-            .await
-            .pop()
-            .expect("one fact is returned for the one input crate");
+        let facts = query_providers_with(
+            vec![(spec.clone(), ProviderResult::Unavailable("crate was unavailable".into()))],
+            |_, _| async { panic!("unavailable crates must not query any provider") },
+        )
+        .await
+        .pop()
+        .expect("one fact is returned for the one input crate");
 
         assert!(is_not_queried(&facts.hosting_data));
         assert!(is_not_queried(&facts.advisory_data));
         assert!(is_not_queried(&facts.codebase_data));
         assert!(is_not_queried(&facts.coverage_data));
         assert!(is_not_queried(&facts.docs_data));
+        assert_eq!(facts.crate_spec, spec);
+        assert!(matches!(facts.crates_data, ProviderResult::Unavailable(ref reason) if reason == "crate was unavailable"));
     }
 
     #[tokio::test]

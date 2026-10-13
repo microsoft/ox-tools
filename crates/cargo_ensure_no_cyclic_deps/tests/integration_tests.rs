@@ -34,16 +34,9 @@ fn test_workspace_with_cycle() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
     cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(manifest_path);
 
-    cmd.assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("Error: Cyclic dependencies detected!"))
-        .stderr(predicate::str::contains("Cycle 1:"))
-        .stderr(
-            predicate::str::contains("crate_a")
-                .and(predicate::str::contains("crate_b"))
-                .and(predicate::str::contains("crate_c")),
-        );
+    cmd.assert().failure().code(1).stderr(predicate::str::diff(
+        "Error: Cyclic dependencies detected!\n\nCycle 1:\n  crate_a -> crate_b -> crate_c -> crate_a\n\n",
+    ));
 }
 
 #[test]
@@ -86,12 +79,9 @@ fn test_workspace_with_self_dev_dependency() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
     cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(manifest_path);
 
-    cmd.assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("Error: Cyclic dependencies detected!"))
-        .stderr(predicate::str::contains("Cycle 1:"))
-        .stderr(predicate::str::contains("self_dep_crate -> self_dep_crate"));
+    cmd.assert().failure().code(1).stderr(predicate::str::diff(
+        "Error: Cyclic dependencies detected!\n\nCycle 1:\n  self_dep_crate -> self_dep_crate\n\n",
+    ));
 }
 
 #[test]

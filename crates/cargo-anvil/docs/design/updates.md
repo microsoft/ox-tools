@@ -101,7 +101,13 @@ slash-slash hosts use `# >>> anvil-managed: <id>` and
 `// >>> anvil-managed: <id>` (with matching `<<<` closers). XML and MSBuild
 hosts use `<!-- >>> anvil-managed: <id> -->` and
 `<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
-element, attribute, or larger comment is ordinary user content.
+element, attribute, or larger comment is ordinary user content. XML region IDs
+containing `--` are rejected during catalog construction. When an XML region is
+absent from an existing MSBuild project, it is inserted before a complete-line
+`</Project>` closing element so the generated content remains inside the root.
+Changing the declared syntax of an existing `(host, id)` is refused; the
+manifest does not record the old syntax, so treating the old pair as absent
+would duplicate the generated body.
 
 ### Strict ownership
 
@@ -358,3 +364,7 @@ updates still apply safe items and preserve tracking for refused regions.
 anvil detects the backend from the origin remote; `--no-backends` emits local
 artifacts only. Previously tracked files for deselected backends follow the
 owned-file retirement rules. Backend selection does not change region ownership.
+## Shared TOML array entries
+
+The opt-in string-entry API has a deliberately narrower contract than ordinary
+whole-table regions: see [Required strings in shared TOML arrays](array-regions.md).

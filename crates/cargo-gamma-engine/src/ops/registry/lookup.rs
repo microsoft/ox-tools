@@ -61,6 +61,7 @@ pub fn resolve(selector: &str) -> Result<Vec<&'static str>> {
             match *member {
                 "*" => names.extend(REGISTRY.iter().map(|m| m.name)),
                 "@default" => names.extend(REGISTRY.iter().filter(|m| m.default_on).map(|m| m.name)),
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "other comes only from the fixed preset catalog whose member selectors all resolve; catalog validity is checked exhaustively by tests")]
                 other => names.extend(resolve(other)?),
             }
         }
@@ -124,6 +125,28 @@ fn unknown(selector: &str) -> Error {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_presets_and_alias_queries_preserve_error_and_success_contracts() {
+        for selector in ["@unknown", "", "unrecognized-alias"] {
+            let error = resolve(selector).unwrap_err();
+            assert!(error.is_usage());
+            assert_eq!(
+                error.to_string(),
+                format!("unknown mutator selector `{selector}`; run `cargo gamma list mutators` to see the registry")
+            );
+        }
+        assert_eq!(resolve("arith.add_to_sub").unwrap(), ["arith.add_to_sub"]);
+        let error = resolve("fn_value.bool").unwrap_err().to_string();
+        assert!(error.contains("did you mean `fn_value.bool_true`?"), "{error}");
+        for preset in PRESETS {
+            for member in preset.members {
+                if *member != "*" {
+                    assert!(resolve(member).is_ok(), "{}: {member}", preset.name);
+                }
+            }
+        }
+    }
 
     #[test]
     fn selector_forms_and_catalog_order_have_exact_oracles() {

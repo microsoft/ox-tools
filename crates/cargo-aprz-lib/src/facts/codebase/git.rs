@@ -53,19 +53,16 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
 async fn get_repo_core_with_executable(repo_path: &Path, repo_url: &Url, timeout: Duration, git_executable: &Path) -> Result<RepoStatus> {
     let path_str = path_str(repo_path)?;
 
-    if !repo_path.exists() {
+    if prepare_cached_repo(
+        repo_path,
+        Path::exists,
+        remove_cached_repo,
+        |message| log::warn!(target: LOG_TARGET, "{message}"),
+    )? {
         if let Some(parent) = repo_path.parent() {
             fs::create_dir_all(parent).into_app_err_with(|| format!("creating directory '{}'", parent.display()))?;
         }
 
-        return clone_repo_with_executable(path_str, repo_url, timeout, git_executable).await;
-    }
-
-    // Verify it's a valid git repository before attempting update
-    if !repo_path.join(".git").exists() {
-        log::warn!(target: LOG_TARGET, "Cached repository path '{path_str}' exists but .git directory missing, re-cloning");
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem adapter errors must be propagated rather than converted into process panics")]
-        remove_cached_repo(repo_path, &format!("removing potentially corrupt cached repository '{path_str}'"))?;
         return clone_repo_with_executable(path_str, repo_url, timeout, git_executable).await;
     }
 
@@ -96,6 +93,26 @@ async fn get_repo_core_with_executable(repo_path: &Path, repo_url: &Url, timeout
     let output = run_git_executable_with_timeout(git_executable, &["-C", path_str, "reset", "--hard", "origin/HEAD"], timeout).await?;
     check_git_output(&output, "git reset")?;
     Ok(RepoStatus::Ok)
+}
+
+fn prepare_cached_repo(
+    path: &Path,
+    exists: impl Fn(&Path) -> bool,
+    remove: impl FnOnce(&Path, &str) -> Result<()>,
+    warn: impl FnOnce(&str),
+) -> Result<bool> {
+    if !exists(path) {
+        return Ok(true);
+    }
+    if exists(&path.join(".git")) {
+        return Ok(false);
+    }
+    let path_str = path_str(path)?;
+    warn(&format!(
+        "Cached repository path '{path_str}' exists but .git directory missing, re-cloning"
+    ));
+    remove(path, &format!("removing potentially corrupt cached repository '{path_str}'"))?;
+    Ok(true)
 }
 
 fn remove_cached_repo(path: &Path, context: &str) -> Result<()> {
@@ -207,6 +224,7 @@ pub async fn get_commit_stats(repo_path: &Path, day_windows: &[i64], timeout: Du
 /// `now` is the reference point the day windows are measured back from.
 fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> CommitStats {
     let mut commit_count: u64 = 0;
+    // #[gamma::skip(option.none_to_some, tag = "equivalent", reason = "every parsed commit overwrites first_timestamp; with no parsed commits both None's fallback and Some(i64::default()) produce UNIX_EPOCH")]
     let mut first_timestamp: Option<i64> = None;
     let mut last_timestamp: Option<i64> = None;
     let mut window_counts = vec![0u64; day_windows.len()];
@@ -595,24 +613,36 @@ mod tests {
         assert!(clone_path.join(".git").exists());
     }
 
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
-    async fn test_get_repo_reclones_when_git_dir_missing() {
-        let (tmp, bare_path) = create_bare_repo_with_commit();
-
-        // Clone via get_repo
-        let clone_path = tmp.path().join("clone");
-        let bare_url = Url::from_file_path(&bare_path).unwrap();
-        let status = get_repo(&clone_path, &bare_url, GIT_TIMEOUT).await.unwrap();
-        assert!(matches!(status, RepoStatus::Ok));
-
-        // Remove .git to simulate corruption
-        fs::remove_dir_all(clone_path.join(".git")).unwrap();
-
-        // get_repo should detect missing .git and re-clone
-        let status = get_repo(&clone_path, &bare_url, GIT_TIMEOUT).await.unwrap();
-        assert!(matches!(status, RepoStatus::Ok));
-        assert!(clone_path.join(".git").exists());
+    #[test]
+    fn test_get_repo_reclones_when_git_dir_missing() {
+        let path = Path::new("cached-repo");
+        let removed = std::cell::Cell::new(false);
+        let mut warnings = Vec::new();
+        let clone_required = prepare_cached_repo(
+            path,
+            |candidate| {
+                if candidate == path {
+                    true
+                } else {
+                    assert_eq!(candidate, path.join(".git"));
+                    false
+                }
+            },
+            |candidate, context| {
+                assert_eq!(candidate, path);
+                assert_eq!(context, "removing potentially corrupt cached repository 'cached-repo'");
+                assert!(!removed.replace(true));
+                Ok(())
+            },
+            |message| warnings.push(message.to_owned()),
+        )
+        .unwrap();
+        assert!(clone_required, "recovery must choose cloning rather than fetching");
+        assert!(removed.get());
+        assert_eq!(
+            warnings,
+            ["Cached repository path 'cached-repo' exists but .git directory missing, re-cloning"]
+        );
     }
 
     #[tokio::test]
@@ -850,6 +880,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "Tokio's Windows runtime requires unsupported I/O completion ports")]
     async fn public_git_queries_propagate_non_utf8_paths() {
         let path = PathBuf::from(OsString::from_wide(&[0xD800]));
+        let remote = Url::parse("https://example.invalid/owner/repo").unwrap();
+        let error = get_repo_core_with_executable(&path, &remote, GIT_TIMEOUT, Path::new("never-invoked"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("invalid UTF-8 in repository path"), "{error:#}");
         let _ = count_contributors(&path, GIT_TIMEOUT).await.unwrap_err();
         let Err(_) = get_commit_stats(&path, &[], GIT_TIMEOUT).await else {
             panic!("a non-UTF-8 path must be rejected");
@@ -860,6 +895,11 @@ mod tests {
     #[tokio::test]
     async fn public_git_queries_propagate_non_utf8_paths() {
         let path = Path::new(OsStr::from_bytes(b"/invalid/\xff"));
+        let remote = Url::parse("https://example.invalid/owner/repo").unwrap();
+        let error = get_repo_core_with_executable(path, &remote, GIT_TIMEOUT, Path::new("never-invoked"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("invalid UTF-8 in repository path"), "{error:#}");
         let Err(_) = count_contributors(path, GIT_TIMEOUT).await else {
             panic!("a non-UTF-8 path must be rejected");
         };

@@ -27,6 +27,7 @@ pub fn plan(mutants: &[Mutant], eligible: &[Eligible]) -> Vec<Edit> {
     for mutant in mutants {
         // Belt and braces. `Eligible` cannot name a survivor, so this can only fire if someone adds
         // a variant later — which is exactly when a second check is worth having.
+        // #[gamma::skip(cond.always_false, loop.delete_continue, reason = "the closed Eligible variants never return Survived; the following eligible lookup independently rejects every survivor")]
         if matches!(mutant.outcome, Outcome::Survived) {
             continue;
         }
@@ -126,6 +127,7 @@ fn matching_directive(lines: &[String], index: usize, tag: &str) -> Option<usize
             return Some(above);
         }
 
+        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the suppression scan must advance to the preceding line")]
         cursor = above;
     }
 
@@ -208,8 +210,135 @@ mod tests {
     use crate::fixtures::mutant_at as mutant;
 
     #[test]
+    #[cfg_attr(miri, ignore = "exhaustive 801-year calendar sweep; bounded era-boundary coverage remains enabled")]
+    fn civil_calendar_matches_independent_month_iteration_across_eight_centuries() {
+        let leap = |year: i64| year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let mut days = -(1600..1970).map(|year| if leap(year) { 366 } else { 365 }).sum::<i64>();
+        for year in 1600..=2400 {
+            for month in 1..=12 {
+                let length = match month {
+                    2 => {
+                        if leap(year) {
+                            29
+                        } else {
+                            28
+                        }
+                    }
+                    4 | 6 | 9 | 11 => 30,
+                    _ => 31,
+                };
+                for day in 1..=length {
+                    assert_eq!(
+                        civil_from_days(days),
+                        format!("{year:04}-{month:02}-{day:02}"),
+                        "epoch offset {days}"
+                    );
+                    days += 1;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn apply_skips_invalid_lines_without_abandoning_earlier_edits_and_keeps_blank_indents() {
+        for (text, ending) in [("first\n\nlast\n", "\n"), ("first\r\n\r\nlast\r\n", "\r\n")] {
+            let edit = |line| Edit {
+                file: "source.rs".into(),
+                line,
+                mutators: BTreeSet::from(["stmt.delete".to_owned()]),
+                tag: "timeout",
+            };
+            let invalid = edit(4);
+            let blank = edit(2);
+            let first = edit(1);
+            let zero = edit(0);
+            assert_eq!(
+                apply(text, &[&invalid, &blank, &first, &zero], "2030-01-02"),
+                format!(
+                    "{}first{ending}{}{ending}last{ending}",
+                    first.render("", "2030-01-02", ending),
+                    blank.render("", "2030-01-02", ending)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn line_ending_majority_uses_strict_half_and_preserves_dominant_carriage_returns() {
+        for (text, expected) in [
+            ("", "\n"),
+            ("a\r\nb\n", "\n"),
+            ("a\r\nb\r\nc\n", "\r\n"),
+            ("a\r\nb\nc\n", "\n"),
+            ("a\r\n", "\r\n"),
+        ] {
+            assert_eq!(ending(text), expected);
+        }
+    }
+
+    #[test]
+    fn generated_directive_parsing_rejects_missing_provenance_and_malformed_fields() {
+        for text in [
+            "// #[gamma::skip(stmt.delete, tag = \"timeout\", reason = \"handwritten\")]",
+            "not a directive written by cargo gamma suppress",
+            "// #[gamma::skip(stmt.delete, reason = \"written by cargo gamma suppress\")]",
+        ] {
+            assert_eq!(generated_tag(text), None);
+        }
+        let malformed = "// #[gamma::skip(stmt.delete,, arith.add_to_sub, reason = \"written by cargo gamma suppress\")]";
+        assert_eq!(generated_selectors(malformed), Some(vec!["stmt.delete".to_owned()]));
+        assert_eq!(generated_selectors("plain text"), None);
+        let generated =
+            "  // #[gamma::skip(stmt.delete, arith.add_to_sub, tag = \"timeout\", reason = \"written by cargo gamma suppress\")]";
+        assert_eq!(generated_tag(generated), Some("timeout"));
+        assert_eq!(
+            generated_selectors(generated),
+            Some(vec!["stmt.delete".to_owned(), "arith.add_to_sub".to_owned()])
+        );
+    }
+
+    #[test]
+    fn apply_extends_multiple_existing_sites_without_stopping_after_first_merge() {
+        let first = Edit {
+            file: "source.rs".into(),
+            line: 1,
+            mutators: BTreeSet::from(["stmt.delete".to_owned()]),
+            tag: "timeout",
+        };
+        let second = Edit { line: 2, ..first.clone() };
+        let original = apply("one\ntwo\n", &[&first, &second], "2030-01-02");
+        let first = Edit {
+            line: 2,
+            mutators: BTreeSet::from(["arith.add_to_sub".to_owned()]),
+            ..first
+        };
+        let second = Edit { line: 4, ..first.clone() };
+        let merged = apply(&original, &[&first, &second], "2030-02-03");
+        let expected = Edit {
+            mutators: BTreeSet::from(["arith.add_to_sub".to_owned(), "stmt.delete".to_owned()]),
+            ..first
+        };
+        assert_eq!(
+            merged,
+            format!(
+                "{}one\n{}two\n",
+                expected.render("", "2030-02-03", "\n"),
+                expected.render("", "2030-02-03", "\n")
+            )
+        );
+    }
+
+    #[test]
     fn civil_date_conversion_handles_the_end_of_a_four_hundred_year_era() {
-        assert_eq!(civil_from_days(11_017), "2000-03-01");
+        for (days, expected) in [
+            (-1, "1969-12-31"),
+            (0, "1970-01-01"),
+            (11_015, "2000-02-28"),
+            (11_016, "2000-02-29"),
+            (11_017, "2000-03-01"),
+        ] {
+            assert_eq!(civil_from_days(days), expected);
+        }
     }
 
     #[test]

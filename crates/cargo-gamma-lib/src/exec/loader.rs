@@ -49,7 +49,7 @@ const STACK_FLOOR: usize = 16 * 1024 * 1024;
 ///
 /// Deriving the stack floor exactly once also keeps the ambient read off the launch path, where
 /// other threads are concurrently spawning children.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct Launch {
     /// The dynamic loader search path, or `None` when there is nothing worth setting.
     pub(super) loader: Option<OsString>,

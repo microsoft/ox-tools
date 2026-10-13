@@ -249,6 +249,20 @@ mod tests {
     use super::*;
     use crate::fixtures;
 
+    #[test]
+    fn one_line_truncation_preserves_both_ends_and_uses_the_requested_character_budget() {
+        for (text, width, expected) in [
+            ("alpha\n  beta\tgamma", 40, "alpha beta gamma"),
+            ("abcdefghijk", 7, "ab...jk"),
+            ("abcdefghijk", 8, "ab...ijk"),
+            ("界甲乙丙丁戊己庚", 7, "界甲...己庚"),
+            ("abcdefghijk", 3, "..."),
+            ("a b", 3, "a b"),
+        ] {
+            assert_eq!(one_line(text, width), expected, "{text:?} at width {width}");
+        }
+    }
+
     /// A minimal mutant, with only the fields `summary` reads set to something meaningful.
     ///
     /// Every other field is a placeholder, because `summary` never touches them; keeping the

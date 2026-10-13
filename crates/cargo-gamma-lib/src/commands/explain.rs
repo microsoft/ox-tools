@@ -45,6 +45,7 @@ pub(super) fn explain<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Resul
     Ok(EXIT_OK)
 }
 
+// #[gamma::skip(fn_value.bool_true, tag = "outofmemory", reason = "the campaign exhausted memory when every subject was routed through mutant-id discovery")]
 fn mutant_id_syntax(subject: &str) -> bool {
     super::CanonicalMutantId::parse(subject).is_ok()
 }

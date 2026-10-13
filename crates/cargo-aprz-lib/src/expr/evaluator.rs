@@ -177,6 +177,7 @@ fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metri
     let mut context = Context::default();
 
     // Build nested map structure for dotted metric names
+    // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_one, literal.int_to_zero, tag = "equivalent", reason = "initial map capacity only affects allocation; inserted CEL variables and their values are unchanged")]
     let mut root_map: crate::HashMap<&str, std::collections::HashMap<Arc<String>, Value>> = crate::hash_map_with_capacity(16);
     let mut flat_vars: Vec<(&str, Value)> = Vec::new();
 
@@ -261,6 +262,21 @@ mod tests {
         );
         assert_eq!(outcome.risk, Risk::Low);
         assert!(outcome.expression_outcomes.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "CEL execution is prohibitively slow under Miri")]
+    fn an_empty_scored_policy_keeps_low_risk_independent_of_thresholds() {
+        let required = Expression::new("required", None, "true", None).unwrap();
+        for (medium, low) in [(30.0, 70.0), (101.0, 102.0), (f64::NAN, f64::NAN)] {
+            for high_risk in [Vec::new(), vec![required.clone()]] {
+                let appraisal = evaluate(&high_risk, &[], empty::<Metric>(), test_timestamp(), medium, low);
+                assert_eq!(appraisal.risk(), Risk::Low);
+                assert_eq!(appraisal.point_totals(), Some((0, 0)));
+                assert_eq!(appraisal.weighted_score(), Some(100.0));
+                assert_eq!(appraisal.expression_outcomes.len(), high_risk.len());
+            }
+        }
     }
 
     #[test]

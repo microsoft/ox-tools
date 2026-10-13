@@ -84,5 +84,6 @@ use table::{TABLE_HEADER_SIZE, define_rows, define_table, validate_table_header}
 pub use table_mgr::TableMgr;
 pub use teams_table::{TeamsTable, TeamsTableIndex};
 pub use users_table::{UsersTable, UsersTableIndex};
+pub(super) use version_downloads_table::VersionDownloadRow;
 pub use version_downloads_table::VersionDownloadsTable;
 pub use versions_table::{VersionsTable, VersionsTableIndex};

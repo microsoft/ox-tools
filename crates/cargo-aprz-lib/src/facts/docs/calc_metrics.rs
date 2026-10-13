@@ -270,7 +270,9 @@ fn count_broken_links<Id>(docs: &str, resolved_links: &std::collections::HashMap
         // Check for inline reference-style links like [`text`][target]
         // Extract the target if present (it's in square brackets but WITHOUT backticks)
         let inline_target = (|| {
-            let remainder = docs_to_check.get(match_end..)?.strip_prefix('[')?;
+            // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "match_end is the end of a regex match in this same UTF-8 string and is always a valid slice boundary")]
+            let after_match = docs_to_check.get(match_end..)?;
+            let remainder = after_match.strip_prefix('[')?;
             let end_pos = remainder.find(']')?;
             remainder.get(..end_pos)
         })();
@@ -298,6 +300,8 @@ fn count_broken_links<Id>(docs: &str, resolved_links: &std::collections::HashMap
         // 5. Try without module path if it contains ::
 
         let text_without_parens = text.strip_suffix("()").unwrap_or(text);
+        // #[gamma::skip(literal.str_to_empty, tag = "equivalent", reason = "for unqualified names the suffix lookup repeats the direct and reference-definition lookups already made below, so trying it for every name adds no resolutions")]
+        let has_path = text_without_parens.contains("::");
 
         let is_resolved = resolved_links.contains_key(text)
             || resolved_links.contains_key(text_without_parens)
@@ -308,14 +312,20 @@ fn count_broken_links<Id>(docs: &str, resolved_links: &std::collections::HashMap
             || link_references
                 .get(text_without_parens)
                 .is_some_and(|target| resolved_links.contains_key(*target))
-            || (text_without_parens.contains("::") && {
-                // Try just the last component (e.g., "Error" from "std::error::Error", or "chain" from "Error::chain")
-                let last_component = text_without_parens.rsplit("::").next().unwrap_or("");
-                resolved_links.contains_key(last_component)
-                    || link_references
-                        .get(last_component)
-                        .is_some_and(|target| resolved_links.contains_key(*target))
-            });
+            || (
+                // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "without a module path the suffix equals text_without_parens, whose direct and reference-definition lookups were already tried, so removing this guard adds no resolutions")]
+                has_path && {
+                    // Try just the last component (e.g., "Error" from "std::error::Error", or "chain" from "Error::chain")
+                    let component = text_without_parens.rsplit("::").next();
+                    // #[gamma::skip(literal.str_to_xyzzy, tag = "equivalent", reason = "rsplit always yields at least one component, even for an empty string, so this fallback is unreachable")]
+                    let fallback = "";
+                    let last_component = component.unwrap_or(fallback);
+                    resolved_links.contains_key(last_component)
+                        || link_references
+                            .get(last_component)
+                            .is_some_and(|target| resolved_links.contains_key(*target))
+                }
+            );
 
         if is_resolved {
             skipped_resolved += 1;
@@ -984,6 +994,33 @@ mod tests {
         let docs = "[`Missing```text\nignored\n```Type`]";
         let broken = count_broken_links::<u32>(docs, &links(&[]));
         assert_eq!(broken, 1);
+    }
+
+    #[test]
+    fn removing_a_code_block_preserves_resolved_link_names_and_reference_targets() {
+        for docs in [
+            "[`Known```rust\nignored\n```Type`]",
+            "[`KnownType`]",
+            "[`KnownType()`]",
+            "[`Alias`][KnownType]",
+            "[`Alias`]\n[`Alias`]: KnownType",
+            "[`module::KnownType`]",
+        ] {
+            assert_eq!(count_broken_links::<u32>(docs, &links(&["KnownType"])), 0, "{docs}");
+        }
+        assert_eq!(count_broken_links::<u32>("[`AbsentType`]", &links(&["KnownType"])), 1);
+    }
+
+    #[test]
+    fn coverage_for_one_public_element_distinguishes_missing_and_present_documentation() {
+        for docs in [None, Some("Documented root")] {
+            let json = make_rustdoc_json("one_item", docs, &[]);
+            let data = calculate_docs_metrics(&serde_json::to_vec(&json).unwrap(), &crate_spec("one_item")).unwrap();
+            assert_eq!(data.metrics.public_api_elements, 1);
+            assert_eq!(data.metrics.undocumented_elements, u64::from(docs.is_none()));
+            let expected = if docs.is_some() { 100.0 } else { 0.0 };
+            assert!((data.metrics.doc_coverage_percentage - expected).abs() < f64::EPSILON);
+        }
     }
 
     #[test]

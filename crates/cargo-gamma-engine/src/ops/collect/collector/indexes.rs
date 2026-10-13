@@ -10,6 +10,7 @@ use syn::{
     TraitItemConst, TraitItemFn, Type, UseTree,
 };
 
+use super::noop::LocalCalls;
 use crate::cfg::CfgSet;
 use crate::ops::collect::collector::predicates::{expr_attrs, is_int_literal, is_numeric_binding, is_numeric_receiver, stmt_attrs};
 use crate::ops::collect::collector::types::Alias;
@@ -81,7 +82,7 @@ pub(in crate::ops::collect) struct Indexes {
     pub(super) scope_imports: HashMap<ScopePath, HashMap<String, Option<Vec<String>>>>,
 
     /// Scope paths that inherit bindings from their lexical parent.
-    block_scopes: HashSet<ScopePath>,
+    pub(super) block_scopes: HashSet<ScopePath>,
 
     /// Names the file uses somewhere in a way only a number can be used.
     pub(super) numeric_uses: NumericUses,
@@ -95,9 +96,12 @@ pub(in crate::ops::collect) struct Indexes {
     /// Return types of locally visible functions.
     pub(super) returns: HashMap<String, Option<Type>>,
     pub(super) parameters: HashMap<String, Option<Vec<Type>>>,
+    pub(super) local_calls: LocalCalls,
 
     /// Locally declared type aliases and their targets.
     pub(super) aliases: HashMap<String, Option<Alias>>,
+    /// Aliases and nominal shadows in their declaring lexical scope.
+    pub(super) scope_aliases: HashMap<ScopePath, HashMap<String, Option<Alias>>>,
 }
 
 impl Indexes {
@@ -173,6 +177,7 @@ fn canonical_import(name: &str, imports: &HashMap<String, Option<Vec<String>>>) 
             return Some(path);
         };
         let prefix = imported.as_ref()?;
+        // #[gamma::skip(iter.first_to_last, reason = "this comparison is evaluated only when prefix contains exactly one element, so first and last select the identical element")]
         if prefix.len() == 1 && prefix.first() == Some(first) {
             return Some(path);
         }
@@ -211,6 +216,41 @@ pub(super) struct Walk<'cfg> {
 }
 
 impl Walk<'_> {
+    pub(super) fn on_item_fn(&mut self, node: &ItemFn) {
+        if self.type_evidence {
+            self.indexes.local_calls.function(node, &self.scope_path);
+        }
+    }
+
+    pub(super) fn on_pat_ident(&mut self, node: &syn::PatIdent) {
+        if self.type_evidence {
+            self.indexes.local_calls.binding(node);
+        }
+    }
+
+    pub(super) fn on_value_name(&mut self, name: &syn::Ident) {
+        if self.type_evidence {
+            self.indexes.local_calls.value_name(name);
+        }
+    }
+
+    pub(super) fn on_opaque_macro(&mut self) {
+        self.indexes.local_calls.opaque(&self.scope_path);
+    }
+
+    pub(super) fn on_local_attributes(&mut self, attributes: &[syn::Attribute]) {
+        if self.indexes.block_scopes.contains(&self.scope_path) && !LocalCalls::nontransforming_attributes(attributes) {
+            self.on_opaque_macro();
+        }
+    }
+
+    pub(super) fn on_item_extern_crate(&mut self, node: &syn::ItemExternCrate) {
+        if self.type_evidence {
+            let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name);
+            self.imported(name.to_string(), &[node.ident.to_string()]);
+        }
+    }
+
     /// Notes a name, when the expression is the bare identifier that proves it.
     pub(super) fn note(&mut self, expression: &Expr) {
         match expression {
@@ -335,6 +375,18 @@ impl Walk<'_> {
                         *known = None;
                     }
                 })
+                .or_insert(Some(alias.clone()));
+            let _known = self
+                .indexes
+                .scope_aliases
+                .entry(self.scope_path.clone())
+                .or_default()
+                .entry(name.to_owned())
+                .and_modify(|known| {
+                    if known.as_ref() != Some(&alias) {
+                        *known = None;
+                    }
+                })
                 .or_insert(Some(alias));
         }
     }
@@ -405,6 +457,7 @@ impl Walk<'_> {
     /// costs a withdrawn mutant rather than a wrong score. Importing the same path twice is not a
     /// disagreement and does not demote.
     fn imported(&mut self, name: String, prefix: &[String]) {
+        self.indexes.local_calls.imported(&name);
         Self::merge_import(&mut self.indexes.imports, name.clone(), prefix);
         if self.scope_path.is_empty() {
             Self::merge_import(&mut self.indexes.root_imports, name, prefix);
@@ -426,6 +479,7 @@ impl Walk<'_> {
 
     pub(super) fn enter_module(&mut self, name: &syn::Ident) {
         self.scope_path.push(module_id(name));
+        self.indexes.local_calls.module(&self.scope_path);
         let _imports = self.indexes.scope_imports.entry(self.scope_path.clone()).or_default();
     }
 
@@ -450,6 +504,8 @@ impl Walk<'_> {
     /// struct's, so each field is checked again here: a field the build does not compile must not
     /// inform the numeric guess for a same-named field elsewhere that the build does compile.
     pub(super) fn on_item_struct(&mut self, node: &ItemStruct) {
+        self.shadow_type(&node.ident);
+        self.on_value_name(&node.ident);
         for field in &node.fields {
             if self.cfg.skip_gate(&field.attrs) {
                 continue;
@@ -479,6 +535,15 @@ impl Walk<'_> {
                 .and_modify(|known| *known = *known && numeric)
                 .or_insert(numeric);
         }
+    }
+
+    pub(super) fn shadow_type(&mut self, name: &syn::Ident) {
+        let _previous = self
+            .indexes
+            .scope_aliases
+            .entry(self.scope_path.clone())
+            .or_default()
+            .insert(name.to_string(), None);
     }
 
     pub(super) fn on_item_mod(&mut self, node: &ItemMod) {
@@ -593,6 +658,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     /// `visit_item_static`, keeps one skipped item from reaching any of them.
     fn visit_item(&mut self, node: &'ast Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
+            self.on_local_attributes(item_attrs(node));
             if let Item::Mod(module) = node {
                 self.on_item_mod(module);
             }
@@ -628,6 +694,10 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     /// body, so this is where that evidence has to be refused.
     fn visit_stmt(&mut self, node: &'ast Stmt) {
         if !self.cfg.skip_gate(stmt_attrs(node)) {
+            self.on_local_attributes(stmt_attrs(node));
+            if matches!(node, Stmt::Expr(Expr::Macro(_), _)) {
+                self.on_opaque_macro();
+            }
             visit::visit_stmt(self, node);
         }
     }
@@ -636,6 +706,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     /// ones it does not admit yet, exactly as the collector's own `visit_expr` does.
     fn visit_expr(&mut self, node: &'ast Expr) {
         if !self.cfg.skip_gate(expr_attrs(node)) {
+            self.on_local_attributes(expr_attrs(node));
             visit::visit_expr(self, node);
         }
     }
@@ -644,6 +715,16 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         self.on_item_struct(node);
 
         visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        self.shadow_type(&node.ident);
+        visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        self.shadow_type(&node.ident);
+        visit::visit_item_union(self, node);
     }
 
     fn visit_item_mod(&mut self, node: &'ast ItemMod) {
@@ -666,8 +747,29 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.on_item_fn(node);
         self.signature(&node.sig);
         visit::visit_item_fn(self, node);
+    }
+
+    fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+        self.on_pat_ident(node);
+        visit::visit_pat_ident(self, node);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        self.on_opaque_macro();
+        visit::visit_item_macro(self, node);
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        self.on_item_extern_crate(node);
+        visit::visit_item_extern_crate(self, node);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.on_opaque_macro();
+        visit::visit_stmt_macro(self, node);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
@@ -684,12 +786,14 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_item_const(&mut self, node: &'ast ItemConst) {
+        self.on_value_name(&node.ident);
         self.declared(&node.ident.to_string(), &node.ty);
 
         visit::visit_item_const(self, node);
     }
 
     fn visit_item_static(&mut self, node: &'ast ItemStatic) {
+        self.on_value_name(&node.ident);
         self.declared(&node.ident.to_string(), &node.ty);
 
         visit::visit_item_static(self, node);
@@ -699,6 +803,16 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         self.declared(&node.ident.to_string(), &node.ty);
 
         visit::visit_impl_item_const(self, node);
+    }
+
+    fn visit_foreign_item_fn(&mut self, node: &'ast syn::ForeignItemFn) {
+        self.on_value_name(&node.sig.ident);
+        visit::visit_foreign_item_fn(self, node);
+    }
+
+    fn visit_foreign_item_static(&mut self, node: &'ast syn::ForeignItemStatic) {
+        self.on_value_name(&node.ident);
+        visit::visit_foreign_item_static(self, node);
     }
 
     fn visit_trait_item_const(&mut self, node: &'ast TraitItemConst) {
@@ -775,31 +889,16 @@ impl<'cfg> Walk<'cfg> {
                 declared_types: HashMap::default(),
                 returns: HashMap::default(),
                 parameters: HashMap::default(),
+                local_calls: LocalCalls::default(),
                 aliases: HashMap::default(),
+                scope_aliases: HashMap::default(),
             },
             numeric: selection.contains("expr.increment")
                 || selection.contains("expr.decrement")
                 || selection.contains("literal.int_decrement"),
 
-            // Several families need source-visible standard-library identities: value synthesis
-            // and result mutation use them for `Default`, while integer decrement uses them to
-            // recognize fixed unsigned constructor arguments.
-            type_evidence: selection.any_in_family("fn_value")
-                || selection.contains("result.ok_to_err")
-                || selection.contains("result.err_to_ok")
-                || selection.contains("option.none_to_some")
-                || selection.contains("assign_value.default")
-                || selection.any_in_family("call")
-                || selection.any_in_family("call_result")
-                || selection.any_in_family("parameter")
-                || selection.any_in_family("return_value")
-                || selection.any_in_family("bool_expr")
-                || selection.any_in_family("arith")
-                || selection.contains("iter.last_to_first")
-                || selection.contains("iter.remove_filter")
-                || selection.contains("expr.increment")
-                || selection.contains("expr.decrement")
-                || selection.contains("literal.int_decrement"),
+            // Resource admission needs trustworthy names even for narrow mutator selections.
+            type_evidence: true,
             scope_path: Vec::new(),
             cfg,
         }
@@ -819,6 +918,286 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn local_index_callbacks_obey_independent_evidence_gates() {
+        let cfg = CfgSet::unconditional();
+        for numeric in [false, true] {
+            for type_evidence in [false, true] {
+                let mut walk = Walk::new(&Selection::everything(), &cfg);
+                walk.numeric = numeric;
+                walk.type_evidence = type_evidence;
+                walk.on_item_struct(&parse_quote!(
+                    struct Fields {
+                        first: u8,
+                        second: u16,
+                    }
+                ));
+                walk.on_item_use(&parse_quote!(
+                    use std::time::Duration;
+                ));
+                walk.on_expr_binary(&parse_quote!(left - right));
+                walk.on_expr_index(&parse_quote!(items[position]));
+                walk.on_expr_method_call(&parse_quote!(receiver.abs()));
+                walk.on_expr_for_loop(&parse_quote!(for bound in 0..4 {}));
+                assert_eq!(walk.indexes.declared_types.len(), if type_evidence { 2 } else { 0 });
+                assert_eq!(walk.indexes.fields.len(), if numeric { 2 } else { 0 });
+                assert_eq!(walk.indexes.root_imports.contains_key("Duration"), type_evidence);
+                for name in ["left", "right", "position", "receiver", "bound"] {
+                    assert_eq!(walk.indexes.numeric_uses.names.contains(name), numeric, "{name}");
+                }
+                assert_eq!(walk.indexes.numeric_uses.unsigned_names.contains("position"), numeric);
+            }
+        }
+        let file = syn::parse_file("mod retained {} struct Fields { value:u8 }").unwrap();
+        let empty = indexes_in(&file, &Selection::parse("relational").unwrap(), &cfg);
+        assert_eq!(
+            empty.root_imports,
+            HashMap::from_iter([("retained".to_owned(), Some(vec!["self".to_owned(), "retained".to_owned()]))])
+        );
+        assert_eq!(empty.scope_imports.len(), 1);
+        assert!(empty.scope_imports.values().all(HashMap::is_empty));
+        assert!(empty.fields.is_empty());
+    }
+
+    #[test]
+    fn block_identity_uses_exact_opening_line_and_column() {
+        let file = syn::parse_file("\n fn first() { }\n\n    fn second() { }\n").unwrap();
+        let identities = file
+            .items
+            .iter()
+            .map(|item| {
+                let syn::Item::Fn(function) = item else {
+                    panic!("the fixture contains only functions");
+                };
+                block_id(&function.block)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(identities, [(2, 12), (4, 16)]);
+    }
+
+    #[test]
+    fn qualified_self_paths_are_not_bare_numeric_binding_evidence() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = Walk::new(&Selection::everything(), &cfg);
+        walk.note(&parse_quote!(<T>::value));
+        walk.note_unsigned(&parse_quote!(<T>::index));
+        assert!(walk.indexes.numeric_uses.names.is_empty());
+        assert!(walk.indexes.numeric_uses.unsigned_names.is_empty());
+        walk.note(&parse_quote!(value));
+        walk.note_unsigned(&parse_quote!(index));
+        assert!(walk.indexes.numeric_uses.names.contains("value"));
+        assert!(walk.indexes.numeric_uses.unsigned_names.contains("index"));
+    }
+
+    #[test]
+    fn canonical_import_matrix_preserves_absolute_roots_and_rejects_unknown_cycles() {
+        let imports = HashMap::from_iter([
+            ("Vec".into(), Some(vec!["std".into(), "vec".into(), "Vec".into()])),
+            ("Alias".into(), Some(vec!["Vec".into()])),
+            ("Nested".into(), Some(vec!["Alias".into(), "Item".into()])),
+            ("Unknown".into(), None),
+            ("Empty".into(), Some(vec![])),
+            ("SelfName".into(), Some(vec!["SelfName".into()])),
+            ("CycleA".into(), Some(vec!["CycleB".into()])),
+            ("CycleB".into(), Some(vec!["CycleA".into()])),
+            ("Absolute".into(), Some(vec![ABSOLUTE_ROOT.into(), "Vec".into()])),
+        ]);
+        for (name, expected) in [
+            ("Vec", Some(vec!["std", "vec", "Vec"])),
+            ("Alias", Some(vec!["std", "vec", "Vec"])),
+            ("Nested", Some(vec!["std", "vec", "Vec", "Item"])),
+            ("Unknown", None),
+            ("Empty", None),
+            ("Missing", None),
+            ("SelfName", Some(vec!["SelfName"])),
+            ("CycleA", None),
+            ("CycleB", None),
+            ("Absolute", Some(vec![ABSOLUTE_ROOT, "Vec"])),
+        ] {
+            assert_eq!(
+                canonical_import(name, &imports),
+                expected.map(|path| path.into_iter().map(str::to_owned).collect()),
+                "{name}"
+            );
+        }
+        for path in [vec![], vec!["std".into()], vec![ABSOLUTE_ROOT.into(), "std".into()]] {
+            let protected = protect_import(path.clone());
+            assert_eq!(protected.first().map(String::as_str), Some(ABSOLUTE_ROOT));
+            assert_eq!(protect_import(protected.clone()), protected);
+            if path.first().is_none_or(|first| first != ABSOLUTE_ROOT) {
+                assert_eq!(&protected[1..], path);
+            } else {
+                assert_eq!(protected, path);
+            }
+        }
+        let mut types = HashMap::default();
+        merge_type(&mut types, "same", &parse_quote!(u8));
+        merge_type(&mut types, "same", &parse_quote!(u8));
+        assert_eq!(types["same"], Some(parse_quote!(u8)));
+        merge_type(&mut types, "same", &parse_quote!(bool));
+        assert_eq!(types["same"], None);
+        merge_type(&mut types, "same", &parse_quote!(u8));
+        assert_eq!(types["same"], None);
+    }
+
+    #[test]
+    fn lexical_import_scopes_keep_local_shadowing_and_parent_alias_resolution() {
+        let file = syn::parse_file(
+            "use std::vec::Vec as Root; fn f() {
+                use Root as First; { use First as Second; let _ = 1; }
+                { use other::Vec as Root; use Root as Foreign; }
+             } mod m { use alloc::vec::Vec as Local; fn g() { use Local as Alias; } }",
+        )
+        .unwrap();
+        let indexes = indexes_in(&file, &Selection::parse("fn_value").unwrap(), &CfgSet::unconditional());
+        assert_eq!(indexes.root_imports["Root"], Some(vec!["std".into(), "vec".into(), "Vec".into()]));
+        assert_eq!(indexes.root_imports["m"], Some(vec!["self".into(), "m".into()]));
+        let inherited = Some(vec![ABSOLUTE_ROOT.into(), "std".into(), "vec".into(), "Vec".into()]);
+        let mut second = 0;
+        let mut foreign = 0;
+        let mut alias = 0;
+        for scope in indexes.scope_imports.values() {
+            if scope.contains_key("Second") {
+                second += 1;
+                assert_eq!(scope["Second"], inherited);
+                assert_eq!(scope["Root"], inherited);
+            }
+            if scope.contains_key("Foreign") {
+                foreign += 1;
+                assert_eq!(scope["Root"], Some(vec!["other".into(), "Vec".into()]));
+                assert_eq!(scope["Foreign"], Some(vec!["other".into(), "Vec".into()]));
+            }
+            if scope.contains_key("Alias") {
+                alias += 1;
+                assert_eq!(
+                    scope["Alias"],
+                    Some(vec![ABSOLUTE_ROOT.into(), "alloc".into(), "vec".into(), "Vec".into()])
+                );
+                assert!(!scope.contains_key("Root"));
+            }
+        }
+        assert_eq!((second, foreign, alias), (1, 1, 1));
+    }
+
+    #[test]
+    fn index_selection_matrix_populates_only_the_requested_evidence() {
+        let file = syn::parse_file(
+            "use std::vec::Vec; type Count = usize; struct Record { size: usize }
+             const LIMIT: usize = 4; fn helper(value: usize) -> bool { value > 0 }
+             fn uses(values: &[u8], offset: usize) { let _ = values[offset]; }",
+        )
+        .unwrap();
+        let cfg = CfgSet::unconditional();
+        for (selector, numeric, type_evidence) in [
+            ("relational.eq_to_ne", false, true),
+            ("fn_value.bool_true", false, true),
+            ("result.ok_to_err", false, true),
+            ("result.err_to_ok", false, true),
+            ("option.none_to_some", false, true),
+            ("assign_value.default", false, true),
+            ("call.replace_with_default", false, true),
+            ("call_result.default", false, true),
+            ("parameter.default_shadow", false, true),
+            ("return_value.default", false, true),
+            ("bool_expr.negate", false, true),
+            ("arith.add_to_sub", false, true),
+            ("iter.last_to_first", false, true),
+            ("iter.remove_filter", false, true),
+            ("expr.increment", true, true),
+            ("expr.decrement", true, true),
+            ("literal.int_decrement", true, true),
+        ] {
+            let selection = Selection::parse(selector).unwrap();
+            let indexes = indexes_in(&file, &selection, &cfg);
+            assert_eq!(indexes.constants.get("LIMIT").copied(), numeric.then_some(true), "{selector}");
+            assert_eq!(indexes.fields.get("size").copied(), numeric.then_some(true), "{selector}");
+            assert_eq!(indexes.numeric_uses.names.contains("offset"), numeric, "{selector}");
+            assert_eq!(indexes.numeric_uses.unsigned_names.contains("offset"), numeric, "{selector}");
+            assert_eq!(
+                indexes.returns.get("helper"),
+                type_evidence.then_some(&Some(parse_quote!(bool))),
+                "{selector}"
+            );
+            assert_eq!(
+                indexes.parameters.get("helper"),
+                type_evidence.then_some(&Some(vec![parse_quote!(usize)])),
+                "{selector}"
+            );
+            assert_eq!(
+                indexes.declared_types.get("LIMIT"),
+                type_evidence.then_some(&Some(parse_quote!(usize))),
+                "{selector}"
+            );
+            assert_eq!(indexes.root_imports.contains_key("Vec"), type_evidence, "{selector}");
+            assert_eq!(indexes.aliases.contains_key("Count"), type_evidence, "{selector}");
+        }
+    }
+
+    #[test]
+    fn repeated_declarations_preserve_agreement_and_permanently_demote_collisions() {
+        let cfg = CfgSet::unconditional();
+        for selector in ["relational", "fn_value", "expr.increment"] {
+            let selection = Selection::parse(selector).unwrap();
+            let mut walk = Walk::new(&selection, &cfg);
+            for (name, text) in [("same", "u8"), ("same", "u8"), ("mixed", "u8"), ("mixed", "bool"), ("mixed", "u8")] {
+                walk.declared(name, &parse_str(text).unwrap());
+            }
+            let first: Signature = parse_quote!(fn helper(value:u8)->u8);
+            walk.signature(&first);
+            walk.signature(&first);
+            assert_eq!(
+                walk.indexes.parameters.get("helper"),
+                walk.type_evidence.then_some(&Some(vec![parse_quote!(u8)]))
+            );
+            walk.signature(&parse_quote!(fn helper(value:bool)->u8));
+            walk.signature(&first);
+            assert_eq!(walk.indexes.parameters.get("helper"), walk.type_evidence.then_some(&None));
+            let generic: syn::Generics = parse_quote!(<T>);
+            walk.alias("Alias", &generic, &parse_quote!(Vec<T>));
+            walk.alias("Alias", &generic, &parse_quote!(Vec<T>));
+            assert_eq!(
+                walk.indexes.aliases.get("Alias").map(Option::is_some),
+                walk.type_evidence.then_some(true)
+            );
+            walk.alias("Alias", &generic, &parse_quote!(Option<T>));
+            walk.alias("Alias", &generic, &parse_quote!(Vec<T>));
+            assert_eq!(
+                walk.indexes.aliases.get("Alias").map(Option::is_none),
+                walk.type_evidence.then_some(true)
+            );
+            assert_eq!(
+                walk.indexes.declared_types.get("same"),
+                walk.type_evidence.then_some(&Some(parse_quote!(u8)))
+            );
+            assert_eq!(walk.indexes.declared_types.get("mixed"), walk.type_evidence.then_some(&None));
+            assert_eq!(walk.indexes.constants.get("same"), walk.numeric.then_some(&true));
+            assert_eq!(walk.indexes.constants.get("mixed"), walk.numeric.then_some(&false));
+        }
+        let source = "
+            struct A { size:u8 } struct B { size:bool }
+            trait T { #[cfg(not(unix))] fn absent()->u8 { 1 } fn active()->u8 { 1 } }
+            struct S; impl S { #[cfg(not(unix))] fn hidden()->u8 { 1 } fn visible()->u8 { 1 } }
+            #[cfg(not(unix))] fn free_hidden()->u8 { 1 }
+            fn free_active()->u8 { 1 }
+            fn f(values:&[u8], index:usize) {
+                #[cfg(not(unix))] let _ = values[excluded];
+                let _ = values[index]; { use a::*; }
+            }";
+        let cfg = CfgSet::parse("unix");
+        let indexes = indexes_in(&syn::parse_file(source).unwrap(), &Selection::everything(), &cfg);
+        assert!(!indexes.fields["size"]);
+        assert!(!indexes.returns.contains_key("active"));
+        assert!(!indexes.returns.contains_key("visible"));
+        assert!(!indexes.returns.contains_key("absent"));
+        assert!(!indexes.returns.contains_key("hidden"));
+        assert_eq!(indexes.returns.get("free_active"), Some(&Some(parse_quote!(u8))));
+        assert!(!indexes.returns.contains_key("free_hidden"));
+        assert!(indexes.numeric_uses.unsigned_names.contains("index"));
+        assert!(!indexes.numeric_uses.names.contains("excluded"));
+        assert_eq!(indexes.imports.get("*"), Some(&None));
+        assert!(!indexes.root_imports.contains_key("*"));
+    }
+
     fn walk(numeric: bool, type_evidence: bool, cfg: &CfgSet) -> Walk<'_> {
         Walk {
             indexes: Indexes {
@@ -832,7 +1211,9 @@ mod tests {
                 declared_types: HashMap::default(),
                 returns: HashMap::default(),
                 parameters: HashMap::default(),
+                local_calls: LocalCalls::default(),
                 aliases: HashMap::default(),
+                scope_aliases: HashMap::default(),
             },
             numeric,
             type_evidence,
@@ -1165,7 +1546,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_enables_only_the_indexes_its_exact_families_consume() {
+    fn selection_always_enables_type_identity_but_gates_numeric_indexes() {
         let cfg = CfgSet::unconditional();
 
         let numeric = Walk::new(&Selection::parse("expr.decrement").expect("selector resolves"), &cfg);
@@ -1178,12 +1559,15 @@ mod tests {
 
         let unrelated = Walk::new(&Selection::parse("literal.bool_flip").expect("selector resolves"), &cfg);
         assert!(!unrelated.numeric);
-        assert!(!unrelated.type_evidence);
+        assert!(unrelated.type_evidence);
 
         let file = syn::parse_file("const LIMIT: usize = left - right; use crate::Thing;").expect("the file parses");
         let indexes = indexes_in(&file, &Selection::parse("literal.bool_flip").expect("selector resolves"), &cfg);
         assert!(indexes.constants.is_empty());
-        assert!(indexes.imports.is_empty());
+        assert_eq!(
+            indexes.imports.get("Thing"),
+            Some(&Some(vec!["crate".to_owned(), "Thing".to_owned()]))
+        );
         assert!(indexes.numeric_uses.names.is_empty());
     }
 

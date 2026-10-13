@@ -68,8 +68,10 @@ pub struct DepsArgs {
 }
 
 pub async fn process_dependencies<H: Host>(host: &mut H, args: &DepsArgs) -> Result<()> {
-    let (mut common, metadata) =
-        Common::new_with_metadata(host, &args.common, |metadata_cmd| configure_metadata_features(metadata_cmd, args)).await?;
+    let (mut common, metadata) = Common::new_with_metadata(host, &args.common, |metadata_cmd| {
+        configure_metadata_features(metadata_cmd, args);
+    })
+    .await?;
     let all_packages: HashMap<_, _> = metadata.packages.iter().map(|p| (&p.id, p)).collect();
     let resolve_index: HashMap<&PackageId, &Node> = metadata
         .resolve
@@ -156,6 +158,7 @@ async fn process_packages<'a, H: Host>(
 
     // Fetch facts for each crate (no suggestions for deps command)
     let crate_refs: Vec<CrateRef> = crate_dep_pairs.into_iter().map(|(crate_ref, _)| crate_ref).collect();
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Collector::collect returns Ok on every path and records provider errors per crate; process_crates preserves that always-Ok outer result")]
     let facts = common.process_crates(&crate_refs, INCLUDE_DEPENDENCY_SUGGESTIONS).await?;
 
     common.report(facts)
@@ -920,6 +923,24 @@ mod tests {
         let result = build_transitive_deps(&all_packages, &resolve_index, &root.id, DependencyType::Standard);
 
         assert!(result.is_empty(), "a target that is not in the metadata has no dependencies");
+    }
+
+    #[test]
+    fn transitive_dependency_cycles_terminate_after_features_stabilize() {
+        let root = package("root", &plain_dep("first"), "{}");
+        let first = package("first", &plain_dep("second"), "{}");
+        let second = package("second", &plain_dep("first"), "{}");
+        let packages = [&root, &first, &second];
+        let all_packages = packages.iter().map(|package| (&package.id, *package)).collect();
+        let root_node = node("root", &["first"]);
+        let first_node = node("first", &["second"]);
+        let second_node = node("second", &["first"]);
+        let nodes = [&root_node, &first_node, &second_node];
+        let index = nodes.iter().map(|node| (&node.id, *node)).collect();
+        let dependencies = build_transitive_deps(&all_packages, &index, &root.id, DependencyType::Standard);
+        let mut names: Vec<_> = dependencies.iter().map(|(reference, _)| reference.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["first", "second"]);
     }
 
     #[test]

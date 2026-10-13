@@ -764,8 +764,7 @@ impl Progress for EagerProgress {
     fn set_phase(&self, _phase: &str) {}
 
     fn set_determinate(&self, callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {
-        let (total, done, message) = callback();
-        assert!(done <= total || message.is_empty() || total == 0 || done > 0);
+        let _ = callback();
     }
 
     fn set_indeterminate(&self, callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {

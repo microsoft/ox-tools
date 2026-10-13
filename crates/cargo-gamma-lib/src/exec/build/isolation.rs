@@ -335,6 +335,7 @@ impl Converger {
             push_isolation_tiers(&mut tiers, package, plan, &context.codes);
             push_isolation_tiers(&mut tiers, dependencies.clone(), plan, &context.codes);
 
+            // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, tag = "outofmemory", reason = "bypassing the admissible-tier budget guard exhausted memory in campaign isolation")]
             if has_admissible_tier(&tiers, &self.withdrawn) && !self.isolation_budget.enter_context() {
                 events.warn(&format!(
                     "left {} unresolved after the Cargo invocation reached its {MAX_ISOLATION_CONTEXTS}-context isolation budget",
@@ -462,11 +463,14 @@ impl Converger {
             }
         }
 
+        // #[gamma::skip(relational.gt_to_ge, literal.int_decrement, tag = "timeout", reason = "bisecting a singleton cannot reduce the isolation population")]
         while items.len() > 1 {
+            // #[gamma::skip(arith.div_to_rem, literal.int_decrement, literal.int_increment, tag = "timeout", reason = "these campaign divisors produced empty or nonshrinking isolation partitions")]
             let middle = items.len() / 2;
             let left = items[..middle].concat();
             let right = items[middle..].concat();
             if self.subset_fails(work, plan, scope, verb, limits, events, &population, &left, proofs)? == Some(true) {
+                // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "successful bisection must shrink the population before retrying")]
                 items.truncate(middle);
                 continue;
             }
@@ -486,11 +490,14 @@ impl Converger {
 
         let item = items.pop().unwrap_or_default();
         let mut narrowed = item.clone();
+        // #[gamma::skip(relational.gt_to_ge, literal.int_decrement, tag = "timeout", reason = "bisecting a singleton cannot reduce the isolation population")]
         while narrowed.len() > 1 {
+            // #[gamma::skip(arith.div_to_rem, literal.int_decrement, literal.int_increment, tag = "timeout", reason = "these campaign divisors produced empty or nonshrinking isolation partitions")]
             let middle = narrowed.len() / 2;
             let left = &narrowed[..middle];
             let right = &narrowed[middle..];
             if self.subset_fails(work, plan, scope, verb, limits, events, &population, left, proofs)? == Some(true) {
+                // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "successful bisection must shrink the population before retrying")]
                 narrowed.truncate(middle);
             } else if self.subset_fails(work, plan, scope, verb, limits, events, &population, right, proofs)? == Some(true) {
                 drop(narrowed.drain(..middle));
@@ -530,6 +537,7 @@ impl Converger {
         while active.len() > 1 && proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS {
             let width = active.len().div_ceil(granularity);
             let chunks = active.chunks(width).map(<[_]>::to_vec).collect::<Vec<_>>();
+            // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "claiming reduction without a successful proof keeps retrying the same active population")]
             let mut reduced = false;
             for chunk in &chunks {
                 if self.subset_fails(work, plan, scope, verb, limits, events, population, chunk, proofs)? == Some(true) {

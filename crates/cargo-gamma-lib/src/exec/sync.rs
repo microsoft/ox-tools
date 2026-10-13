@@ -343,9 +343,11 @@ fn readers_have_same_contents(left: impl Read, right: impl Read) -> std::io::Res
             )
         };
 
+        // #[gamma::skip(logical.or_remove_right, tag = "timeout", reason = "the campaign comparison stalled when unequal end-of-file states no longer ended the scan")]
         if !equal || left_eof != right_eof {
             return Ok(false);
         }
+        // #[gamma::skip(cond.always_false, tag = "timeout", reason = "the comparison must stop once both files reach end of input")]
         if left_eof {
             return Ok(true);
         }

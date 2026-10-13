@@ -505,6 +505,15 @@ export -f just
         assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
+        assert!(PR_IMPL_WORKFLOW.contains("name: Resolve current PR title"));
+        assert!(PR_IMPL_WORKFLOW.contains("github.rest.pulls.get"));
+        assert!(PR_IMPL_WORKFLOW.contains("pull_number: context.payload.pull_request.number"));
+        assert!(PR_IMPL_WORKFLOW.contains("retries: 3"));
+        assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE: ${{ steps.pr_title.outputs.title }}"));
+        assert!(
+            !PR_IMPL_WORKFLOW.contains("PR_TITLE: ${{ github.event.pull_request.title }}"),
+            "workflow reruns must validate the live PR title rather than the original event payload"
+        );
         assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
         for name in [
             "Check Group: Fast Checks (${{ matrix.os }})",

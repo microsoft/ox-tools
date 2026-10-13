@@ -149,6 +149,7 @@ impl<'a> SourceFileAnalyzer<'a> {
                 .and_then(|segment| segment.name_ref())
                 .is_some_and(|name| matches!(&*name.text(), "test" | "bench" | "cfg"));
 
+            // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "attribute_marks_test already rejects every name except test, bench, and cfg; the syntax-name check only avoids allocating text for those rejected names")]
             is_candidate && attribute_marks_test(&attr.syntax().text().to_string())
         })
     }
@@ -345,6 +346,45 @@ pub fn analyze_source_file(source_file: &str) -> SourceFileInfo {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attribute_whitespace_and_line_categories_are_independent() {
+        for text in [
+            "# [ test ]",
+            "#[  test  ]",
+            "#! [ cfg ( test ) ]",
+            "# [cfg(all ( test , feature = \"x\" )) ]",
+        ] {
+            assert!(attribute_marks_test(text), "{text}");
+        }
+        for text in [
+            "#[cfg(not(test))]",
+            "# [cfg(any ( test , feature = \"x\" )) ]",
+            "# [derive(Debug) ]",
+        ] {
+            assert!(!attribute_marks_test(text), "{text}");
+        }
+
+        let mut analyzer = SourceFileAnalyzer::new("a\nb\nc\nd");
+        analyzer.mark_line(0, LINE_PRODUCTION);
+        analyzer.mark_line(1, LINE_TEST);
+        analyzer.mark_line(2, LINE_COMMENT);
+        analyzer.mark_line(3, LINE_TEST | LINE_COMMENT);
+        assert_eq!(analyzer.count_lines(LINE_PRODUCTION), 1);
+        assert_eq!(analyzer.count_lines(LINE_TEST), 2);
+        assert_eq!(analyzer.count_lines(LINE_COMMENT), 2);
+
+        let info =
+            analyze_source_file("// comment\nfn production() {\n\n    let value = 1;\n    let _ = value;\n}\n#[test]\nfn test_only() {}");
+        assert_eq!(info.production_lines, 5);
+        assert_eq!(info.test_lines, 2);
+        assert_eq!(info.comment_lines, 1);
+        assert!(!info.has_errors);
+        assert_eq!(
+            split_predicates("all(any(test, feature = \"x\"), feature = \"y\"), unix, any(test, windows)"),
+            ["all(any(test, feature = \"x\"), feature = \"y\")", "unix", "any(test, windows)"]
+        );
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri detects UB in external rowan crate")]

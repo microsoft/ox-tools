@@ -4,9 +4,232 @@
 //! Whether a proposed replacement would leave the program as it was.
 
 use rustc_lexer::{LiteralKind, TokenKind};
+use syn::{Expr, ItemFn, PatIdent, ReturnType, Type};
 
 use super::super::defaults::DefaultPaths;
+use super::indexes::ScopePath;
+use super::types::{Types, constructor_argument_count};
+use super::values::Kind;
 use crate::ops::collect::Shape;
+use crate::{HashMap, HashSet};
+
+/// Positive callee evidence kept separate from the optimistic name-only return index.
+#[derive(Default)]
+pub(super) struct LocalCalls {
+    declarations: HashMap<String, Option<ScopePath>>,
+    bound_names: HashSet<String>,
+    opaque_scopes: HashSet<ScopePath>,
+    module_scopes: HashSet<ScopePath>,
+    imported_names: HashSet<String>,
+}
+
+/// Recognizes standard type constructors, not same-named inherent methods on local types.
+pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type, types: &Types<'_>, defaults: &DefaultPaths) -> bool {
+    if types.abstracts.iter().chain(types.defaulted).any(|name| name == "Default")
+        || !defaults.is_standard_default_segments(&["Default".into(), "default".into()])
+    {
+        return false;
+    }
+    let expression = match expression {
+        Expr::Paren(paren) => return is_standard_default_constructor(&paren.expr, expected, types, defaults),
+        Expr::Group(group) => return is_standard_default_constructor(&group.expr, expected, types, defaults),
+        expression => expression,
+    };
+    let Expr::Call(call) = expression else {
+        return false;
+    };
+    let Expr::Path(callee) = &*call.func else {
+        return false;
+    };
+    if !call.attrs.is_empty() || !call.args.is_empty() || callee.qself.is_some() {
+        return false;
+    }
+    let mut path = callee.path.clone();
+    let Some(method) = path.segments.pop() else {
+        return false;
+    };
+    if !matches!(method.arguments, syn::PathArguments::None) || !matches!(method.ident.to_string().as_str(), "new" | "default") {
+        return false;
+    }
+    let _separator = path.segments.pop_punct();
+    if path.segments.is_empty() {
+        return false;
+    }
+    let constructor = Type::Path(syn::TypePath {
+        attrs: Vec::new(),
+        qself: None,
+        path,
+    });
+    let Type::Path(constructor_path) = &constructor else {
+        return false;
+    };
+    let Some(arguments) = constructor_argument_count(&constructor_path.path) else {
+        return false;
+    };
+    let first = constructor_path
+        .path
+        .segments
+        .first()
+        .expect("the empty constructor path was rejected above")
+        .ident
+        .to_string();
+    if types.abstracts.contains(&first)
+        || types.defaulted.contains(&first)
+        || types.aliases.is_some_and(|aliases| aliases.contains_key(&first))
+    {
+        return false;
+    }
+    let expected = types.resolve_alias(expected);
+    if !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
+        return false;
+    }
+    if method.ident == "new" {
+        return types.supports_empty_default_constructor(&constructor)
+            && types.supports_empty_default_constructor(expected)
+            && same_standard_type(&constructor, expected, types);
+    }
+    if types.supports_empty_default_constructor(&constructor) && types.supports_empty_default_constructor(expected) {
+        return same_standard_type(&constructor, expected, types);
+    }
+    let expected_arguments = match expected {
+        Type::Path(path) => constructor_argument_count(&path.path),
+        _ => None,
+    };
+    (arguments == 0
+        && expected_arguments == Some(0)
+        && types.supports_primitive_kind(&constructor, Kind::Bool)
+        && types.supports_primitive_kind(expected, Kind::Bool))
+        || (arguments <= 1
+            && expected_arguments.is_some_and(|arguments| arguments <= 1)
+            && types.supports_option_api(&constructor)
+            && types.supports_option_api(expected))
+}
+
+fn same_standard_type(left: &Type, right: &Type, types: &Types<'_>) -> bool {
+    // Imported renames are allowed only when both paths resolve to the same standard type.
+    types
+        .standard_type_name(left)
+        .is_some_and(|left| types.standard_type_name(right).as_ref() == Some(&left))
+}
+
+pub(super) fn is_resolved_trait_default(expression: &Expr, types: &Types<'_>) -> bool {
+    match expression {
+        Expr::Paren(paren) => return is_resolved_trait_default(&paren.expr, types),
+        Expr::Group(group) => return is_resolved_trait_default(&group.expr, types),
+        _ => {}
+    }
+    let Expr::Call(call) = expression else {
+        return false;
+    };
+    if !call.args.is_empty() || !call.attrs.is_empty() {
+        return false;
+    }
+    let mut callee = &*call.func;
+    while let Expr::Paren(paren) = callee {
+        callee = &paren.expr;
+    }
+    let Expr::Path(callee) = callee else {
+        return false;
+    };
+    if callee.qself.is_some() {
+        return false;
+    }
+    let mut path = callee.path.clone();
+    let Some(method) = path.segments.pop() else {
+        return false;
+    };
+    if method.ident != "default" || !matches!(method.arguments, syn::PathArguments::None) {
+        return false;
+    }
+    let _separator = path.segments.pop_punct();
+    let generic = path.get_ident().is_some_and(|ident| types.defaulted.contains(&ident.to_string()));
+    generic
+        || types.supports_default_trait(&Type::Path(syn::TypePath {
+            attrs: Vec::new(),
+            qself: None,
+            path,
+        }))
+}
+
+impl LocalCalls {
+    pub(super) fn function(&mut self, node: &ItemFn, scope: &ScopePath) {
+        let unit = node.sig.asyncness.is_none()
+            && (matches!(&node.sig.output, ReturnType::Default)
+                || matches!(&node.sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::Tuple(tuple) if tuple.elems.is_empty())));
+        let ordinary_attributes = Self::nontransforming_attributes(&node.attrs);
+        if !ordinary_attributes {
+            self.opaque(scope);
+        }
+        let declaration = (unit && ordinary_attributes).then(|| scope.clone());
+        let _previous = self
+            .declarations
+            .entry(node.sig.ident.to_string())
+            .and_modify(|known| *known = None)
+            .or_insert(declaration);
+    }
+
+    pub(super) fn nontransforming_attributes(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().all(|attribute| {
+            attribute.path().get_ident().is_some_and(|name| {
+                matches!(
+                    name.to_string().as_str(),
+                    "cfg" | "doc" | "allow" | "expect" | "warn" | "deny" | "forbid" | "inline" | "cold" | "track_caller" | "must_use"
+                )
+            })
+        })
+    }
+
+    pub(super) fn binding(&mut self, pattern: &PatIdent) {
+        self.value_name(&pattern.ident);
+    }
+
+    pub(super) fn value_name(&mut self, name: &syn::Ident) {
+        let _bound = self.bound_names.insert(name.to_string());
+    }
+
+    pub(super) fn opaque(&mut self, scope: &ScopePath) {
+        let _opaque = self.opaque_scopes.insert(scope.clone());
+    }
+
+    pub(super) fn module(&mut self, scope: &ScopePath) {
+        let _module = self.module_scopes.insert(scope.clone());
+    }
+
+    pub(super) fn imported(&mut self, name: &str) {
+        let _imported = self.imported_names.insert(name.to_owned());
+    }
+
+    pub(super) fn scope_is_transparent(&self, scope: &ScopePath) -> bool {
+        !self.opaque_scopes.iter().any(|opaque| scope.starts_with(opaque))
+    }
+
+    pub(super) fn returns_unit(&self, callee: &Expr, scope: &ScopePath, visible_imports: &HashMap<String, Option<Vec<String>>>) -> bool {
+        let Expr::Path(path) = callee else {
+            return false;
+        };
+        if path.qself.is_some() || path.path.leading_colon.is_some() {
+            return false;
+        }
+        let Some(ident) = path.path.get_ident() else {
+            return false;
+        };
+        let name = ident.to_string();
+        if self.bound_names.contains(&name)
+            || self.imported_names.contains(&name)
+            || visible_imports.contains_key("*")
+            || !self.scope_is_transparent(scope)
+        {
+            return false;
+        }
+        self.declarations.get(&name).and_then(Option::as_ref).is_some_and(|declaration| {
+            scope.starts_with(declaration)
+                && !self
+                    .module_scopes
+                    .iter()
+                    .any(|module| module.len() > declaration.len() && scope.starts_with(module))
+        })
+    }
+}
 
 /// Returns whether a replacement reproduces the code it would replace.
 ///
@@ -58,6 +281,7 @@ pub(super) fn is_same_leak(replacement: &str, original: &str, defaults: &Default
     // both expressions, so its absence from either raw text rules out a match without tokenizing
     // either one. Almost no replacement or original has this shape, so this skips the two token
     // passes below for the overwhelming majority of candidates.
+    // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, literal.str_to_empty, reason = "both parsed calls must end in Box::leak; weakening this substring prefilter only performs extra parsing before the same answer")]
     if !replacement.contains("leak") || !original.contains("leak") {
         return false;
     }
@@ -84,10 +308,12 @@ pub(super) fn leaked_value(text: &str) -> Option<&str> {
     let mut expression = strip_parentheses(&tokens);
 
     if expression.first()?.kind == TokenKind::And && expression.get(1)?.kind == TokenKind::Star {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "the preceding checks found two tokens, so removing those tokens always yields a valid suffix slice")]
         expression = strip_parentheses(expression.get(2..)?);
     }
 
     let leaked = call_argument(text, expression, "Box", "leak")?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "call_argument returns a complete token-bounded subslice of the text already accepted by lexemes, including any intervening comments intact")]
     let tokens = lexemes(leaked)?;
 
     call_argument(leaked, strip_parentheses(&tokens), "Box", "new")
@@ -106,6 +332,7 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
     let open = expression.iter().position(|token| token.kind == TokenKind::OpenParen)?;
     let (callee, call) = expression.split_at(open);
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "position found an opening parenthesis, so split_at leaves a nonempty call suffix and last cannot be None")]
     if !path_ends_with(callee, qualifier, name) || call.last()?.kind != TokenKind::CloseParen {
         return None;
     }
@@ -113,8 +340,10 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
     let mut depth = 0_usize;
     for (index, token) in call.iter().enumerate() {
         match token.kind {
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "each increment consumes a distinct token in a slice, so depth cannot overflow usize")]
             TokenKind::OpenParen => depth = depth.checked_add(1)?,
             TokenKind::CloseParen => {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "the call starts with an opener and returns at the first zero depth, before any unmatched closer can underflow")]
                 depth = depth.checked_sub(1)?;
                 if depth == 0 && index + 1 != call.len() {
                     return None;
@@ -125,11 +354,14 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
         }
     }
 
+    // #[gamma::skip(logical.or_remove_right, literal.int_decrement, literal.int_to_one, literal.int_to_zero, reason = "a two-token empty call yields an empty argument slice and first returns None; relaxing this size check cannot create an argument")]
     if depth != 0 || call.len() < 3 {
         return None;
     }
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "the preceding length guard guarantees both slice bounds exist and are ordered")]
     let argument = call.get(1..call.len() - 1)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "call.len is at least three, so stripping two delimiters leaves a nonempty argument slice with both endpoints")]
     text.get(argument.first()?.start..argument.last()?.end)
 }
 
@@ -224,10 +456,10 @@ fn same_tokens(left: &str, right: &str) -> bool {
     };
 
     if left.len() != right.len()
-        || !left
-            .iter()
-            .zip(&right)
-            .all(|(left, right)| left.kind == right.kind && left.text == right.text)
+        || !left.iter().zip(&right).all(|(left, right)| {
+            // #[gamma::skip(logical.and_remove_left, reason = "the deterministic lexer assigns the same token kind to identical complete token text, so text equality already proves kind equality")]
+            left.kind == right.kind && left.text == right.text
+        })
     {
         return false;
     }
@@ -255,6 +487,7 @@ fn lexemes(text: &str) -> Option<Vec<Lexeme<'_>>> {
             TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment { terminated: true } => {}
             kind if valid(kind) => lexemes.push(Lexeme {
                 kind,
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "rustc_lexer token lengths partition this same UTF-8 source into in-bounds character-boundary slices")]
                 text: text.get(start..at)?,
                 start,
                 end: at,
@@ -348,6 +581,181 @@ mod tests {
     }
 
     #[test]
+    fn default_constructor_proofs_reject_shadowing_and_nonconstructor_shapes() {
+        let imports = HashMap::default();
+        let declarations = crate::ops::collect::Defaults::of(&syn::parse_file("").unwrap());
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        let paths = defaults();
+        for (expression, expected_type, expected) in [
+            ("(String::new())", "String", true),
+            ("String::default()", "String", true),
+            ("String::new()", "Vec<u8>", false),
+            ("String::new()", "&str", false),
+            ("true", "bool", false),
+            ("(factory())()", "String", false),
+            ("String::new(1)", "String", false),
+            ("<String as Default>::default()", "String", false),
+            ("String::new::<u8>()", "String", false),
+            ("String::other()", "String", false),
+            ("default()", "String", false),
+            ("bool::default()", "bool", true),
+            ("Option::<u8>::default()", "Option<u8>", true),
+            ("Vec::<u8>::new()", "Vec<u8>", true),
+            ("Option::<u8,u8>::default()", "Option<u8>", false),
+        ] {
+            assert_eq!(
+                is_standard_default_constructor(
+                    &syn::parse_str(expression).unwrap(),
+                    &syn::parse_str(expected_type).unwrap(),
+                    &types,
+                    &paths
+                ),
+                expected,
+                "{expression}: {expected_type}"
+            );
+        }
+        let grouped = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            expr: Box::new(syn::parse_quote!(String::new())),
+        });
+        assert!(is_standard_default_constructor(
+            &grouped,
+            &syn::parse_quote!(String),
+            &types,
+            &paths
+        ));
+        let aliases = HashMap::from_iter([("String".to_owned(), None)]);
+        for shadow in [
+            Types {
+                abstracts: &["Default".to_owned()],
+                ..types
+            },
+            Types {
+                aliases: Some(&aliases),
+                ..types
+            },
+            Types {
+                abstracts: &["String".to_owned()],
+                ..types
+            },
+        ] {
+            assert!(!is_standard_default_constructor(
+                &syn::parse_quote!(String::new()),
+                &syn::parse_quote!(String),
+                &shadow,
+                &paths
+            ));
+        }
+        let mut call: syn::ExprCall = syn::parse_quote!(String::new());
+        let Expr::Path(path) = &mut *call.func else { unreachable!() };
+        path.path.segments.clear();
+        assert!(!is_standard_default_constructor(
+            &Expr::Call(call),
+            &syn::parse_quote!(String),
+            &types,
+            &paths
+        ));
+    }
+
+    #[test]
+    fn resolved_trait_defaults_and_local_calls_require_unambiguous_paths() {
+        let imports = HashMap::default();
+        let declarations = crate::ops::collect::Defaults::of(&syn::parse_file("").unwrap());
+        let types = Types {
+            abstracts: &[],
+            defaulted: &["T".to_owned()],
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, expected) in [
+            ("(T::default())", true),
+            ("(T::default)()", true),
+            ("T::default(1)", false),
+            ("(factory())()", false),
+            ("<T as Default>::default()", false),
+            ("T::default::<u8>()", false),
+            ("T::other()", false),
+            ("default()", false),
+        ] {
+            assert_eq!(
+                is_resolved_trait_default(&syn::parse_str(text).unwrap(), &types),
+                expected,
+                "{text}"
+            );
+        }
+        let grouped = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            expr: Box::new(syn::parse_quote!(T::default())),
+        });
+        assert!(is_resolved_trait_default(&grouped, &types));
+        let mut call: syn::ExprCall = syn::parse_quote!(T::default());
+        let Expr::Path(path) = &mut *call.func else { unreachable!() };
+        path.path.segments.clear();
+        assert!(!is_resolved_trait_default(&Expr::Call(call), &types));
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &syn::parse_quote!(
+                fn local() {}
+            ),
+            &Vec::new(),
+        );
+        assert!(calls.returns_unit(&syn::parse_quote!(local), &Vec::new(), &imports));
+        for text in ["1", "::local", "module::local", "<T as Trait>::local"] {
+            assert!(!calls.returns_unit(&syn::parse_str(text).unwrap(), &Vec::new(), &imports), "{text}");
+        }
+    }
+
+    #[test]
+    fn leak_equivalence_requires_both_defaults_and_complete_balanced_calls() {
+        let defaults = defaults();
+        let defaulted = vec!["T".to_owned()];
+        for (left, right, expected) in [
+            ("Box::leak(Box::new(T::default()))", "Box::leak(Box::new(Default::default()))", true),
+            ("Box::leak(Box::new(1))", "Box::leak(Box::new(Default::default()))", false),
+            ("Box::leak(Box::new(T::default()))", "Box::leak(Box::new(1))", false),
+            ("Box::leak(Box::new(1))", "Box::leak(Box::new(2))", false),
+            ("Box::leak(Box::new((1)))", "Box::leak(Box::new((1)))", true),
+        ] {
+            assert_eq!(is_same_leak(left, right, &defaults, &defaulted), expected, "{left} / {right}");
+        }
+        for (text, expected) in [
+            ("", None),
+            ("&", None),
+            ("*", None),
+            ("&*", None),
+            ("/*", None),
+            ("Box::leak(Box::new())", None),
+            ("Box::leak(Box::new((value))", None),
+            ("Box::leak(Box::new(value", None),
+            ("Box::leak(Box::new(value)) extra", None),
+            ("Box::leak(Box::new(value))", Some("value")),
+        ] {
+            assert_eq!(leaked_value(text), expected, "{text}");
+        }
+        for malformed in ["Box : new", "Box +: new", "Box :+ new", "(Box::new", "Box::new)"] {
+            let tokens = lexemes(malformed).unwrap();
+            assert_eq!(path_segments(&tokens), None, "{malformed}");
+        }
+        for text in ["(x", "x)", "((x)) + ((y))"] {
+            let tokens = lexemes(text).unwrap();
+            assert_eq!(strip_parentheses(&tokens).len(), tokens.len(), "{text}");
+        }
+    }
+
+    #[test]
     fn layout_and_comments_do_not_change_token_equality() {
         assert!(same_tokens("Some(1)", "Some /* note */ ( 1 )"));
     }
@@ -359,6 +767,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "10,000 tokenization checks are a native source-map stress regression")]
     fn repeated_noop_checks_do_not_advance_the_proc_macro_source_map() {
         let marker = || {
             "source_map_marker"

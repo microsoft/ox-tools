@@ -66,6 +66,13 @@ No cyclic dependencies found.
 
 The tool will exit with code 0 if no cycles are found, or code 1 if cycles are detected.
 
+## Cycle Reporting
+
+When multiple cycles exist within the same strongly connected component,
+the tool reports one representative directed cycle for that component,
+with self-loops reported separately. Resolving the reported cycle may
+reveal remaining cycles in the same component on subsequent runs.
+
 
 <hr/>
 <sub>

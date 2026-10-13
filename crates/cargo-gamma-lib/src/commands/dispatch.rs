@@ -125,6 +125,7 @@ fn dispatched<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<Os
         }
     };
 
+    // #[gamma::skip(call_result.default, reason = "say_notes returns unit and this mutator still emits the same notes before replacing unit with unit")]
     say_notes(host, styler);
 
     code
@@ -168,6 +169,7 @@ fn normalize(args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> Vec
         normalized.insert(1, "run".into());
     }
 
+    // #[gamma::skip(call_result.default, reason = "normalize_list_mode returns unit and this mutator still normalizes the same arguments before replacing unit with unit")]
     normalize_list_mode(&mut normalized);
 
     normalized
@@ -215,8 +217,10 @@ fn subcommand_index(args: &[OsString]) -> Option<usize> {
         {
             index += 1;
         } else if GLOBAL_OPTIONS.contains(&first) {
+            // #[gamma::skip(stmt.delete_assign, literal.int_to_zero, tag = "timeout", reason = "the global-option scan must consume the option and value to make progress")]
             index += 2;
         } else {
+            // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "timeout", reason = "an unrecognized argument ends this scan; continuing revisits the same argument forever")]
             break;
         }
     }
@@ -302,10 +306,12 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
     match cli.command {
         Command::Run(mut args) => {
             configure(host, &mut args, styler)?;
-            check_shard(&args.select)?;
+            check_run_shard(&args)?;
 
             #[cfg(target_os = "linux")]
-            if let Some(code) = relaunch_for_memory_control(host, &args) {
+            if !args.resume_testing
+                && let Some(code) = relaunch_for_memory_control(host, &args)
+            {
                 return Ok(code);
             }
 
@@ -333,6 +339,13 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
 
         Command::Completions(args) => Ok(completions(host, &args)),
     }
+}
+
+fn check_run_shard(args: &super::cli::RunArgs) -> crate::Result<()> {
+    if args.resume_testing {
+        return Ok(());
+    }
+    check_shard(&args.select)
 }
 
 /// Checks the settings that can arrive half from the command line and half from the file.
@@ -539,6 +552,25 @@ mod tests {
             assert!(host.err().contains("--shard-index"), "{}", host.err());
             assert!(host.out().is_empty(), "a rejected shard listed mutants anyway: {}", host.out());
         });
+    }
+
+    #[test]
+    fn resumed_runs_ignore_live_shards_but_fresh_runs_validate_them() {
+        let mut args = super::super::cli::RunArgs {
+            resume_testing: true,
+            select: SelectArgs {
+                shard_count: Some(2),
+                ..SelectArgs::default()
+            },
+            ..super::super::cli::RunArgs::default()
+        };
+        check_run_shard(&args).expect("resume uses the saved shard rather than the incomplete live pair");
+        args.resume_testing = false;
+        let error = check_run_shard(&args).expect_err("fresh runs require the missing shard index");
+        assert!(error.is_usage());
+        assert_eq!(error.to_string(), check_shard(&args.select).unwrap_err().to_string());
+        args.select.shard_index = Some(1);
+        check_run_shard(&args).expect("the complete fresh-run shard is valid");
     }
 
     #[test]

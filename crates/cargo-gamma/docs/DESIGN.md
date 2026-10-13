@@ -368,14 +368,41 @@ cargo-gamma resolves this with a rollback fixpoint:
 Withdrawn mutants are reported as unviable. They are not silently discarded, because the score is
 meaningful only when its excluded population remains visible.
 
-The source collector prevents a mutation before this loop only when syntax proves the replacement
-invalid. Its local evidence distinguishes explicit and inferred integer, unsigned, floating-point,
+The source collector prevents a mutation before this loop when source evidence proves the replacement
+invalid or equivalent to the original. Equivalent candidates are omitted from the population rather
+than executed or counted as source suppressions. This includes token-identical replacements,
+supported default-value spellings, and result-only defaulting of calls proven to return unit.
+Unit-call proof requires an unambiguous local free-function declaration visible at the call site;
+unresolved calls, imported names, and potentially shadowed bindings are not sufficient evidence.
+Empty-constructor equivalence requires resolution to a supported standard type without custom
+allocator or hasher arguments. A user-defined `new` or `default` method is not a standard constructor
+merely because it has the same name. Allocation-capacity hints and application-specific invariants
+remain separate policy decisions, not general equivalence proofs.
+
+Resource-safety policy also omits mutations proven to introduce a stalled loop
+or unbounded retained-memory growth. These mutations never enter the population:
+they have no verdict, suppression count, or score contribution, and are not
+classified as equivalent or killed. The proof is conditional on reaching the
+affected loop path, not on a test exercising it. It is restricted to small loops
+with invariant, primitive-scalar conditions and nonescaping, state-preserving
+operations, optionally including standard owned string appends of literals.
+Known standard character iterators additionally permit a proof conditional on
+reaching exhaustion: repeated `next()` calls cannot revive an exhausted iterator.
+Unknown effects and potential escapes keep the candidate eligible. Unbounded
+growth does not imply a particular OOM verdict or depend on machine memory.
+
+Its local evidence distinguishes explicit and inferred integer, unsigned, floating-point,
 textual, optional, and temporal values; expected types flow through local returns, arguments,
 fields, casts, indices, and initializers. Proven unsigned zeroes do not receive `-1`, proven floats
 use floating-point perturbation units, and proven non-additive values do not receive integer
 operators. Option-producing chains are kept out of iterator-shaped rewrites. Ambiguous external
 trait implementations, constructors, moves, and overloaded operators remain candidates: guessing
 that they are invalid could remove a viable survivor and improve the score incorrectly.
+
+File and diff filters narrow the mutation population, not the package's declaration
+evidence. Excluded sources still contribute module declarations and `Default`
+implementations before candidate collection. Only an unanalyzable source makes its
+package's negative evidence incomplete; exclusions alone do not.
 
 Each compiler-blamed unviable mutant retains a bounded reason: rustc's primary error code when
 present, a normalized and length-capped primary-message category, and whether a primary span
@@ -857,8 +884,9 @@ Hint promotion is a projection of persisted campaign state, not another discover
 resolving and validating the current workspace identity, it uses the campaign ledger's persisted
 workspace-relative source paths without a source walk, parsing, or mutant regeneration. Stale
 identities remain safe because every hint is checked before use. Incremental promotion preserves
-unrelated entries; `--replace` intentionally drops them and requires a valid completed campaign
-record before changing the artifact. Older records that lack an exact path preserve supported
+unrelated entries; `--replace` intentionally drops them and requires a valid persisted completed
+campaign record before changing the artifact, never an interrupted checkpoint.
+Older records that lack an exact path preserve supported
 generalized and compiler-ordering knowledge while omitting the unmappable exact entry. Incremental
 promotion treats a missing, corrupt, oversized, or unsupported campaign record as no promotable
 knowledge; replacement and commands that reconstruct source edits, such as `cargo gamma suppress`,
@@ -1148,6 +1176,89 @@ make the report easier to serialize and harder to use correctly.
 
 ## Reports and integrations
 
+`cargo gamma run --resume-testing` continues an interrupted mutant-testing
+sweep against the already copied and instrumented tree and compiled test
+binaries. It does not repeat discovery, copying, building, baseline measurement,
+or census collection. Selection and execution settings stay frozen, including
+mutant ordinals, budgets, resources, oracle, and test arguments. Every durably
+recorded verdict is retained; unfinished mutants are retried. Repeated
+interruptions are supported. Missing, pre-testing, completed, incompatible, or
+corrupt state and changed prepared artifacts cause an error instead of a fresh
+run. Live checkout edits do not alter the frozen campaign. Live shard flags are
+not validated on resume; the saved campaign's validated shard selection is used.
+
+If interruption occurs after the last verdict is recorded but before the
+completed ledger is durably published, resume still closes the planning phase and displays the
+restored testing status. It launches no mutants and preserves prior sweep
+accounting before completing the campaign.
+
+New prepared snapshots capture regular-file type and Unix executable bits as
+well as content digests. Symlink artifacts record their target spelling;
+links to regular files also validate target bytes and executable bits.
+Directory symlinks are rejected during prepared snapshot capture and resume
+validation, including validation of legacy snapshots. Their target contents
+cannot be frozen by recording only the link spelling. The error directs the
+user to replace the link with a real directory and start a new campaign.
+Tree capture never follows ancestor links or walks linked external directories.
+Older snapshots without metadata retain their original byte-validation
+contract and remain resumable.
+
+Captured dynamic libraries remain integrity-checked even beneath generated
+target directories. New snapshots freeze each artifact's generated-output
+classification at capture time; adding a manifest later cannot turn recorded
+source beneath a directory named `target` into exempt output. Legacy snapshots
+without this classification retain the original compatibility behavior.
+New snapshots retain candidate confidence separately from
+the public mutant serialization, so resumed diagnostics preserve its buckets.
+Legacy snapshots that did not record confidence retain their original defaults.
+Resumed diagnostics and advice use the saved worker count, prepared Cargo
+profile, and original shard identity, not live execution flags. New snapshots
+also retain the selected mutator catalog for diagnostics. Legacy snapshots
+without that catalog list the frozen population's mutators and warn that the
+original selection is unavailable. Artifact paths, diagnostic verbosity and
+redaction remain live reporting options. Live `gamma.toml` supplies only the
+`min-score` and `max-flaky` reporting gates, with command-line gates taking
+precedence. Its narrow schema ignores values of known execution settings;
+unknown top-level keys are rejected, and reporting gates and TOML syntax still
+require valid input. Pending tests run
+only if the current inherited environment matches
+its saved digest; a changed or unrecorded environment refuses resume rather than
+mixing verdicts from different execution contexts. The environment digest is
+saved independently of compiler identity, even when incremental reuse cannot
+be enabled. Recovery with no pending mutants publishes retained verdicts
+without requiring the current inherited environment to match.
+
+A failed checkpoint append or sync truncates and syncs back to the prior
+journal length; a rollback failure is reported explicitly. Restoring measured
+state does not append previously logged verdicts again.
+
+Each new verdict checkpoint also stores cumulative sweep accounting. Resume
+adds the unfinished segment's counters and active elapsed time to that saved
+prefix; package spans use this same active-time axis, excluding downtime.
+Counters sample all worker effort observed at checkpoint publication, including
+in-flight work; package mutant counts include only completed verdicts. Work
+after the last durable checkpoint cannot be recovered. Older journals without
+accounting remain resumable, but their prior sweep costs cannot be reconstructed.
+
+The snapshot also retains the original report timestamp and shard identity;
+completion never substitutes the resume command's selection or current time.
+Legacy snapshots lacking this provenance still resume, with an explicit warning.
+Their reports use timestamp zero and the non-authoritative population marker
+used for merged reports, so they cannot refresh stale evidence or withdraw
+mutants from other shards.
+
+The private cache stores a versioned prepared snapshot and a synced verdict
+journal independently of the diagnostic progress log. `hints` and `suppress`
+can consume this partial knowledge after CTRL+C; pending mutants supply no
+verdict. Partial records also merge generalized item, file, and reach ordering
+knowledge saved by the interrupted sweep. The verdict journal remains the
+authority for outcomes and exact probes. `unsuppress` remains based on current
+source policy. Resume appends the
+existing progress and selection logs, discarding only incomplete trailing lines
+before appending new events, and publishes final reports only after testing
+finishes. Reporting flags and gates remain configurable; live
+`gamma.toml` and new mutation/testing settings are not applied on resume.
+
 One verdict model feeds every output surface:
 
 - the console emphasizes actionable survivors, exceptional resource outcomes, and flaky tests;
@@ -1182,7 +1293,7 @@ constructed while reachability, optional census work, hints, projections, and th
 prepared, and closes that phase before workers start. `--dashboard` replaces the planning bar and
 subsequent testing bar with a multiline, in-place dashboard containing mutant outcomes,
 test-selection effectiveness, and test-process costs. The completed
-`Planning N/N mutants planned` line remains above the live testing dashboard just as the completed
+`Planned N/N mutants planned` line remains above the live testing dashboard just as the completed
 baseline line does. It uses the same terminal eligibility as `--progress`,
 selects small, medium, or large layouts from the current terminal width, adapts when the window is
 resized, and redraws no more than once per second.

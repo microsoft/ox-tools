@@ -326,6 +326,7 @@ impl TableMgr {
         let mut delay_ms = INITIAL_DELAY_MS;
 
         loop {
+            // #[gamma::skip(cond.always_false, tag = "timeout", reason = "the campaign ignored successful cleanup and exhausted repeated download preparation retries after seventeen minutes")]
             if cleanup_delete_all_tables(tables_root)? {
                 return Ok(());
             }
@@ -362,7 +363,9 @@ impl TableMgr {
                 sleep_seconds
             );
 
-            cleanup_sleep(Duration::from_millis(sleep_ms));
+            let sleep_duration = Duration::from_millis(sleep_ms);
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "cleanup_sleep returns unit and the sleep still executes before unit is replaced with unit")]
+            cleanup_sleep(sleep_duration);
 
             // Exponential backoff for next iteration, capped at MAX_DELAY_MS
             delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
@@ -513,7 +516,8 @@ async fn prep_tables_core(
     let downloaded_bytes = Arc::new(core::sync::atomic::AtomicU64::new(0));
     let downloaded_bytes_clone = Arc::clone(&downloaded_bytes);
 
-    set_download_progress(progress.as_ref(), content_length, downloaded_bytes_clone);
+    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "the call returns unit and still installs the progress callback before unit is replaced with unit")]
+    set_download_progress(&*progress, content_length, downloaded_bytes_clone);
 
     let (tx, rx) = download_channel();
     let processing_progress = Arc::clone(&progress);
@@ -558,6 +562,7 @@ fn set_download_progress(progress: &dyn Progress, content_length: Option<u64>, d
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(parameter.default_shadow, tag = "equivalent", reason = "a successfully exhausted HTTP body has transferred exactly its Content-Length; stream errors and closed receivers return before final bookkeeping, so discarding this final-store hint leaves the same byte count")]
 async fn stream_download(
     response: reqwest::Response,
     tx: &mpsc::Sender<Result<Bytes>>,
@@ -588,6 +593,7 @@ async fn forward_download_stream(
             }
         }
     }
+    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "the call returns unit and still stores the final total before unit is replaced with unit")]
     finish_download(downloaded_bytes, content_length);
 }
 
@@ -708,9 +714,9 @@ mod tests {
 
     use super::{
         CRATES_DB_DOWNLOAD_OPERATION, CRATES_DB_DOWNLOAD_TIMEOUT, ChannelReader, CratesTable, DELETE_ALL_TABLES_HOOK, ELAPSED_MS_HOOK,
-        IoError, Path, SHARING_VIOLATION, SLEEP_HOOK, SLEEP_SECONDS_HOOK, Table, TableMgr, archive_entry_path, delete_all_tables,
-        determinate_download_progress, download_channel, download_response, finish_download, forward_download_stream, fs,
-        indeterminate_download_progress, join_processing_task, prep_tables_core, process_download, removal_left_file_locked,
+        IoError, Path, SHARING_VIOLATION, SLEEP_HOOK, SLEEP_SECONDS_HOOK, Table, TableMgr, archive_entry_path, archive_filename,
+        delete_all_tables, determinate_download_progress, download_channel, download_response, finish_download, forward_download_stream,
+        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, process_download, removal_left_file_locked,
         send_download_chunk, set_download_progress,
     };
     use crate::facts::progress::Progress;
@@ -796,6 +802,35 @@ mod tests {
         let locked = removal_left_file_locked(Ok(()), Path::new("crates.table")).expect("a successful removal is not an error");
 
         assert!(!locked, "a file that was removed cannot still be locked");
+    }
+
+    #[test]
+    fn archive_filename_handles_root_empty_and_nested_paths_without_panicking() {
+        assert_eq!(archive_filename(Path::new("")), None);
+        assert_eq!(archive_filename(Path::new(std::path::MAIN_SEPARATOR_STR)), None);
+        assert_eq!(archive_filename(Path::new("crates.csv")), Some("crates.csv"));
+        assert_eq!(archive_filename(&Path::new("nested").join("versions.csv")), Some("versions.csv"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn downloaded_archive_propagates_invalid_windows_path_encoding() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.as_mut_bytes()[0] = 0xff;
+        header.set_cksum();
+        let mut archive = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        archive.append(&header, std::io::empty()).unwrap();
+        let bytes = archive.into_inner().unwrap().finish().unwrap();
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let error = process_bytes(bytes, directory.path()).expect_err("Windows rejects non-UTF-8 tar entry names");
+        assert!(
+            format!("{error:#}").contains("reading crates database archive entry path"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1041,7 +1076,7 @@ mod tests {
     #[test]
     fn known_and_unknown_lengths_install_the_matching_progress_callback() {
         let progress = RecordingProgress::default();
-        let downloaded = Arc::new(AtomicU64::new(17));
+        let downloaded = Arc::new(AtomicU64::new(0));
         set_download_progress(&progress, Some(100), Arc::clone(&downloaded));
 
         let determinate = progress
@@ -1050,6 +1085,8 @@ mod tests {
             .expect("determinate callback mutex is not poisoned")
             .take()
             .expect("known lengths install a determinate callback");
+        assert_eq!(determinate(), (100, 0, "0/0 MB: Downloading crates database".to_owned()));
+        downloaded.store(17, Ordering::Relaxed);
         assert_eq!(determinate(), (100, 17, "0/0 MB: Downloading crates database".to_owned()));
         assert!(
             progress

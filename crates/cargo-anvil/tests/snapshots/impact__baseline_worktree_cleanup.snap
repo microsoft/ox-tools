@@ -1,0 +1,34 @@
+---
+source: crates/cargo-anvil/tests/impact.rs
+expression: cleanup
+---
+            $cleanupFailures = [System.Collections.Generic.List[string]]::new()
+            $worktreeOutput = @(git worktree list --porcelain -z)
+            $listFailed = $LASTEXITCODE -ne 0
+            if ($listFailed) {
+                $cleanupFailures.Add("failed to list worktrees: $($worktreeOutput -join [Environment]::NewLine)")
+            }
+            $worktrees = if ($listFailed) { @() } else { ($worktreeOutput -join "`n").Split([char] 0) }
+            $registeredPath = 'worktree ' + $wt.Replace([System.IO.Path]::DirectorySeparatorChar, [char] '/')
+            if ($listFailed -or $worktrees -contains $registeredPath) {
+                $cleanupOutput = @(git worktree remove --force --force $wt 2>&1)
+                if ($LASTEXITCODE -ne 0) {
+                    $cleanupFailures.Add("failed to remove baseline worktree at ${wt}: $($cleanupOutput -join [Environment]::NewLine)")
+                }
+            }
+            try {
+                if (Test-Path -LiteralPath $wt) {
+                    Remove-Item -LiteralPath $wt -Recurse -Force -ErrorAction Stop
+                }
+            } catch {
+                $cleanupFailures.Add("failed to remove baseline directory at ${wt}: $($_.Exception.Message)")
+            }
+            if ($cleanupFailures.Count -gt 0) {
+                $cleanupMessage = "anvil-impact: baseline cleanup failed: $($cleanupFailures -join '; ')"
+                if ($baselineFailed) {
+                    Write-Warning -Message $cleanupMessage -WarningAction Continue
+                } else {
+                    throw $cleanupMessage
+                }
+            }
+        }

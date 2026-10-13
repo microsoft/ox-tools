@@ -16,9 +16,9 @@ use syn::visit::{self, Visit};
 use syn::{
     Arm, Attribute, BinOp, Block, Expr, ExprArray, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprCast, ExprClosure, ExprContinue,
     ExprForLoop, ExprIf, ExprIndex, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn,
-    ExprStruct, ExprTry, ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, ItemConst, ItemFn,
-    ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt, TraitItemConst,
-    TraitItemFn, Type, UnOp, Variant,
+    ExprStruct, ExprTry, ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
+    ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt,
+    TraitItemConst, TraitItemFn, Type, UnOp, Variant,
 };
 
 use super::stated::stated_range;
@@ -33,6 +33,7 @@ mod indexes;
 mod noop;
 pub(super) mod phase_one;
 mod predicates;
+mod resource;
 mod tables;
 mod types;
 mod values;
@@ -54,7 +55,7 @@ use types::{Types, returns_undefaultable_error, undefaulted_parameters};
 use values::{Kind, resolve_type, return_values};
 
 use super::Confidence;
-use super::defaults::{DefaultPaths, standard_defaulted_parameters};
+use super::defaults::{DefaultPaths, impl_item_attrs, item_attrs, standard_defaulted_parameters, trait_item_attrs};
 
 /// The marker string every string-valued mutant is replaced by.
 ///
@@ -81,6 +82,8 @@ fn numeric_associated_call(call: &ExprCall) -> bool {
 struct BindingType {
     ty: Type,
     imports: HashMap<String, Option<Vec<String>>>,
+    scope: ScopePath,
+    resource_trusted: bool,
 }
 
 enum Undo {
@@ -89,6 +92,7 @@ enum Undo {
     Binding(String, Option<bool>),
     BindingType(String, Option<Box<BindingType>>),
     InferredUnsigned(String, bool),
+    ResourceIterator(String, bool),
 
     /// Restores whether `deferred` contained `name` before the block changed it.
     Deferred(String, bool),
@@ -97,6 +101,7 @@ enum Undo {
 struct LoopContext {
     label: Option<String>,
     produces_value: bool,
+    proof: Option<resource::LoopProof>,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +112,10 @@ enum UnsignedReturn {
 }
 
 /// The traversal state.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent lexical and type-evidence flags describe overlapping traversal contexts, not a single state machine"
+)]
 pub(super) struct Collector<'a> {
     file: &'a SourceFile,
     selection: &'a Selection,
@@ -249,7 +258,11 @@ pub(super) struct Collector<'a> {
     /// Locally visible function return types and aliases.
     returns: HashMap<String, Option<Type>>,
     parameters: HashMap<String, Option<Vec<Type>>>,
+    local_calls: noop::LocalCalls,
+    implicit_prelude: bool,
     aliases: HashMap<String, Option<types::Alias>>,
+    scope_aliases: HashMap<ScopePath, HashMap<String, Option<types::Alias>>>,
+    block_scopes: HashSet<ScopePath>,
 
     /// Names in the enclosing function declared by a `let` that supplies no initialiser.
     ///
@@ -329,6 +342,8 @@ pub(super) struct Collector<'a> {
 
     /// Enclosing loops, used to reject a valueless `break` when its target requires a value.
     loops: Vec<LoopContext>,
+    resource_transparent: bool,
+    resource_iterators: HashSet<String>,
 }
 
 impl<'a> Collector<'a> {
@@ -396,7 +411,15 @@ impl<'a> Collector<'a> {
             declared_types: indexes.declared_types,
             returns: indexes.returns,
             parameters: indexes.parameters,
+            local_calls: indexes.local_calls,
+            implicit_prelude: !file
+                .ast
+                .attrs
+                .iter()
+                .any(|attribute| attribute.path().is_ident("no_implicit_prelude")),
             aliases: indexes.aliases,
+            scope_aliases: indexes.scope_aliases,
+            block_scopes: indexes.block_scopes,
             deferred: HashSet::default(),
             undo: Vec::new(),
             generics: Vec::new(),
@@ -407,6 +430,8 @@ impl<'a> Collector<'a> {
             cfg,
             seen: HashMap::default(),
             loops: Vec::new(),
+            resource_transparent: noop::LocalCalls::nontransforming_attributes(&file.ast.attrs),
+            resource_iterators: HashSet::default(),
         }
     }
 
@@ -545,7 +570,14 @@ impl<'a> Collector<'a> {
         }
 
         let identity_key = self.reserve_identity_occurrence(mutator, range.clone());
-        if !included {
+        if !included
+            || self
+                .loops
+                .iter()
+                .rev()
+                .filter_map(|context| context.proof.as_ref())
+                .any(|proof| proof.omits(&self.file.text, &range, &replacement))
+        {
             return;
         }
 
@@ -586,6 +618,7 @@ impl<'a> Collector<'a> {
         let key = site_key(item_path, mutator, &normalized);
         let site = (key, range);
 
+        // #[gamma::skip(literal.int_increment, reason = "finish consumes only identity_sites keys; the stored placeholder value is never read")]
         let _reserved = self.identity_sites.entry(site).or_insert(0);
         key
     }
@@ -604,6 +637,117 @@ impl<'a> Collector<'a> {
     /// pays nothing for the text it would have spliced.
     fn wants(&self, mutator: &str) -> bool {
         self.inert_depth == 0 && self.selection.contains(mutator)
+    }
+
+    fn resource_proof(&self, expression: &Expr) -> Option<resource::LoopProof> {
+        if !self.resource_transparent || !self.implicit_prelude || !self.local_calls.scope_is_transparent(&self.scope_path) {
+            return None;
+        }
+        let mut bindings = self
+            .resource_iterators
+            .iter()
+            .map(|name| (name.clone(), resource::Binding::PeekableChars))
+            .collect::<HashMap<_, _>>();
+        for (name, binding) in &self.binding_types {
+            if !binding.resource_trusted {
+                continue;
+            }
+            let Some(kind) = self.resource_binding(&binding.ty, &binding.scope, &mut HashSet::default()) else {
+                continue;
+            };
+            if kind == resource::Binding::StrReference {
+                continue;
+            }
+            let _prior = bindings.insert(name.clone(), kind);
+        }
+        resource::LoopProof::new(expression, bindings, self.types().supports_char_api())
+    }
+
+    fn resource_binding(&self, ty: &Type, scope: &ScopePath, visited: &mut HashSet<(ScopePath, String)>) -> Option<resource::Binding> {
+        let imports = self.scope_imports.get(scope).unwrap_or(&self.root_imports);
+        let mut types = self.types_with(imports);
+        types.aliases = None;
+        if types.supports_str_reference(ty) {
+            return Some(resource::Binding::StrReference);
+        }
+        if let Type::Reference(reference) = ty {
+            return (reference.mutability.is_some()
+                && self.resource_binding(&reference.elem, scope, visited) == Some(resource::Binding::PeekableChars))
+            .then_some(resource::Binding::PeekableChars);
+        }
+        let Type::Path(path) = ty else { return None };
+        let first = path.path.segments.first()?.ident.to_string();
+        if self.generics.contains(&first) || self.defaulted.contains(&first) {
+            return None;
+        }
+        if path.qself.is_none() && path.path.segments.len() == 1 && !imports.contains_key(&first) {
+            let mut declaring = scope.clone();
+            loop {
+                if let Some(alias) = self.scope_aliases.get(&declaring).and_then(|aliases| aliases.get(&first)) {
+                    let alias = alias.as_ref()?;
+                    if !alias.parameters.is_empty()
+                        || !match &path.path.segments[0].arguments {
+                            syn::PathArguments::None => true,
+                            syn::PathArguments::AngleBracketed(arguments) => arguments
+                                .args
+                                .iter()
+                                .all(|argument| matches!(argument, syn::GenericArgument::Lifetime(_))),
+                            syn::PathArguments::Parenthesized(_) => false,
+                        }
+                        || !visited.insert((declaring.clone(), first.clone()))
+                    {
+                        return None;
+                    }
+                    return self.resource_binding(&alias.target, &declaring, visited);
+                }
+                if !self.block_scopes.contains(&declaring) {
+                    break;
+                }
+                let _parent = declaring.pop();
+            }
+        }
+        if !types.standard_constructor_root(ty) {
+            return None;
+        }
+        if types.supports_peekable_chars(ty) {
+            Some(resource::Binding::PeekableChars)
+        } else if types.supports_primitive_kind(ty, Kind::Bool) {
+            Some(resource::Binding::Bool)
+        } else if types.supports_primitive_kind(ty, Kind::Signed) || types.supports_primitive_kind(ty, Kind::Unsigned) {
+            Some(resource::Binding::Integer)
+        } else if types.supports_empty_default_constructor(ty) && types.supports_string_api(ty) {
+            Some(resource::Binding::String)
+        } else {
+            None
+        }
+    }
+
+    fn resource_iterator_initializer(&self, expression: &Expr) -> bool {
+        let Expr::MethodCall(peekable) = expression else {
+            return false;
+        };
+        if !peekable.attrs.is_empty() || peekable.turbofish.is_some() || !peekable.args.is_empty() || peekable.method != "peekable" {
+            return false;
+        }
+        let Expr::MethodCall(chars) = &*peekable.receiver else {
+            return false;
+        };
+        if !chars.attrs.is_empty() || chars.turbofish.is_some() || !chars.args.is_empty() || chars.method != "chars" {
+            return false;
+        }
+        let Expr::Path(source) = &*chars.receiver else {
+            return false;
+        };
+        if !source.attrs.is_empty() || source.qself.is_some() {
+            return false;
+        }
+        let Some(name) = source.path.get_ident() else {
+            return false;
+        };
+        let Some(binding) = self.binding_types.get(&name.to_string()).filter(|binding| binding.resource_trusted) else {
+            return false;
+        };
+        self.resource_binding(&binding.ty, &binding.scope, &mut HashSet::default()) == Some(resource::Binding::StrReference)
     }
 
     /// Returns the source text a span covers, or an empty string if the span is not in the file.
@@ -1120,6 +1264,7 @@ impl<'a> Collector<'a> {
     fn rewrite_part(&self, whole: Span, part: Span, replacement: &str) -> Option<CompactString> {
         let whole = whole.byte_range();
         let part = part.byte_range();
+        // #[gamma::skip(logical.and_remove_left, logical.and_remove_right, logical.and_to_or, reason = "both following checked slices reject the same noncontained endpoints, so relaxing this prefilter still returns None")]
         let valid = part.start >= whole.start && part.end <= whole.end;
         let (whole, part) = valid.then_some((whole, part))?;
         let before = self.file.text.get(whole.start..part.start)?;
@@ -1237,6 +1382,15 @@ impl<'a> Collector<'a> {
         types.has_default(ty) && resolve_type(types.resolve_alias(ty)) != Kind::Result
     }
 
+    fn standard_default_replacement(&self) -> bool {
+        self.implicit_prelude
+            && !self.generics.iter().chain(&self.defaulted).any(|name| name == "Default")
+            && self
+                .default_paths
+                .is_standard_default_segments(&["Default".into(), "default".into()])
+            && self.types().supports_bare_default_trait()
+    }
+
     fn expression_can_directly_default(&self, expression: &Expr) -> bool {
         match expression {
             Expr::Lit(ExprLit {
@@ -1262,11 +1416,14 @@ impl<'a> Collector<'a> {
             Expr::Lit(ExprLit { lit: Lit::Str(value), .. }) => value.value().is_empty(),
             Expr::Paren(paren) => self.expression_is_known_default(&paren.expr),
             Expr::Group(group) => self.expression_is_known_default(&group.expr),
-            _ => is_default_call(expression, &self.default_paths, &self.defaulted),
+            _ => noop::is_resolved_trait_default(expression, &self.types()),
         }
     }
 
     fn expression_is_known_default_for_type(&self, expression: &Expr, ty: &Type) -> bool {
+        if !self.standard_default_replacement() {
+            return false;
+        }
         if self.expression_is_known_default(expression) {
             return true;
         }
@@ -1274,16 +1431,7 @@ impl<'a> Collector<'a> {
         let types = self.types();
         let kind = resolve_type(types.resolve_alias(ty));
 
-        if matches!(
-            (kind, expression),
-            (Kind::Bool | Kind::Option | Kind::String, Expr::Call(call))
-                if call.args.is_empty()
-                    && callee_name(&call.func).as_deref() == Some("default")
-                    && callee_type(&call.func).is_some_and(|name| {
-                        [(Kind::Bool, "bool"), (Kind::Option, "Option"), (Kind::String, "String")]
-                            .contains(&(kind, name.as_str()))
-                    })
-        ) {
+        if noop::is_standard_default_constructor(expression, ty, &types, &self.default_paths) {
             return true;
         }
 
@@ -1291,13 +1439,7 @@ impl<'a> Collector<'a> {
             return true;
         }
 
-        matches!(
-            (kind, expression),
-            (Kind::String, Expr::Call(call))
-                if call.args.is_empty()
-                    && callee_type(&call.func).as_deref() == Some("String")
-                    && callee_name(&call.func).as_deref() == Some("new")
-        )
+        false
     }
 
     fn is_option_receiver(&self, expression: &Expr) -> bool {
@@ -1388,6 +1530,7 @@ impl<'a> Collector<'a> {
     }
 
     fn is_standard_range(&self, range: &ExprRange) -> bool {
+        // #[gamma::skip(collection.reverse_array, reason = "the endpoint predicates are pure and all checks both endpoints, so reversing their order preserves the result")]
         let endpoints = [range.start.as_deref(), range.end.as_deref()];
         range.start.is_some()
             && endpoints.into_iter().flatten().all(|endpoint| {
@@ -1534,11 +1677,16 @@ impl<'a> Collector<'a> {
         }
         if self.wants("call_result.default") {
             let call = self.text_of(node.span());
-            self.emit(
+            let included = !self.standard_default_replacement()
+                || !self.local_calls.returns_unit(&node.func, &self.scope_path, self.current_imports());
+            self.emit_at_conditionally(
                 "call_result.default",
-                node.span(),
+                node.span().byte_range(),
                 format_compact!("{{ let _ = {call}; Default::default() }}"),
                 0,
+                Shape::Expr,
+                Confidence::Proven,
+                included,
             );
         }
     }
@@ -2041,6 +2189,7 @@ impl<'a> Collector<'a> {
         });
         let types = self.types();
 
+        // #[gamma::skip(collection.reverse_array, reason = "any performs pure primitive-kind membership checks; the order of the three kinds cannot change the answer")]
         [Kind::Signed, Kind::Unsigned, Kind::Float]
             .into_iter()
             .any(|kind| types.supports_primitive_kind(&ty, kind))
@@ -2263,6 +2412,7 @@ impl<'a> Collector<'a> {
         let outer_inferred_unsigned = take(&mut self.inferred_unsigned);
         let outer_parameter_types = take(&mut self.parameter_types);
         let outer_deferred = take(&mut self.deferred);
+        let outer_resource_iterators = take(&mut self.resource_iterators);
 
         for input in &sig.inputs {
             let FnArg::Typed(typed) = input else {
@@ -2271,7 +2421,11 @@ impl<'a> Collector<'a> {
 
             if let Pat::Ident(ident) = &*typed.pat {
                 self.bind(ident.ident.to_string(), is_numeric_binding(&typed.ty));
-                self.bind_type(ident.ident.to_string(), (*typed.ty).clone());
+                self.bind_type_with_trust(
+                    ident.ident.to_string(),
+                    (*typed.ty).clone(),
+                    ident.by_ref.is_none() && ident.subpat.is_none(),
+                );
                 let _previous = self.parameter_types.insert(ident.ident.to_string(), (*typed.ty).clone());
             }
         }
@@ -2283,6 +2437,7 @@ impl<'a> Collector<'a> {
         self.inferred_unsigned = outer_inferred_unsigned;
         self.parameter_types = outer_parameter_types;
         self.deferred = outer_deferred;
+        self.resource_iterators = outer_resource_iterators;
         self.undo.truncate(mark);
         self.numeric_return = outer;
         self.unsigned_return = outer_unsigned;
@@ -2453,10 +2608,17 @@ impl<'a> Collector<'a> {
         self.undo.push(Undo::Binding(name, prior));
     }
 
+    #[cfg(test)]
     fn bind_type(&mut self, name: String, ty: Type) {
+        self.bind_type_with_trust(name, ty, true);
+    }
+
+    fn bind_type_with_trust(&mut self, name: String, ty: Type, resource_trusted: bool) {
         let binding = BindingType {
             ty,
             imports: self.current_imports().clone(),
+            scope: self.scope_path.clone(),
+            resource_trusted,
         };
         let prior = self.binding_types.insert(name.clone(), binding).map(Box::new);
         self.undo.push(Undo::BindingType(name.clone(), prior));
@@ -2531,6 +2693,12 @@ impl<'a> Collector<'a> {
                 }
                 Undo::InferredUnsigned(name, false) => {
                     let _dropped = self.inferred_unsigned.remove(&name);
+                }
+                Undo::ResourceIterator(name, true) => {
+                    let _restored = self.resource_iterators.insert(name);
+                }
+                Undo::ResourceIterator(name, false) => {
+                    let _dropped = self.resource_iterators.remove(&name);
                 }
                 Undo::Deferred(name, true) => {
                     let _restored = self.deferred.insert(name);
@@ -2778,12 +2946,14 @@ fn imported_item_matches(imports: &HashMap<String, Option<Vec<String>>>, ident: 
 }
 
 fn ident_is_nonzero_unsigned(ident: &syn::Ident) -> bool {
+    // #[gamma::skip(collection.reverse_array, reason = "any compares the identifier against every constant name with no side effects, so reversing the name list preserves membership")]
     ["NonZeroU8", "NonZeroU16", "NonZeroU32", "NonZeroU64", "NonZeroU128", "NonZeroUsize"]
         .iter()
         .any(|name| ident == name)
 }
 
 fn ident_is_atomic_unsigned(ident: &syn::Ident) -> bool {
+    // #[gamma::skip(collection.reverse_array, reason = "any compares the identifier against every constant name with no side effects, so reversing the name list preserves membership")]
     ["AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64", "AtomicUsize"]
         .iter()
         .any(|name| ident == name)
@@ -3075,6 +3245,27 @@ fn regex_mutations(pattern: &str) -> Vec<(&'static str, String)> {
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
 )]
 impl<'ast> Visit<'ast> for Collector<'_> {
+    fn visit_item(&mut self, node: &'ast Item) {
+        let transparent = self.resource_transparent;
+        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(item_attrs(node));
+        visit::visit_item(self, node);
+        self.resource_transparent = transparent;
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        let transparent = self.resource_transparent;
+        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(impl_item_attrs(node));
+        visit::visit_impl_item(self, node);
+        self.resource_transparent = transparent;
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        let transparent = self.resource_transparent;
+        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(trait_item_attrs(node));
+        visit::visit_trait_item(self, node);
+        self.resource_transparent = transparent;
+    }
+
     /// Records the type of an annotated `let`, so that later uses of the name can be judged.
     ///
     /// Statements are visited in source order, so a name resolves to the most recent binding that
@@ -3087,11 +3278,28 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
 
+        if let Some(name) = declared_name(&node.pat) {
+            let iterator = node
+                .init
+                .as_ref()
+                .is_some_and(|init| init.diverge.is_none() && self.resource_iterator_initializer(&init.expr));
+            let prior = if iterator {
+                !self.resource_iterators.insert(name.clone())
+            } else {
+                self.resource_iterators.remove(&name)
+            };
+            self.undo.push(Undo::ResourceIterator(name, prior));
+        }
+
         match &node.pat {
             Pat::Type(typed) => {
                 if let Pat::Ident(ident) = &*typed.pat {
                     self.bind(ident.ident.to_string(), is_numeric_binding(&typed.ty));
-                    self.bind_type(ident.ident.to_string(), (*typed.ty).clone());
+                    self.bind_type_with_trust(
+                        ident.ident.to_string(),
+                        (*typed.ty).clone(),
+                        ident.by_ref.is_none() && ident.subpat.is_none(),
+                    );
                 }
             }
 
@@ -3112,7 +3320,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     );
 
                     if let Some(ty) = inferred_type {
-                        self.bind_type(name, ty);
+                        self.bind_type_with_trust(name, ty, false);
                     } else if inferred_unsigned {
                         self.bind_inferred_unsigned(name);
                     } else {
@@ -3202,7 +3410,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         self.scope_path.push(module_id(&node.ident));
+        let outer_prelude = self.implicit_prelude;
+        self.implicit_prelude &= !node.attrs.iter().any(|attribute| attribute.path().is_ident("no_implicit_prelude"));
         self.scoped(&node.ident, |collector| visit::visit_item_mod(collector, node));
+        self.implicit_prelude = outer_prelude;
         let _module = self.scope_path.pop();
     }
 
@@ -3489,6 +3700,17 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_block(&mut self, node: &'ast Block) {
+        let transparent = self.resource_transparent;
+        self.resource_transparent &= node.stmts.iter().all(|statement| {
+            let Stmt::Local(local) = statement else {
+                return true;
+            };
+            let pattern = match &local.pat {
+                Pat::Type(typed) => &*typed.pat,
+                pattern => pattern,
+            };
+            matches!(pattern, Pat::Ident(ident) if ident.by_ref.is_none() && ident.subpat.is_none())
+        });
         let unsigned_tail = matches!(self.unsigned_return, UnsignedReturn::BodyPending);
         if unsigned_tail {
             self.unsigned_return = UnsignedReturn::BodyEntered;
@@ -3535,6 +3757,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             }
         });
         let _block = self.scope_path.pop();
+        self.resource_transparent = transparent;
     }
 
     /// Leaves an expression the build does not contain unvisited.
@@ -3547,7 +3770,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
 
+        let transparent = self.resource_transparent;
+        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(expr_attrs(node))
+            && !matches!(node, Expr::Closure(_) | Expr::Async(_) | Expr::Match(_) | Expr::ForLoop(_))
+            && !matches!(node, Expr::If(node) if binds_a_pattern(&node.cond))
+            && !matches!(node, Expr::While(node) if binds_a_pattern(&node.cond));
         visit::visit_expr(self, node);
+        self.resource_transparent = transparent;
     }
 
     fn visit_expr_closure(&mut self, node: &'ast ExprClosure) {
@@ -3623,6 +3852,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_while(&mut self, node: &'ast ExprWhile) {
+        self.loops.push(LoopContext {
+            label: node.label.as_ref().map(|label| label.name.ident.to_string()),
+            produces_value: false,
+            proof: self.resource_proof(&Expr::While(node.clone())),
+        });
         // Only the negation, because a `while` forced to `true` never terminates and one forced to
         // `false` is the loop deleted — the first costs a full timeout to reach a verdict already
         // available more cheaply, and the second is what statement deletion asks.
@@ -3633,10 +3867,6 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             self.emit("cond.negate", span, negated, 0);
         }
 
-        self.loops.push(LoopContext {
-            label: node.label.as_ref().map(|label| label.name.ident.to_string()),
-            produces_value: false,
-        });
         visit::visit_expr_while(self, node);
         let _ = self.loops.pop();
     }
@@ -3645,6 +3875,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.loops.push(LoopContext {
             label: node.label.as_ref().map(|label| label.name.ident.to_string()),
             produces_value: false,
+            proof: None,
         });
         visit::visit_expr_for_loop(self, node);
         let _ = self.loops.pop();
@@ -3654,6 +3885,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.loops.push(LoopContext {
             label: node.label.as_ref().map(|label| label.name.ident.to_string()),
             produces_value: loop_produces_value(node) || self.value_required_loops.contains(&node.span().byte_range()),
+            proof: self.resource_proof(&Expr::Loop(node.clone())),
         });
         visit::visit_expr_loop(self, node);
         let _ = self.loops.pop();
@@ -3952,9 +4184,17 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if let Some(value) = node.expr.as_ref()
             && let Some(expected) = self.expected_return.as_ref()
             && self.can_directly_default(expected)
-            && !self.expression_is_known_default_for_type(value, expected)
         {
-            self.emit("return_value.default", value.span(), "Default::default()", 0);
+            let included = !self.expression_is_known_default_for_type(value, expected);
+            self.emit_at_conditionally(
+                "return_value.default",
+                value.span().byte_range(),
+                "Default::default()",
+                0,
+                Shape::Expr,
+                Confidence::Proven,
+                included,
+            );
         }
 
         let visit = |collector: &mut Self| {
@@ -4309,9 +4549,10 @@ mod mutation_tests {
         assert!(collector.is_known_unsigned(&syn::parse_quote!(value as usize)));
 
         let shadowed_file = SourceFile::parse("mutation.rs", "struct Option; struct String;".to_owned()).expect("fixture parses");
-        let shadowed = Collector::new(&shadowed_file, &selection, selection.errors(), &cfg, &defaults);
-        assert!(shadowed.expression_is_known_default_for_type(&syn::parse_quote!(Option::default()), &syn::parse_quote!(Option<u8>)));
-        assert!(shadowed.expression_is_known_default_for_type(&syn::parse_quote!(String::default()), &syn::parse_quote!(String)));
+        let shadowed_defaults = Defaults::of(&shadowed_file.ast);
+        let shadowed = Collector::new(&shadowed_file, &selection, selection.errors(), &cfg, &shadowed_defaults);
+        assert!(!shadowed.expression_is_known_default_for_type(&syn::parse_quote!(Option::default()), &syn::parse_quote!(Option<u8>)));
+        assert!(!shadowed.expression_is_known_default_for_type(&syn::parse_quote!(String::default()), &syn::parse_quote!(String)));
     }
 
     #[test]

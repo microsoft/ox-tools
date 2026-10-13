@@ -25,6 +25,7 @@ pub fn checksum_bytes(data: &[u8]) -> String {
     let normalized = normalize_line_endings(data);
     let digest = Sha256::digest(&normalized);
     // #[gamma::skip(literal.int_increment, reason = "changes only spare String capacity; checksum bytes are identical")]
+    // #[gamma::skip(arith.add_to_mul, arith.mul_to_add, arith.mul_to_div, literal.int_to_one, literal.int_to_zero, literal.int_decrement, reason = "these nonnegative allocation estimates change only spare capacity; push operations still append every prefix and digest byte")]
     let mut s = String::with_capacity(7 + digest.len() * 2);
     s.push_str("sha256:");
     for byte in digest {

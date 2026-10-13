@@ -42,6 +42,7 @@ fn list_with_cargo<H: Host>(
     }
 }
 
+// #[gamma::skip(fn_value.default, tag = "outofmemory", reason = "discarding the requested discovery limits exhausted memory in the campaign")]
 fn selection_args(args: &ListArgs) -> super::cli::SelectArgs {
     match &args.command {
         ListCommand::Mutants(args) => args.select.clone(),

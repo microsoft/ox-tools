@@ -151,11 +151,11 @@ pub struct MergeArgs {
 /// Arguments for `suppress`.
 #[derive(Debug, Args)]
 pub struct SuppressArgs {
-    /// Path to the workspace or package whose completed campaign should be used.
+    /// Path to the workspace or package whose latest campaign should be used.
     #[arg(short = 'd', long, value_name = "PATH", default_value = ".", help_heading = "Suppressing")]
     pub dir: Utf8PathBuf,
 
-    /// Read the completed campaign from this cache directory instead of cargo-gamma's default.
+    /// Read completed or interrupted testing evidence from this cache directory.
     #[arg(long, value_name = "PATH", help_heading = "Cache")]
     pub cache_dir: Option<Utf8PathBuf>,
 
@@ -218,7 +218,7 @@ pub struct UnsuppressArgs {
 /// Arguments for `hints`.
 #[derive(Debug, Args, Default)]
 pub struct HintsArgs {
-    /// Path to the workspace or package whose latest completed campaign should be promoted.
+    /// Path to the workspace or package whose latest campaign knowledge should be promoted.
     #[arg(short = 'd', long, value_name = "PATH", default_value = ".")]
     pub dir: Utf8PathBuf,
 
@@ -234,7 +234,7 @@ pub struct HintsArgs {
     #[arg(long, help_heading = "Run control")]
     pub dry_run: bool,
 
-    /// Replace the complete hints artifact instead of merging the completed campaign into it.
+    /// Replace the complete hints artifact instead of merging the recorded campaign into it.
     ///
     /// Ordinary promotion preserves knowledge outside the recorded campaign population. Use this
     /// only after a deliberately complete run when retained knowledge from every other scope
@@ -609,6 +609,13 @@ pub struct MeasureArgs {
     reason = "each is an independent command-line flag, and grouping them would only obscure that"
 )]
 pub struct RunArgs {
+    /// Continue the interrupted campaign's testing phase using its existing prepared tree.
+    ///
+    /// Completed verdicts are retained. Discovery, copying, mutation, building and baseline
+    /// measurement are not repeated. Mutation and testing settings are frozen by the campaign.
+    #[arg(long, conflicts_with_all = ["dry_run", "only_survivors", "mutants"], help_heading = "Run control")]
+    pub resume_testing: bool,
+
     /// Which mutants to consider.
     #[command(flatten)]
     pub select: SelectArgs,

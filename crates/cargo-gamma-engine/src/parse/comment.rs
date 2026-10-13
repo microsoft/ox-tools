@@ -78,12 +78,14 @@ pub(crate) fn comment_spans(text: &str) -> Vec<Range<usize>> {
 
     while i < bytes.len() {
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "a zero endpoint rewinds the scanner to rediscover the same line comment indefinitely")]
             let end = line_comment_end(bytes, i);
 
             comments.push(i..end);
             // #[gamma::skip(all, reason = "not advancing to the comment end rediscovers it forever")]
             i = end;
         } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "a zero endpoint rewinds the scanner to rediscover the same block comment indefinitely")]
             let end = block_comment_end(bytes, i);
 
             comments.push(i..end);
@@ -106,6 +108,7 @@ pub(crate) fn literal_end(text: &str, start: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let end = match bytes.get(start)? {
         b'"' => string_end(bytes, start),
+        // #[gamma::skip(match_guard.always_true, reason = "raw_string_end rejects a non-raw r prefix by returning start plus one, which the final width guard reduces to the same None")]
         b'r' if matches!(bytes.get(start + 1), Some(b'"' | b'#')) => raw_string_end(bytes, start),
         b'\'' => quote_end(bytes, start),
         // #[gamma::skip(option.none_to_some, reason = "claiming ordinary syntax starts a zero-width literal leaves the outer scanner non-progressing")]
@@ -176,7 +179,9 @@ fn build_comment(kind: CommentKind, raw: &str, span: Range<usize>, text: &str, l
 }
 
 /// Returns the offset just past the end of a `//` comment.
+// #[gamma::skip(fn_value.zero, fn_value.one, parameter.default_shadow, tag = "timeout", reason = "resetting the start or returning a fixed endpoint revisits a comment without forward progress")]
 fn line_comment_end(bytes: &[u8], start: usize) -> usize {
+    // #[gamma::skip(literal.int_decrement, literal.int_to_zero, reason = "the caller has recognized two slash bytes; scanning either delimiter too reaches the same first newline or EOF")]
     let mut i = start + 2;
 
     while i < bytes.len() && bytes[i] != b'\n' {
@@ -296,6 +301,7 @@ fn quote_end(bytes: &[u8], start: usize) -> usize {
     // A single character followed by a closing quote is a character literal. The character may be
     // several bytes, so step by whole characters rather than by bytes.
     let rest = &bytes[start + 1..];
+    // #[gamma::skip(literal.int_increment, reason = "when rest is empty, fallback bytes zero and one both have UTF-8 width one")]
     let width = utf8_width(rest.first().copied().unwrap_or(0));
 
     if rest.get(width) == Some(&b'\'') {
@@ -362,6 +368,60 @@ mod fuzz {
 mod tests {
     use super::super::source_file::{SourceFile, line_starts};
     use super::*;
+
+    #[test]
+    fn scanner_endpoints_and_comment_records_match_exact_source_slices() {
+        for (text, expected) in [
+            ("x / y * z", vec![]),
+            ("x // body\nz", std::iter::once(2..9).collect()),
+            ("x /**/ z", std::iter::once(2..6).collect()),
+            ("x /* a /* b */ c */ z", std::iter::once(2..19).collect()),
+            ("x /* unfinished", std::iter::once(2..15).collect()),
+            ("rvalue // real", std::iter::once(7..14).collect()),
+            ("\"// hidden\" // real", std::iter::once(12..19).collect()),
+            ("'é' // real", std::iter::once(5..12).collect()),
+        ] {
+            assert_eq!(comment_spans(text), expected, "{text}");
+        }
+        for (text, start, end) in [("xx//abc\nz", 2, 7), ("xx//", 2, 4), ("xx//é", 2, 6)] {
+            assert_eq!(line_comment_end(text.as_bytes(), start), end);
+        }
+        for (text, start, expected) in [
+            ("x 'a'", 2, Some(5)),
+            ("x 'é'", 2, Some(6)),
+            ("x '\\n'", 2, Some(6)),
+            ("x '\\''", 2, Some(6)),
+            ("x 'life", 2, None),
+            ("x rname", 2, None),
+            ("x \"z\"", 2, Some(5)),
+            ("x \"\"", 2, Some(4)),
+            ("x", 1, None),
+        ] {
+            assert_eq!(literal_end(text, start), expected, "{text}");
+        }
+        assert_eq!(quote_end(b"xxx'\\n'", 3), 7);
+        assert_eq!(quote_end(b"'", 0), 1);
+        assert_eq!(block_comment_kind("/** docs /**/"), CommentKind::OuterDoc);
+
+        for (raw, kind, body) in [
+            ("/**/", CommentKind::Block, ""),
+            ("/** docs */", CommentKind::OuterDoc, "docs"),
+            ("/*** plain */", CommentKind::Block, "plain"),
+            ("/*! inner */", CommentKind::InnerDoc, "inner"),
+            ("/* ** text ** */", CommentKind::Block, "** text **"),
+            ("//! inner", CommentKind::InnerDoc, "inner"),
+        ] {
+            let text = format!("fn f() {{}}\n  {raw}\n");
+            let comments = scan_comments(&text, &line_starts(&text));
+            assert_eq!(comments.len(), 1, "{raw}");
+            let comment = &comments[0];
+            assert_eq!(comment.kind, kind, "{raw}");
+            assert_eq!(&text[comment.body.clone()], body, "{raw}");
+            assert_eq!(&text[comment.span.clone()], raw);
+            assert_eq!(comment.line, 2);
+            assert!(!comment.trailing);
+        }
+    }
 
     pub(crate) fn assert_comment_scan_invariants(text: &str) {
         let comments = scan_comments(text, &line_starts(text));

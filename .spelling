@@ -15,6 +15,8 @@ accessor
 accessors
 bitset
 catchable
+Ctrl
+unanalyzable
 acyclic
 addrs
 ado
@@ -325,6 +327,7 @@ rustfmt
 rustup
 Sandana
 sans-io
+SCC
 SCCACHE
 schemas
 scopeguard

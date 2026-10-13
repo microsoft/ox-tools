@@ -44,7 +44,7 @@ the compiled test harness.
 
 ```toml
 [dependencies]
-cargo-gamma-attrs = "0.2"
+cargo-gamma-attrs = "0.3"
 ```
 
 The package is `cargo-gamma-attrs` but its library is named `gamma`, which is what lets the
@@ -68,7 +68,7 @@ If the crate uses only [`macro@resource`][__link4] on tests or test modules, a d
 
 ```toml
 [dev-dependencies]
-cargo-gamma-attrs = "0.2"
+cargo-gamma-attrs = "0.3"
 ```
 
 ## The vocabulary

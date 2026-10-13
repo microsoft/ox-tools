@@ -97,16 +97,32 @@ pub fn render(plan: &Plan, session: Option<&Session>, jobs: usize, wall: Duratio
     let _ = writeln!(text, "outcomes  {}", counts.join(", "));
 
     if let Some(session) = session {
+        // #[gamma::skip(call_result.default, reason = "write_session returns unit and this mutator still executes the call, replacing unit with unit")]
         write_session(&mut text, session);
     }
 
+    // #[gamma::skip(call_result.default, reason = "write_throughput returns unit and this mutator still executes the call, replacing unit with unit")]
     write_throughput(&mut text, &plan.mutants, session, jobs, testing);
+    // #[gamma::skip(call_result.default, reason = "write_slowest returns unit and this mutator still executes the call, replacing unit with unit")]
     write_slowest(&mut text, &plan.mutants);
-    write_breakdown(&mut text, "mutator", &group(&plan.mutants, |mutant| mutant.mutator.to_string()));
-    write_breakdown(&mut text, "package", &group(&plan.mutants, |mutant| mutant.package.to_string()));
-    write_breakdown(&mut text, "file", &group(&plan.mutants, |mutant| mutant.file.to_string()));
+    {
+        let buckets = group(&plan.mutants, |mutant| mutant.mutator.to_string());
+        // #[gamma::skip(call_result.default, reason = "write_breakdown returns unit and this mutator still renders the same buckets before replacing unit with unit")]
+        write_breakdown(&mut text, "mutator", &buckets);
+    }
+    {
+        let buckets = group(&plan.mutants, |mutant| mutant.package.to_string());
+        // #[gamma::skip(call_result.default, reason = "write_breakdown returns unit and this mutator still renders the same buckets before replacing unit with unit")]
+        write_breakdown(&mut text, "package", &buckets);
+    }
+    {
+        let buckets = group(&plan.mutants, |mutant| mutant.file.to_string());
+        // #[gamma::skip(call_result.default, reason = "write_breakdown returns unit and this mutator still renders the same buckets before replacing unit with unit")]
+        write_breakdown(&mut text, "file", &buckets);
+    }
 
     if let Some(session) = session {
+        // #[gamma::skip(call_result.default, reason = "write_binaries returns unit and this mutator still executes the call, replacing unit with unit")]
         write_binaries(&mut text, session);
     }
 
@@ -124,9 +140,13 @@ fn write_session(text: &mut String, session: &Session) {
         if session.widened { "widened to the workspace" } else { "kept" }
     );
 
+    // #[gamma::skip(call_result.default, reason = "write_rounds returns unit and this mutator still executes the call, replacing unit with unit")]
     write_rounds(text, session);
+    // #[gamma::skip(call_result.default, reason = "write_ordering returns unit and this mutator still executes the call, replacing unit with unit")]
     write_ordering(text, session);
+    // #[gamma::skip(call_result.default, reason = "write_census returns unit and this mutator still executes the call, replacing unit with unit")]
     write_census(text, session);
+    // #[gamma::skip(call_result.default, reason = "write_phases returns unit and this mutator still executes the call, replacing unit with unit")]
     write_phases(text, session);
 
     let _ = writeln!(

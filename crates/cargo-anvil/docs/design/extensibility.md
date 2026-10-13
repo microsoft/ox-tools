@@ -24,6 +24,7 @@ front-end binary. Every tool built on the engine emits the *same* fixed namespac
 - managed-region sentinels in the host syntax: `# >>> anvil-managed: <id>` …
   `# <<< anvil-managed: <id>`, `//` equivalents, or complete XML comments
   `<!-- >>> anvil-managed: <id> -->` … `<!-- <<< anvil-managed: <id> -->`
+- XML region IDs must not contain `--`, which XML forbids inside comments
 - region IDs such as `anvil-imports`, `anvil-workspace-rust-lints`,
   `anvil-rust-lints`, and `anvil-lints`
 - recipe-name prefix `anvil-` (`anvil-pr`, `anvil-clippy`, …)
@@ -160,6 +161,10 @@ impl Artifact {
     pub fn with_body(self, body: impl Into<String>) -> Artifact;
 }
 ```
+
+An existing live region keeps its marker syntax. Replacing an artifact may
+change its body, but changing `syntax` for the same `(host, id)` is refused
+rather than appending a second region under the new syntax.
 
 `RegionId` is the only identifier newtype in the public surface. There is **no public
 `ArtifactKey`**: the engine identifies "which slot" internally (a path for owned files, a

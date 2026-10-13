@@ -46,12 +46,20 @@ pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
 /// no exact match. Choosing either candidate would make ownership depend on
 /// filesystem enumeration order.
 pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Result<String, AppError> {
+    resolve_case_insensitive_with(repo_root, relpath, find_entry_case_insensitive)
+}
+
+pub(crate) fn resolve_case_insensitive_with(
+    repo_root: &Path,
+    relpath: &str,
+    find_entry: impl Fn(&Path, &str) -> Result<Option<String>, AppError>,
+) -> Result<String, AppError> {
     let segments: Vec<&str> = relpath.split('/').filter(|s| !s.is_empty()).collect();
     let mut resolved: Vec<String> = Vec::with_capacity(segments.len());
 
     for (index, segment) in segments.iter().enumerate() {
         let current_dir = repo_root.join(resolved.join("/"));
-        if let Some(actual) = find_entry_case_insensitive(&current_dir, segment)? {
+        if let Some(actual) = find_entry(&current_dir, segment)? {
             resolved.push(actual);
         } else {
             // This segment (and everything below it) isn't on disk yet;
@@ -68,18 +76,38 @@ pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Res
 /// exact-case match and falling back to an ASCII-case-insensitive one. Returns
 /// the entry's real on-disk name.
 fn find_entry_case_insensitive(dir: &Path, name: &str) -> Result<Option<String>, AppError> {
-    let entries = match std::fs::read_dir(dir) {
+    find_entry_case_insensitive_with(dir, name, directory_entry_names)
+}
+
+fn find_entry_case_insensitive_with(
+    dir: &Path,
+    name: &str,
+    entries: impl FnOnce(&Path) -> Result<Option<Vec<String>>, AppError>,
+) -> Result<Option<String>, AppError> {
+    let Some(names) = entries(dir)? else {
+        return Ok(None);
+    };
+    selected_entry_with_context(select_entry_case_insensitive(names, name), dir, name)
+}
+
+fn directory_entry_names(dir: &Path) -> Result<Option<Vec<String>>, AppError> {
+    directory_entry_names_with(dir, |path| {
+        std::fs::read_dir(path).map(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())))
+    })
+}
+
+fn directory_entry_names_with<I: IntoIterator<Item = std::io::Result<String>>>(
+    dir: &Path,
+    read: impl FnOnce(&Path) -> std::io::Result<I>,
+) -> Result<Option<Vec<String>>, AppError> {
+    let entries = match read(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err::<Option<String>, _>(error).into_app_err_with(|| format!("failed to read directory {}", dir.display()));
+            return Err::<Option<Vec<String>>, _>(error).into_app_err_with(|| format!("failed to read directory {}", dir.display()));
         }
     };
-    let names = collect_entry_names(
-        entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())),
-        dir,
-    )?;
-    selected_entry_with_context(select_entry_case_insensitive(names, name), dir, name)
+    collect_entry_names(entries, dir).map(Some)
 }
 
 fn selected_entry_with_context(selected: Result<Option<String>, Vec<String>>, dir: &Path, name: &str) -> Result<Option<String>, AppError> {
@@ -156,6 +184,37 @@ mod tests {
         let entries = ["justfile".to_owned(), "Justfile".to_owned()];
 
         assert_eq!(select_entry_case_insensitive(entries, "Justfile"), Ok(Some("Justfile".to_owned())));
+    }
+
+    #[test]
+    fn case_resolution_propagates_directory_and_entry_enumeration_errors() {
+        let dir = Path::new("catalog");
+        for (enumerating, context) in [
+            (false, "failed to read directory catalog"),
+            (true, "failed to enumerate directory catalog"),
+        ] {
+            let error = find_entry_case_insensitive_with(dir, "Justfile", |path| {
+                directory_entry_names_with(path, |requested| {
+                    assert_eq!(requested, dir);
+                    let failure = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "scripted directory failure");
+                    if enumerating { Ok(vec![Err(failure)]) } else { Err(failure) }
+                })
+            })
+            .expect_err("scripted read and enumeration failures must propagate");
+            let cause = error.find_source::<std::io::Error>().expect("the I/O cause is retained");
+            assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(cause.to_string(), "scripted directory failure");
+            assert_eq!(error.message(), "scripted directory failure");
+            let rendered = error.to_string();
+            assert_eq!(
+                rendered.lines().nth(1).unwrap().split(" (at ").next().unwrap(),
+                format!("> {context}")
+            );
+        }
+        assert_eq!(
+            directory_entry_names_with(dir, |_| Err::<Vec<std::io::Result<String>>, _>(std::io::ErrorKind::NotFound.into())).unwrap(),
+            None
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

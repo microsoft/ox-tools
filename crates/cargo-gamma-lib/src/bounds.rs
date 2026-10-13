@@ -128,6 +128,7 @@ pub fn size(text: &str) -> Result<u64, String> {
 /// rather than passed through: it compares false against every score, so a gate set to it would
 /// silently never fire.
 pub fn percentage(text: &str, value: f64) -> Result<f64, String> {
+    // #[gamma::skip(logical.or_remove_left, reason = "the closed finite range already excludes NaN and both infinities, so the explicit finite check is redundant")]
     if !value.is_finite() || !(0.0..=100.0).contains(&value) {
         return Err(format!("`{text}` is not a percentage between 0 and 100"));
     }
@@ -215,5 +216,27 @@ mod tests {
         _ = percentage("-1", -1.0).expect_err("out of range");
         _ = percentage("0", 0.0).expect("in range");
         _ = percentage("100", 100.0).expect("in range");
+    }
+
+    #[test]
+    fn accepted_numeric_bounds_preserve_the_exact_value() {
+        for value in [0.125, 1.5, 17.25, 99.5] {
+            assert_eq!(percentage("input", value), Ok(value));
+            assert_eq!(factor("input", value), Ok(value));
+            assert_eq!(seconds("input", value), Ok(value));
+        }
+        for value in [0.0, 100.0] {
+            assert_eq!(percentage("input", value), Ok(value));
+        }
+        for (text, expected) in [("1.25", 1), ("1.75KiB", 1792), ("2.5MB", 2_621_440)] {
+            assert_eq!(size(text), Ok(expected), "{text}");
+        }
+        assert_eq!(size("!"), Err("`!` is not a number of bytes".to_owned()));
+        for value in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -0.25, 100.25] {
+            assert_eq!(
+                percentage("input", value),
+                Err("`input` is not a percentage between 0 and 100".to_owned())
+            );
+        }
     }
 }

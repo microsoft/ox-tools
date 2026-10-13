@@ -69,6 +69,13 @@ The `.anvil.lock` manifest is filtered out of the snapshot input to keep the sna
 stable across version bumps (the manifest carries `rendered_by = "cargo-anvil <ver>"`
 which would otherwise churn on every release).
 
+Embedded script contract tests compare emitted exception-handling boundaries,
+cleanup error precedence, and platform-separator expressions in process against
+exact expected source. They do not invoke an installed interpreter or skip based
+on tool availability. These checks protect the emitted artifact contract, not
+runtime PowerShell semantics; recipe execution is validated by the provisioned
+self-hosting pipeline described above.
+
 ### 2.3 Fixture-based integration tests
 
 Alongside the snapshot tests, a `tests/fixtures/` corpus covers

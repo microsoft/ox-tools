@@ -80,6 +80,7 @@ impl DefaultPaths {
     /// written through an alias recurses only when bare `Default` still resolves to that standard
     /// trait; qualified and differently aliased custom traits stay mutable.
     pub(super) fn is_fallback_trait(&self, path: &Path) -> bool {
+        // #[gamma::skip(iter.first_to_last, reason = "the right operand is evaluated only for a one-segment path, whose first and last segment are identical")]
         if path.segments.len() == 1 && path.segments.first().is_some_and(|segment| segment.ident == "Default") {
             return true;
         }
@@ -193,6 +194,7 @@ impl DefaultPaths {
                 .first()
                 .expect("alias expansion cannot consume more segments than the original path contains");
             let Some(prefix) = self.module_aliases.get(first) else {
+                // #[gamma::skip(loop.break_to_continue, reason = "without an alias prefix expanded is unchanged, so continuing the bounded loop only repeats the same failed lookup")]
                 break;
             };
 
@@ -382,6 +384,9 @@ pub struct Defaults {
     /// prove the opposite. Only a mixed collision is undecidable.
     ambiguous: HashSet<String>,
 
+    /// Names also introduced by aliases or re-exports, whose target declaration is unresolved.
+    indirect: HashSet<String>,
+
     /// Names declared with type or const parameters.
     ///
     /// A bare use can fill omitted parameters from declaration defaults whose instantiated bounds
@@ -515,6 +520,7 @@ impl Defaults {
             }
         }
         self.ambiguous.extend(other.ambiguous);
+        self.indirect.extend(other.indirect);
         self.defined.extend(other.defined);
         self.defaulted.extend(other.defaulted);
         self.generic.extend(other.generic);
@@ -530,7 +536,11 @@ impl Defaults {
     /// is a name rather than a syntax node.
     #[must_use]
     pub fn lacks_error_default(&self, name: &str) -> bool {
-        self.completeness.supplies_negative_evidence() && self.defined.contains(name) && !self.defaulted.contains(name)
+        self.completeness.supplies_negative_evidence()
+            && self.defined.contains(name)
+            && !self.defaulted.contains(name)
+            && !self.indirect.contains(name)
+            && !self.indirect.contains("*")
     }
 
     /// Returns whether the workspace declares a type with this unqualified name.
@@ -676,6 +686,7 @@ impl<'ast> Visit<'ast> for Defaults {
         if self.cfg.skip_gate(&node.attrs) {
             return;
         }
+        let _inserted = self.indirect.insert(node.ident.to_string());
 
         // Only an alias for `Result` matters, and only when it supplies its own error type as a
         // parameter default. `type Result<T> = core::result::Result<T, Error>` — with the error
@@ -698,6 +709,32 @@ impl<'ast> Visit<'ast> for Defaults {
 
         // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for nodes nested in an alias target, so descent is unobservable")]
         visit::visit_item_type(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        fn names(tree: &syn::UseTree, into: &mut HashSet<String>) {
+            match tree {
+                syn::UseTree::Path(path) => names(&path.tree, into),
+                syn::UseTree::Name(name) => {
+                    let _inserted = into.insert(name.ident.to_string());
+                }
+                syn::UseTree::Rename(rename) => {
+                    let _inserted = into.insert(rename.rename.to_string());
+                }
+                syn::UseTree::Glob(_) => {
+                    let _inserted = into.insert("*".to_owned());
+                }
+                syn::UseTree::Group(group) => {
+                    for tree in &group.items {
+                        names(tree, into);
+                    }
+                }
+            }
+        }
+        if self.cfg.skip_gate(&node.attrs) || matches!(node.vis, syn::Visibility::Inherited) {
+            return;
+        }
+        names(&node.tree, &mut self.indirect);
     }
 }
 
@@ -769,10 +806,67 @@ fn payload_name(ty: &Type, index: usize) -> Option<String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[test]
+    fn public_reexports_block_negative_evidence_for_each_introduced_name() {
+        let file = syn::parse_file(
+            "struct Named; struct Renamed; struct Grouped; pub use external::{Named, Original as Renamed, nested::{Grouped}};",
+        )
+        .unwrap();
+        let index = super::Defaults::of(&file);
+        for name in ["Named", "Renamed", "Grouped"] {
+            assert!(!index.lacks_default(&syn::parse_str(name).unwrap()), "{name}");
+        }
+        let file = syn::parse_file("struct Any; pub use external::*;").unwrap();
+        assert!(!super::Defaults::of(&file).lacks_default(&syn::parse_quote!(Any)));
+        let mut index = super::Defaults::of(&syn::parse_file("struct Missing;").unwrap());
+        index.absorb(super::Defaults::default());
+        assert!(index.lacks_default(&syn::parse_quote!(Missing)));
+    }
+
     use proc_macro2::TokenStream;
     use syn::{parse_file, parse_quote};
 
     use super::*;
+
+    #[test]
+    fn default_path_matrix_separates_prelude_aliases_modules_and_custom_shadows() {
+        for (source, trait_path, standard, fallback, derive) in [
+            ("", "Default", true, true, true),
+            ("trait Default {}", "Default", false, true, true),
+            ("trait Other {}", "Default", true, true, true),
+            ("use other::Default;", "Default", false, true, false),
+            ("use core::default::Default as D;", "D", true, true, true),
+            ("use core::default::Default as D; struct Default;", "D", true, false, true),
+            ("use core::default as d;", "d::Default", true, true, true),
+            ("use core::default::{self as d};", "d::Default", true, true, true),
+            ("use other::default as d;", "d::Default", false, false, true),
+            ("use core::default as Default;", "Default::Default", true, false, true),
+            ("mod child { trait Default{} }", "Default", true, true, true),
+            (
+                "#[cfg(not(unix))] struct Default; use core::default::Default as D;",
+                "D",
+                true,
+                true,
+                true,
+            ),
+        ] {
+            let paths = DefaultPaths::of_in(&parse_file(source).unwrap(), &CfgSet::parse("unix"));
+            let path = syn::parse_str::<Path>(trait_path).unwrap();
+            assert_eq!(paths.is_standard_trait(&path), standard, "{source} / {trait_path}");
+            assert_eq!(paths.is_fallback_trait(&path), fallback, "{source} / {trait_path}");
+            assert_eq!(paths.is_standard_derive(&parse_quote!(Default)), derive, "{source}");
+            let callee = syn::parse_str::<Path>(&format!("{trait_path}::default")).unwrap();
+            assert_eq!(paths.is_standard_default_callee(&callee), standard, "{source}");
+            let segments = callee.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
+            assert_eq!(paths.is_standard_default_segments(&segments), standard, "{source}");
+            assert!(!paths.is_standard_default_callee(&parse_quote!(helper)));
+            assert!(!paths.is_standard_default_segments(&["D".into(), "new".into()]));
+        }
+        let generics: syn::Generics = syn::parse_quote!(<'a, const N: usize, T, U: Default, V: Clone, W: core::default::Default>);
+        assert_eq!(standard_defaulted_parameters(&generics, &DefaultPaths::default()), ["U", "W"]);
+        let qualified: Type = parse_quote!(<T as Trait>::Output);
+        assert_eq!(unqualified_name_of(&qualified), None);
+    }
 
     #[test]
     fn unqualified_names_follow_parenthesized_and_grouped_types() {
@@ -786,6 +880,50 @@ mod tests {
         assert_eq!(unqualified_name_of(&parse_quote!(_)), None);
     }
 
+    #[test]
+    fn derive_paths_cfg_modules_and_associated_attributes_preserve_exact_evidence() {
+        let defaults = Defaults::of_in(
+            &parse_file(
+                "use core::default as d;
+             #[other(Default)] struct NotDerived;
+             #[derive(Clone,Default)] struct Derived;
+             #[cfg(not(unix))] mod inactive { #[derive(Default)] struct Disabled; }
+             mod nested { struct Bare; impl Default for Bare {} struct Qualified; impl core::default::Default for Qualified {}
+                 struct ViaModule; impl d::Default for ViaModule {} }
+             struct Root; impl Default for Root {}",
+            )
+            .unwrap(),
+            &CfgSet::parse("unix"),
+        );
+        assert!(!defaults.has_default(&parse_quote!(NotDerived)));
+        assert!(defaults.has_default(&parse_quote!(Derived)));
+        assert!(!defaults.defines("Disabled"));
+        assert!(!defaults.has_default(&parse_quote!(Bare)));
+        assert!(defaults.has_default(&parse_quote!(Qualified)));
+        assert!(defaults.has_default(&parse_quote!(ViaModule)));
+        assert!(defaults.has_default(&parse_quote!(Root)));
+        let implementation: syn::ItemImpl = parse_quote!(impl Example {
+            #[cfg(unix)] const VALUE:u8=0;
+            #[cfg(unix)] type Associated=u8;
+        });
+        for item in &implementation.items {
+            assert_eq!(impl_item_attrs(item).len(), 1);
+            assert!(impl_item_attrs(item)[0].path().is_ident("cfg"));
+        }
+        let declaration: syn::ItemTrait = parse_quote!(
+            trait Example {
+                #[cfg(unix)]
+                const VALUE: u8;
+                #[cfg(unix)]
+                type Associated;
+            }
+        );
+        for item in &declaration.items {
+            assert_eq!(trait_item_attrs(item).len(), 1);
+            assert!(trait_item_attrs(item)[0].path().is_ident("cfg"));
+        }
+    }
+
     fn index(sources: &[&str]) -> Defaults {
         let mut defaults = Defaults::default();
 
@@ -794,6 +932,38 @@ mod tests {
         }
 
         defaults
+    }
+
+    #[test]
+    fn partial_and_colliding_default_indexes_preserve_unknown_evidence() {
+        let mut complete = index(&["struct Missing; #[derive(Default)] struct Present; union Bits { value: u32 }"]);
+        assert!(complete.lacks_default(&parse_quote!(Missing)));
+        assert!(complete.lacks_default(&parse_quote!(Bits)));
+        assert!(complete.declares_default_name("Present"));
+        complete.mark_incomplete();
+        assert!(!complete.is_complete());
+        assert!(!complete.lacks_default(&parse_quote!(Missing)));
+        assert!(!complete.declares_default_name("Present"));
+
+        for sources in [
+            ["#[derive(Default)] struct Config;", "struct Config;"],
+            ["struct Config;", "#[derive(Default)] struct Config;"],
+        ] {
+            let collided = index(&sources);
+            assert!(!collided.declares_default_name("Config"));
+            assert!(!collided.has_default(&parse_quote!(Config)));
+            assert!(!collided.lacks_default(&parse_quote!(Config)));
+            assert!(collided.defines("Config"));
+        }
+        let generic = index(&["#[derive(Default)] struct Generic<T>(T);"]);
+        assert!(!generic.declares_default_name("Generic"));
+        assert!(generic.declares_generic_default_name("Generic"));
+        let gated = Defaults::of_in(
+            &parse_file("#[cfg(not(unix))] union Disabled { field: u32 } union Active { field: u32 }").unwrap(),
+            &CfgSet::parse("unix"),
+        );
+        assert!(!gated.defines("Disabled"));
+        assert!(gated.defines("Active"));
     }
 
     #[test]

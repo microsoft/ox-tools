@@ -241,16 +241,34 @@ impl Check {
 // to the parent coverage run.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn dispatch(args: &[OsString]) -> std::result::Result<ExitCode, AppError> {
-    if std::env::var_os(evidence::WRAPPER_VAR).is_some() {
-        return evidence::wrapper(&args[1..]);
+    dispatch_with(
+        args,
+        |key| std::env::var_os(key),
+        evidence::wrapper,
+        doctests::rustdoc_wrapper,
+        doctests::shim,
+        run,
+    )
+}
+
+fn dispatch_with(
+    args: &[OsString],
+    environment: impl Fn(&str) -> Option<OsString>,
+    wrapper: impl FnOnce(&[OsString]) -> Result<ExitCode>,
+    rustdoc: impl FnOnce(&[OsString]) -> Result<ExitCode>,
+    shim: impl FnOnce(&[OsString], &Path) -> Result<ExitCode>,
+    run: impl FnOnce() -> Result<ExitCode>,
+) -> Result<ExitCode> {
+    if environment(evidence::WRAPPER_VAR).is_some() {
+        return wrapper(&args[1..]);
     }
-    if std::env::var_os(doctests::RUSTDOC_WRAPPER_VAR).is_some() {
-        return doctests::rustdoc_wrapper(&args[1..]);
+    if environment(doctests::RUSTDOC_WRAPPER_VAR).is_some() {
+        return rustdoc(&args[1..]);
     }
-    if let Some(capture) = std::env::var_os(doctests::CAPTURE_VAR) {
+    if let Some(capture) = environment(doctests::CAPTURE_VAR) {
         let subcommand = args.get(1).map(OsString::as_os_str);
         if subcommand != Some(SUBCOMMAND.as_ref()) {
-            return doctests::shim(&args[1..], Path::new(&capture));
+            return shim(&args[1..], Path::new(&capture));
         }
     }
 
@@ -277,7 +295,16 @@ const SUBCOMMAND: &str = "unused-deps";
 /// cannot be enumerated, compiler or doctest evidence collection fails, package
 /// selectors are invalid, or a fixed manifest cannot be written back.
 fn run() -> Result<ExitCode> {
-    let cli = Cli::parse();
+    run_with(Cli::parse(), workspace_manifest_of, workspace_of, catalog_check, source_checks)
+}
+
+fn run_with(
+    cli: Cli,
+    resolve_manifest: impl FnOnce(&Path) -> Result<PathBuf>,
+    load_workspace: impl FnOnce(&Path) -> Result<Workspace>,
+    check_catalog: impl FnOnce(&Path, bool, bool) -> Result<ExitCode>,
+    check_sources: impl FnOnce(&Path, &[OsString], &Workspace, &BTreeSet<PathBuf>, &[Check]) -> Result<bool>,
+) -> Result<ExitCode> {
     let Commands::UnusedDeps {
         manifest_path,
         packages,
@@ -287,7 +314,7 @@ fn run() -> Result<ExitCode> {
         fix,
         require_workspace,
     } = cli.command;
-    let manifest_path = workspace_manifest_of(&manifest_path)?;
+    let manifest_path = resolve_manifest(&manifest_path)?;
 
     let package_context = if package_checks_selected(&packages, workspace) {
         let selection = PackageSelection {
@@ -295,7 +322,7 @@ fn run() -> Result<ExitCode> {
             workspace,
             exclude,
         };
-        let workspace = workspace_of(&manifest_path)?;
+        let workspace = load_workspace(&manifest_path)?;
         let selected = selection.resolve(&workspace.packages)?;
         Some((selection.flags(), workspace, selected))
     } else {
@@ -304,10 +331,10 @@ fn run() -> Result<ExitCode> {
 
     // The catalog question is workspace-global and always runs. Package
     // selection applies only to checks backed by compile evidence.
-    let mut failed = catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
+    let mut failed = check_catalog(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
 
     if let Some((selection_flags, workspace, selected)) = package_context {
-        failed |= source_checks(&manifest_path, &selection_flags, &workspace, &selected, &checks)?;
+        failed |= check_sources(&manifest_path, &selection_flags, &workspace, &selected, &checks)?;
     }
 
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
@@ -325,14 +352,16 @@ fn package_checks_selected(packages: &[String], workspace: bool) -> bool {
 
 /// Resolve any member manifest to the root manifest Cargo associates with it.
 fn workspace_manifest_of(manifest_path: &Path) -> Result<PathBuf> {
+    workspace_manifest_with(manifest_path, members_of)
+}
+
+fn workspace_manifest_with(manifest_path: &Path, mut members: impl FnMut(&Path) -> Result<Vec<PathBuf>>) -> Result<PathBuf> {
     let manifest = detect::read_manifest(manifest_path)?;
     if matches!(detect::catalog(&manifest)?, Catalog::Workspace(_)) {
         return Ok(manifest_path.to_path_buf());
     }
 
-    let supplied = manifest_path
-        .canonicalize()
-        .into_app_err(format!("failed to resolve {}", manifest_path.display()))?;
+    let supplied = canonical_manifest(manifest_path, manifest_path.canonicalize())?;
     let package_dir = supplied
         .parent()
         .expect("a canonical manifest file path always has a parent directory");
@@ -346,12 +375,17 @@ fn workspace_manifest_of(manifest_path: &Path) -> Result<PathBuf> {
         if !matches!(detect::catalog(&document)?, Catalog::Workspace(_)) {
             continue;
         }
-        if members_of(&candidate)?.iter().any(|member| member == &supplied) {
+        if members(&candidate)?.iter().any(|member| member == &supplied) {
             return Ok(candidate);
         }
     }
 
     Ok(manifest_path.to_path_buf())
+}
+
+fn canonical_manifest(manifest_path: &Path, canonical: std::io::Result<PathBuf>) -> Result<PathBuf> {
+    let canonical = canonical.into_app_err(format!("failed to resolve {}", manifest_path.display()))?;
+    Ok(canonical)
 }
 
 /// Cargo-style package selection for compiler-backed checks.
@@ -428,12 +462,32 @@ fn source_checks(
     selected: &BTreeSet<PathBuf>,
     checks: &[Check],
 ) -> Result<bool> {
+    source_checks_with(
+        manifest_path,
+        selection_flags,
+        workspace,
+        selected,
+        checks,
+        evidence::gather,
+        doctest_evidence,
+    )
+}
+
+fn source_checks_with(
+    manifest_path: &Path,
+    selection_flags: &[OsString],
+    workspace: &Workspace,
+    selected: &BTreeSet<PathBuf>,
+    checks: &[Check],
+    mut gather: impl FnMut(&Path, &[OsString], &Path, bool) -> Result<evidence::Evidence>,
+    gather_doctests: impl FnOnce(&Path, &Workspace, &[verdict::Finding]) -> Result<doctests::DoctestEvidence>,
+) -> Result<bool> {
     let plain_target_dir = workspace.evidence_target_dir.path().join("plain");
     let all_target_dir = workspace.evidence_target_dir.path().join("all-targets");
     // Two passes: default targets first, where a report can only have come from
     // a target's single plain unit, then everything.
-    let plain = evidence::gather(manifest_path, selection_flags, &plain_target_dir, false)?;
-    let all = evidence::gather(manifest_path, selection_flags, &all_target_dir, true)?;
+    let plain = gather(manifest_path, selection_flags, &plain_target_dir, false)?;
+    let all = gather(manifest_path, selection_flags, &all_target_dir, true)?;
 
     // Doctest evidence can only ever spare a dependency, never accuse one, so
     // it is gathered lazily: judge first without it, then compile the doctests
@@ -456,7 +510,7 @@ fn source_checks(
             && finding.section != Section::Build
             && (Check::Unused.wanted(checks) || finding.section == Section::Normal)
     });
-    let doctests = doctest_evidence(manifest_path, workspace, &candidates)?;
+    let doctests = gather_doctests(manifest_path, workspace, &candidates)?;
 
     let findings = verdict::judge(&workspace.packages, selected, &plain, &all, &doctests, &workspace.allowed);
 
@@ -477,6 +531,7 @@ fn source_checks(
         return Ok(false);
     }
 
+    // #[gamma::skip(call_result.default, reason = "report_findings returns unit; diagnostics still execute and () is replaced with ()")]
     report_findings(&wanted);
 
     Ok(true)
@@ -487,12 +542,28 @@ fn source_checks(
 /// Nothing else needs them: a doctest can only reveal that a dependency *is*
 /// used, so a package with no findings has nothing a doctest could change.
 fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[verdict::Finding]) -> Result<doctests::DoctestEvidence> {
+    doctest_evidence_with(
+        manifest_path,
+        workspace,
+        candidates,
+        std::env::current_exe,
+        doctests::gather_package,
+    )
+}
+
+fn doctest_evidence_with(
+    manifest_path: &Path,
+    workspace: &Workspace,
+    candidates: &[verdict::Finding],
+    executable: impl FnOnce() -> std::io::Result<PathBuf>,
+    mut gather: impl FnMut(&Path, &str, &Path, &Path) -> Result<doctests::PackageDoctests>,
+) -> Result<doctests::DoctestEvidence> {
     let mut evidence = doctests::DoctestEvidence::default();
     if candidates.is_empty() {
         return Ok(evidence);
     }
 
-    let shim = std::env::current_exe().into_app_err("failed to locate this executable to use as the doctest shim")?;
+    let shim = executable().into_app_err("failed to locate this executable to use as the doctest shim")?;
     let accused: BTreeSet<&Path> = candidates.iter().map(|finding| finding.manifest_path.as_path()).collect();
 
     for package in &workspace.packages {
@@ -500,7 +571,7 @@ fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[v
         // doctests of a bin-only package is an error, not an empty answer.
         if package.has_doctests && accused.contains(package.manifest_path.as_path()) {
             let selector = format!("{}@{}", package.name, package.version);
-            let found = doctests::gather_package(
+            let found = gather(
                 manifest_path,
                 &selector,
                 &workspace.evidence_target_dir.path().join("doctests"),
@@ -522,11 +593,7 @@ fn report_findings(findings: &[&verdict::Finding]) {
     );
 
     for finding in findings {
-        let section = match finding.section {
-            Section::Normal => "dependencies",
-            Section::Development => "dev-dependencies",
-            Section::Build => "build-dependencies",
-        };
+        let section = dependency_section(finding.section);
         let table = dependency_table(finding.target.as_deref(), section);
 
         match finding.verdict {
@@ -548,6 +615,14 @@ fn report_findings(findings: &[&verdict::Finding]) {
 /// Render an unconditional or target-specific dependency table.
 fn dependency_table(target: Option<&str>, section: &str) -> String {
     target.map_or_else(|| format!("[{section}]"), |target| format!("[target.'{target}'.{section}]"))
+}
+
+fn dependency_section(section: Section) -> &'static str {
+    match section {
+        Section::Normal => "dependencies",
+        Section::Development => "dev-dependencies",
+        Section::Build => "build-dependencies",
+    }
 }
 
 /// Split from [`run`] so tests can drive it without a process boundary or a
@@ -594,6 +669,7 @@ fn catalog_check_with_hook(manifest_path: &Path, fix: bool, require_workspace: b
     hook(CheckStage::InheritanceCollected);
     let (unused, stale) = detect::partition(&catalog, &inheritance.keys, &inheritance.declarations);
 
+    // #[gamma::skip(call_result.default, reason = "report_stale returns unit; diagnostics still execute and () is replaced with ()")]
     report_stale(&stale);
 
     if catalog.declared.is_empty() {
@@ -602,11 +678,14 @@ fn catalog_check_with_hook(manifest_path: &Path, fix: bool, require_workspace: b
     }
 
     if unused.is_empty() {
-        report_clean(manifest_path, &catalog, &inheritance.keys, members.len());
+        let member_count = members.len();
+        // #[gamma::skip(call_result.default, reason = "report_clean returns unit; diagnostics still execute and () is replaced with ()")]
+        report_clean(manifest_path, &catalog, &inheritance.keys, member_count);
         return Ok(ExitCode::SUCCESS);
     }
 
     if !fix {
+        // #[gamma::skip(call_result.default, reason = "report_unused returns unit; diagnostics still execute and () is replaced with ()")]
         report_unused(manifest_path, &unused);
         return Ok(ExitCode::FAILURE);
     }
@@ -622,6 +701,7 @@ fn catalog_check_with_hook(manifest_path: &Path, fix: bool, require_workspace: b
         entries(outcome.removed),
         manifest_path.display()
     );
+    // #[gamma::skip(call_result.default, reason = "report_carries returns unit; diagnostics still execute and () is replaced with ()")]
     report_carries(&outcome.carries);
 
     Ok(ExitCode::SUCCESS)
@@ -793,12 +873,29 @@ struct Workspace {
 
 /// Read every member's declarations, the workspace allow-list, and where to build.
 fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
-    let metadata = MetadataCommand::new()
-        .manifest_path(manifest_path)
-        .no_deps()
-        .exec()
-        .into_app_err(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+    workspace_of_with(manifest_path, || {
+        MetadataCommand::new().manifest_path(manifest_path).no_deps().exec()
+    })
+}
 
+fn workspace_of_with(
+    manifest_path: &Path,
+    execute: impl FnOnce() -> std::result::Result<cargo_metadata::Metadata, cargo_metadata::Error>,
+) -> Result<Workspace> {
+    let metadata = execute().into_app_err(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+
+    workspace_from(manifest_path, metadata, create_evidence_directory)
+}
+
+fn create_evidence_directory(root: &Path) -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().prefix("run-").tempdir_in(root)
+}
+
+fn workspace_from(
+    manifest_path: &Path,
+    metadata: cargo_metadata::Metadata,
+    create_directory: impl FnOnce(&Path) -> std::io::Result<tempfile::TempDir>,
+) -> Result<Workspace> {
     let mut packages = Vec::new();
     for package in metadata.workspace_packages() {
         let path = package.manifest_path.clone().into_std_path_buf();
@@ -829,9 +926,7 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
 
     let evidence_root = metadata.target_directory.into_std_path_buf().join("unused-deps");
     fs::create_dir_all(&evidence_root).into_app_err(format!("failed to create {}", evidence_root.display()))?;
-    let evidence_target_dir = tempfile::Builder::new()
-        .prefix("run-")
-        .tempdir_in(&evidence_root)
+    let evidence_target_dir = create_directory(&evidence_root)
         .into_app_err(format!("failed to create an evidence directory under {}", evidence_root.display()))?;
 
     Ok(Workspace {
@@ -902,6 +997,484 @@ fn lines(count: usize) -> &'static str {
     if count == 1 { "line" } else { "lines" }
 }
 
+#[cfg(all(test, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod source_campaign_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_preserves_wrapper_precedence_arguments_and_subcommand_escape() {
+        for (marker, subcommand, expected) in [
+            (evidence::WRAPPER_VAR, "rustc", "compiler"),
+            (doctests::RUSTDOC_WRAPPER_VAR, "input.rs", "rustdoc"),
+            (doctests::CAPTURE_VAR, "input.rs", "shim"),
+            (doctests::CAPTURE_VAR, SUBCOMMAND, "run"),
+            ("unrelated", SUBCOMMAND, "run"),
+        ] {
+            let args = ["binary", subcommand, "last"].map(OsString::from);
+            dispatch_with(
+                &args,
+                |key| (key == marker).then(|| "capture".into()),
+                |forwarded| {
+                    assert_eq!(expected, "compiler");
+                    assert_eq!(forwarded, &args[1..]);
+                    Ok(ExitCode::SUCCESS)
+                },
+                |forwarded| {
+                    assert_eq!(expected, "rustdoc");
+                    assert_eq!(forwarded, &args[1..]);
+                    Ok(ExitCode::SUCCESS)
+                },
+                |forwarded, capture| {
+                    assert_eq!(expected, "shim");
+                    assert_eq!(forwarded, &args[1..]);
+                    assert_eq!(capture, Path::new("capture"));
+                    Ok(ExitCode::SUCCESS)
+                },
+                || {
+                    assert_eq!(expected, "run");
+                    Ok(ExitCode::SUCCESS)
+                },
+            )
+            .expect("the selected dispatch branch succeeds");
+        }
+    }
+
+    fn cli(package: &str) -> Cli {
+        Cli::try_parse_from(["cargo", SUBCOMMAND, "--manifest-path", "Cargo.toml", "--package", package])
+            .expect("test CLI arguments are valid")
+    }
+
+    #[test]
+    fn run_preserves_all_error_boundaries_and_combines_catalog_and_source_findings() {
+        for failing_stage in 0..5 {
+            let result = run_with(
+                cli(if failing_stage == 2 { "missing" } else { "fixture" }),
+                |_| {
+                    if failing_stage == 0 {
+                        Err(ohno::app_err!("root failed"))
+                    } else {
+                        Ok("resolved.toml".into())
+                    }
+                },
+                |path| {
+                    assert_eq!(path, Path::new("resolved.toml"));
+                    if failing_stage == 1 {
+                        Err(ohno::app_err!("workspace failed"))
+                    } else {
+                        Ok(workspace(vec![package("fixture", true)]))
+                    }
+                },
+                |path, fix, require| {
+                    assert_eq!(path, Path::new("resolved.toml"));
+                    assert!(!fix);
+                    assert!(!require);
+                    if failing_stage == 3 {
+                        Err(ohno::app_err!("catalog failed"))
+                    } else {
+                        Ok(ExitCode::SUCCESS)
+                    }
+                },
+                |path, flags, workspace, selected, checks| {
+                    assert_eq!(path, Path::new("resolved.toml"));
+                    assert_eq!(flags, [OsString::from("--package"), OsString::from("fixture")]);
+                    assert_eq!(selected, &BTreeSet::from([workspace.packages[0].manifest_path.clone()]));
+                    assert!(checks.is_empty());
+                    Err(ohno::app_err!("source failed"))
+                },
+            );
+            let error = result.expect_err("every injected stage failure propagates");
+            let expected = ["root failed", "workspace failed", "missing", "catalog failed", "source failed"][failing_stage];
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        for catalog_failed in [false, true] {
+            for source_failed in [false, true] {
+                let result = run_with(
+                    cli("fixture"),
+                    |_| Ok("resolved.toml".into()),
+                    |_| Ok(workspace(vec![package("fixture", true)])),
+                    |_, _, _| Ok(if catalog_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }),
+                    |_, _, _, _, _| Ok(source_failed),
+                )
+                .expect("both check stages complete");
+                assert_eq!(
+                    result,
+                    if catalog_failed || source_failed {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                );
+            }
+        }
+    }
+
+    fn write_manifest(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().expect("fixture manifests have a parent")).expect("fixture directory exists");
+        fs::write(path, text).expect("fixture manifest is writable");
+    }
+
+    #[test]
+    fn ancestor_resolution_skips_missing_and_nonworkspace_manifests_and_propagates_errors() {
+        let directory = tempfile::tempdir().expect("fixture directory exists");
+        let root = directory.path().canonicalize().expect("fixture directory is canonical");
+        let root_manifest = root.join("Cargo.toml");
+        let intermediate = root.join("nested").join("Cargo.toml");
+        let member = root.join("nested").join("missing").join("member").join("Cargo.toml");
+        write_manifest(&root_manifest, "[workspace]\n");
+        write_manifest(&intermediate, "[package]\nname='intermediate'\nversion='0.1.0'\n");
+        write_manifest(&member, "[package]\nname='member'\nversion='0.1.0'\n");
+        let resolved = workspace_manifest_with(&member, |path| {
+            assert_eq!(path, root_manifest);
+            Ok(vec![root.join("unrelated").join("Cargo.toml"), member.clone()])
+        })
+        .expect("a later matching workspace is resolved");
+        assert_eq!(resolved, root_manifest);
+        let error = workspace_manifest_with(&member, |_| Err(ohno::app_err!("members unavailable")))
+            .expect_err("member enumeration failure propagates");
+        assert!(error.to_string().contains("members unavailable"), "{error}");
+        assert_eq!(
+            workspace_manifest_with(&root_manifest, |_| panic!("a root needs no enumeration")).expect("root is accepted"),
+            root_manifest
+        );
+        write_manifest(&intermediate, "not valid toml ]");
+        workspace_manifest_with(&member, |_| panic!("invalid ancestor stops enumeration")).expect_err("invalid ancestor propagates");
+        workspace_manifest_with(&root.join("absent.toml"), |_| panic!("missing input stops enumeration"))
+            .expect_err("missing input propagates");
+    }
+
+    #[test]
+    fn empty_catalog_is_successful_without_member_enumeration() {
+        let directory = tempfile::tempdir().expect("fixture directory exists");
+        let manifest = directory.path().join("Cargo.toml");
+        write_manifest(&manifest, "[workspace]\n");
+        assert_eq!(
+            catalog_check_with_hook(&manifest, false, false, |_| panic!("empty catalogs need no Cargo metadata"))
+                .expect("an empty catalog is successful"),
+            ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn exclusions_preserve_missing_matches_and_reject_ambiguous_selectors() {
+        let packages = [package("fixture", true)];
+        let selection = PackageSelection {
+            packages: Vec::new(),
+            workspace: true,
+            exclude: vec!["missing".into()],
+        };
+        assert_eq!(
+            selection.resolve(&packages).expect("missing excludes are allowed"),
+            BTreeSet::from([packages[0].manifest_path.clone()])
+        );
+        let mut second = package("fixture", true);
+        second.version = "2.0.0".into();
+        second.manifest_path = PathBuf::from("second").join("Cargo.toml");
+        let packages = [package("fixture", true), second];
+        let selection = PackageSelection {
+            packages: Vec::new(),
+            workspace: true,
+            exclude: vec!["fixture".into()],
+        };
+        let error = selection.resolve(&packages).expect_err("ambiguous exclusions must return errors");
+        assert!(error.to_string().contains("matched more than one workspace member"), "{error}");
+    }
+
+    #[test]
+    fn workspace_metadata_and_canonicalization_failures_preserve_manifest_context() {
+        let manifest = Path::new("Cargo.toml");
+        let error = workspace_of_with(manifest, || {
+            Err(cargo_metadata::Error::Io(std::io::Error::other("metadata unavailable")))
+        })
+        .err()
+        .expect("metadata errors must propagate instead of panicking");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to enumerate the workspace members of Cargo.toml"),
+            "{error}"
+        );
+        let error = canonical_manifest(manifest, Err(std::io::Error::other("canonicalization unavailable")))
+            .expect_err("canonicalization errors must propagate instead of panicking");
+        assert!(error.to_string().contains("failed to resolve Cargo.toml"), "{error}");
+    }
+
+    fn metadata(root: &Path, manifests: &[PathBuf]) -> cargo_metadata::Metadata {
+        let packages = manifests.iter().enumerate().map(|(index, path)| serde_json::json!({
+            "name": format!("package{index}"), "version": "1.2.3", "id": format!("package{index} 1.2.3 (path+file:///fixture{index})"),
+            "license": null, "license_file": null, "description": null, "source": null, "dependencies": [],
+            "targets": [{"kind":["bin"], "crate_types":["bin"], "name":"binary", "src_path":root.join("main.rs"), "edition":"2024", "doc":true, "doctest":false, "test":true},
+                        {"kind":["rlib", "bin"], "crate_types":["rlib"], "name":"library", "src_path":root.join("lib.rs"), "edition":"2024", "doc":true, "doctest":true, "test":true}],
+            "features": {}, "manifest_path": path, "metadata": {}, "publish": null,
+            "authors": [], "categories": [], "keywords": [], "readme": null, "repository": null,
+            "homepage": null, "documentation": null, "edition":"2024", "links":null, "default_run":null, "rust_version":null
+        })).collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "workspace_members": packages.iter().map(|package| package["id"].clone()).collect::<Vec<_>>(),
+            "workspace_default_members": [], "packages": packages, "resolve":null, "target_directory":root.join("target"),
+            "workspace_root": root, "version":1, "metadata":{}
+        }))
+        .expect("the synthetic metadata follows Cargo's JSON format")
+    }
+
+    #[test]
+    fn workspace_materialization_preserves_targets_paths_allowlists_and_filesystem_errors() {
+        let directory = tempfile::tempdir().expect("fixture directory exists");
+        let root = directory.path();
+        let manifest = root.join("Cargo.toml");
+        let member = root.join("member").join("Cargo.toml");
+        write_manifest(
+            &manifest,
+            "[workspace]\n[workspace.metadata.unused-deps]\nallowed=['root-allowed']\n",
+        );
+        write_manifest(
+            &member,
+            "[package]\nname='member'\nversion='1.2.3'\n[package.metadata.unused-deps]\nallowed=['member-allowed']\n[dependencies]\ndep='1'\n",
+        );
+        let workspace = workspace_from(&manifest, metadata(root, std::slice::from_ref(&member)), create_evidence_directory)
+            .expect("valid metadata is materialized");
+        assert_eq!(
+            workspace.evidence_target_dir.path().parent(),
+            Some(root.join("target").join("unused-deps").as_path())
+        );
+        assert!(
+            workspace
+                .evidence_target_dir
+                .path()
+                .file_name()
+                .expect("run directory has a name")
+                .to_string_lossy()
+                .starts_with("run-")
+        );
+        assert_eq!(workspace.allowed, BTreeSet::from(["root-allowed".to_owned()]));
+        assert_eq!(workspace.packages.len(), 1);
+        assert_eq!(workspace.packages[0].manifest_path, member);
+        assert!(workspace.packages[0].has_doctests);
+        assert_eq!(workspace.packages[0].declared[0].name, "dep");
+        assert_eq!(workspace.packages[0].allowed, BTreeSet::from(["member-allowed".to_owned()]));
+        workspace_from(&manifest, metadata(root, std::slice::from_ref(&member)), |_| {
+            Err(std::io::Error::other("run directory unavailable"))
+        })
+        .err()
+        .expect("run directory failure propagates");
+        write_manifest(&member, "[package.metadata.unused-deps]\nallowed=123\n");
+        workspace_from(&manifest, metadata(root, std::slice::from_ref(&member)), create_evidence_directory)
+            .err()
+            .expect("invalid package allowlist propagates");
+        fs::remove_file(&member).expect("member fixture can be removed");
+        workspace_from(&manifest, metadata(root, std::slice::from_ref(&member)), create_evidence_directory)
+            .err()
+            .expect("missing member manifest propagates");
+        write_manifest(&manifest, "[workspace.metadata.unused-deps]\nallowed=123\n");
+        workspace_from(&manifest, metadata(root, &[]), create_evidence_directory)
+            .err()
+            .expect("invalid root catalog propagates");
+        fs::remove_file(&manifest).expect("root fixture can be removed");
+        workspace_from(&manifest, metadata(root, &[]), create_evidence_directory)
+            .err()
+            .expect("missing root manifest propagates");
+        write_manifest(&manifest, "[workspace]\n");
+        fs::remove_dir_all(root.join("target")).expect("target fixture can be removed");
+        fs::write(root.join("target"), "").expect("blocking target file exists");
+        workspace_from(&manifest, metadata(root, &[]), create_evidence_directory)
+            .err()
+            .expect("evidence root creation failure propagates");
+    }
+
+    fn package(name: &str, has_doctests: bool) -> verdict::Package {
+        verdict::Package {
+            name: name.to_owned(),
+            version: "1.2.3".to_owned(),
+            manifest_path: PathBuf::from(name).join("Cargo.toml"),
+            declared: vec![],
+            allowed: BTreeSet::new(),
+            has_doctests,
+        }
+    }
+
+    fn workspace(packages: Vec<verdict::Package>) -> Workspace {
+        Workspace {
+            packages,
+            allowed: BTreeSet::new(),
+            evidence_target_dir: tempfile::tempdir().expect("evidence directory exists"),
+        }
+    }
+
+    fn finding(package: &verdict::Package, section: Section) -> verdict::Finding {
+        verdict::Finding {
+            package: package.name.clone(),
+            manifest_path: package.manifest_path.clone(),
+            name: "dependency".to_owned(),
+            section,
+            target: None,
+            verdict: Verdict::Unused,
+        }
+    }
+
+    #[test]
+    fn source_collection_preserves_both_passes_and_each_failure_boundary() {
+        let workspace = workspace(Vec::new());
+        let selected = BTreeSet::new();
+        let flags = [OsString::from("--workspace")];
+        for failing_pass in [0, 1, 2] {
+            let mut calls = 0;
+            let error = source_checks_with(
+                Path::new("Cargo.toml"),
+                &flags,
+                &workspace,
+                &selected,
+                &[],
+                |manifest, selection, target, all_targets| {
+                    assert_eq!(manifest, Path::new("Cargo.toml"));
+                    assert_eq!(selection, flags);
+                    assert_eq!(
+                        target,
+                        workspace
+                            .evidence_target_dir
+                            .path()
+                            .join(if calls == 0 { "plain" } else { "all-targets" })
+                    );
+                    assert_eq!(all_targets, calls != 0);
+                    let current = calls;
+                    calls += 1;
+                    if current == failing_pass {
+                        Err(ohno::app_err!("evidence pass {current} failed"))
+                    } else {
+                        Ok(evidence::Evidence::default())
+                    }
+                },
+                |_, _, candidates| {
+                    assert!(candidates.is_empty());
+                    assert_eq!(failing_pass, 2);
+                    Err(ohno::app_err!("doctest pass failed"))
+                },
+            )
+            .expect_err("every evidence failure must propagate");
+            assert!(
+                error.to_string().contains(if failing_pass == 2 {
+                    "doctest pass failed"
+                } else {
+                    "evidence pass"
+                }),
+                "{error}"
+            );
+            assert_eq!(calls, if failing_pass == 0 { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn doctest_candidates_obey_section_and_requested_check_rules() {
+        let mut package = package("fixture", true);
+        package.declared = [Section::Normal, Section::Development, Section::Build]
+            .map(|section| detect::Declared {
+                name: format!("{section:?}"),
+                section,
+                target: None,
+                feature_referenced: false,
+            })
+            .to_vec();
+        let selected = BTreeSet::from([package.manifest_path.clone()]);
+        let workspace = workspace(vec![package]);
+        for check in [Check::Unused, Check::Misplaced] {
+            let found = source_checks_with(
+                Path::new("Cargo.toml"),
+                &[],
+                &workspace,
+                &selected,
+                &[check],
+                |_, _, _, _| Ok(evidence::Evidence::default()),
+                |_, _, candidates| {
+                    let sections = candidates.iter().map(|finding| finding.section).collect::<Vec<_>>();
+                    assert_eq!(
+                        sections,
+                        if check == Check::Unused {
+                            vec![Section::Normal, Section::Development]
+                        } else {
+                            vec![Section::Normal]
+                        }
+                    );
+                    Ok(doctests::DoctestEvidence::default())
+                },
+            )
+            .expect("empty evidence is valid");
+            assert_eq!(found, check == Check::Unused);
+        }
+    }
+
+    #[test]
+    fn doctest_dispatch_is_lazy_and_collects_only_accused_libraries() {
+        let workspace = workspace(vec![package("accused", true), package("unaccused", true), package("binary", false)]);
+        doctest_evidence_with(
+            Path::new("Cargo.toml"),
+            &workspace,
+            &[],
+            || panic!("empty candidates need no shim"),
+            |_, _, _, _| panic!("empty candidates need no doctests"),
+        )
+        .expect("empty candidates are valid");
+        let candidates = [
+            finding(&workspace.packages[0], Section::Normal),
+            finding(&workspace.packages[2], Section::Normal),
+        ];
+        let mut calls = 0;
+        doctest_evidence_with(
+            Path::new("Cargo.toml"),
+            &workspace,
+            &candidates,
+            || Ok("shim".into()),
+            |manifest, selector, target, shim| {
+                calls += 1;
+                assert_eq!(manifest, Path::new("Cargo.toml"));
+                assert_eq!(selector, "accused@1.2.3");
+                assert_eq!(target, workspace.evidence_target_dir.path().join("doctests"));
+                assert_eq!(shim, Path::new("shim"));
+                Ok(doctests::PackageDoctests::default())
+            },
+        )
+        .expect("only the accused library is collected");
+        assert_eq!(calls, 1);
+        let error = doctest_evidence_with(
+            Path::new("Cargo.toml"),
+            &workspace,
+            &candidates,
+            || Err(std::io::Error::other("executable unavailable")),
+            |_, _, _, _| panic!("shim failure stops collection"),
+        )
+        .expect_err("shim lookup failure propagates");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to locate this executable to use as the doctest shim"),
+            "{error}"
+        );
+        let error = doctest_evidence_with(
+            Path::new("Cargo.toml"),
+            &workspace,
+            &candidates,
+            || Ok("shim".into()),
+            |_, _, _, _| Err(ohno::app_err!("collection failed")),
+        )
+        .expect_err("package doctest collection failure propagates");
+        assert!(error.to_string().contains("collection failed"), "{error}");
+    }
+
+    #[test]
+    fn reported_dependency_tables_preserve_every_section_and_target() {
+        for (section, name) in [
+            (Section::Normal, "dependencies"),
+            (Section::Development, "dev-dependencies"),
+            (Section::Build, "build-dependencies"),
+        ] {
+            assert_eq!(dependency_section(section), name);
+            assert_eq!(dependency_table(None, dependency_section(section)), format!("[{name}]"));
+            assert_eq!(
+                dependency_table(Some("cfg(windows)"), dependency_section(section)),
+                format!("[target.'cfg(windows)'.{name}]")
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod selection_tests {
@@ -910,6 +1483,34 @@ mod selection_tests {
     use std::path::PathBuf;
 
     use super::{Check, PackageSelection, resolve_selectors, verdict};
+
+    #[test]
+    fn version_qualified_selectors_resolve_and_errors_are_propagated() {
+        let packages = [verdict::Package {
+            name: "fixture".to_owned(),
+            version: "1.2.3".to_owned(),
+            manifest_path: PathBuf::from("fixture").join("Cargo.toml"),
+            declared: Vec::new(),
+            allowed: BTreeSet::new(),
+            has_doctests: false,
+        }];
+        assert_eq!(
+            resolve_selectors(&packages, &["fixture@1.2.3".to_owned()], false).expect("qualified selector matches"),
+            BTreeSet::from([packages[0].manifest_path.clone()])
+        );
+        let selection = PackageSelection {
+            packages: vec!["missing".to_owned()],
+            workspace: false,
+            exclude: Vec::new(),
+        };
+        selection.resolve(&packages).expect_err("a missing selected package is an error");
+        let selection = PackageSelection {
+            packages: Vec::new(),
+            workspace: true,
+            exclude: vec!["fixture".to_owned()],
+        };
+        assert!(selection.resolve(&packages).expect("a matching exclusion resolves").is_empty());
+    }
 
     #[test]
     fn check_filtering_selects_only_requested_findings() {

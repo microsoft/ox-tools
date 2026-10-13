@@ -20,6 +20,7 @@ pub struct RowWriter<'a, W: Write> {
 impl<'a, W: Write> RowWriter<'a, W> {
     pub fn new(writer: &'a mut W) -> Self {
         Self {
+            // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_one, literal.int_to_zero, tag = "equivalent", reason = "the buffer grows on demand; initial capacity cannot change the serialized row bytes")]
             buffer: Vec::with_capacity(256),
             writer,
             row_count: 0,
@@ -45,6 +46,7 @@ impl<'a, W: Write> RowWriter<'a, W> {
 
     #[inline]
     pub fn write_u64(&mut self, value: u64) {
+        // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "encode_u64 overwrites every byte in the returned prefix; the initial fill value is never serialized")]
         let mut buf = [0u8; 9];
         let bytes_written = vu128::encode_u64(&mut buf, value);
         self.buffer.extend_from_slice(&buf[..bytes_written]);
@@ -188,6 +190,27 @@ mod tests {
         }
 
         buffer
+    }
+
+    #[test]
+    fn byte_values_are_not_replaced_by_default_and_integer_prefixes_round_trip() {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = RowWriter::new(&mut bytes);
+            for byte in 0..=u8::MAX {
+                writer.write_byte(byte);
+            }
+            writer.row_done().unwrap();
+        }
+        assert_eq!(bytes, (0..=u8::MAX).collect::<Vec<_>>());
+        for value in [0, 1, 127, 128, 16_383, 16_384, u64::MAX] {
+            let bytes = encoded(value);
+            let mut prefix = [0_u8; 9];
+            prefix[..bytes.len()].copy_from_slice(&bytes);
+            let (decoded, used) = vu128::decode_u64(&prefix);
+            assert_eq!(decoded, value);
+            assert_eq!(used, bytes.len());
+        }
     }
 
     /// The tables are a cache read back by later runs, so the integer encoding is an on-disk

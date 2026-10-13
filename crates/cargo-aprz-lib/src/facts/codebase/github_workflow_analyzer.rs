@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ohno::IntoAppError;
 
@@ -23,33 +23,44 @@ pub struct GitHubWorkflowInfo {
 
 /// Detect if Miri and Clippy are mentioned in GitHub Actions CI
 pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkflowInfo> {
-    const MAX_WORKFLOW_FILES: usize = 100;
-
-    let mut usage = GitHubWorkflowInfo::default();
-
     let workflows_dir = repo_path.as_ref().join(".github").join("workflows");
     if !workflows_dir.exists() {
-        return Ok(usage);
+        return Ok(GitHubWorkflowInfo::default());
     }
-
-    usage.workflows_detected = true;
-
-    let mut file_count = 0;
 
     // #[gamma::skip(literal.bool_flip, reason = "symlink traversal policy belongs to the external filesystem walker adapter")]
     let entries = walkdir::WalkDir::new(&workflows_dir).follow_links(false);
+    scan_workflow_entries(
+        &workflows_dir,
+        entries
+            .into_iter()
+            .map(|entry| entry.map(|entry| (entry.path().to_owned(), entry.file_type().is_dir()))),
+        |path| fs::File::open(path).map(BufReader::new),
+    )
+}
+
+fn scan_workflow_entries<R: BufRead>(
+    workflows_dir: &Path,
+    entries: impl IntoIterator<Item = std::result::Result<(PathBuf, bool), impl std::error::Error + Send + Sync + 'static>>,
+    mut open: impl FnMut(&Path) -> std::io::Result<R>,
+) -> Result<GitHubWorkflowInfo> {
+    const MAX_WORKFLOW_FILES: usize = 100;
+    let mut usage = GitHubWorkflowInfo {
+        workflows_detected: true,
+        ..GitHubWorkflowInfo::default()
+    };
+    let mut file_count = 0;
     for entry_result in entries {
         // #[gamma::skip(try.propagate_to_unwrap, reason = "filesystem walk failures must be propagated rather than converted into process panics")]
-        let entry = entry_result.into_app_err(WALKING_WORKFLOWS_CONTEXT)?;
+        let (path, is_directory) = entry_result.into_app_err(WALKING_WORKFLOWS_CONTEXT)?;
 
         // Skip directories
-        if entry.file_type().is_dir() {
+        if is_directory {
             continue;
         }
 
         // Check for YAML extension
-        let is_yaml = entry
-            .path()
+        let is_yaml = path
             .extension()
             .and_then(|s| s.to_str())
             .is_some_and(|ext| ext == "yml" || ext == "yaml");
@@ -65,8 +76,7 @@ pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkf
         }
 
         // #[gamma::skip(try.propagate_to_unwrap, reason = "opening a workflow file is a filesystem adapter boundary whose errors must remain recoverable")]
-        let file = fs::File::open(entry.path()).into_app_err_with(|| format!("opening workflow file '{}'", entry.path().display()))?;
-        let mut reader = BufReader::new(file);
+        let mut reader = open(&path).into_app_err_with(|| format!("opening workflow file '{}'", path.display()))?;
 
         // The line buffer is reused and matched case-insensitively in place, so scanning a
         // workflow file allocates nothing per line.
@@ -129,14 +139,86 @@ mod tests {
 
     #[test]
     fn line_buffer_is_cleared_between_reads() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let workflows_dir = temp_dir.path().join(".github").join("workflows");
-        fs::create_dir_all(&workflows_dir).unwrap();
-        fs::write(workflows_dir.join("ci.yml"), "run: cargo cli\nppy\n").unwrap();
-
-        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+        let result = scan_workflow_entries(
+            Path::new("workflows"),
+            [Ok::<_, std::io::Error>((PathBuf::from("ci.yml"), false))],
+            |_| Ok(std::io::Cursor::new("run: cargo cli\nppy\n")),
+        )
+        .unwrap();
 
         assert!(!result.clippy_detected, "text split across separate lines is not a tool name");
+    }
+
+    #[test]
+    fn tools_are_detected_in_either_line_order_without_scanning_yaml_named_directories_as_files() {
+        for contents in [
+            "run: cargo miri test\nrun: cargo clippy\n",
+            "run: cargo clippy\nrun: cargo miri test\n",
+        ] {
+            let result = scan_workflow_entries(
+                Path::new("workflows"),
+                [
+                    Ok::<_, std::io::Error>((PathBuf::from("nested.yaml"), true)),
+                    Ok((PathBuf::from("ci.yml"), false)),
+                ],
+                |path| {
+                    assert_eq!(path, Path::new("ci.yml"));
+                    Ok(std::io::Cursor::new(contents))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (result.workflows_detected, result.miri_detected, result.clippy_detected),
+                (true, true, true)
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_scan_skips_non_yaml_and_stops_before_later_open_errors() {
+        for (contents, miri, clippy) in [
+            ("run: cargo miri test\n", true, false),
+            ("run: cargo clippy\n", false, true),
+            ("run: cargo miri test\nrun: cargo clippy\n", true, true),
+        ] {
+            let entries = [(PathBuf::from("notes.txt"), false), (PathBuf::from("ci.yml"), false)];
+            let open = |path: &Path| {
+                assert_eq!(path, Path::new("ci.yml"));
+                Ok(std::io::Cursor::new(contents))
+            };
+            let result = scan_workflow_entries(
+                Path::new("workflows"),
+                entries.clone().into_iter().map(Ok::<_, std::io::Error>),
+                open,
+            )
+            .unwrap();
+            assert_eq!((result.miri_detected, result.clippy_detected), (miri, clippy));
+            if miri && clippy {
+                let result = scan_workflow_entries(
+                    Path::new("workflows"),
+                    entries
+                        .into_iter()
+                        .chain([(PathBuf::from("later.yml"), false)])
+                        .map(Ok::<_, std::io::Error>),
+                    open,
+                )
+                .unwrap();
+                assert!(result.miri_detected && result.clippy_detected);
+            }
+        }
+        let error = scan_workflow_entries(
+            Path::new("workflows"),
+            [Ok::<_, std::io::Error>((PathBuf::from("missing.yml"), false))],
+            |path| {
+                assert_eq!(path, Path::new("missing.yml"));
+                Err::<std::io::Cursor<&str>, _>(std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

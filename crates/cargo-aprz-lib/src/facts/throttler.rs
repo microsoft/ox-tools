@@ -32,6 +32,7 @@ impl Throttler {
     // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "a zero-capacity semaphore can never issue a work permit")]
     pub fn new(max_concurrent: usize) -> Arc<Self> {
         Arc::new(Self {
+            // #[gamma::skip(expr.decrement, tag = "timeout", reason = "the campaign reduced a one-slot throttler to zero slots, so acquisition can never complete")]
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "a throttler initialized as paused has no task scheduled to resume it")]
             paused: AtomicBool::new(false),
@@ -81,6 +82,7 @@ impl Throttler {
     }
 
     /// Returns whether the throttler is currently paused.
+    // #[gamma::skip(fn_value.bool_true, tag = "timeout", reason = "the campaign forced permanent paused status and retrying callers never finished")]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
     }

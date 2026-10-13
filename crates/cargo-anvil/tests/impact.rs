@@ -282,6 +282,105 @@ fn run_impact(root: &Path) -> String {
 }
 
 #[test]
+fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
+    let recipe = include_str!("../templates/justfiles/anvil/impact.just");
+    let creation = recipe
+        .split_once("        $env:GIT_LFS_SKIP_SMUDGE = '1'\n")
+        .unwrap()
+        .1
+        .split_once("            if (-not (Test-Path (Join-Path $wt 'Cargo.toml'))) {")
+        .unwrap()
+        .0;
+    assert_eq!(
+        creation,
+        concat!(
+            "        $baselineFailed = $false\n",
+            "        try {\n",
+            "            $worktreeOutput = @(git worktree add --detach $wt $baseSha 2>&1)\n",
+            "            if ($LASTEXITCODE -ne 0) {\n",
+            "                throw \"anvil-impact: failed to create baseline worktree at ${wt}: $($worktreeOutput -join [Environment]::NewLine)\"\n",
+            "            }\n",
+        )
+    );
+    let cleanup = recipe
+        .split_once("\n        } finally {\n")
+        .unwrap()
+        .1
+        .split_once("\n    }\n\n    # --- Current snapshot:")
+        .unwrap()
+        .0;
+    insta::assert_snapshot!("baseline_worktree_cleanup", cleanup);
+}
+
+#[test]
+fn baseline_cleanup_emits_the_error_precedence_contract() {
+    let recipe = include_str!("../templates/justfiles/anvil/impact.just");
+    let boundary = recipe
+        .split_once("                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8\n")
+        .unwrap()
+        .1
+        .split_once("            $cleanupFailures = ")
+        .unwrap()
+        .0;
+    assert_eq!(
+        boundary,
+        concat!(
+            "                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline\n",
+            "            }\n",
+            "        } catch {\n",
+            "            $baselineFailed = $true\n",
+            "            throw\n",
+            "        } finally {\n",
+        )
+    );
+    let policy = recipe
+        .split_once("            if ($cleanupFailures.Count -gt 0) {\n")
+        .unwrap()
+        .1
+        .split_once("\n    }\n\n    # --- Current snapshot:")
+        .unwrap()
+        .0;
+    assert_eq!(
+        policy,
+        concat!(
+            "                $cleanupMessage = \"anvil-impact: baseline cleanup failed: $($cleanupFailures -join '; ')\"\n",
+            "                if ($baselineFailed) {\n",
+            "                    Write-Warning -Message $cleanupMessage -WarningAction Continue\n",
+            "                } else {\n",
+            "                    throw $cleanupMessage\n",
+            "                }\n",
+            "            }\n",
+            "        }",
+        )
+    );
+}
+
+#[test]
+fn baseline_registration_emits_platform_separator_normalization() {
+    let registration = include_str!("../templates/justfiles/anvil/impact.just")
+        .lines()
+        .find(|line| line.trim_start().starts_with("$registeredPath = "))
+        .unwrap();
+    assert_eq!(
+        registration.trim(),
+        "$registeredPath = 'worktree ' + $wt.Replace([System.IO.Path]::DirectorySeparatorChar, [char] '/')",
+    );
+}
+
+#[test]
+fn baseline_worktree_names_do_not_reuse_abandoned_process_paths() {
+    let allocation = include_str!("../templates/justfiles/anvil/impact.just")
+        .lines()
+        .find(|line| line.trim_start().starts_with("$wt = "))
+        .expect("the embedded impact recipe assigns its baseline path to $wt");
+    assert_eq!(
+        allocation.trim(),
+        r#"$wt = Join-Path $tmpRoot "anvil-baseline-$PID-$([System.Guid]::NewGuid().ToString('N'))""#,
+        "each allocation must ask for a fresh GUID, not reuse a PID-only path"
+    );
+}
+
+#[test]
 #[serial]
 fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     if !tools_available() {

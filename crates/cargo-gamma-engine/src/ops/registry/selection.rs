@@ -47,6 +47,7 @@ impl Selection {
 
     /// An empty set.
     #[must_use]
+    // #[gamma::skip(fn_value.default, reason = "Self is Selection, so both spellings call the same derived Default implementation")]
     pub fn empty() -> Self {
         Self::default()
     }
@@ -168,6 +169,31 @@ impl Selection {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_lists_preserve_order_errors_and_preset_provenance() {
+        let selection = Selection::parse(", , relational.eq_to_ne, , !relational.eq_to_ne, literal.bool_flip,").unwrap();
+        assert_eq!(selection.sorted(), ["literal.bool_flip"]);
+        assert!(selection.includes_optimistic("literal.bool_flip"));
+        assert!(!selection.includes_optimistic("relational.eq_to_ne"));
+
+        for selectors in ["unknown", "!unknown", "literal.bool_flip,unknown", "literal.bool_flip,!unknown"] {
+            assert!(Selection::parse(selectors).is_err(), "{selectors}");
+        }
+        assert_eq!(
+            Selection::parse("default").unwrap_err().to_string(),
+            "unknown mutator selector `default`; did you mean `@default`?"
+        );
+        let selection = Selection::parse("@default").unwrap();
+        assert_eq!(selection.sorted(), Selection::default_preset().sorted());
+        assert!(selection.optimistic.is_empty());
+        let mut selection = Selection::empty();
+        selection.set_errors(Vec::new());
+        assert!(!selection.contains(ERR_WITH));
+        selection.set_errors(vec!["first".into(), "second".into()]);
+        assert!(selection.contains(ERR_WITH));
+        assert_eq!(selection.errors(), ["first", "second"]);
+    }
 
     #[test]
     fn unknown_selectors_are_errors_not_silent_no_ops() {

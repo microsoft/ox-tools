@@ -60,6 +60,7 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
     }
 
     // Freeze the first column (metric names) and first row (headers)
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "set_freeze_panes only checks row and column bounds; the fixed (1, 1) coordinates are valid")]
     propagate_xlsx(worksheet.set_freeze_panes(1, 1))?;
 
     // Write metrics as rows, grouped by category
@@ -81,12 +82,14 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
                     Risk::High => &high_risk_format,
                 };
                 #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "the prior header write validates this column; row 1 is valid and appraisal status contains only bounded numeric values and fixed labels, so the string write cannot return a bounds or length error")]
                 propagate_xlsx(worksheet.write_string_with_format(row, (col_idx + 1) as u16, value, format))?;
             }
         }
         row += 1;
 
         // Reasons row
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "write_string can fail only on coordinates or string length; row 2, column 0 and the fixed Reasons label are valid")]
         propagate_xlsx(worksheet.write_string_with_format(row, 0, "Reasons", &bold_format))?;
         propagate_report(write_eval_row(worksheet, row, crates, |eval| appraisal_cell_values(eval).1))?;
         row += 1;
@@ -104,6 +107,7 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
             // Fill the rest of the category row with the same background color
             #[expect(clippy::cast_possible_truncation, reason = "Column count is limited by Excel's u16 column limit")]
             for c in 1..=crates.len() as u16 {
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "the category header just validated this row and the crate headers validated each column; write_blank has no error other than out-of-range coordinates")]
                 propagate_xlsx(worksheet.write_blank(row, c, &category_format))?;
             }
 
@@ -896,5 +900,47 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
     fn report_generation_propagates_writer_errors() {
         assert!(generate(&[], &mut FailingWriter).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run rust_xlsxwriter")]
+    fn report_generation_propagates_oversized_metric_name_errors() {
+        static LONG_NAME: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| "x".repeat(32_768));
+        let mut context = ReportContext::new(&[]);
+        context
+            .metrics_by_category
+            .insert(MetricCategory::Metadata, vec![LONG_NAME.as_str()]);
+        let error = generate_with_context(&[], &context, &mut Vec::new()).unwrap_err();
+        assert!(error.to_string().to_lowercase().contains("string"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run rust_xlsxwriter")]
+    fn report_generation_propagates_oversized_headers_reasons_and_metric_values() {
+        let oversized = "x".repeat(32_768);
+        let header = create_test_crate(&oversized, "1.0.0", None);
+        let reasons = create_test_crate(
+            "reasons",
+            "1.0.0",
+            Some(Appraisal::new(
+                Risk::High,
+                vec![ExpressionOutcome::new(
+                    "failed".into(),
+                    oversized.clone().into(),
+                    ExpressionDisposition::False,
+                )],
+                1,
+                0,
+                0.0,
+            )),
+        );
+        let mut metric = create_test_crate("metric", "1.0.0", None);
+        metric
+            .metrics
+            .push(Metric::with_value(&STABILITY_DEF, MetricValue::String(oversized.into())));
+        for crate_info in [header, reasons, metric] {
+            let error = generate(&[crate_info], &mut Vec::new()).expect_err("Excel rejects strings beyond 32767 characters");
+            assert!(format!("{error:#}").to_ascii_lowercase().contains("string"), "{error:#}");
+        }
     }
 }
