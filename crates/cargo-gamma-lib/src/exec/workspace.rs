@@ -173,6 +173,25 @@ struct TestingSnapshot {
     resources: Resources,
 }
 
+/// I/O needed to resume a prepared workspace, separate from decoding and hydration.
+pub(crate) struct TestingResumeIo<
+    S = fn(&Utf8Path, Option<&Utf8Path>) -> Utf8PathBuf,
+    C = fn(&Utf8Path, &Utf8Path) -> Result<File>,
+    J = fn(&Utf8Path, Option<u64>) -> Result<super::testing_state::TestingJournal>,
+> {
+    default_scratch: S,
+    claim_cache: C,
+    open_journal: J,
+}
+
+impl TestingResumeIo {
+    pub(crate) const FILESYSTEM: Self = Self {
+        default_scratch: gamma_base,
+        claim_cache: claim_redirected_cache,
+        open_journal: super::testing_state::TestingJournal::open,
+    };
+}
+
 impl TestingSnapshot {
     fn resume_with<C, J>(
         snapshot: serde_json::Value,
@@ -575,35 +594,30 @@ impl Workspace {
         Ok(paths)
     }
 
-    pub(crate) fn resume_testing(
+    pub(crate) fn resume_testing<C, J>(
         source: &Utf8Path,
         base: &Utf8Path,
         snapshot: serde_json::Value,
-        workspace_lock: File,
+        workspace_lock: impl Into<Option<File>>,
         valid_bytes: u64,
-    ) -> Result<Self> {
-        Self::resume_testing_with(
+        io: TestingResumeIo<
+            impl FnOnce(&Utf8Path, Option<&Utf8Path>) -> Utf8PathBuf,
+            impl FnOnce(&Utf8Path, &Utf8Path) -> Result<C>,
+            impl FnOnce(&Utf8Path, Option<u64>) -> Result<J>,
+        >,
+    ) -> Result<Self>
+    where
+        C: Into<Option<File>>,
+        J: Into<Option<super::testing_state::TestingJournal>>,
+    {
+        let (saved, cache_lock, journal) = TestingSnapshot::resume_with(
+            snapshot,
             source,
             base,
-            snapshot,
-            Some(workspace_lock),
-            || gamma_base(source, None),
-            |source, base| claim_redirected_cache(source, base).map(Some),
-            |base| super::testing_state::TestingJournal::open(base, Some(valid_bytes)).map(Some),
-        )
-    }
-
-    fn resume_testing_with(
-        source: &Utf8Path,
-        base: &Utf8Path,
-        snapshot: serde_json::Value,
-        workspace_lock: Option<File>,
-        default_scratch: impl FnOnce() -> Utf8PathBuf,
-        claim_cache: impl FnOnce(&Utf8Path, &Utf8Path) -> Result<Option<File>>,
-        open_journal: impl FnOnce(&Utf8Path) -> Result<Option<super::testing_state::TestingJournal>>,
-    ) -> Result<Self> {
-        let (saved, cache_lock, journal) =
-            TestingSnapshot::resume_with(snapshot, source, base, default_scratch, claim_cache, open_journal)?;
+            || (io.default_scratch)(source, None),
+            io.claim_cache,
+            |base| (io.open_journal)(base, Some(valid_bytes)),
+        )?;
         Ok(Self {
             base: saved.base,
             root: saved.root,
@@ -614,7 +628,7 @@ impl Workspace {
             nextest: saved.nextest,
             test_environment: saved.test_environment,
             resources: saved.resources,
-            testing_journal: journal,
+            testing_journal: journal.into(),
             launch: OnceLock::from(saved.launch),
             harness_threads: OnceLock::from(saved.harness_threads),
             rustc_captures: None,
@@ -624,8 +638,8 @@ impl Workspace {
             leak: false,
             #[cfg(any(test, feature = "internals"))]
             test_cache_home: crate::testing::cache_home(source),
-            _workspace_lock: workspace_lock,
-            _cache_lock: cache_lock.flatten(),
+            _workspace_lock: workspace_lock.into(),
+            _cache_lock: cache_lock.and_then(Into::into),
             torn_down: false,
         })
     }
@@ -2540,6 +2554,7 @@ mod path_identity_tests {
 mod testing_resume_tests {
     use std::cell::RefCell;
 
+    use super::super::testing_state::TestingJournal;
     use super::*;
     use crate::exec::verdict::Only;
 
@@ -2582,24 +2597,30 @@ mod testing_resume_tests {
         assert!(encoded["resources"].get("active").is_none());
         let calls = RefCell::new(Vec::new());
         let restored = with_cache_home(|| {
-            Workspace::resume_testing_with(
+            Workspace::resume_testing(
                 source,
                 base,
                 encoded.clone(),
                 None,
-                || {
-                    calls.borrow_mut().push("scratch");
-                    default_scratch.to_owned()
-                },
-                |actual_source, actual_base| {
-                    assert_eq!((actual_source, actual_base), (source, base));
-                    calls.borrow_mut().push("cache");
-                    Ok(None)
-                },
-                |actual_base| {
-                    assert_eq!(actual_base, base);
-                    calls.borrow_mut().push("journal");
-                    Ok(None)
+                73,
+                TestingResumeIo {
+                    default_scratch: |actual_source: &Utf8Path, cache: Option<&Utf8Path>| {
+                        assert_eq!(actual_source, source);
+                        assert_eq!(cache, None);
+                        calls.borrow_mut().push("scratch");
+                        default_scratch.to_owned()
+                    },
+                    claim_cache: |actual_source: &Utf8Path, actual_base: &Utf8Path| {
+                        assert_eq!((actual_source, actual_base), (source, base));
+                        calls.borrow_mut().push("cache");
+                        Ok(None)
+                    },
+                    open_journal: |actual_base: &Utf8Path, valid_bytes| {
+                        assert_eq!(actual_base, base);
+                        assert_eq!(valid_bytes, Some(73));
+                        calls.borrow_mut().push("journal");
+                        Ok(None)
+                    },
                 },
             )
         })
@@ -2630,20 +2651,28 @@ mod testing_resume_tests {
             let encoded = snapshot(base, default_scratch);
             let calls = RefCell::new(Vec::new());
             let restored = with_cache_home(|| {
-                Workspace::resume_testing_with(
+                Workspace::resume_testing(
                     Utf8Path::new("source"),
                     base,
                     encoded.clone(),
                     None,
-                    || {
-                        calls.borrow_mut().push("scratch");
-                        default_scratch.to_owned()
-                    },
-                    |_, _| panic!("default scratch must not claim a redirected cache"),
-                    |actual_base| {
-                        assert_eq!(actual_base, base);
-                        calls.borrow_mut().push("journal");
-                        Ok(None)
+                    0,
+                    TestingResumeIo {
+                        default_scratch: |actual_source: &Utf8Path, cache: Option<&Utf8Path>| {
+                            assert_eq!(actual_source, Utf8Path::new("source"));
+                            assert_eq!(cache, None);
+                            calls.borrow_mut().push("scratch");
+                            default_scratch.to_owned()
+                        },
+                        claim_cache: |_: &Utf8Path, _: &Utf8Path| -> Result<Option<File>> {
+                            panic!("default scratch must not claim a redirected cache")
+                        },
+                        open_journal: |actual_base: &Utf8Path, valid_bytes| {
+                            assert_eq!(actual_base, base);
+                            assert_eq!(valid_bytes, Some(0));
+                            calls.borrow_mut().push("journal");
+                            Ok(None)
+                        },
                     },
                 )
             })
@@ -2665,13 +2694,19 @@ mod testing_resume_tests {
         ] {
             let mut encoded = snapshot(base, base);
             encoded[field] = value.into();
-            let failure = TestingSnapshot::resume_with(
-                encoded,
+            let failure = Workspace::resume_testing(
                 Utf8Path::new("source"),
                 base,
-                || "default-scratch".into(),
-                |_, _| -> Result<()> { panic!("invalid paths must not claim a cache") },
-                |_| -> Result<()> { panic!("invalid paths must not open a journal") },
+                encoded,
+                None,
+                19,
+                TestingResumeIo {
+                    default_scratch: |_: &Utf8Path, _: Option<&Utf8Path>| "default-scratch".into(),
+                    claim_cache: |_: &Utf8Path, _: &Utf8Path| -> Result<Option<File>> { panic!("invalid paths must not claim a cache") },
+                    open_journal: |_: &Utf8Path, _: Option<u64>| -> Result<Option<TestingJournal>> {
+                        panic!("invalid paths must not open a journal")
+                    },
+                },
             )
             .unwrap_err();
             assert_eq!(
@@ -2684,13 +2719,19 @@ mod testing_resume_tests {
 
     #[test]
     fn testing_resume_rejects_malformed_state_before_io() {
-        let failure = TestingSnapshot::resume_with(
-            serde_json::json!({}),
+        let failure = Workspace::resume_testing(
             Utf8Path::new("source"),
             Utf8Path::new("cache"),
-            || panic!("malformed state must not resolve default scratch"),
-            |_, _| -> Result<()> { panic!("malformed state must not claim a cache") },
-            |_| -> Result<()> { panic!("malformed state must not open a journal") },
+            serde_json::json!({}),
+            None,
+            19,
+            TestingResumeIo {
+                default_scratch: |_: &Utf8Path, _: Option<&Utf8Path>| panic!("malformed state must not resolve default scratch"),
+                claim_cache: |_: &Utf8Path, _: &Utf8Path| -> Result<Option<File>> { panic!("malformed state must not claim a cache") },
+                open_journal: |_: &Utf8Path, _: Option<u64>| -> Result<Option<TestingJournal>> {
+                    panic!("malformed state must not open a journal")
+                },
+            },
         )
         .unwrap_err();
         let cause = failure.source().unwrap().downcast_ref::<serde_json::Error>().unwrap();
@@ -2703,13 +2744,19 @@ mod testing_resume_tests {
         let base = Utf8Path::new("cache");
         let mut encoded = snapshot(base, base);
         encoded["root"] = "/".into();
-        let failure = TestingSnapshot::resume_with(
-            encoded,
+        let failure = Workspace::resume_testing(
             Utf8Path::new("source"),
             base,
-            || panic!("missing scratch must not resolve default scratch"),
-            |_, _| -> Result<()> { panic!("missing scratch must not claim a cache") },
-            |_| -> Result<()> { panic!("missing scratch must not open a journal") },
+            encoded,
+            None,
+            19,
+            TestingResumeIo {
+                default_scratch: |_: &Utf8Path, _: Option<&Utf8Path>| panic!("missing scratch must not resolve default scratch"),
+                claim_cache: |_: &Utf8Path, _: &Utf8Path| -> Result<Option<File>> { panic!("missing scratch must not claim a cache") },
+                open_journal: |_: &Utf8Path, _: Option<u64>| -> Result<Option<TestingJournal>> {
+                    panic!("missing scratch must not open a journal")
+                },
+            },
         )
         .unwrap_err();
         assert_eq!(failure.to_string(), "prepared testing workspace has no scratch directory");
@@ -2719,16 +2766,22 @@ mod testing_resume_tests {
     #[test]
     fn testing_resume_cache_rejection_prevents_journal_recovery() {
         let base = Utf8Path::new("cache");
-        let failure = TestingSnapshot::resume_with(
-            snapshot(base, base),
+        let failure = Workspace::resume_testing(
             Utf8Path::new("source"),
             base,
-            || "default-scratch".into(),
-            |source, actual_base| -> Result<()> {
-                assert_eq!((source, actual_base), (Utf8Path::new("source"), base));
-                Err(error!("cache admission failed").caused_by(io::Error::new(io::ErrorKind::PermissionDenied, "foreign writer")))
+            snapshot(base, base),
+            None,
+            19,
+            TestingResumeIo {
+                default_scratch: |_: &Utf8Path, _: Option<&Utf8Path>| "default-scratch".into(),
+                claim_cache: |source: &Utf8Path, actual_base: &Utf8Path| -> Result<Option<File>> {
+                    assert_eq!((source, actual_base), (Utf8Path::new("source"), base));
+                    Err(error!("cache admission failed").caused_by(io::Error::new(io::ErrorKind::PermissionDenied, "foreign writer")))
+                },
+                open_journal: |_: &Utf8Path, _: Option<u64>| -> Result<Option<TestingJournal>> {
+                    panic!("rejected cache must not open a journal")
+                },
             },
-            |_| -> Result<()> { panic!("rejected cache must not open a journal") },
         )
         .unwrap_err();
         let cause = failure.source().unwrap().downcast_ref::<io::Error>().unwrap();
@@ -2740,34 +2793,46 @@ mod testing_resume_tests {
     #[test]
     fn testing_resume_propagates_journal_failure_after_cache_admission() {
         #[derive(Debug)]
-        struct CacheLock<'a>(&'a RefCell<Vec<&'static str>>);
+        struct Lock<'a>(&'a RefCell<Vec<&'static str>>, &'static str);
 
-        impl Drop for CacheLock<'_> {
+        impl Drop for Lock<'_> {
             fn drop(&mut self) {
-                self.0.borrow_mut().push("cache-drop");
+                self.0.borrow_mut().push(self.1);
+            }
+        }
+
+        impl From<Lock<'_>> for Option<File> {
+            fn from(lock: Lock<'_>) -> Self {
+                lock.0.borrow_mut().push("lock-transfer");
+                None
             }
         }
 
         let base = Utf8Path::new("cache");
         let calls = RefCell::new(Vec::new());
-        let failure = TestingSnapshot::resume_with(
-            snapshot(base, base),
+        let failure = Workspace::resume_testing(
             Utf8Path::new("source"),
             base,
-            || "default-scratch".into(),
-            |source, actual_base| {
-                assert_eq!((source, actual_base), (Utf8Path::new("source"), base));
-                calls.borrow_mut().push("cache");
-                Ok(CacheLock(&calls))
-            },
-            |actual_base| -> Result<()> {
-                assert_eq!(actual_base, base);
-                calls.borrow_mut().push("journal");
-                Err(error!("journal recovery failed").caused_by(io::Error::new(io::ErrorKind::InvalidData, "truncated verdict")))
+            snapshot(base, base),
+            Lock(&calls, "workspace-drop"),
+            19,
+            TestingResumeIo {
+                default_scratch: |_: &Utf8Path, _: Option<&Utf8Path>| "default-scratch".into(),
+                claim_cache: |source: &Utf8Path, actual_base: &Utf8Path| {
+                    assert_eq!((source, actual_base), (Utf8Path::new("source"), base));
+                    calls.borrow_mut().push("cache");
+                    Ok(Lock(&calls, "cache-drop"))
+                },
+                open_journal: |actual_base: &Utf8Path, valid_bytes| -> Result<Option<TestingJournal>> {
+                    assert_eq!(actual_base, base);
+                    assert_eq!(valid_bytes, Some(19));
+                    calls.borrow_mut().push("journal");
+                    Err(error!("journal recovery failed").caused_by(io::Error::new(io::ErrorKind::InvalidData, "truncated verdict")))
+                },
             },
         )
         .unwrap_err();
-        assert_eq!(calls.into_inner(), ["cache", "journal", "cache-drop"]);
+        assert_eq!(calls.into_inner(), ["cache", "journal", "cache-drop", "workspace-drop"]);
         let cause = failure.source().unwrap().downcast_ref::<io::Error>().unwrap();
         assert_eq!(cause.kind(), io::ErrorKind::InvalidData);
         assert_eq!(cause.to_string(), "truncated verdict");
