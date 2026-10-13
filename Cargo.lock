@@ -538,6 +538,7 @@ dependencies = [
  "semver",
  "serde_json",
  "tempfile",
+ "unicode-ident",
 ]
 
 [[package]]

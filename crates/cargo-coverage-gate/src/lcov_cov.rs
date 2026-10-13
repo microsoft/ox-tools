@@ -58,7 +58,7 @@ pub(crate) struct FileReport {
     pub(crate) uncovered_lines: Vec<u32>,
 }
 
-type LineCoverage = BTreeMap<(String, PathBuf), BTreeMap<u32, bool>>;
+type LineCoverage = BTreeMap<PathBuf, BTreeMap<u32, bool>>;
 
 impl CoverageReport {
     /// Parse an lcov tracefile from a string.
@@ -117,7 +117,7 @@ impl CoverageReport {
 
     fn from_line_coverage(merged: LineCoverage) -> Self {
         let mut files = Vec::with_capacity(merged.len());
-        for ((_, filename), lines) in merged {
+        for (filename, lines) in merged {
             let mut total: u32 = 0;
             let mut covered: u32 = 0;
             let mut coverable_lines = Vec::with_capacity(lines.len());
@@ -139,14 +139,13 @@ impl CoverageReport {
                 uncovered_lines,
             });
         }
-        files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self { files }
     }
 }
 
 fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) {
     for (section_key, section) in report.sections {
-        let lines = merged.entry((section_key.test_name, section_key.source_file)).or_default();
+        let lines = merged.entry(section_key.source_file).or_default();
         for (line_key, data) in section.lines {
             let is_covered = data.count > 0;
             lines
@@ -257,6 +256,28 @@ end_of_record
         assert_eq!(f.lines_covered, 3, "covered if hit in either config");
         assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
         assert_eq!(f.uncovered_lines, vec![4]);
+    }
+
+    #[test]
+    fn named_test_sections_merge_by_source_path_and_line() {
+        let input = "\
+TN:first
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,1
+DA:2,0
+end_of_record
+TN:second
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,0
+DA:2,1
+end_of_record
+";
+        let report = CoverageReport::from_str(input).expect("named sections parse");
+        assert_eq!(report.files.len(), 1, "test names must not create duplicate source files");
+        let file = &report.files[0];
+        assert_eq!(file.lines_total, 2);
+        assert_eq!(file.lines_covered, 2, "a hit in either named section covers the source line");
+        assert!(file.uncovered_lines.is_empty());
     }
 
     #[test]
