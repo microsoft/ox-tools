@@ -144,7 +144,7 @@ pub struct Workspace {
     /// Held for the life of the run so that another cargo-gamma command targeting the same original
     /// workspace is turned away. Released when the process ends, however it ends, so a crash cannot
     /// leave a lock nobody can clear.
-    _workspace_lock: File,
+    _workspace_lock: Option<File>,
 
     /// Held when reusable state was redirected, so another workspace cannot use the same cache.
     _cache_lock: Option<File>,
@@ -155,6 +155,58 @@ pub struct Workspace {
     /// error part-way through a run, a panic, a test that drops the tree without ceremony — so it
     /// has to stay. This is what keeps it from walking a tree that is already gone.
     torn_down: bool,
+}
+
+/// Persisted launch state, decoded before cache admission or journal recovery.
+#[derive(Debug, serde::Deserialize)]
+struct TestingSnapshot {
+    base: Utf8PathBuf,
+    root: Utf8PathBuf,
+    target: Utf8PathBuf,
+    runtime: Utf8PathBuf,
+    libraries: Vec<Utf8PathBuf>,
+    cargo: CargoOptions,
+    nextest: Option<Harness>,
+    test_environment: Option<TestEnvironment>,
+    launch: Launch,
+    harness_threads: Option<String>,
+    resources: Resources,
+}
+
+impl TestingSnapshot {
+    fn resume_with<C, J>(
+        snapshot: serde_json::Value,
+        source: &Utf8Path,
+        base: &Utf8Path,
+        default_scratch: impl FnOnce() -> Utf8PathBuf,
+        claim_cache: impl FnOnce(&Utf8Path, &Utf8Path) -> Result<C>,
+        open_journal: impl FnOnce(&Utf8Path) -> Result<J>,
+    ) -> Result<(Self, Option<C>, J)> {
+        let saved: Self = serde_json::from_value(snapshot)
+            .map_err(|cause| error!("prepared testing workspace is invalid; start a new campaign").caused_by(cause))?;
+        let scratch = saved
+            .root
+            .parent()
+            .ok_or_else(|| error!("prepared testing workspace has no scratch directory"))?;
+        let default_scratch = default_scratch();
+        if saved.base != base
+            || saved.target != base.join("target")
+            || (scratch != default_scratch && scratch != base)
+            || saved.root != scratch.join("workspace")
+            || saved.runtime != scratch.join("rt")
+        {
+            return Err(error!(
+                "prepared testing workspace does not belong to `{source}` and `{base}`; start a new campaign"
+            ));
+        }
+        let cache_lock = if scratch == base && base != default_scratch {
+            Some(claim_cache(source, base)?)
+        } else {
+            None
+        };
+        let journal = open_journal(base)?;
+        Ok((saved, cache_lock, journal))
+    }
 }
 
 impl Drop for Workspace {
@@ -328,7 +380,7 @@ impl Workspace {
             testing_journal: None,
             #[cfg(any(test, feature = "internals"))]
             test_cache_home: crate::testing::cache_home(source),
-            _workspace_lock: workspace_lock,
+            _workspace_lock: Some(workspace_lock),
             _cache_lock: cache_lock,
             torn_down: false,
         };
@@ -456,7 +508,7 @@ impl Workspace {
             testing_journal: None,
             #[cfg(any(test, feature = "internals"))]
             test_cache_home,
-            _workspace_lock: tempfile::tempfile().expect("a temporary file should be creatable"),
+            _workspace_lock: None,
             _cache_lock: None,
             torn_down: false,
         }
@@ -530,43 +582,28 @@ impl Workspace {
         workspace_lock: File,
         valid_bytes: u64,
     ) -> Result<Self> {
-        #[derive(serde::Deserialize)]
-        struct Snapshot {
-            base: Utf8PathBuf,
-            root: Utf8PathBuf,
-            target: Utf8PathBuf,
-            runtime: Utf8PathBuf,
-            libraries: Vec<Utf8PathBuf>,
-            cargo: CargoOptions,
-            nextest: Option<Harness>,
-            test_environment: Option<TestEnvironment>,
-            launch: Launch,
-            harness_threads: Option<String>,
-            resources: Resources,
-        }
-        let saved: Snapshot = serde_json::from_value(snapshot)
-            .map_err(|cause| error!("prepared testing workspace is invalid; start a new campaign").caused_by(cause))?;
-        let scratch = saved
-            .root
-            .parent()
-            .ok_or_else(|| error!("prepared testing workspace has no scratch directory"))?;
-        let default_scratch = gamma_base(source, None);
-        if saved.base != base
-            || saved.target != base.join("target")
-            || (scratch != default_scratch && scratch != base)
-            || saved.root != scratch.join("workspace")
-            || saved.runtime != scratch.join("rt")
-        {
-            return Err(error!(
-                "prepared testing workspace does not belong to `{source}` and `{base}`; start a new campaign"
-            ));
-        }
-        let cache_lock = if scratch == base && base != default_scratch {
-            Some(claim_redirected_cache(source, base)?)
-        } else {
-            None
-        };
-        let testing_journal = Some(super::testing_state::TestingJournal::open(base, Some(valid_bytes))?);
+        Self::resume_testing_with(
+            source,
+            base,
+            snapshot,
+            Some(workspace_lock),
+            || gamma_base(source, None),
+            |source, base| claim_redirected_cache(source, base).map(Some),
+            |base| super::testing_state::TestingJournal::open(base, Some(valid_bytes)).map(Some),
+        )
+    }
+
+    fn resume_testing_with(
+        source: &Utf8Path,
+        base: &Utf8Path,
+        snapshot: serde_json::Value,
+        workspace_lock: Option<File>,
+        default_scratch: impl FnOnce() -> Utf8PathBuf,
+        claim_cache: impl FnOnce(&Utf8Path, &Utf8Path) -> Result<Option<File>>,
+        open_journal: impl FnOnce(&Utf8Path) -> Result<Option<super::testing_state::TestingJournal>>,
+    ) -> Result<Self> {
+        let (saved, cache_lock, journal) =
+            TestingSnapshot::resume_with(snapshot, source, base, default_scratch, claim_cache, open_journal)?;
         Ok(Self {
             base: saved.base,
             root: saved.root,
@@ -577,7 +614,7 @@ impl Workspace {
             nextest: saved.nextest,
             test_environment: saved.test_environment,
             resources: saved.resources,
-            testing_journal,
+            testing_journal: journal,
             launch: OnceLock::from(saved.launch),
             harness_threads: OnceLock::from(saved.harness_threads),
             rustc_captures: None,
@@ -588,7 +625,7 @@ impl Workspace {
             #[cfg(any(test, feature = "internals"))]
             test_cache_home: crate::testing::cache_home(source),
             _workspace_lock: workspace_lock,
-            _cache_lock: cache_lock,
+            _cache_lock: cache_lock.flatten(),
             torn_down: false,
         })
     }
@@ -2499,6 +2536,246 @@ mod path_identity_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod testing_resume_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::exec::verdict::Only;
+
+    fn with_cache_home<T>(operation: impl FnOnce() -> T) -> T {
+        crate::testing::with_cache_home_at("controlled-cache-home".into(), operation)
+    }
+
+    fn workspace(base: &Utf8Path, scratch: &Utf8Path) -> Workspace {
+        let mut original = with_cache_home(|| Workspace::adopt(scratch.join("workspace"), base.join("target")));
+        original.runtime = scratch.join("rt");
+        original.libraries = vec![scratch.join("libraries")];
+        original.cargo.profile = Some("gamma".to_owned());
+        original.cargo.test_args = vec!["--skip".into(), "slow".into()];
+        original.test_environment = Some(TestEnvironment::fake("subject", "BUILD_SCRIPT_VALUE", "captured"));
+        original.harness_threads = OnceLock::from(Some("3".into()));
+        original.launch = OnceLock::from(Launch {
+            loader: Some("captured-library-path".into()),
+            stack: "7654321".into(),
+        });
+        original
+    }
+
+    fn snapshot(base: &Utf8Path, scratch: &Utf8Path) -> serde_json::Value {
+        workspace(base, scratch).testing_snapshot().unwrap()
+    }
+
+    #[test]
+    fn testing_resume_restores_launch_environment_arguments_and_idle_resource_admission() {
+        let source = Utf8Path::new("source");
+        let base = Utf8Path::new("cache");
+        let default_scratch = Utf8Path::new("default-scratch");
+        let mut original = workspace(base, base);
+        let binary = TestBinary {
+            package_id: "subject".into(),
+            ..crate::testing::test_binary("a-test")
+        };
+        original.resources = Resources::fake_tests(&binary, &[("one", "database")]);
+        let _held = original.acquire_resources(&binary, Only::One("one"));
+        let encoded = original.testing_snapshot().unwrap();
+        assert!(encoded["resources"].get("active").is_none());
+        let calls = RefCell::new(Vec::new());
+        let restored = with_cache_home(|| {
+            Workspace::resume_testing_with(
+                source,
+                base,
+                encoded.clone(),
+                None,
+                || {
+                    calls.borrow_mut().push("scratch");
+                    default_scratch.to_owned()
+                },
+                |actual_source, actual_base| {
+                    assert_eq!((actual_source, actual_base), (source, base));
+                    calls.borrow_mut().push("cache");
+                    Ok(None)
+                },
+                |actual_base| {
+                    assert_eq!(actual_base, base);
+                    calls.borrow_mut().push("journal");
+                    Ok(None)
+                },
+            )
+        })
+        .unwrap();
+        assert_eq!(calls.into_inner(), ["scratch", "cache", "journal"]);
+        assert!(restored.testing_journal.is_none());
+        assert_eq!(restored.testing_snapshot().unwrap(), encoded);
+        assert_eq!(restored.reporting_profile(), Some("gamma"));
+        assert_eq!(restored.test_arguments(), ["--skip", "slow"]);
+        assert_eq!(restored.harness_threads(), Some("3"));
+        assert_eq!(restored.launch().stack, "7654321");
+        assert_eq!(restored.launch().loader.as_deref(), Some(OsStr::new("captured-library-path")));
+        let required = restored.required_resources(&binary, Only::One("one"));
+        assert_eq!(required.iter().map(AsRef::as_ref).collect::<Vec<&str>>(), ["database"]);
+        let mut command = Command::new("unused");
+        restored.configure_test_environment(&mut command, &binary);
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(OsStr::new("BUILD_SCRIPT_VALUE"), Some(OsStr::new("captured")))]
+        );
+        let _fresh = restored.acquire_resources(&binary, Only::One("one"));
+    }
+
+    #[test]
+    fn testing_resume_default_scratch_does_not_claim_a_redirected_cache() {
+        let default_scratch = Utf8Path::new("default-scratch");
+        for base in [Utf8Path::new("cache"), default_scratch] {
+            let encoded = snapshot(base, default_scratch);
+            let calls = RefCell::new(Vec::new());
+            let restored = with_cache_home(|| {
+                Workspace::resume_testing_with(
+                    Utf8Path::new("source"),
+                    base,
+                    encoded.clone(),
+                    None,
+                    || {
+                        calls.borrow_mut().push("scratch");
+                        default_scratch.to_owned()
+                    },
+                    |_, _| panic!("default scratch must not claim a redirected cache"),
+                    |actual_base| {
+                        assert_eq!(actual_base, base);
+                        calls.borrow_mut().push("journal");
+                        Ok(None)
+                    },
+                )
+            })
+            .unwrap();
+            assert_eq!(calls.into_inner(), ["scratch", "journal"]);
+            assert_eq!(restored.testing_snapshot().unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn testing_resume_rejects_cross_workspace_paths_before_io() {
+        let base = Utf8Path::new("cache");
+        for (field, value) in [
+            ("base", "other-cache"),
+            ("target", "other-cache/target"),
+            ("root", "other-scratch/workspace"),
+            ("root", "cache/not-workspace"),
+            ("runtime", "other-scratch/rt"),
+        ] {
+            let mut encoded = snapshot(base, base);
+            encoded[field] = value.into();
+            let failure = TestingSnapshot::resume_with(
+                encoded,
+                Utf8Path::new("source"),
+                base,
+                || "default-scratch".into(),
+                |_, _| -> Result<()> { panic!("invalid paths must not claim a cache") },
+                |_| -> Result<()> { panic!("invalid paths must not open a journal") },
+            )
+            .unwrap_err();
+            assert_eq!(
+                failure.to_string(),
+                "prepared testing workspace does not belong to `source` and `cache`; start a new campaign"
+            );
+            assert!(failure.source().is_none());
+        }
+    }
+
+    #[test]
+    fn testing_resume_rejects_malformed_state_before_io() {
+        let failure = TestingSnapshot::resume_with(
+            serde_json::json!({}),
+            Utf8Path::new("source"),
+            Utf8Path::new("cache"),
+            || panic!("malformed state must not resolve default scratch"),
+            |_, _| -> Result<()> { panic!("malformed state must not claim a cache") },
+            |_| -> Result<()> { panic!("malformed state must not open a journal") },
+        )
+        .unwrap_err();
+        let cause = failure.source().unwrap().downcast_ref::<serde_json::Error>().unwrap();
+        assert_eq!(cause.classify(), serde_json::error::Category::Data);
+        assert_eq!(cause.to_string(), "missing field `base`");
+    }
+
+    #[test]
+    fn testing_resume_rejects_missing_scratch_before_io() {
+        let base = Utf8Path::new("cache");
+        let mut encoded = snapshot(base, base);
+        encoded["root"] = "/".into();
+        let failure = TestingSnapshot::resume_with(
+            encoded,
+            Utf8Path::new("source"),
+            base,
+            || panic!("missing scratch must not resolve default scratch"),
+            |_, _| -> Result<()> { panic!("missing scratch must not claim a cache") },
+            |_| -> Result<()> { panic!("missing scratch must not open a journal") },
+        )
+        .unwrap_err();
+        assert_eq!(failure.to_string(), "prepared testing workspace has no scratch directory");
+        assert!(failure.source().is_none());
+    }
+
+    #[test]
+    fn testing_resume_cache_rejection_prevents_journal_recovery() {
+        let base = Utf8Path::new("cache");
+        let failure = TestingSnapshot::resume_with(
+            snapshot(base, base),
+            Utf8Path::new("source"),
+            base,
+            || "default-scratch".into(),
+            |source, actual_base| -> Result<()> {
+                assert_eq!((source, actual_base), (Utf8Path::new("source"), base));
+                Err(error!("cache admission failed").caused_by(io::Error::new(io::ErrorKind::PermissionDenied, "foreign writer")))
+            },
+            |_| -> Result<()> { panic!("rejected cache must not open a journal") },
+        )
+        .unwrap_err();
+        let cause = failure.source().unwrap().downcast_ref::<io::Error>().unwrap();
+        assert_eq!(cause.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "foreign writer");
+        assert_eq!(failure.to_string(), "cache admission failed: foreign writer");
+    }
+
+    #[test]
+    fn testing_resume_propagates_journal_failure_after_cache_admission() {
+        #[derive(Debug)]
+        struct CacheLock<'a>(&'a RefCell<Vec<&'static str>>);
+
+        impl Drop for CacheLock<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("cache-drop");
+            }
+        }
+
+        let base = Utf8Path::new("cache");
+        let calls = RefCell::new(Vec::new());
+        let failure = TestingSnapshot::resume_with(
+            snapshot(base, base),
+            Utf8Path::new("source"),
+            base,
+            || "default-scratch".into(),
+            |source, actual_base| {
+                assert_eq!((source, actual_base), (Utf8Path::new("source"), base));
+                calls.borrow_mut().push("cache");
+                Ok(CacheLock(&calls))
+            },
+            |actual_base| -> Result<()> {
+                assert_eq!(actual_base, base);
+                calls.borrow_mut().push("journal");
+                Err(error!("journal recovery failed").caused_by(io::Error::new(io::ErrorKind::InvalidData, "truncated verdict")))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls.into_inner(), ["cache", "journal", "cache-drop"]);
+        let cause = failure.source().unwrap().downcast_ref::<io::Error>().unwrap();
+        assert_eq!(cause.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(cause.to_string(), "truncated verdict");
+        assert_eq!(failure.to_string(), "journal recovery failed: truncated verdict");
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -2616,52 +2893,6 @@ mod tests {
 
         assert_eq!(args.iter().filter(|arg| *arg == "fallback").count(), 1);
         assert_eq!(args.iter().filter(|arg| *arg == "precise-id").count(), 1);
-    }
-
-    #[test]
-    fn testing_resume_restores_launch_environment_arguments_and_idle_resource_admission() {
-        let directory = crate::testing::workdir("workspace-testing-restore-");
-        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).unwrap();
-        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).unwrap();
-        let root = base.join("workspace");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&root).unwrap();
-        fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
-        mark_cache_owned_for_test(&source, &base);
-        let mut original = Workspace::adopt(root, base.join("target"));
-        original.runtime = base.join("rt");
-        original.cargo.profile = Some("gamma".to_owned());
-        original.cargo.test_args = vec!["--skip".into(), "slow".into()];
-        original.test_environment = Some(TestEnvironment::fake("subject", "BUILD_SCRIPT_VALUE", "captured"));
-        original.harness_threads = OnceLock::from(Some("3".into()));
-        original.launch = OnceLock::from(Launch {
-            loader: Some("captured-library-path".into()),
-            stack: "7654321".into(),
-        });
-        let binary = TestBinary {
-            package_id: "subject".into(),
-            ..crate::testing::test_binary("a-test")
-        };
-        original.resources = Resources::fake_tests(&binary, &[("one", "database")]);
-        let _held = original.acquire_resources(&binary, super::super::verdict::Only::One("one"));
-        let snapshot = original.testing_snapshot().unwrap();
-        assert!(snapshot["resources"].get("active").is_none());
-        let restored = Workspace::resume_testing(&source, &base, snapshot.clone(), tempfile::tempfile().unwrap(), 0).unwrap();
-        assert_eq!(restored.testing_snapshot().unwrap(), snapshot);
-        assert_eq!(restored.reporting_profile(), Some("gamma"));
-        assert_eq!(restored.test_arguments(), ["--skip", "slow"]);
-        assert_eq!(restored.harness_threads(), Some("3"));
-        assert_eq!(restored.launch().stack, "7654321");
-        let required = restored.required_resources(&binary, super::super::verdict::Only::One("one"));
-        assert_eq!(required.iter().map(AsRef::as_ref).collect::<Vec<&str>>(), ["database"]);
-        let mut command = Command::new("unused");
-        restored.configure_test_environment(&mut command, &binary);
-        assert!(
-            command
-                .get_envs()
-                .any(|(name, value)| name == "BUILD_SCRIPT_VALUE" && value == Some(OsStr::new("captured")))
-        );
-        let _fresh = restored.acquire_resources(&binary, super::super::verdict::Only::One("one"));
     }
 
     #[test]
@@ -3841,7 +4072,7 @@ mod tests {
             resources: Resources::default(),
             testing_journal: None,
             test_cache_home: crate::testing::cache_home(root),
-            _workspace_lock: File::create(base.join("lock").as_std_path()).unwrap(),
+            _workspace_lock: Some(File::create(base.join("lock").as_std_path()).unwrap()),
             _cache_lock: None,
             torn_down: false,
         }
@@ -4150,7 +4381,7 @@ mod tests {
             resources: Resources::default(),
             testing_journal: None,
             test_cache_home,
-            _workspace_lock: tempfile::tempfile().unwrap(),
+            _workspace_lock: Some(tempfile::tempfile().unwrap()),
             _cache_lock: None,
             torn_down: false,
         }
@@ -4179,7 +4410,7 @@ mod tests {
             resources: Resources::default(),
             testing_journal: None,
             test_cache_home: None,
-            _workspace_lock: tempfile::tempfile().unwrap(),
+            _workspace_lock: Some(tempfile::tempfile().unwrap()),
             _cache_lock: None,
             torn_down: false,
         }
