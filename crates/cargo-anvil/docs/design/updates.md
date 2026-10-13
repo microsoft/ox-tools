@@ -105,9 +105,13 @@ element, attribute, or larger comment is ordinary user content. XML region IDs
 containing `--` are rejected during catalog construction. When an XML region is
 absent from an existing MSBuild project, it is inserted before a complete-line
 `</Project>` closing element so the generated content remains inside the root.
-Changing the declared syntax of an existing `(host, id)` is refused; the
-manifest does not record the old syntax, so treating the old pair as absent
-would duplicate the generated body.
+If no such complete-line closing element exists, introduction refuses rather
+than appending invalid content after the root. Changing the declared syntax of
+an existing `(host, id)` is refused whenever marker lines in the previous
+syntax remain, including an unpaired marker; the manifest does not record the
+old syntax, so treating those markers as absent could duplicate an unbounded
+generated body. Recovery requires restoring the previous catalog syntax or
+deliberately removing the old markers and body before retrying.
 
 ### Strict ownership
 

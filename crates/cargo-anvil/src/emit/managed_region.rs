@@ -59,6 +59,10 @@ pub enum RefusalRemedy {
     /// The region's marker lines do not form a usable pair, so no boundary can
     /// be proven for whatever sits between them.
     MalformedMarkers,
+    /// The catalog declares a different marker syntax for an existing region.
+    SyntaxChange,
+    /// An XML host has no safe complete-line insertion point inside its root.
+    XmlPlacement,
     /// An existing region owns the selected array or a separator needed for adoption.
     EnclosingOwnership,
     /// A neighboring change would remove delimiters or change a live array's table membership.
