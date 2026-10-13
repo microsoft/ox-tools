@@ -349,18 +349,23 @@ mod tests {
     }
 
     #[test]
-    fn checks_fail_closed_and_preserve_opted_out_tests() {
+    fn checks_fail_closed_and_delegate_coverage() {
         let checks = all_check_bodies();
         for needle in [
             "anvil-bolero: target discovery failed",
             "${prefix}: cargo metadata failed",
-            "running tests without coverage for opted-out packages",
-            "all affected packages opted out of coverage",
             "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
+        for needle in ["'coverage-gate'", "'run'", "'--no-coverage-target'", "'aarch64-pc-windows-msvc'"] {
+            assert!(checks.contains(needle), "checks tree missing coverage delegation '{needle}'");
+        }
+        assert!(
+            !checks.contains("Invoke-AnvilLcovReport"),
+            "generated recipes must not duplicate cargo-coverage-gate collection"
+        );
         for needle in ["Inconclusive comparisons", "an unbuildable baseline is not evidence"] {
             assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }

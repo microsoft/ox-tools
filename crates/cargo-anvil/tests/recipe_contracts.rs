@@ -2843,7 +2843,7 @@ fn semver_includes_libraries_restricted_to_named_registries() {
 }
 
 #[test]
-fn all_coverage_opted_out_packages_run_both_test_configurations() {
+fn coverage_recipe_delegates_scoped_collection_filtering_and_gate() {
     if !tools_available() {
         return;
     }
@@ -2862,206 +2862,30 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[("FAKE_NEXTEST_EXIT", OsStr::new("0")), ("FAKE_CARGO_LOG", log.as_os_str())],
-    );
-    assert!(
-        output.status.success(),
-        "all-opted-out coverage path should succeed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let calls = fs::read_to_string(&log).unwrap();
-    assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
-    assert!(calls.contains("--all-features"), "calls:\n{calls}");
-    assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
-    assert_eq!(calls.matches("--no-tests=pass").count(), 2, "calls:\n{calls}");
-    assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
-    assert!(!calls.contains("coverage-gate"), "the coverage gate must not run:\n{calls}");
-
-    let no_tests = run_just(tmp.path(), &["anvil-llvm-cov"], &[("FAKE_NEXTEST_EXIT", OsStr::new("4"))]);
-    assert!(
-        no_tests.status.success(),
-        "opted-out packages with no runnable tests should succeed:\n{}",
-        String::from_utf8_lossy(&no_tests.stderr)
-    );
-
-    let failed = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[("FAKE_NEXTEST_EXIT", OsStr::new("7")), ("FAKE_CARGO_LOG", log.as_os_str())],
-    );
-    assert_failed(&failed, "plain nextest failure for an opted-out package");
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-#[test]
-fn coverage_reports_use_requested_package_scope() {
-    if !tools_available() {
-        return;
-    }
-
-    for (scope, expected, include_second_package) in [
-        ("--package measured@0.1.0", "llvm-cov report --package measured@0.1.0 --lcov", true),
-        ("--workspace", "llvm-cov report --workspace --lcov", false),
-    ] {
-        let tmp = fixture(
-            &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
-            &[
-                "anvil-component-nightly-llvm-tools-validate-prereqs",
-                "anvil-tool-cargo-llvm-cov-validate-prereqs",
-                "anvil-tool-cargo-nextest-validate-prereqs",
-                "anvil-tool-cargo-coverage-gate-validate-prereqs",
-                "anvil-component-nightly-llvm-tools-install",
-                "anvil-tool-cargo-llvm-cov-install installer",
-                "anvil-tool-cargo-nextest-install installer",
-                "anvil-tool-cargo-coverage-gate-install installer",
-                "anvil-impact",
-            ],
-        );
-        let log = tmp.path().join("cargo.log");
-        seed_include(tmp.path(), "affected", scope);
-        let mut environment = vec![("FAKE_CARGO_LOG", log.as_os_str())];
-        if include_second_package {
-            environment.push(("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")));
-        }
-        let output = run_just(tmp.path(), &["anvil-llvm-cov"], &environment);
-        assert!(
-            output.status.success(),
-            "coverage path for {scope} should succeed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let calls = fs::read_to_string(&log).unwrap();
-        let reports: Vec<_> = calls.lines().filter(|call| call.contains("llvm-cov report")).collect();
-        assert_eq!(reports.len(), 2, "calls for {scope}:\n{calls}");
-        assert!(
-            reports.iter().all(|call| call.contains(expected)),
-            "coverage reports must match the requested {scope} scope:\n{calls}"
-        );
-    }
-}
-
-#[cfg(all(windows, not(target_arch = "aarch64")))]
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one end-to-end fixture covers successful and failed response-file retries"
-)]
-fn windows_coverage_report_retries_error_206_with_response_file() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
-        &[
-            "anvil-component-nightly-llvm-tools-validate-prereqs",
-            "anvil-tool-cargo-llvm-cov-validate-prereqs",
-            "anvil-tool-cargo-nextest-validate-prereqs",
-            "anvil-tool-cargo-coverage-gate-validate-prereqs",
-            "anvil-component-nightly-llvm-tools-install",
-            "anvil-tool-cargo-llvm-cov-install installer",
-            "anvil-tool-cargo-nextest-install installer",
-            "anvil-tool-cargo-coverage-gate-install installer",
-            "anvil-impact",
-        ],
-    );
-    let llvm_cov = tmp.path().join("fake-bin/llvm-cov.ps1");
-    let llvm_cov_log = tmp.path().join("llvm-cov.log");
-    let response_log = tmp.path().join("response.log");
-    write(
-        &llvm_cov,
-        "param([Parameter(ValueFromRemainingArguments = $true)][string[]] $Remaining)\n\
-         Add-Content -LiteralPath $env:FAKE_LLVM_COV_LOG -Value ($Remaining -join ' ')\n\
-         $response = $Remaining | Where-Object { $_.StartsWith('@') } | Select-Object -First 1\n\
-         if (-not $response) { exit 2 }\n\
-         $responseContent = Get-Content -LiteralPath $response.Substring(1) -Raw\n\
-         if ($responseContent -match \"'\") { exit 3 }\n\
-         if ($responseContent -notmatch '-instr-profile=fake.profdata') { exit 4 }\n\
-         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value $responseContent\n\
-         Write-Output 'TN:'\n\
-         if ($env:FAKE_LLVM_COV_EXIT) { exit [int]$env:FAKE_LLVM_COV_EXIT }\n\
-         exit 0\n",
-    );
     seed_include(tmp.path(), "affected", "--package measured@0.1.0");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
-            ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
-            ("FAKE_LLVM_COV_MULTILINE", OsStr::new("1")),
-            ("FAKE_LLVM_COV_SINGLE_QUOTES", OsStr::new("1")),
-            ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
-            ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
-            ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
-        ],
-    );
-
+    let output = run_just(tmp.path(), &["anvil-llvm-cov"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(
         output.status.success(),
-        "response-file fallback failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        "coverage delegation failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let invocations = fs::read_to_string(&llvm_cov_log).unwrap();
-    assert_eq!(invocations.lines().count(), 2, "invocations:\n{invocations}");
-    assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
-    let responses = fs::read_to_string(&response_log).unwrap();
-    assert_eq!(
-        responses.matches("\n\"-object\" \"fake-object.exe\"").count(),
-        2,
-        "both reports must preserve the multiline command shape:\n{responses}"
-    );
-    for config in ["all-features", "no-default"] {
-        let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
-        assert_eq!(fs::read_to_string(report).unwrap().trim(), "TN:");
-    }
+    let calls = fs::read_to_string(log).unwrap();
     assert!(
-        fs::read_dir(tmp.path().join("target/coverage")).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains("llvm-cov.rsp")),
-        "response-file fallback must remove temporary files"
+        calls.contains("+nightly-test coverage-gate run --no-coverage-target aarch64-pc-windows-msvc --package measured@0.1.0"),
+        "calls:\n{calls}"
     );
-
-    let failed = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
-            ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
-            ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
-            ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
-            ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
-            ("FAKE_LLVM_COV_EXIT", OsStr::new("7")),
-        ],
-    );
-    assert_failed(&failed, "failed response-file fallback");
-    let invocations = fs::read_to_string(&llvm_cov_log).unwrap();
-    assert_eq!(
-        invocations.lines().count(),
-        3,
-        "both quote styles must reach llvm-cov:\n{invocations}"
-    );
-    let failed_report = tmp.path().join("target/coverage/lcov-all-features.info");
-    assert!(!failed_report.exists(), "failed response-file fallback must remove partial report");
     assert!(
-        fs::read_dir(tmp.path().join("target/coverage")).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains("llvm-cov.rsp")),
-        "failed response-file fallback must remove temporary files"
+        !calls.contains("llvm-cov report"),
+        "the recipe must not duplicate collection:\n{calls}"
+    );
+    assert!(
+        !calls.contains("metadata --no-deps"),
+        "coverage-gate owns metadata discovery:\n{calls}"
     );
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
+fn coverage_recipe_uses_coverage_gate_workspace_default_and_propagates_failure() {
     if !tools_available() {
         return;
     }
@@ -3080,27 +2904,16 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--workspace");
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],
-        &[
-            ("PROCESSOR_ARCHITECTURE", OsStr::new("ARM64")),
-            ("FAKE_NEXTEST_EXIT", OsStr::new("4")),
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-        ],
+        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new("7"))],
     );
-    assert!(
-        output.status.success(),
-        "Windows ARM64 fallback should accept empty nextest sets:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let calls = fs::read_to_string(&log).unwrap();
-    assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
-    assert!(calls.contains("--all-features"), "calls:\n{calls}");
-    assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
-    assert_eq!(calls.matches("--no-tests=pass").count(), 2, "calls:\n{calls}");
-    assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
+    assert_failed(&output, "coverage-gate run failure");
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(calls.contains("+nightly-test coverage-gate run"), "calls:\n{calls}");
+    assert!(!calls.contains("--workspace"), "coverage-gate defaults to the workspace:\n{calls}");
 }
 
 // --- container-specific behaviour ------------------------------------------

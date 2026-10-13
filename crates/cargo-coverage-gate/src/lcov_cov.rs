@@ -3,9 +3,10 @@
 
 //! lcov tracefile parser.
 //!
-//! Reads an [lcov tracefile][lcov] (the format `cargo llvm-cov --lcov`
-//! emits) and produces a per-file view of line coverage that the rest
-//! of the gate consumes.
+//! Reads a released-surface-filtered [lcov tracefile][lcov] (derived from the
+//! format `cargo llvm-cov --lcov` emits) and produces a per-file view of line
+//! coverage that the rest of the gate consumes. Raw reports are filtered by
+//! [`crate::source_filter`] before they reach this parser.
 //!
 //! ## Why lcov, not the JSON
 //!
@@ -14,8 +15,7 @@
 //! UI consuming this data sees:
 //!
 //! - Codecov ingests lcov uploads directly.
-//! - Azure DevOps ingests cobertura XML, which cargo-llvm-cov derives
-//!   from lcov internally — same line set.
+//! - Azure DevOps ingests lcov directly.
 //! - `cargo llvm-cov report --codecov` emits Codecov's custom JSON,
 //!   also derived from lcov.
 //!

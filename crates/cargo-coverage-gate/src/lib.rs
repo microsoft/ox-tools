@@ -17,6 +17,12 @@
 //! optionally, to a Markdown summary file for CI step summaries). A failing
 //! verdict includes actionable details without relying on a later
 //! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
+//! Before aggregation, every tracefile is filtered to the source surface that
+//! can ship from Cargo library and binary targets. Test, example, bench,
+//! build-script, and other non-release target sources are removed. Within a
+//! released source file, only items whose `cfg` semantics require `test` (plus
+//! ordinary `#[test]`/`#[bench]` functions) are removed; feature-gated
+//! `test-util` APIs remain measured when they can compile in a non-test build.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
@@ -119,8 +125,7 @@
 //! `cargo-llvm-cov` exports the same instrumentation run in several
 //! formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
 //! consumes lcov because that is what every other coverage report fed by
-//! the same data sees: Codecov ingests lcov uploads directly, ADO
-//! consumes cobertura that cargo-llvm-cov derives from lcov, and the
+//! the same data sees: Codecov and ADO ingest lcov uploads directly, and the
 //! lcov line semantics ("a line is covered if any region on it was
 //! hit") match the human reading of "did we hit this line". The JSON
 //! export uses a stricter "every region on the line must be hit"
@@ -138,8 +143,10 @@
 //! The bare command evaluates existing LCOV files and remains backward
 //! compatible. `cargo coverage-gate run` collects `all-features` and
 //! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
-//! writes `lcov-all-features.info` and `lcov-no-default.info` under
-//! `target/coverage`, and evaluates those same files in-process. Collection can
+//! writes released-surface-filtered `lcov-all-features.info` and
+//! `lcov-no-default.info` under `target/coverage`, and evaluates those exact
+//! files in-process. They are therefore also the artifacts CI uploads to
+//! Codecov or Azure DevOps. Collection can
 //! be limited with repeatable `--package` selectors; no selectors means the
 //! workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
 //! options to customize collection.
@@ -169,14 +176,16 @@
 //! distinct coverage directories; private profile isolation does not serialize
 //! stable artifact writers.
 //!
-//! `--lcov` may be repeated; the tracefiles are merged at the line level
+//! `--lcov` may be repeated; each tracefile is released-surface filtered and
+//! then the tracefiles are merged at the line level
 //! (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 //! (`--all-features`, `--no-default-features`) can be gated together
 //! without a separate, platform-specific merge step.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration or
-//! operational errors (unparseable lcov, missing data for a gated package, a
+//! operational errors (unparseable lcov, an unreadable/unparseable source or
+//! source path with no Cargo target owner, stale LCOV line numbers, missing data for a gated package, a
 //! `--package` selector that matches no member, failed collection/export, an
 //! out-of-range `min-lines-percent` value, …).
 //!
@@ -199,7 +208,9 @@
 //!
 //! ## Public API
 //!
-//! [`evaluate`] gates one lcov tracefile for the rustc host target, while
+//! [`filter_lcov`] and [`filter_lcov_many`] produce the released-surface LCOV
+//! artifacts without evaluating policy. [`evaluate`] gates one lcov tracefile
+//! for the rustc host target, while
 //! [`evaluate_many`] merges multiple tracefiles at line level.
 //! [`evaluate_many_for_target`] evaluates a selected Rust target, which may be
 //! supplied explicitly or omitted to select the rustc host target.
@@ -227,12 +238,46 @@ mod error;
 mod lcov_cov;
 mod package_glob;
 mod render;
+mod source_filter;
 mod target;
 mod threshold;
 mod verdict;
 mod workspace;
 
 pub use error::CoverageGateError;
+
+/// Remove coverage that cannot belong to a released Cargo library or binary
+/// surface from one LCOV tracefile.
+///
+/// Cargo target roots and out-of-line module declarations establish source
+/// ownership. Files reachable only from tests, examples, benches, build
+/// scripts, or other non-release targets are removed. Within released files,
+/// lines, branches, and functions are removed only when Rust syntax proves
+/// they are test-only (`#[test]`, `#[bench]`, `#[cfg(test)]`, or a `cfg`
+/// predicate that requires `test`).
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] when Cargo metadata cannot be loaded, the
+/// LCOV input is malformed, a referenced source cannot be resolved/read/parsed,
+/// target ownership cannot be determined, or LCOV line data does not match the
+/// current source tree.
+pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
+    source_filter::filter_one(lcov_text, manifest_path)
+}
+
+/// Apply [`filter_lcov`] to multiple independent tracefiles using one Cargo
+/// target/source analysis pass.
+///
+/// The returned vector preserves input order and length.
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] under the same conditions as
+/// [`filter_lcov`]; any failing input aborts the operation.
+pub fn filter_lcov_many(lcov_texts: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
+    source_filter::filter_many(lcov_texts, manifest_path)
+}
 
 /// Outcome of a coverage-gate evaluation.
 ///
@@ -278,10 +323,13 @@ impl EvaluatedReport {
         self.inner.verdict()
     }
 
-    /// Number of source files in the lcov tracefile whose path did not
-    /// match any workspace member. Such files are dropped from the
-    /// per-package aggregation; this count surfaces them as a single
-    /// aggregated warning rather than per-file noise.
+    /// Number of source files whose path was not attributed to a workspace
+    /// member.
+    ///
+    /// Released-surface filtering now rejects paths with no Cargo target owner
+    /// and paths that cannot be attributed to a package before evaluation, so
+    /// successful evaluations return zero.
+    /// The accessor remains for source compatibility.
     #[must_use]
     pub fn unattributed_count(&self) -> usize {
         self.inner.unattributed
@@ -377,7 +425,9 @@ pub fn evaluate_many_for_target(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
-    let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
+    let filtered = source_filter::filter_many(lcov_texts, manifest_path)?;
+    let filtered_refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
+    let report = lcov_cov::CoverageReport::from_strs(&filtered_refs)?;
     let ws = workspace::Workspace::load(manifest_path, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })

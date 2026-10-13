@@ -534,6 +534,7 @@ dependencies = [
  "mutants",
  "ohno",
  "predicates",
+ "ra_ap_syntax",
  "semver",
  "serde_json",
  "tempfile",

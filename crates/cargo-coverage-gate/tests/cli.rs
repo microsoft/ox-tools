@@ -56,7 +56,11 @@ edition = "2021"
             ),
         )
         .expect("write member Cargo.toml");
-        fs::write(member_dir.join("src/lib.rs"), "// empty\n").expect("write lib.rs");
+        fs::write(
+            member_dir.join("src/lib.rs"),
+            "pub fn released() {}\n#[cfg(test)] fn test_only() {}\n",
+        )
+        .expect("write lib.rs");
     }
 }
 
@@ -69,6 +73,13 @@ fn make_coverage_lcov(dir: &Path, files: &[(&str, u32, u32)]) -> String {
     let mut out = String::new();
     for (rel, count, covered) in files {
         let full = dir.join(rel);
+        if *count > 0 {
+            let mut source = String::new();
+            for line in 1..=*count {
+                writeln!(&mut source, "pub const COVERAGE_LINE_{line}: u32 = {line};").expect("write to String");
+            }
+            fs::write(&full, source).expect("write source matching LCOV line numbers");
+        }
         let path = full.to_string_lossy().replace('\\', "/");
         out.push_str("TN:\n");
         writeln!(out, "SF:{path}").expect("write to String never fails");
@@ -285,6 +296,11 @@ fn displayed_rounding_does_not_satisfy_full_coverage_threshold() {
 fn multiple_lcov_files_merge_at_line_level() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
+    fs::write(
+        tmp.path().join("alpha/src/lib.rs"),
+        "pub const A: u32 = 1;\npub const B: u32 = 2;\npub const C: u32 = 3;\npub const D: u32 = 4;\n",
+    )
+    .expect("write four-line source");
     let src = tmp.path().join("alpha/src/lib.rs").to_string_lossy().replace('\\', "/");
 
     // Two configs of the SAME file, each covering a disjoint half (50%
@@ -642,6 +658,11 @@ fn lcov_with_test_name_records_is_parsed() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
     let full = tmp.path().join("alpha/src/lib.rs");
+    fs::write(
+        &full,
+        "pub const A: u32 = 1;\npub const B: u32 = 2;\npub const C: u32 = 3;\npub const D: u32 = 4;\npub const E: u32 = 5;\n",
+    )
+    .expect("write five-line source");
     let path = full.to_string_lossy().replace('\\', "/");
     let body = format!("TN:my_test\nSF:{path}\nDA:1,5\nDA:2,5\nDA:3,5\nDA:4,5\nDA:5,0\nLF:5\nLH:4\nend_of_record\n");
     let lcov_path = tmp.path().join("cov.info");
@@ -770,6 +791,12 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
             .starts_with("TN:"),
         "successful collection must write the requested stable artifact"
     );
+    for configuration in ["all-features", "no-default"] {
+        let published = fs::read_to_string(coverage_dir.join(format!("lcov-{configuration}.info"))).expect("read filtered LCOV");
+        assert!(published.contains("DA:1,1"), "{published}");
+        assert!(!published.contains("DA:2,"), "{published}");
+        assert!(published.contains("LF:1"), "{published}");
+    }
 
     let log = fs::read_to_string(tool_log).expect("read fake tool log");
     assert!(!log.contains("cargo\tllvm-cov\tclean"), "{log}");

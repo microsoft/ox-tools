@@ -26,9 +26,9 @@ all-features = true
 # we are forced to re-expose.
 allowed_external_types = ["ohno::*"]
 
-# Production code is measured while test-only modules and scaffolding opt out with
-# `#[cfg_attr(coverage_nightly, coverage(off))]`. This floor records the lowest cross-platform
-# production result from the coverage-gate CI matrix; raise it only after that matrix improves.
+# The gate filters test-only source regions and non-release Cargo targets before measuring this
+# crate. This floor records the lowest cross-platform released-surface result from the coverage-gate
+# CI matrix; raise it only after that matrix improves.
 [package.metadata.coverage-gate]
 min-lines-percent = 99.82758
 
@@ -43,6 +43,7 @@ clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-
 glob = { workspace = true }
 lcov = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
+ra_ap_syntax = { workspace = true }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 

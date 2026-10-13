@@ -10,6 +10,7 @@ use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io};
 
+use cargo_coverage_gate::filter_lcov_many;
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -73,17 +74,17 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         workspace: &workspace,
         selection: &selection,
         args: &collection,
-        #[cfg(windows)]
         scratch_dir: coverage_scratch.path(),
         coverage_target_root: &coverage_target_root,
         target: &effective_target.triple,
         tools: &tools,
         quiet: args.quiet,
     };
-    let mut lcov_paths = Vec::with_capacity(configurations.len());
+    let mut collected = Vec::with_capacity(configurations.len());
     for configuration in configurations {
-        lcov_paths.push(collect_configuration(&execution, configuration)?);
+        collected.push(collect_configuration(&execution, configuration)?);
     }
+    let lcov_paths = filter_and_publish_reports(&execution, &collected)?;
 
     let evaluation = crate::run::evaluate_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
     combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
@@ -186,7 +187,6 @@ struct CollectionExecution<'a> {
     workspace: &'a WorkspaceInfo,
     selection: &'a Selection,
     args: &'a CollectionArgs,
-    #[cfg(windows)]
     scratch_dir: &'a Path,
     coverage_target_root: &'a Path,
     target: &'a str,
@@ -546,15 +546,61 @@ fn plain_configuration_command(
     command
 }
 
-fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<PathBuf, AppError> {
-    let lcov_path = execution
+#[derive(Debug)]
+struct CollectedReport {
+    raw_path: PathBuf,
+    stable_path: PathBuf,
+    configuration: FeatureConfiguration,
+}
+
+fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<CollectedReport, AppError> {
+    let stable_path = execution
         .args
         .coverage_dir
         .join(format!("lcov-{}.info", configuration.artifact_name()));
+    let raw_path = execution
+        .scratch_dir
+        .join(format!("raw-lcov-{}.info", configuration.artifact_name()));
 
     run_nextest(execution, configuration)?;
-    run_report(execution, configuration, &lcov_path)?;
-    Ok(lcov_path)
+    run_report(execution, configuration, &raw_path)?;
+    Ok(CollectedReport {
+        raw_path,
+        stable_path,
+        configuration,
+    })
+}
+
+fn filter_and_publish_reports(execution: &CollectionExecution<'_>, collected: &[CollectedReport]) -> Result<Vec<PathBuf>, AppError> {
+    let raw = collected
+        .iter()
+        .map(|report| {
+            fs::read_to_string(&report.raw_path).into_app_err(format!("failed to read raw LCOV report `{}`", report.raw_path.display()))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
+    let manifest = execution.workspace.root.join("Cargo.toml");
+    let filtered = filter_lcov_many(&raw_refs, Some(&manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")?;
+    let mut staged = Vec::with_capacity(collected.len());
+    for (index, report) in collected.iter().enumerate() {
+        let contents = filtered
+            .get(index)
+            .expect("filter_lcov_many preserves one output for every input tracefile");
+        let directory = report
+            .stable_path
+            .parent()
+            .ok_or_else(|| AppError::new(format!("LCOV path `{}` has no parent directory", report.stable_path.display())))?;
+        let temporary = TemporaryPath::write(
+            directory,
+            &format!("{}-filtered.info", report.configuration.artifact_name()),
+            contents.as_bytes(),
+        )?;
+        staged.push((temporary, report.stable_path.clone()));
+    }
+    for (temporary, target) in staged {
+        temporary.publish(&target)?;
+    }
+    Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
 }
 
 fn cargo_command(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Command {
@@ -1061,20 +1107,17 @@ fn command_display(command: &Command) -> String {
         .join(" ")
 }
 
-#[cfg(any(windows, test))]
 #[derive(Debug)]
 struct TemporaryPath {
     path: PathBuf,
     armed: bool,
 }
 
-#[cfg(any(windows, test))]
 /// A temporary-file writer boundary that makes durability failures independently testable.
 trait SynchronizedWrite: io::Write {
     fn sync_all(&self) -> io::Result<()>;
 }
 
-#[cfg(any(windows, test))]
 impl SynchronizedWrite for fs::File {
     #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
     fn sync_all(&self) -> io::Result<()> {
@@ -1082,7 +1125,6 @@ impl SynchronizedWrite for fs::File {
     }
 }
 
-#[cfg(any(windows, test))]
 impl TemporaryPath {
     fn new(directory: &Path, label: &str) -> Self {
         let sequence = reserve_temporary_sequence(&TEMPORARY_SEQUENCE);
@@ -1126,7 +1168,6 @@ impl TemporaryPath {
     }
 }
 
-#[cfg(any(windows, test))]
 impl Drop for TemporaryPath {
     fn drop(&mut self) {
         if self.armed {
@@ -1135,7 +1176,6 @@ impl Drop for TemporaryPath {
     }
 }
 
-#[cfg(any(windows, test))]
 fn write_temporary_contents(temporary: &TemporaryPath, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<(), AppError> {
     writer
         .write_all(contents)
@@ -1769,7 +1809,6 @@ mod tests {
             workspace: &workspace,
             selection: &explicit,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: Path::new("scratch"),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
@@ -2299,7 +2338,6 @@ mod tests {
             workspace: &workspace,
             selection: &selection,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: Path::new("scratch"),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
@@ -2419,7 +2457,6 @@ mod tests {
             workspace: &workspace,
             selection: &selection,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: tmp.path(),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
@@ -2567,7 +2604,6 @@ mod tests {
             workspace: &workspace,
             selection: &selection,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: tmp.path(),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
