@@ -1000,11 +1000,11 @@ mod tests {
         SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
         add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
-        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte, failure_stops_launching,
-        finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds, record_emitted_failure, run,
-        run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group,
-        spawn_worker, spawn_worker_with, terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with,
-        wait_for_worker, wait_for_worker_with, with_cleanup_failure,
+        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
+        failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
+        record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
+        validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
 

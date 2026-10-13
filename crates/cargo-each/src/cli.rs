@@ -179,7 +179,8 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use clap::{CommandFactory, Parser as _, error::ErrorKind};
+    use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser as _};
 
     use super::*;
 
