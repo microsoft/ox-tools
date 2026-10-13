@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{Metadata, MetadataCommand};
 use cargo_platform::{Cfg, CfgExpr, Platform};
 use serde_json::Value;
 
@@ -84,7 +84,6 @@ impl Workspace {
     ///
     /// Runs `cargo metadata --no-deps`, which does not fetch or build
     /// dependencies and is therefore fast and side-effect-free.
-    #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>, target: Option<&str>) -> Result<Self, CoverageGateError> {
         Self::load_with_target_resolver(manifest_path, || TargetContext::resolve(target))
     }
@@ -93,13 +92,18 @@ impl Workspace {
         manifest_path: Option<&Path>,
         resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
     ) -> Result<Self, CoverageGateError> {
-        let mut cmd = MetadataCommand::new();
-        cmd.no_deps();
-        if let Some(path) = manifest_path {
-            cmd.manifest_path(path);
-        }
-        let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
+        let metadata = load_metadata(manifest_path)?;
+        Self::from_metadata_with_target_resolver(&metadata, resolve_target)
+    }
 
+    pub(crate) fn from_metadata(metadata: &Metadata, target: Option<&str>) -> Result<Self, CoverageGateError> {
+        Self::from_metadata_with_target_resolver(metadata, || TargetContext::resolve(target))
+    }
+
+    fn from_metadata_with_target_resolver(
+        metadata: &Metadata,
+        resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
+    ) -> Result<Self, CoverageGateError> {
         // The workspace scope may carry a `min-lines-percent` default but
         // must not assert `expect-no-coverable-lines = true` (an explicit
         // `false` there is accepted and ignored, since it is equivalent to
@@ -152,6 +156,16 @@ impl Workspace {
             default_min_lines_percent: workspace_default,
         })
     }
+}
+
+#[ohno::enrich_err("failed to load cargo workspace metadata")]
+pub(crate) fn load_metadata(manifest_path: Option<&Path>) -> Result<Metadata, CoverageGateError> {
+    let mut command = MetadataCommand::new();
+    command.no_deps();
+    if let Some(path) = manifest_path {
+        command.manifest_path(path);
+    }
+    command.exec().map_err(|error| LoadMetadataError::caused_by(error).into())
 }
 
 /// Whether a `[*.metadata.coverage-gate]` block is being read from a

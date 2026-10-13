@@ -25,6 +25,10 @@ use serde_json::Value;
 /// [`Display`] rendering includes the chained source as `Caused by: …`
 /// automatically.
 ///
+/// Concrete cause types are intentionally private. Callers should propagate or
+/// render this error rather than matching display text; no stable
+/// programmatic classification is currently part of the public API.
+///
 /// [`Display`]: std::fmt::Display
 #[ohno::error]
 #[from(

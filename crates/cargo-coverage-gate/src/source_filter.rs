@@ -14,16 +14,17 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cargo_metadata::{Edition as CargoEdition, MetadataCommand, TargetKind};
+use cargo_metadata::{Edition as CargoEdition, Metadata, TargetKind};
 use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName, LiteralKind};
 use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, TextRange};
 
 use crate::CoverageGateError;
 use crate::error::{
     AmbiguousModuleSourceError, ConflictingSourceEditionError, CoverageLineOutOfRangeError, InvalidModulePathAttributeError,
-    LoadMetadataError, MissingFunctionStartLineError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError,
-    ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
+    MissingFunctionStartLineError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError,
+    UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
 };
+use crate::workspace::load_metadata;
 
 const LINE_RELEASED: u8 = 1;
 const LINE_TEST_ONLY: u8 = 1 << 1;
@@ -105,13 +106,7 @@ struct SourceIndex {
 
 impl SourceIndex {
     #[ohno::enrich_err("failed to load Cargo target ownership for coverage filtering")]
-    fn load(manifest_path: Option<&Path>) -> Result<Self, CoverageGateError> {
-        let mut command = MetadataCommand::new();
-        command.no_deps();
-        if let Some(path) = manifest_path {
-            command.manifest_path(path);
-        }
-        let metadata = command.exec().map_err(LoadMetadataError::caused_by)?;
+    fn from_metadata(metadata: &Metadata) -> Result<Self, CoverageGateError> {
         let workspace_root = resolve_source_path(metadata.workspace_root.as_std_path())?;
         let mut member_dirs = metadata
             .workspace_packages()
@@ -608,22 +603,35 @@ fn validate_line(path: &Path, line: u32, line_count: usize) -> Result<(), Covera
 }
 
 pub(crate) fn filter_many(inputs: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
-    let reports = inputs
-        .iter()
-        .map(|input| lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).map_err(|error| ParseLcovError::from(error).into()))
-        .collect::<Result<Vec<_>, CoverageGateError>>()?;
+    let reports = parse_reports(inputs)?;
     if reports.is_empty() {
         return Ok(Vec::new());
     }
-    let sources = SourceIndex::load(manifest_path)?;
+    let metadata = load_metadata(manifest_path)?;
+    filter_reports_with_metadata(reports, &metadata)
+}
+
+pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata: &Metadata) -> Result<Vec<String>, CoverageGateError> {
+    if reports.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sources = SourceIndex::from_metadata(metadata)?;
     reports.into_iter().map(|report| filter_report(report, &sources)).collect()
 }
 
 pub(crate) fn filter_one(input: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
-    let report = lcov::Report::from_reader(lcov::Reader::new(input.as_bytes()))
-        .map_err(|error| CoverageGateError::from(ParseLcovError::from(error)))?;
-    let sources = SourceIndex::load(manifest_path)?;
+    let report = parse_report(input)?;
+    let metadata = load_metadata(manifest_path)?;
+    let sources = SourceIndex::from_metadata(&metadata)?;
     filter_report(report, &sources)
+}
+
+pub(crate) fn parse_reports(inputs: &[&str]) -> Result<Vec<lcov::Report>, CoverageGateError> {
+    inputs.iter().map(|input| parse_report(input)).collect()
+}
+
+fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
+    lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).map_err(|error| CoverageGateError::from(ParseLcovError::from(error)))
 }
 
 #[cfg(test)]

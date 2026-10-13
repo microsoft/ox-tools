@@ -9,7 +9,7 @@ use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target};
+use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target, evaluate_released_surface_many_for_target};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::CoverageGateArgs;
@@ -29,6 +29,31 @@ pub(crate) fn evaluate_paths(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<ExitCode, AppError> {
+    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Raw)
+}
+
+pub(crate) fn evaluate_filtered_paths(
+    args: &CoverageGateArgs,
+    lcov_paths: &[PathBuf],
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<ExitCode, AppError> {
+    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Released)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InputSurface {
+    Raw,
+    Released,
+}
+
+fn evaluate_paths_with_surface(
+    args: &CoverageGateArgs,
+    lcov_paths: &[PathBuf],
+    gated_packages: &[String],
+    target: Option<&str>,
+    surface: InputSurface,
+) -> Result<ExitCode, AppError> {
     let mut lcov_texts: Vec<String> = Vec::with_capacity(lcov_paths.len());
     for path in lcov_paths {
         let text = fs::read_to_string(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
@@ -36,7 +61,11 @@ pub(crate) fn evaluate_paths(
     }
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
-    let report = evaluate_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
+    let report = match surface {
+        InputSurface::Raw => evaluate_released_surface_many_for_target(&lcov_refs, None, gated_packages, target),
+        InputSurface::Released => evaluate_many_for_target(&lcov_refs, None, gated_packages, target),
+    }
+    .into_app_err("failed to evaluate coverage")?;
     finish_evaluation(args, &report, write_text_output, write_summary_file)
 }
 

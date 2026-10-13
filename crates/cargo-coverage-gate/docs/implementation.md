@@ -102,9 +102,14 @@ leaving errors and summary-file rendering intact.
 
 ## Diagnostic pipeline
 
+The CLI and `evaluate_released_surface*` use the complete pipeline below. Raw
+`evaluate*` compatibility APIs skip source discovery/filtering and begin at
+the filtered-report parsing/attribution stages.
+
 1. Each LCOV input is parsed before source discovery. Malformed LCOV therefore
    fails without touching source state.
-2. Cargo metadata enumerates every workspace target and classifies released
+2. One Cargo metadata snapshot drives both source ownership and package policy.
+   It enumerates every workspace target and classifies released
    libraries (including proc macros and explicit library crate types) and bins
    separately from every other target kind. A module walk follows plain
    `mod name;`, `name/mod.rs`, inline modules, and `#[path = "..."]` edges.
