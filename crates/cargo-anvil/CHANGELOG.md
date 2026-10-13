@@ -19,6 +19,13 @@
     Invalid TOML, overlapping ownership, and structural dependencies
     refuse without applying unrelated pending writes.
 
+- Bug Fixes
+
+  - Use unique temporary baseline worktree paths in the generated impact
+    recipe to avoid collisions when process IDs are reused. Clean up
+    partial baseline checkouts and surface cleanup failures
+    ([#248](https://github.com/microsoft/ox-tools/pull/248)).
+
 - Upgrade notes
 
   - Array regions are opt-in for custom catalogs. Hosts must have a
@@ -28,8 +35,9 @@
     comma. Generated compound values, inline-table scaffolding, and
     automatic migration from whole-table regions are not supported.
   - The `.anvil.lock` schema remains version 1. Array selectors contribute
-    to custom catalog checksums; the built-in catalog and its generated
-    infrastructure remain unchanged.
+    to custom catalog checksums. The generated impact recipe update also
+    changes the built-in catalog checksum; updating generated
+    infrastructure follows the existing managed-file ownership rules.
 
 - Dependencies
 
@@ -92,9 +100,10 @@
   - Raise the generated `cargo-each` pin from 0.1.0 to 0.3.0 for the
     package-isolated checks
     ([#224](https://github.com/microsoft/ox-tools/pull/224)).
-  - Exclude test-only modules from production coverage and record the
-    crate's coverage floor as 99.86445 percent
+  - Exclude test-only modules from production coverage
     ([#229](https://github.com/microsoft/ox-tools/pull/229)).
+  - Record the crate's coverage floor as 99.86445 percent
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
   - Expand engine regression and mutation coverage, and refactor
     catalog, manifest, region, and workspace helpers without changing
     the managed-file ownership contract
