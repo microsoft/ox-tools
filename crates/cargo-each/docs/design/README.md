@@ -226,13 +226,17 @@ atoms are:
 |-----------|-----------------------|
 | `lib` | has a plain `lib` target. Proc-macro, `cdylib`, and `staticlib` crates are **not** matched — the predicate means the plain `lib` target kind only. |
 | `bin` | has a `bin` target. |
-| `doctest` | has at least one target for which Cargo metadata reports `doctest = true`. This uses Cargo's resolved capability bit, so `[lib] doctest = false` is excluded, compatible proc-macro and library crate types remain eligible, and bin-only packages are excluded. |
+| `doctest` | has at least one target for which Cargo metadata reports `doctest = true`. |
 | `target-kind:<kind>` | has a target whose Cargo metadata kind is `<kind>`; accepted spellings are `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`, `bin`, `example`, `test`, `bench`, and `custom-build`. |
 | `publishable` | may be published: `package.publish` is absent or names at least one registry. `publish = false` is not publishable. |
 | `feature:<name>` | declares the named package feature. |
 | `dep:<name>` | lists `<name>` among its dependencies (any kind). |
 | `metadata:<dotted.key>` | has `package.metadata.<dotted.key>` present. |
 | `metadata:<dotted.key>=<value>` | has `package.metadata.<dotted.key>` equal to `<value>` (numeric compare when both parse as a number, else string compare). |
+
+The `doctest` predicate uses Cargo's resolved capability bit rather than target
+kind: `[lib] doctest = false` is excluded, compatible proc-macro and library
+crate types remain eligible, and bin-only packages are excluded.
 
 For example:
 
