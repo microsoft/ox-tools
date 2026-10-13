@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-12
+
+- ✨ Features
+
+  - improve campaign scheduling and UX ([#208](https://github.com/microsoft/ox-tools/pull/208))
+  - optimize mutation campaigns ([#187](https://github.com/microsoft/ox-tools/pull/187))
+
+- 🐛 Bug Fixes
+
+  - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
+
+- 🧩 Miscellaneous
+
+  - Address Sander's 'Tsunami of Feedback' ([#221](https://github.com/microsoft/ox-tools/pull/221))
+
 ## [0.2.0] - 2026-09-03
 
 - 🐛 Bug Fixes
