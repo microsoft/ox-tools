@@ -210,19 +210,18 @@ where to write the Markdown verdict table.
 use std::io;
 
 let lcov = std::fs::read_to_string("target/coverage/lcov.info")?;
-let report = cargo_coverage_gate::evaluate_released_surface(&lcov, None, &[])?;
+let report = cargo_coverage_gate::evaluate(&lcov, None, &[])?;
 report.render_text(&mut io::stdout())?;
 let code = report.verdict().as_exit_code();
 ```
 
 ### Public API
 
-[`filter_released_surface_lcov`][__link1] and
-[`filter_released_surface_lcov_many`][__link2] produce released-surface LCOV
-artifacts without evaluating policy. The established [`evaluate`][__link3],
-[`evaluate_many`][__link4], and [`evaluate_many_for_target`][__link5] functions retain raw
-LCOV evaluation semantics for compatibility. Their
-`evaluate_released_surface*` counterparts filter before evaluation.
+[`filter_lcov`][__link1] and [`filter_lcov_many`][__link2] produce released-surface LCOV
+artifacts without evaluating policy. [`evaluate`][__link3], [`evaluate_many`][__link4], and
+[`evaluate_many_for_target`][__link5] apply that filtering before evaluating policy.
+Callers that intentionally need unfiltered attribution use the explicitly
+named `evaluate_raw*` functions.
 Evaluation returns an [`EvaluatedReport`][__link6], which renders as plain
 text via [`EvaluatedReport::render_text`][__link7] or GitHub-flavored Markdown via
 [`EvaluatedReport::render_markdown`][__link8] and reduces to a [`Verdict`][__link9] via
@@ -236,11 +235,11 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb3bP2yNjbCNgbQdA9FWzHmTsbrTbKrwOCY10bVNuO6AZDuUdhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbJdmE95HQbqwb4daqP17NKBAbGwnIeMUtJrobaMFRKVCy_9NhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_released_surface_lcov.html
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_lcov.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
- [__link2]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_released_surface_lcov_many.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.filter_lcov_many.html
  [__link3]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.evaluate.html
  [__link4]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.evaluate_many.html
  [__link5]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.evaluate_many_for_target.html

@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io};
 
-use cargo_coverage_gate::filter_released_surface_lcov_many;
+use cargo_coverage_gate::filter_lcov_many;
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -580,13 +580,12 @@ fn filter_and_publish_reports(execution: &CollectionExecution<'_>, collected: &[
         .collect::<Result<Vec<_>, AppError>>()?;
     let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
     let manifest = execution.workspace.root.join("Cargo.toml");
-    let filtered =
-        filter_released_surface_lcov_many(&raw_refs, Some(&manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")?;
+    let filtered = filter_lcov_many(&raw_refs, Some(&manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")?;
     let mut staged = Vec::with_capacity(collected.len());
     for (index, report) in collected.iter().enumerate() {
         let contents = filtered
             .get(index)
-            .expect("filter_released_surface_lcov_many preserves one output for every input tracefile");
+            .expect("filter_lcov_many preserves one output for every input tracefile");
         let directory = report
             .stable_path
             .parent()
