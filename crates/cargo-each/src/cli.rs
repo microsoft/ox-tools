@@ -92,6 +92,11 @@ pub(crate) struct EachArgs {
     #[arg(long = "target-filter", value_name = "EXPR", requires = "each_targets")]
     pub(crate) target_filters: Vec<String>,
 
+    /// Require every selected package to retain at least one target after
+    /// target-kind and target-expression filtering.
+    #[arg(long, requires = "each_targets")]
+    pub(crate) require_target_per_package: bool,
+
     /// Run each per-package command from that member's crate root (the
     /// directory containing its Cargo.toml) instead of the current directory.
     /// Per-package and per-target modes only; cannot be combined with --once.
@@ -213,6 +218,14 @@ mod tests {
                 .expect_err("target filtering has one Boolean-expression option");
             assert_eq!(error.kind(), ErrorKind::UnknownArgument);
         }
+    }
+
+    #[test]
+    fn target_requirement_requires_target_mode() {
+        let error = CargoCli::try_parse_from(["cargo", "each", "--require-target-per-package", "--", "echo"])
+            .expect_err("the per-package target invariant only applies in target mode");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--each-target"));
     }
 
     #[test]

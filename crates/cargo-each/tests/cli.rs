@@ -1135,6 +1135,202 @@ fn target_filter_requires_target_mode() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn target_requirement_requires_target_mode() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--workspace", "--require-target-per-package", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--each-target"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_requirement_accepts_packages_with_one_or_more_matches() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "--each-target",
+            "test",
+            "--require-target-per-package",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .assert()
+        .success()
+        .stdout("echo alpha::loom-test\necho alpha::ordinary-test\n");
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_requirement_reports_one_missing_package_by_canonical_identity() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "-p",
+            "beta",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "required-feature:loom",
+            "--require-target-per-package",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout("")
+        .stderr(
+            predicate::str::contains("failed to build command plan")
+                .and(predicate::str::contains(
+                    "`--require-target-per-package` found selected packages without a matching target: beta@0.1.0",
+                ))
+                .and(predicate::str::contains("alpha@0.1.0").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_requirement_reports_all_missing_packages_deterministically() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "required-feature:loom",
+            "--require-target-per-package",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "beta@0.1.0, delta@1.2.3-beta.1+build, epsilon@0.1.0, gamma@0.1.0",
+        ));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_requirement_keeps_empty_package_selection_as_a_successful_noop() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--none",
+            "--each-target",
+            "test",
+            "--require-target-per-package",
+            "--",
+            "cargo-each-command-that-must-not-run",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("selection resolved to no work"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn package_filter_narrows_target_requirement_scope() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter",
+            "feature:loom",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "required-feature:loom",
+            "--require-target-per-package",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .assert()
+        .success()
+        .stdout("echo alpha::loom-test\n");
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_filter_can_make_an_otherwise_valid_package_fail_the_requirement() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "name:no-such-target",
+            "--require-target-per-package",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("alpha@0.1.0"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_requirement_validates_the_complete_plan_before_any_execution() {
+    let (tmp, manifest) = fixture();
+    let executable = compile_execution_probe(tmp.path());
+    let marker = tmp.path().join("must-not-exist.log");
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "-p",
+            "beta",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "required-feature:loom",
+            "--require-target-per-package",
+            "--jobs",
+            "2",
+            "--keep-going",
+            "--timeout",
+            "1s",
+            "--chdir",
+            "--",
+        ])
+        .arg(executable)
+        .arg("keep-going")
+        .arg("{name}")
+        .arg(&marker)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("beta@0.1.0"));
+    assert!(
+        !marker.exists(),
+        "no earlier matching target command may run when another package fails"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn target_required_feature_is_no_longer_a_cli_option() {
     let (_tmp, manifest) = fixture();
     each(&manifest)

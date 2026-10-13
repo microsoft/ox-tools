@@ -32,6 +32,7 @@
     InvalidFilterExpressionError,
     InvalidTargetMetadataError,
     InvalidTargetKindError,
+    MissingTargetPerPackageError,
     PlaceholderMisuseError,
     ChdirConflictsWithOnceError,
     JobsConflictWithOnceError,
@@ -87,6 +88,13 @@ pub(crate) struct InvalidTargetMetadataError {
 )]
 pub(crate) struct InvalidTargetKindError {
     pub(crate) kind: String,
+}
+
+/// Selected packages failed to retain a matching target in per-target mode.
+#[ohno::error]
+#[display("`--require-target-per-package` found selected packages without a matching target: {packages}")]
+pub(crate) struct MissingTargetPerPackageError {
+    pub(crate) packages: String,
 }
 
 /// A placeholder token was used in a mode that does not support it.
@@ -247,6 +255,14 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("nope"));
         assert!(rendered.contains("target kind"));
+    }
+
+    #[test]
+    fn missing_target_requirement_lists_packages() {
+        let err = MissingTargetPerPackageError::new("alpha@1.0.0, beta@2.0.0".to_owned());
+        let rendered = err.to_string();
+        assert!(rendered.contains("--require-target-per-package"));
+        assert!(rendered.contains("alpha@1.0.0, beta@2.0.0"));
     }
 
     #[test]
