@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-13
+
+- ✨ Features
+
+  - resume interrupted campaigns and streamline mutant testing ([#248](https://github.com/microsoft/ox-tools/pull/248))
+  - support managed TOML array entries ([#235](https://github.com/microsoft/ox-tools/pull/235))
+  - support XML managed regions
+
+- ✔️ Tasks
+
+  - release v0.14.0 ([#252](https://github.com/microsoft/ox-tools/pull/252))
+
+- 🧩 Miscellaneous
+
+  - Merge main and harden XML managed regions
+
 ## [0.14.0] - 2026-10-12
 
 - ✨ Features
