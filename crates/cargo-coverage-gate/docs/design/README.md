@@ -405,6 +405,12 @@ cargo coverage-gate \
   --lcov target/coverage/lcov-no-default.info
 ```
 
+Library callers choose explicitly between compatibility and released-surface
+semantics. `evaluate*` preserves raw LCOV attribution for existing consumers;
+`evaluate_released_surface*` applies the same filtering as the CLI. The
+standalone `filter_released_surface_lcov*` functions expose the filtered
+artifacts without evaluating policy.
+
 ### 5.6 Collection sequence
 
 For each requested feature configuration, `run`:
@@ -498,7 +504,8 @@ LH:82
 end_of_record
 ```
 
-Before counting, the tool filters every section to the released Cargo surface:
+Before counting, the CLI and `evaluate_released_surface*` APIs filter every
+section to the released Cargo surface:
 
 - target roots classified as libraries (`lib`, `rlib`, `dylib`, `cdylib`,
   `staticlib`, and `proc-macro`) or `bin` are released roots;
@@ -570,11 +577,12 @@ upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
 
 ### 6.2 File-to-package attribution
 
-Filtering first requires every `SF:` path to be reachable from a Cargo target
-root through supported module declarations. A source reached only from a
-non-release target is removed. An unresolvable, unreadable, unparseable source,
-a source with no Cargo target owner, or a stale source reference is a configuration/operational error
-(exit `2`) rather than a counter the tool silently hides.
+Released-surface filtering requires every `SF:` path to be reachable from a
+Cargo target root through supported module declarations. A source reached only
+from a non-release target is removed. An unresolvable, unreadable, unparseable
+source, a source with no Cargo target owner, or a stale source reference is a
+configuration/operational error (exit `2`) rather than a counter the tool
+silently hides. Raw `evaluate*` compatibility APIs bypass this filtering.
 
 For each retained `SF:` path, the tool determines which workspace member owns
 it by **longest-prefix match** against the
