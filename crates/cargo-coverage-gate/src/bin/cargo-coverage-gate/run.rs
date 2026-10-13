@@ -9,7 +9,7 @@ use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target, evaluate_raw_many_for_target};
+use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target, evaluate_unfiltered_many_for_target};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::CoverageGateArgs;
@@ -29,7 +29,10 @@ pub(crate) fn evaluate_paths(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<ExitCode, AppError> {
-    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Unfiltered)
+    let lcov_texts = read_lcov_paths(lcov_paths)?;
+    let lcov_refs = lcov_texts.iter().map(String::as_str).collect::<Vec<_>>();
+    let report = evaluate_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
+    finish_evaluation(args, &report, write_text_output, write_summary_file)
 }
 
 pub(crate) fn evaluate_filtered_paths(
@@ -38,35 +41,20 @@ pub(crate) fn evaluate_filtered_paths(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<ExitCode, AppError> {
-    evaluate_paths_with_surface(args, lcov_paths, gated_packages, target, InputSurface::Filtered)
+    let lcov_texts = read_lcov_paths(lcov_paths)?;
+    let lcov_refs = lcov_texts.iter().map(String::as_str).collect::<Vec<_>>();
+    let report =
+        evaluate_unfiltered_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
+    finish_evaluation(args, &report, write_text_output, write_summary_file)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum InputSurface {
-    Unfiltered,
-    Filtered,
-}
-
-fn evaluate_paths_with_surface(
-    args: &CoverageGateArgs,
-    lcov_paths: &[PathBuf],
-    gated_packages: &[String],
-    target: Option<&str>,
-    surface: InputSurface,
-) -> Result<ExitCode, AppError> {
+fn read_lcov_paths(lcov_paths: &[PathBuf]) -> Result<Vec<String>, AppError> {
     let mut lcov_texts: Vec<String> = Vec::with_capacity(lcov_paths.len());
     for path in lcov_paths {
         let text = fs::read_to_string(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
         lcov_texts.push(text);
     }
-    let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
-
-    let report = match surface {
-        InputSurface::Unfiltered => evaluate_many_for_target(&lcov_refs, None, gated_packages, target),
-        InputSurface::Filtered => evaluate_raw_many_for_target(&lcov_refs, None, gated_packages, target),
-    }
-    .into_app_err("failed to evaluate coverage")?;
-    finish_evaluation(args, &report, write_text_output, write_summary_file)
+    Ok(lcov_texts)
 }
 
 fn finish_evaluation(

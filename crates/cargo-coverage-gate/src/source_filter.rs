@@ -21,9 +21,9 @@ use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, TextRange};
 use crate::CoverageGateError;
 use crate::error::{
     AmbiguousModuleSourceError, ConditionalModulePathError, ConflictingSourceEditionError, CoverageLineOutOfRangeError,
-    InvalidModulePathAttributeError, MissingFunctionStartLineError, NormalizedSourceCollisionError, ParseCoverageSourceError,
-    ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError,
-    UnsupportedSourceEditionError,
+    InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError, NormalizedSourceCollisionError,
+    PackageScopedTestAttributesError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError,
+    UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
 };
 use crate::workspace::load_metadata;
 
@@ -110,9 +110,77 @@ struct MemberDirectory {
     reported: PathBuf,
 }
 
+fn configured_test_attributes(metadata: &Metadata) -> Result<BTreeSet<String>, CoverageGateError> {
+    reject_package_test_attributes(
+        metadata
+            .workspace_packages()
+            .into_iter()
+            .map(|package| (package.name.as_str(), &package.metadata)),
+    )?;
+
+    parse_configured_test_attributes(test_attributes_value(&metadata.workspace_metadata))
+}
+
+fn reject_package_test_attributes<'a>(
+    packages: impl IntoIterator<Item = (&'a str, &'a serde_json::Value)>,
+) -> Result<(), CoverageGateError> {
+    for (name, metadata) in packages {
+        if package_test_attributes_value(metadata).is_some() {
+            return Err(PackageScopedTestAttributesError::new(name.to_owned()).into());
+        }
+    }
+    Ok(())
+}
+
+fn test_attributes_value(metadata: &serde_json::Value) -> Option<&serde_json::Value> {
+    metadata.get("coverage-gate").and_then(|gate| gate.get("test-attributes"))
+}
+
+fn package_test_attributes_value(metadata: &serde_json::Value) -> Option<&serde_json::Value> {
+    let gate = metadata.get("coverage-gate")?;
+    gate.get("test-attributes").or_else(|| {
+        gate.get("target")?
+            .as_object()?
+            .values()
+            .find_map(|policy| policy.get("test-attributes"))
+    })
+}
+
+fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<BTreeSet<String>, CoverageGateError> {
+    let Some(raw) = raw else {
+        return Ok(BTreeSet::new());
+    };
+    let values = raw
+        .as_array()
+        .ok_or_else(|| InvalidTestAttributesValueError::new("workspace".to_owned(), raw.clone()))?;
+    values
+        .iter()
+        .map(|value| {
+            let path = value
+                .as_str()
+                .ok_or_else(|| InvalidTestAttributesValueError::new("workspace".to_owned(), value.clone()))?;
+            parse_configured_test_attribute(path).ok_or_else(|| InvalidTestAttributePathError::new(path.to_owned()).into())
+        })
+        .collect()
+}
+
+fn parse_configured_test_attribute(value: &str) -> Option<String> {
+    let source = format!("#[{value}]\nfn __coverage_gate_test_attribute() {{}}\n");
+    let parse = SourceFile::parse(&source, Edition::CURRENT);
+    if !parse.errors().is_empty() {
+        return None;
+    }
+    let attribute = parse.tree().syntax().descendants().find_map(ast::Attr::cast)?;
+    let ast::Meta::PathMeta(meta) = attribute.meta()? else {
+        return None;
+    };
+    meta.path().map(|path| normalize_attribute_path(&path))
+}
+
 impl SourceIndex {
     #[ohno::enrich_err("failed to load Cargo target ownership for coverage filtering")]
     fn from_metadata(metadata: &Metadata) -> Result<Self, CoverageGateError> {
+        let test_attributes = configured_test_attributes(metadata)?;
         let workspace_root = resolve_source_path(metadata.workspace_root.as_std_path())?;
         let mut member_dirs = metadata
             .workspace_packages()
@@ -170,13 +238,13 @@ impl SourceIndex {
                     continue;
                 }
                 indexed.add_visit(pending.surface, pending.role);
-                let declarations = source_declarations(&pending.path, &indexed.analysis, pending.role)?;
+                let declarations = source_declarations(&pending.path, &indexed.analysis, pending.role, &test_attributes)?;
                 enqueue_declarations(&mut queue, declarations, pending.edition, pending.surface)?;
                 continue;
             }
 
-            let analysis = analyze_source(&pending.path, pending.edition)?;
-            let declarations = source_declarations(&pending.path, &analysis, pending.role)?;
+            let analysis = analyze_source(&pending.path, pending.edition, &test_attributes)?;
+            let declarations = source_declarations(&pending.path, &analysis, pending.role, &test_attributes)?;
             let mut indexed = IndexedSource {
                 analysis,
                 edition: pending.edition,
@@ -239,9 +307,14 @@ fn enqueue_declarations(
     Ok(())
 }
 
-fn source_declarations(path: &Path, analysis: &SourceAnalysis, role: SourceRole) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
+fn source_declarations(
+    path: &Path,
+    analysis: &SourceAnalysis,
+    role: SourceRole,
+    test_attributes: &BTreeSet<String>,
+) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
     let mut is_file = Path::is_file;
-    module_declarations(path, &analysis.syntax, role, &mut is_file)
+    module_declarations(path, &analysis.syntax, role, test_attributes, &mut is_file)
 }
 
 fn target_is_released(kinds: &[TargetKind]) -> bool {
@@ -274,12 +347,17 @@ fn resolve_source_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
     fs::canonicalize(path).map_err(|error| ResolveCoverageSourceError::caused_by(path.display().to_string(), error).into())
 }
 
-fn analyze_source(path: &Path, edition: Edition) -> Result<SourceAnalysis, CoverageGateError> {
+fn analyze_source(path: &Path, edition: Edition, test_attributes: &BTreeSet<String>) -> Result<SourceAnalysis, CoverageGateError> {
     let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(path.display().to_string(), error))?;
-    analyze_source_text(path, &source, edition)
+    analyze_source_text(path, &source, edition, test_attributes)
 }
 
-fn analyze_source_text(path: &Path, source: &str, edition: Edition) -> Result<SourceAnalysis, CoverageGateError> {
+fn analyze_source_text(
+    path: &Path,
+    source: &str,
+    edition: Edition,
+    test_attributes: &BTreeSet<String>,
+) -> Result<SourceAnalysis, CoverageGateError> {
     let parse = SourceFile::parse(source, edition);
     if !parse.errors().is_empty() {
         let diagnostics = parse.errors().iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
@@ -291,7 +369,7 @@ fn analyze_source_text(path: &Path, source: &str, edition: Edition) -> Result<So
     let test_ranges = root
         .descendants()
         .filter_map(ast::Attr::cast)
-        .filter(attribute_marks_test)
+        .filter(|attribute| attribute_marks_test(attribute, test_attributes))
         .map(|attribute| {
             attribute
                 .syntax()
@@ -357,33 +435,45 @@ fn offset_to_line(starts: &[usize], offset: usize) -> usize {
     starts.binary_search(&offset).unwrap_or_else(|line| line.saturating_sub(1))
 }
 
-fn attribute_marks_test(attribute: &ast::Attr) -> bool {
+fn attribute_marks_test(attribute: &ast::Attr, test_attributes: &BTreeSet<String>) -> bool {
     let Some(meta) = attribute.meta() else {
         return false;
     };
-    meta_marks_test(&meta)
+    meta_marks_test(&meta, test_attributes)
 }
 
-fn meta_marks_test(meta: &ast::Meta) -> bool {
+fn meta_marks_test(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> bool {
     match meta {
         ast::Meta::CfgMeta(cfg) => cfg.cfg_predicate().is_some_and(|predicate| cfg_predicate_is_test_only(&predicate)),
-        ast::Meta::PathMeta(path_meta) => path_meta.path().is_some_and(|path| path_marks_test(&path)),
-        ast::Meta::TokenTreeMeta(token_tree) => token_tree.path().is_some_and(|path| path_marks_test(&path)),
+        ast::Meta::PathMeta(path_meta) => path_meta.path().is_some_and(|path| path_marks_test(&path, test_attributes)),
+        ast::Meta::TokenTreeMeta(token_tree) => token_tree.path().is_some_and(|path| path_marks_test(&path, test_attributes)),
         ast::Meta::CfgAttrMeta(cfg_attr) => {
             let Some(predicate) = cfg_attr.cfg_predicate() else {
                 return false;
             };
             let possibilities = cfg_possibilities_without_test(&predicate);
-            possibilities.can_be_true && !possibilities.can_be_false && cfg_attr.metas().any(|inner| meta_marks_test(&inner))
+            possibilities.can_be_true
+                && !possibilities.can_be_false
+                && cfg_attr.metas().any(|inner| meta_marks_test(&inner, test_attributes))
         }
         ast::Meta::KeyValueMeta(_) | ast::Meta::UnsafeMeta(_) => false,
     }
 }
 
-fn path_marks_test(path: &ast::Path) -> bool {
-    path.segment()
-        .and_then(|segment| segment.name_ref())
-        .is_some_and(|name| matches!(&*name.text(), "test" | "bench"))
+fn path_marks_test(path: &ast::Path, test_attributes: &BTreeSet<String>) -> bool {
+    let normalized = normalize_attribute_path(path);
+    matches!(normalized.as_str(), "test" | "bench") || test_attributes.contains(&normalized)
+}
+
+fn normalize_attribute_path(path: &ast::Path) -> String {
+    path.syntax()
+        .text()
+        .to_string()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .trim_start_matches("::")
+        .to_owned()
 }
 
 fn cfg_predicate_is_test_only(predicate: &ast::CfgPredicate) -> bool {
@@ -462,6 +552,7 @@ fn module_declarations(
     path: &Path,
     source: &ast::SourceFile,
     role: SourceRole,
+    test_attributes: &BTreeSet<String>,
     is_file: &mut impl FnMut(&Path) -> bool,
 ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
     let Some(directory) = owned_directory(path, role) else {
@@ -471,16 +562,14 @@ fn module_declarations(
         return Ok(Vec::new());
     };
     let mut declarations = Vec::new();
-    let source_test_only = ast::attrs_including_inner(source).any(|attribute| attribute_marks_test(&attribute));
-    walk_modules(
-        source.items().collect(),
-        &directory,
-        base,
-        path,
-        source_test_only,
-        &mut declarations,
+    let source_test_only = ast::attrs_including_inner(source).any(|attribute| attribute_marks_test(&attribute, test_attributes));
+    ModuleWalker {
+        declaring_file: path,
+        test_attributes,
+        declarations: &mut declarations,
         is_file,
-    )?;
+    }
+    .walk(source.items().collect(), &directory, base, source_test_only)?;
     Ok(declarations)
 }
 
@@ -499,66 +588,63 @@ fn owned_directory(path: &Path, role: SourceRole) -> Option<PathBuf> {
     }
 }
 
-fn walk_modules(
-    items: Vec<ast::Item>,
-    directory: &Path,
-    base: &Path,
-    declaring_file: &Path,
-    inherited_test_only: bool,
-    declarations: &mut Vec<ModuleDeclaration>,
-    is_file: &mut impl FnMut(&Path) -> bool,
-) -> Result<(), CoverageGateError> {
-    for item in items {
-        let ast::Item::Module(module) = item else {
-            continue;
-        };
-        let name = module
-            .name()
-            .expect("a parsed module declaration always has a name")
-            .text()
-            .trim_start_matches("r#")
-            .to_owned();
-        let test_only = inherited_test_only || ast::attrs_including_inner(&module).any(|attribute| attribute_marks_test(&attribute));
-        let path_override = module_path_attribute(&module, declaring_file, &name)?;
+struct ModuleWalker<'a, F> {
+    declaring_file: &'a Path,
+    test_attributes: &'a BTreeSet<String>,
+    declarations: &'a mut Vec<ModuleDeclaration>,
+    is_file: &'a mut F,
+}
 
-        if let Some(item_list) = module.item_list() {
-            let nested = path_override.map_or_else(|| directory.join(&name), |relative| base.join(relative));
-            walk_modules(
-                item_list.items().collect(),
-                &nested,
-                &nested,
-                declaring_file,
-                test_only,
-                declarations,
-                is_file,
-            )?;
-            continue;
-        }
+impl<F: FnMut(&Path) -> bool> ModuleWalker<'_, F> {
+    fn walk(&mut self, items: Vec<ast::Item>, directory: &Path, base: &Path, inherited_test_only: bool) -> Result<(), CoverageGateError> {
+        for item in items {
+            let ast::Item::Module(module) = item else {
+                continue;
+            };
+            let name = module
+                .name()
+                .expect("a parsed module declaration always has a name")
+                .text()
+                .trim_start_matches("r#")
+                .to_owned();
+            let test_only = inherited_test_only
+                || ast::attrs_including_inner(&module).any(|attribute| attribute_marks_test(&attribute, self.test_attributes));
+            let path_override = module_path_attribute(&module, self.declaring_file, &name)?;
 
-        let (candidates, role) = path_override.map_or_else(
-            || {
-                (
-                    vec![directory.join(format!("{name}.rs")), directory.join(&name).join("mod.rs")],
-                    SourceRole::PlainModule,
+            if let Some(item_list) = module.item_list() {
+                let nested = path_override.map_or_else(|| directory.join(&name), |relative| base.join(relative));
+                self.walk(item_list.items().collect(), &nested, &nested, test_only)?;
+                continue;
+            }
+
+            let (candidates, role) = path_override.map_or_else(
+                || {
+                    (
+                        vec![directory.join(format!("{name}.rs")), directory.join(&name).join("mod.rs")],
+                        SourceRole::PlainModule,
+                    )
+                },
+                |relative| (vec![base.join(relative)], SourceRole::PathModule),
+            );
+            let existing = candidates
+                .into_iter()
+                .filter(|candidate| (self.is_file)(candidate))
+                .collect::<Vec<_>>();
+            if existing.len() > 1 {
+                return Err(AmbiguousModuleSourceError::new(
+                    self.declaring_file.display().to_string(),
+                    name,
+                    existing[0].display().to_string(),
+                    existing[1].display().to_string(),
                 )
-            },
-            |relative| (vec![base.join(relative)], SourceRole::PathModule),
-        );
-        let existing = candidates.into_iter().filter(|candidate| is_file(candidate)).collect::<Vec<_>>();
-        if existing.len() > 1 {
-            return Err(AmbiguousModuleSourceError::new(
-                declaring_file.display().to_string(),
-                name,
-                existing[0].display().to_string(),
-                existing[1].display().to_string(),
-            )
-            .into());
+                .into());
+            }
+            if let Some(path) = existing.into_iter().next() {
+                self.declarations.push(ModuleDeclaration { path, test_only, role });
+            }
         }
-        if let Some(path) = existing.into_iter().next() {
-            declarations.push(ModuleDeclaration { path, test_only, role });
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_name: &str) -> Result<Option<PathBuf>, CoverageGateError> {
@@ -675,13 +761,8 @@ fn filter_report_with<'a>(
         validate_section_lines(&key.source_file, &section, line_count)?;
         key.source_file = source_file;
         section.lines.retain(|line, _| !test_only.contains(&line.line));
-        section.branches.retain(|branch, _| !test_only.contains(&branch.line));
-        section.functions.retain(|_, function| {
-            let line = function
-                .start_line
-                .expect("validate_section_lines rejects every function without a start line before filtering");
-            !test_only.contains(&line)
-        });
+        section.branches.clear();
+        section.functions.clear();
         if !section.is_empty() {
             let test_name = key.test_name.clone();
             let path = key.source_file.display().to_string();
@@ -700,18 +781,7 @@ fn filter_report_with<'a>(
 }
 
 fn validate_section_lines(path: &Path, section: &lcov::report::section::Value, line_count: usize) -> Result<(), CoverageGateError> {
-    for line in section
-        .lines
-        .keys()
-        .map(|line| line.line)
-        .chain(section.branches.keys().map(|branch| branch.line))
-    {
-        validate_line(path, line, line_count)?;
-    }
-    for (function, data) in &section.functions {
-        let line = data
-            .start_line
-            .ok_or_else(|| MissingFunctionStartLineError::new(path.display().to_string(), function.name.clone()))?;
+    for line in section.lines.keys().map(|line| line.line) {
         validate_line(path, line, line_count)?;
     }
     Ok(())
@@ -762,6 +832,8 @@ fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
 mod tests {
     use std::fmt::Write as _;
 
+    use serde_json::json;
+
     use super::*;
 
     struct FixtureSource {
@@ -793,7 +865,7 @@ mod tests {
     }
 
     fn analyze(path: &Path, source: &str) -> SourceAnalysis {
-        analyze_source_text(path, source, Edition::Edition2024).expect("fixture source parses")
+        analyze_source_text(path, source, Edition::Edition2024, &BTreeSet::new()).expect("fixture source parses")
     }
 
     fn declarations(
@@ -803,7 +875,7 @@ mod tests {
         existing: &BTreeSet<PathBuf>,
     ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
         let mut is_file = |candidate: &Path| existing.contains(&lexical_normalize(candidate));
-        module_declarations(path, &analysis.syntax, role, &mut is_file)
+        module_declarations(path, &analysis.syntax, role, &BTreeSet::new(), &mut is_file)
     }
 
     fn parse_lcov(input: &str) -> lcov::Report {
@@ -831,12 +903,69 @@ mod tests {
         .tree();
         let marks = source
             .items()
-            .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute)))
+            .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &BTreeSet::new())))
             .collect::<Vec<_>>();
         assert_eq!(
             marks,
-            [true, true, false, false, false, true, false, true, true, false, true, false, true,]
+            [true, true, false, false, false, false, false, true, true, false, true, false, false,]
         );
+
+        let configured = BTreeSet::from(["tokio::test".to_owned()]);
+        let marks = source
+            .items()
+            .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &configured)))
+            .collect::<Vec<_>>();
+        assert!(marks[5]);
+        assert!(marks[12]);
+    }
+
+    #[test]
+    fn configured_test_attributes_are_exact_workspace_paths() {
+        assert!(parse_configured_test_attributes(None).expect("absent policy is valid").is_empty());
+        assert_eq!(
+            parse_configured_test_attributes(Some(&json!(["tokio::test", "::company::async_test"]))).expect("valid paths parse"),
+            BTreeSet::from(["company::async_test".to_owned(), "tokio::test".to_owned()])
+        );
+
+        for invalid in [json!("tokio::test"), json!([7]), json!(["tokio::test()"])] {
+            assert!(parse_configured_test_attributes(Some(&invalid)).is_err(), "{invalid}");
+        }
+
+        let package_metadata = json!({"coverage-gate": {"test-attributes": ["company::test"]}});
+        let error = reject_package_test_attributes([("alpha", &package_metadata)])
+            .expect_err("package policy must be rejected")
+            .to_string();
+        assert!(error.contains("workspace-scoped"), "{error}");
+
+        let target_metadata = json!({
+            "coverage-gate": {
+                "target": {
+                    "cfg(unix)": {
+                        "min-lines-percent": 100,
+                        "test-attributes": ["company::test"]
+                    }
+                }
+            }
+        });
+        assert!(reject_package_test_attributes([("alpha", &target_metadata)]).is_err());
+
+        let source = SourceFile::parse(
+            "#[company::test] fn named_test() {}\n#[tokio::test] async fn configured_test() {}\n",
+            Edition::Edition2024,
+        )
+        .tree();
+        let default_marks = source
+            .items()
+            .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &BTreeSet::new())))
+            .collect::<Vec<_>>();
+        assert_eq!(default_marks, [false, false]);
+
+        let configured = BTreeSet::from(["tokio::test".to_owned()]);
+        let configured_marks = source
+            .items()
+            .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &configured)))
+            .collect::<Vec<_>>();
+        assert_eq!(configured_marks, [false, true]);
     }
 
     #[test]
@@ -1085,15 +1214,8 @@ mod tests {
             by_path[&lib].lines.keys().map(|line| line.line).collect::<Vec<_>>(),
             [1, 4, 5, 6, 9]
         );
-        assert_eq!(
-            by_path[&lib]
-                .functions
-                .keys()
-                .map(|function| function.name.as_str())
-                .collect::<Vec<_>>(),
-            ["cfg_any_test", "released"]
-        );
-        assert_eq!(by_path[&lib].branches.keys().map(|branch| branch.line).collect::<Vec<_>>(), [4]);
+        assert!(by_path[&lib].functions.is_empty());
+        assert!(by_path[&lib].branches.is_empty());
         assert_eq!(by_path[&shared_support].lines.values().next().expect("shared line").count, 0);
         assert!(by_path.contains_key(&bin));
         for excluded in [unit_support, integration, example, bench, build] {
@@ -1133,18 +1255,19 @@ mod tests {
         assert!(error.contains("references line 3"), "{error}");
 
         let missing_function_line = format!("TN:\nSF:{}\nFNDA:0,unknown\nDA:1,0\nend_of_record\n", lib.display());
-        let error = filter_report_with(parse_lcov(&missing_function_line), |_| {
+        let filtered = filter_report_with(parse_lcov(&missing_function_line), |_| {
             Ok(SourceDisposition::Include {
                 source_file: lib.clone(),
                 line_count: 2,
                 test_only_lines: &test_only,
             })
         })
-        .expect_err("function data without a source line must fail")
-        .to_string();
-        assert!(error.contains("has no start line"), "{error}");
+        .expect("function records are removed from line-only filtered LCOV");
+        let report = parse_lcov(&filtered);
+        let section = report.sections.values().next().expect("filtered section remains");
+        assert!(section.functions.is_empty());
 
-        let error = analyze_source_text(&lib, "pub fn broken( {\n", Edition::Edition2024)
+        let error = analyze_source_text(&lib, "pub fn broken( {\n", Edition::Edition2024, &BTreeSet::new())
             .expect_err("invalid Rust source must fail")
             .to_string();
         assert!(error.contains("could not parse Rust source"), "{error}");

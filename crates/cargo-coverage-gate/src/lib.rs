@@ -78,6 +78,19 @@
 //! coverable code. The two keys are mutually exclusive, and
 //! `expect-no-coverable-lines` is package-scoped only.
 //!
+//! ### Qualified test attributes
+//!
+//! Compiler-owned `#[test]` and `#[bench]` attributes are recognized
+//! intrinsically. Qualified framework attributes are exact workspace policy,
+//! never inferred from a final `test`/`bench` path segment:
+//!
+//! ```toml
+//! [workspace.metadata.coverage-gate]
+//! test-attributes = ["my_runtime::test"]
+//! ```
+//!
+//! The list has no qualified defaults and cannot be set per package.
+//!
 //! ### Target-specific policies
 //!
 //! A package can replace its base policy for a Cargo-style target selector:
@@ -214,7 +227,7 @@
 //! artifacts without evaluating policy. [`evaluate`], [`evaluate_many`], and
 //! [`evaluate_many_for_target`] apply that filtering before evaluating policy.
 //! Callers that intentionally need unfiltered attribution use the explicitly
-//! named `evaluate_raw*` functions.
+//! named `evaluate_unfiltered*` functions.
 //! Evaluation returns an [`EvaluatedReport`], which renders as plain
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
@@ -252,9 +265,10 @@ pub use error::CoverageGateError;
 /// Cargo target roots and out-of-line module declarations establish source
 /// ownership. Files reachable only from tests, examples, benches, build
 /// scripts, or other non-release targets are removed. Within released files,
-/// lines, branches, and functions are removed only when Rust syntax proves
-/// they are test-only (`#[test]`, `#[bench]`, `#[cfg(test)]`, or a `cfg`
-/// predicate that requires `test`).
+/// line records are removed only when Rust syntax proves they are test-only
+/// (`#[test]`, `#[bench]`, `#[cfg(test)]`, a `cfg` predicate that requires
+/// `test`, or an exact qualified attribute listed in workspace metadata).
+/// Function and branch records are omitted because the proof is line-granular.
 ///
 /// This is a workspace operation, not a pure text transform. It runs
 /// `cargo metadata --no-deps`, reads and parses reachable Rust sources, and
@@ -265,9 +279,19 @@ pub use error::CoverageGateError;
 /// Cargo metadata, and record ordering and summary records may differ from the
 /// input.
 ///
+/// Qualified framework test macros are configured explicitly:
+///
+/// ```toml
+/// [workspace.metadata.coverage-gate]
+/// test-attributes = ["my_runtime::test"]
+/// ```
+///
+/// There are no qualified default attributes; unknown `*::test` macros remain
+/// measured.
+///
 /// The result is already released-surface filtered. To evaluate that returned
-/// text without repeating source analysis, pass it to [`evaluate_raw`] (or its
-/// multi-input counterpart).
+/// text without repeating source analysis, pass it to [`evaluate_unfiltered`]
+/// (or its multi-input counterpart).
 ///
 /// # Example
 ///
@@ -353,7 +377,7 @@ impl EvaluatedReport {
     ///
     /// Released-surface evaluation rejects paths outside every workspace
     /// member before aggregation, so its successful reports return zero.
-    /// Raw evaluation may return a nonzero count.
+    /// Unfiltered evaluation may return a nonzero count.
     #[must_use]
     pub fn unattributed_count(&self) -> usize {
         self.inner.unattributed
@@ -461,12 +485,12 @@ pub fn evaluate_many_for_target(
 ///
 /// Returns [`CoverageGateError`] when LCOV parsing, Cargo metadata, target
 /// policy resolution, package selection, or verdict evaluation fails.
-pub fn evaluate_raw(
+pub fn evaluate_unfiltered(
     lcov_text: &str,
     manifest_path: Option<&Path>,
     gated_packages: &[String],
 ) -> Result<EvaluatedReport, CoverageGateError> {
-    evaluate_raw_many(std::slice::from_ref(&lcov_text), manifest_path, gated_packages)
+    evaluate_unfiltered_many(std::slice::from_ref(&lcov_text), manifest_path, gated_packages)
 }
 
 /// Evaluate multiple LCOV tracefiles without released-surface filtering.
@@ -475,24 +499,24 @@ pub fn evaluate_raw(
 ///
 /// # Errors
 ///
-/// Returns [`CoverageGateError`] under the same conditions as [`evaluate_raw`];
-/// any malformed input aborts the operation.
-pub fn evaluate_raw_many(
+/// Returns [`CoverageGateError`] under the same conditions as
+/// [`evaluate_unfiltered`]; any malformed input aborts the operation.
+pub fn evaluate_unfiltered_many(
     lcov_texts: &[&str],
     manifest_path: Option<&Path>,
     gated_packages: &[String],
 ) -> Result<EvaluatedReport, CoverageGateError> {
-    evaluate_raw_many_for_target(lcov_texts, manifest_path, gated_packages, None)
+    evaluate_unfiltered_many_for_target(lcov_texts, manifest_path, gated_packages, None)
 }
 
-/// Evaluate multiple raw LCOV tracefiles for a selected Rust target.
+/// Evaluate multiple unfiltered LCOV tracefiles for a selected Rust target.
 ///
 /// # Errors
 ///
 /// Returns [`CoverageGateError`] under the same conditions as
-/// [`evaluate_raw_many`]. Target-resolution failures are also reported when
-/// target policy requires a Rust target.
-pub fn evaluate_raw_many_for_target(
+/// [`evaluate_unfiltered_many`]. Target-resolution failures are also reported
+/// when target policy requires a Rust target.
+pub fn evaluate_unfiltered_many_for_target(
     lcov_texts: &[&str],
     manifest_path: Option<&Path>,
     gated_packages: &[String],
@@ -527,7 +551,7 @@ mod tests {
         assert!(err.to_string().contains("lcov tracefile"));
         assert!(!err.to_string().contains("workspace metadata"));
 
-        let err = evaluate_raw("not lcov", None, &[]).expect_err("raw evaluation also rejects malformed LCOV");
+        let err = evaluate_unfiltered("not lcov", None, &[]).expect_err("unfiltered evaluation also rejects malformed LCOV");
         assert!(err.to_string().contains("lcov tracefile"));
     }
 
@@ -611,8 +635,8 @@ mod tests {
 
         let missing_source = tmp.path().join("explicit-manifest-only/src/missing.rs").display().to_string();
         let lcov = format!("TN:\nSF:{missing_source}\nDA:999,0\nend_of_record\n");
-        let evaluated = evaluate_raw(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
-            .expect("raw evaluation must preserve manifest/package forwarding without source validation");
+        let evaluated = evaluate_unfiltered(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
+            .expect("unfiltered evaluation must preserve manifest/package forwarding without source validation");
         assert_eq!(evaluated.verdict(), Verdict::Pass);
 
         let error = evaluate(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
