@@ -134,7 +134,8 @@ stages.
    numbers, ambiguous modules, and unsupported path attributes are operational
    errors rather than reasons to drop counters.
    Distinct `SF:` spellings that normalize to the same LCOV section key are
-   also rejected instead of replacing one section's counters.
+   merged line-by-line; conflicting checksums for the same normalized line are
+   rejected instead of replacing one section's counters.
    Filtered output removes function and branch records entirely because the
    available proof is line-granular.
 4. The LCOV parser merges filtered reports by source path and line number. A line is
