@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.14.0"
-catalog_checksum = "sha256:25e5a91376245c0703915a360133541ce5288fc73bf28cafd6d50dd5cf32858c"
+catalog_checksum = "sha256:d9161a9b608f44a1851facbd3c078744ca7407a6bbaeec5367dee670c971a2e3"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -21,7 +21,7 @@ checksum = "sha256:d564a0ce424cda58c8f5b2476cf0c8b36e759afbdf8227608bd1f3fc74913
 
 [[file]]
 path = ".github/actions/anvil-setup/action.yml"
-checksum = "sha256:2605edeafb34ee31ded87b277ad196917f4dafb2a5bdd96201cff03584705128"
+checksum = "sha256:08bdc66a6ee94447aa1a60ece93c73fcbc930b7e331de85b2e9b78b5bc3d2e01"
 
 [[file]]
 path = ".github/actions/anvil-setup/just-problem-matcher.json"
@@ -253,7 +253,7 @@ checksum = "sha256:00453a12cbb34811ee6a2c083dade5f6198575e3b0610f49e4743366326cd
 
 [[file]]
 path = "justfiles/anvil/tools.just"
-checksum = "sha256:8b923a88ce0ca55e38bce5fc01d22b9b1e7aad7d95e4eb33ad6aa16cc4f12da7"
+checksum = "sha256:77329a0cb72de82742e7f48b6c8c06874e13b5c1622dc8080ce003e0c5ece251"
 
 [[file]]
 path = "justfiles/anvil/versions.just"

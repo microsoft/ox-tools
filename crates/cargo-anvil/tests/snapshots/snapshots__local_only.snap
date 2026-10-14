@@ -6033,9 +6033,9 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # System-level prerequisites (libclang, etc.)
 # ============================================================================
 
-# Public setup capabilities for system-level prerequisites that catalog tools
-# need to BUILD from source. The `binstall` install path downloads pre-built
-# binaries and does not need these. The installer invokes a capability only
+# Public: probe for system-level prerequisites that catalog tools need
+# to BUILD from source. The `binstall` install path downloads pre-built
+# binaries and does not need these. The installer invokes this check only
 # immediately before a source build, including fallback after binstall fails.
 #
 # Scope policy: only system libs that an anvil catalog tool DIRECTLY
@@ -6043,13 +6043,6 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # Current entries:
 #   - libclang: required by cargo-spellcheck (clang-sys / hunspell-rs)
 #     at build time.
-#
-# Capabilities may provision a missing dependency only when the hosting
-# environment gives Anvil an unambiguous, non-interactive package manager.
-# GitHub-hosted Linux runners meet that contract, so the libclang capability
-# installs `libclang-dev` there. Local and self-hosted environments retain the
-# diagnostic-only behavior because admin policy and package-manager choice
-# belong to their owners.
 #
 # Detection verifies libclang is *discoverable*, not merely present:
 # bindgen/clang-sys locate it via `LIBCLANG_PATH` or directories on
@@ -6061,26 +6054,28 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # catching that case up front. No version checks -- any reasonably modern
 # libclang works for clang-sys.
 #
-# On missing deps outside a supported provisioning environment, the recipe
-# prints copy-paste install hints per OS / package manager and exits non-zero.
+# On missing deps the recipe prints copy-paste install hints per OS /
+# package manager and exits non-zero. No auto-install: admin / sudo and
+# package-manager choice stay with the user.
 
-# Provide the libclang source-build capability.
+# Check cargo-spellcheck source-build prerequisites.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-setup-capability-libclang:
+anvil-tool-cargo-spellcheck-source-deps-check:
     $ErrorActionPreference = 'Stop'
-    Set-StrictMode -Version 3
+    $missing = @()
 
-    function Find-LibClang {
-        # Locate the directory via LIBCLANG_PATH, then standard install dirs.
-        # Versioned Linux packages commonly install under /usr/lib/llvm-N/lib.
-        $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
-        if ($env:LIBCLANG_PATH) {
-            foreach ($f in $libclangFiles) {
-                if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { return $env:LIBCLANG_PATH }
-            }
+    # libclang: required to BUILD cargo-spellcheck from source. Locate the
+    # *directory* it lives in (via LIBCLANG_PATH, then standard install
+    # dirs), so we can additionally verify discoverability below.
+    $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
+    $libclangDir = $null
+    if ($env:LIBCLANG_PATH) {
+        foreach ($f in $libclangFiles) {
+            if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { $libclangDir = $env:LIBCLANG_PATH; break }
         }
-
+    }
+    if (-not $libclangDir) {
         $probes = if ($IsWindows) {
             @(
                 'C:\Program Files\LLVM\bin',
@@ -6098,48 +6093,19 @@ anvil-setup-capability-libclang:
                 '/usr/lib64'
             )
         }
-        if ($IsLinux) {
-            $probes += @(
-                Get-ChildItem -Path '/usr/lib' -Directory -Filter 'llvm-*' -ErrorAction SilentlyContinue |
-                    ForEach-Object { Join-Path $_.FullName 'lib' }
-            )
-        }
         foreach ($d in $probes) {
             foreach ($f in $libclangFiles) {
-                if (Test-Path (Join-Path $d $f)) { return $d }
+                if (Test-Path (Join-Path $d $f)) { $libclangDir = $d; break }
             }
-            if (-not $IsWindows -and -not $IsMacOS) {
-                $glob = Get-ChildItem -Path $d -Filter 'libclang*.so*' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-                if ($glob) { return $glob.DirectoryName }
-            }
+            if ($libclangDir) { break }
         }
-        return $null
+        # Linux distros often add a version suffix (libclang-19.so etc.); glob fallback.
+        if (-not $libclangDir -and -not $IsWindows -and -not $IsMacOS) {
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($glob) { $libclangDir = $glob.DirectoryName }
+        }
     }
 
-    $libclangDir = Find-LibClang
-    $canProvision = (
-        -not $libclangDir -and
-        $IsLinux -and
-        $env:GITHUB_ACTIONS -eq 'true' -and
-        $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
-    )
-    if ($canProvision) {
-        Write-Host "anvil: provisioning setup capability 'libclang' with apt-get"
-        & sudo apt-get update
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "anvil: apt-get update failed while provisioning setup capability 'libclang' (exit $LASTEXITCODE)"
-            exit $LASTEXITCODE
-        }
-        & sudo apt-get install -y libclang-dev
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "anvil: apt-get install libclang-dev failed while provisioning setup capability 'libclang' (exit $LASTEXITCODE)"
-            exit $LASTEXITCODE
-        }
-        $libclangDir = Find-LibClang
-    }
-
-    $missing = @()
     if (-not $libclangDir) {
         $missing += [pscustomobject]@{
             name = 'libclang'
@@ -6183,11 +6149,6 @@ anvil-setup-capability-libclang:
         }
         Write-Host "If the dep is installed but not on the standard search path, set LIBCLANG_PATH and re-run." -ForegroundColor Yellow
         exit 1
-    }
-    if ($env:ANVIL_SETUP_CAPABILITY_ENV_FILE) {
-        @{ LIBCLANG_PATH = $libclangDir } |
-            ConvertTo-Json -Compress |
-            Set-Content -LiteralPath $env:ANVIL_SETUP_CAPABILITY_ENV_FILE -Encoding UTF8
     }
 
 # ============================================================================
@@ -6478,9 +6439,7 @@ anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 #                 cargo install fallback for tools that declare source
 #                 prerequisites). Bootstraps cargo-binstall itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
-# including a binstall fallback. The recipe may write a JSON object to the
-# path in `ANVIL_SETUP_CAPABILITY_ENV_FILE`; those variables are applied to
-# the pending source build.
+# including a binstall fallback.
 [script("pwsh", "-NoProfile")]
 _install-tool-core name version installer source_prereq="":
     $ErrorActionPreference = 'Stop'
@@ -6539,30 +6498,8 @@ _install-tool-core name version installer source_prereq="":
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
     if ($sourcePrereq) {
-        $capabilityEnvironmentFile = Join-Path ([IO.Path]::GetTempPath()) "anvil-setup-capability-$PID-$([guid]::NewGuid().ToString('N')).json"
-        $previousCapabilityEnvironmentFile = $env:ANVIL_SETUP_CAPABILITY_ENV_FILE
-        try {
-            $env:ANVIL_SETUP_CAPABILITY_ENV_FILE = $capabilityEnvironmentFile
-            & "{{just_executable()}}" $sourcePrereq
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if (Test-Path -LiteralPath $capabilityEnvironmentFile -PathType Leaf) {
-                $capabilityEnvironment = Get-Content -LiteralPath $capabilityEnvironmentFile -Raw | ConvertFrom-Json
-                foreach ($property in $capabilityEnvironment.PSObject.Properties) {
-                    if ($property.Name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
-                        Write-Error "anvil: setup capability '$sourcePrereq' returned invalid environment variable name '$($property.Name)'"
-                        exit 2
-                    }
-                    Set-Item -Path "Env:$($property.Name)" -Value ([string]$property.Value)
-                }
-            }
-        } finally {
-            Remove-Item -LiteralPath $capabilityEnvironmentFile -Force -ErrorAction SilentlyContinue
-            if ($null -eq $previousCapabilityEnvironmentFile) {
-                Remove-Item Env:ANVIL_SETUP_CAPABILITY_ENV_FILE -ErrorAction SilentlyContinue
-            } else {
-                $env:ANVIL_SETUP_CAPABILITY_ENV_FILE = $previousCapabilityEnvironmentFile
-            }
-        }
+        & "{{just_executable()}}" $sourcePrereq
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"
     if ($LASTEXITCODE -ne 0) {
@@ -7158,7 +7095,7 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-setup-capability-libclang")
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-tool-cargo-spellcheck-source-deps-check")
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]
