@@ -236,6 +236,11 @@ mod tests {
         assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
+        assert_eq!(
+            SETUP_ACTION.matches("GITHUB_TOKEN: ${{ github.token }}").count(),
+            2,
+            "both setup binstall call sites must use GitHub's authenticated API quota"
+        );
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));
@@ -273,13 +278,16 @@ mod tests {
     }
 
     #[test]
-    fn setup_action_can_reclaim_github_hosted_runner_disk_space() {
+    fn setup_action_manages_github_hosted_runner_system_packages() {
         assert!(SETUP_ACTION.contains("free-disk-space:"));
         assert!(SETUP_ACTION.contains("runner.environment == 'github-hosted'"));
         assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
-        assert!(!SETUP_ACTION.contains("Install libclang"));
-        assert!(!SETUP_ACTION.contains("apt-get install -y libclang-dev"));
+        assert!(SETUP_ACTION.contains("Install libclang (Linux spellcheck groups)"));
+        assert!(SETUP_ACTION.contains("sudo apt-get update && sudo apt-get install -y libclang-dev"));
+        assert!(SETUP_ACTION.contains("inputs.group == 'pr-fast'"));
+        assert!(SETUP_ACTION.contains("inputs.group == 'spellcheck'"));
+        assert!(!SETUP_ACTION.contains("inputs.group == 'none'"));
     }
 
     #[test]
