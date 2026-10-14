@@ -295,6 +295,19 @@ mod tests {
     }
 
     #[test]
+    fn container_launcher_recipe_contract() {
+        let (_, launcher) = RECIPE
+            .split_once("anvil-container *command:\n")
+            .expect("the container template declares the launcher recipe");
+        let body = launcher
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("    "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("container_launcher_recipe", body);
+    }
+
+    #[test]
     fn group_is_two_owned_files_and_five_dockerfile_regions() {
         let all = all();
         let owned: Vec<_> = all
@@ -783,22 +796,6 @@ mod tests {
     }
 
     #[test]
-    fn a_host_token_requires_explicit_opt_in_and_is_forwarded_by_name() {
-        assert!(!RECIPE.contains("gh auth token"));
-        assert!(!RECIPE.contains("Get-Command gh"));
-        assert!(RECIPE.contains("if ($forwardGithubToken) {"));
-        assert!(RECIPE.contains("$forwardedEnv += 'GITHUB_TOKEN'"));
-        assert!(RECIPE.contains("$runArgs += @('-e', 'GITHUB_TOKEN')"));
-        // By name, never by value: `-e NAME=VALUE` would put the credential on
-        // the host's command line, where endpoint telemetry retains it.
-        assert!(!RECIPE.contains("'-e', \"GITHUB_TOKEN="));
-        assert!(!RECIPE.contains("$hookEnv += 'GITHUB_TOKEN'"));
-        // Forwarding by name only works if the engine can see the name, so a
-        // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
-        assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
-    }
-
-    #[test]
     fn the_whole_recipe_tree_defines_the_image() {
         // `just anvil-setup` reaches the install recipes through the tier,
         // group and check recipes, so the routing decides *whether* a tool is
@@ -882,27 +879,6 @@ mod tests {
     }
 
     #[test]
-    fn github_token_opt_in_is_validated_before_engine_resolution() {
-        let guard = RECIPE
-            .find("$argv[0] -ceq '--github-token'")
-            .expect("the leading flag must be parsed");
-        let validation = RECIPE
-            .find("[string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)")
-            .expect("the explicitly supplied token must be validated");
-        let run = RECIPE.find("anvil-container *command:").expect("the launcher recipe must exist");
-        let engine = run
-            + RECIPE[run..]
-                .find(" _anvil-container-engine")
-                .expect("the launcher must resolve the engine");
-        assert!(
-            guard < validation && validation < engine,
-            "consume and validate the launcher flag before invoking the engine"
-        );
-        assert!(!RECIPE.contains("--dry-run"));
-        assert!(!RECIPE.contains("$needsToken"));
-    }
-
-    #[test]
     fn an_untracked_input_is_framed_from_the_filesystem() {
         // git has no record of an untracked file and `diff --raw` does not
         // report one, so the filesystem is the only thing that can answer for
@@ -918,12 +894,6 @@ mod tests {
         // Tracked files must NOT be read this way: Windows has no executable
         // bit, so two checkouts of one commit would disagree on the tag.
         assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
-    }
-
-    #[test]
-    fn run_hooks_cannot_implicitly_forward_the_reserved_github_token() {
-        assert!(RECIPE.contains("$name -ieq 'GITHUB_TOKEN'"));
-        assert!(RECIPE.contains("Anvil-RunEnv cannot forward it without --github-token"));
     }
 
     #[test]
