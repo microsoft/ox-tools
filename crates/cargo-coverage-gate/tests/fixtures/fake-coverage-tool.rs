@@ -265,10 +265,11 @@ fn fake_lcov() -> Result<String, String> {
         }
         writeln!(output, "TN:").map_err(|error| error.to_string())?;
         writeln!(output, "SF:{}", source.display()).map_err(|error| error.to_string())?;
-        writeln!(output, "DA:1,{hits}").map_err(|error| error.to_string())?;
-        writeln!(output, "DA:2,1").map_err(|error| error.to_string())?;
-        writeln!(output, "LF:2").map_err(|error| error.to_string())?;
-        writeln!(output, "LH:{}", covered + 1).map_err(|error| error.to_string())?;
+        writeln!(output, "DA:4,{hits}").map_err(|error| error.to_string())?;
+        writeln!(output, "DA:5,1").map_err(|error| error.to_string())?;
+        writeln!(output, "DA:6,1").map_err(|error| error.to_string())?;
+        writeln!(output, "LF:3").map_err(|error| error.to_string())?;
+        writeln!(output, "LH:{}", covered + 2).map_err(|error| error.to_string())?;
         writeln!(output, "end_of_record").map_err(|error| error.to_string())?;
     }
     Ok(output)
