@@ -350,7 +350,14 @@ fn xml_lexical_ranges(text: &str) -> (Vec<ByteRange>, Vec<ByteRange>) {
     (comments, ignored)
 }
 
-pub(crate) fn xml_root_closing_line_offset(text: &str) -> Result<Option<usize>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct XmlRootBounds {
+    pub opening_end: usize,
+    pub closing_start: usize,
+    pub closing_line_start: Option<usize>,
+}
+
+pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, String> {
     fn qualified_name(prefix: &str, local: &str) -> String {
         if prefix.is_empty() {
             local.to_owned()
@@ -361,12 +368,21 @@ pub(crate) fn xml_root_closing_line_offset(text: &str) -> Result<Option<usize>, 
 
     let mut pending = None;
     let mut stack: Vec<(String, String)> = Vec::new();
+    let mut root_opening_end = None;
+    let mut root_close = None;
+    let mut root_is_empty = false;
     for token in Tokenizer::from(text) {
         match token.map_err(|error| format!("the XML host is malformed: {error}"))? {
             Token::ElementStart { prefix, local, .. } => {
                 pending = Some((prefix.as_str().to_owned(), local.as_str().to_owned()));
             }
-            Token::ElementEnd { end: ElementEnd::Open, .. } => {
+            Token::ElementEnd {
+                end: ElementEnd::Open,
+                span,
+            } => {
+                if stack.is_empty() {
+                    root_opening_end = Some(span.end());
+                }
                 stack.push(
                     pending
                         .take()
@@ -376,10 +392,10 @@ pub(crate) fn xml_root_closing_line_offset(text: &str) -> Result<Option<usize>, 
             Token::ElementEnd {
                 end: ElementEnd::Empty, ..
             } => {
-                let root_is_empty = stack.is_empty();
+                let is_root = stack.is_empty();
                 pending = None;
-                if root_is_empty {
-                    return Ok(None);
+                if is_root {
+                    root_is_empty = true;
                 }
             }
             Token::ElementEnd {
@@ -405,7 +421,7 @@ pub(crate) fn xml_root_closing_line_offset(text: &str) -> Result<Option<usize>, 
                     let line_start = text[..range.start].rfind('\n').map_or(0, |newline| newline + 1);
                     let line_end = text[range.end..].find('\n').map_or(text.len(), |newline| range.end + newline);
                     let line = text[line_start..line_end].trim_end_matches('\r');
-                    return Ok((line.trim() == &text[range]).then_some(line_start));
+                    root_close = Some((range.start, (line.trim() == &text[range]).then_some(line_start)));
                 }
             }
             _ => {}
@@ -417,7 +433,18 @@ pub(crate) fn xml_root_closing_line_offset(text: &str) -> Result<Option<usize>, 
             qualified_name(prefix, local)
         ));
     }
-    Ok(None)
+    if root_is_empty {
+        return Ok(None);
+    }
+    match (root_opening_end, root_close) {
+        (Some(opening_end), Some((closing_start, closing_line_start))) => Ok(Some(XmlRootBounds {
+            opening_end,
+            closing_start,
+            closing_line_start,
+        })),
+        (None, None) => Err("the XML host has no document element".to_owned()),
+        _ => Err("the XML host has an incomplete document element".to_owned()),
+    }
 }
 
 /// Locate ownership only at TOML comment tokens, including in a duplicate-table intermediate.
@@ -2815,19 +2842,45 @@ mod tests {
             "  </build:graph>\n",
         );
         assert_eq!(
-            xml_root_closing_line_offset(text).unwrap(),
-            Some(text.rfind("  </build:graph>").unwrap())
+            xml_document_root(text).unwrap(),
+            Some(XmlRootBounds {
+                opening_end: text.find(">\n").unwrap() + 1,
+                closing_start: text.rfind("</build:graph>").unwrap(),
+                closing_line_start: Some(text.rfind("  </build:graph>").unwrap()),
+            })
         );
     }
 
     #[test]
     fn xml_root_close_detection_refuses_compact_self_closing_and_malformed_documents() {
-        assert_eq!(xml_root_closing_line_offset("<root></root>\n").unwrap(), None);
-        assert_eq!(xml_root_closing_line_offset("<root />\n").unwrap(), None);
-        assert!(
-            xml_root_closing_line_offset("<root>\n</other>\n")
-                .unwrap_err()
-                .contains("closes `other`")
+        assert_eq!(
+            xml_document_root("<root></root>\n").unwrap(),
+            Some(XmlRootBounds {
+                opening_end: "<root>".len(),
+                closing_start: "<root>".len(),
+                closing_line_start: None,
+            })
+        );
+        assert_eq!(xml_document_root("<root />\n").unwrap(), None);
+        assert_eq!(
+            xml_document_root("<root>\n</other>\n").unwrap_err(),
+            "the XML host closes `other` while `root` is still open"
+        );
+    }
+
+    #[test]
+    fn xml_document_root_rejects_trailing_elements_and_text() {
+        assert_eq!(
+            xml_document_root("<root>\n</root>\n</extra>\n").unwrap_err(),
+            "the XML host is malformed: unknown token at 3:1"
+        );
+        assert_eq!(
+            xml_document_root("<root>\n</root>\ntrailing\n").unwrap_err(),
+            "the XML host is malformed: unknown token at 3:1"
+        );
+        assert_eq!(
+            xml_document_root("<root>\n</root>\n<extra />\n").unwrap_err(),
+            "the XML host is malformed: unknown token at 3:1"
         );
     }
 

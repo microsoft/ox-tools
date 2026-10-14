@@ -127,10 +127,10 @@ unicode-width = { version = "0.2.2", default-features = false }
 url = { version = "2.5.8", default-features = false }
 vu128 = { version = "1.1.0", default-features = false }
 walkdir = { version = "2.5.0", default-features = false }
-xmlparser = { version = "0.13.6", default-features = false }
 windows = { version = "0.62.2", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
+xmlparser = { version = "0.13.6", default-features = false }
 yaml_serde = { version = "0.10.7", default-features = false }
 zstd = { version = "0.14.0", default-features = false }
 

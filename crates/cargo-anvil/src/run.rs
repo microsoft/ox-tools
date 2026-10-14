@@ -29,7 +29,7 @@ use crate::plan::{Plan, PlanItem, Target};
 use crate::region::upsert_region;
 use crate::region::{
     CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, remove_region,
-    xml_root_closing_line_offset,
+    xml_document_root,
 };
 use crate::workspace::{self, Workspace};
 
@@ -1011,10 +1011,16 @@ fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str
         let text = current.ok_or_else(|| {
             "the XML host does not exist, so its document root and a safe insertion point cannot be established".to_owned()
         })?;
-        if find_region(text, region_id, syntax).ok().flatten().is_some() {
+        let root = xml_document_root(text)?;
+        if let Some(region) = find_region(text, region_id, syntax).ok().flatten() {
+            let root = root.ok_or_else(|| "the XML document element is self-closing, so it cannot contain a managed region".to_owned())?;
+            if region.start_line.start < root.opening_end || region.end_line.end > root.closing_start {
+                return Err("the existing XML managed region is outside the document root".to_owned());
+            }
             return Ok(RegionPlacement::End);
         }
-        let offset = xml_root_closing_line_offset(text)?.ok_or_else(|| {
+        let root = root.ok_or_else(|| "the XML document element is self-closing, so it cannot contain a managed region".to_owned())?;
+        let offset = root.closing_line_start.ok_or_else(|| {
             "the XML host has no complete-line closing root element, so a safe insertion point cannot be established".to_owned()
         })?;
         return Ok(RegionPlacement::At(offset));
@@ -2764,21 +2770,27 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem")]
     #[test]
     fn marker_recovery_preserves_content_and_settles_for_all_syntaxes() {
-        for (syntax, open, close) in [
+        for (syntax, prefix, open, close, suffix) in [
             (
                 CommentSyntax::Hash,
+                "",
                 "# >>> anvil-managed: repair\r\n",
                 "# <<< anvil-managed: repair\r\n",
+                "",
             ),
             (
                 CommentSyntax::SlashSlash,
+                "",
                 "// >>> anvil-managed: repair\r\n",
                 "// <<< anvil-managed: repair\r\n",
+                "",
             ),
             (
                 CommentSyntax::Xml,
+                "<root>\r\n",
                 "<!-- >>> anvil-managed: repair -->\r\n",
                 "<!-- <<< anvil-managed: repair -->\r\n",
+                "</root>\r\n",
             ),
         ] {
             let catalog = Catalog::builder(CliMeta::new("anvil"))
@@ -2791,8 +2803,8 @@ mod tests {
                 .build()
                 .unwrap();
             for input in [
-                format!("{open}{open}generated\r\n{close}user\r\n"),
-                format!("{open}generated\r\n{close}user\r\n{close}"),
+                format!("{prefix}{open}{open}generated\r\n{close}user\r\n{suffix}"),
+                format!("{prefix}{open}generated\r\n{close}user\r\n{close}{suffix}"),
             ] {
                 let tmp = empty_workspace();
                 let path = tmp.path().join("host.txt");
@@ -2897,6 +2909,31 @@ mod tests {
             assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
             assert_eq!(host.matches("generated").count(), 1);
         }
+    }
+
+    #[test]
+    fn existing_xml_region_outside_the_document_root_is_refused() {
+        let host = "<!-- >>> anvil-managed: settings -->\n\
+                    <!-- <<< anvil-managed: settings -->\n\
+                    <configuration>\n</configuration>\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "  <setting name=\"generated\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.xml", "settings", checksum_str(""));
+        let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage config.xml [settings]: the existing XML managed region is outside the document root. This region was left unchanged; other regions \
+               in the same file and other artifacts may still be updated. Create or restore a well-formed XML host with its closing document-root element on its own \
+               line so anvil can insert the managed region inside the root, then retry."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
     }
 
     #[test]
