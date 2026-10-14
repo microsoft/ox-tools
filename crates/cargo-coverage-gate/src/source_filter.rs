@@ -320,8 +320,20 @@ fn source_declarations(
     role: SourceRole,
     test_attributes: &BTreeSet<String>,
 ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
-    let mut is_file = Path::is_file;
+    let mut is_file = source_path_is_file;
     module_declarations(path, &analysis.syntax, role, test_attributes, &mut is_file)
+}
+
+fn source_path_is_file(path: &Path) -> Result<bool, CoverageGateError> {
+    classify_source_path_metadata(path, fs::metadata(path))
+}
+
+fn classify_source_path_metadata(path: &Path, metadata: std::io::Result<fs::Metadata>) -> Result<bool, CoverageGateError> {
+    match metadata {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), error).into()),
+    }
 }
 
 fn target_is_released(kinds: &[TargetKind]) -> bool {
@@ -576,7 +588,7 @@ fn module_declarations(
     source: &ast::SourceFile,
     role: SourceRole,
     test_attributes: &BTreeSet<String>,
-    is_file: &mut impl FnMut(&Path) -> bool,
+    is_file: &mut impl FnMut(&Path) -> Result<bool, CoverageGateError>,
 ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
     let Some(directory) = owned_directory(path, role) else {
         return Ok(Vec::new());
@@ -618,7 +630,7 @@ struct ModuleWalker<'a, F> {
     is_file: &'a mut F,
 }
 
-impl<F: FnMut(&Path) -> bool> ModuleWalker<'_, F> {
+impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
     fn walk(&mut self, items: Vec<ast::Item>, directory: &Path, base: &Path, inherited_test_only: bool) -> Result<(), CoverageGateError> {
         for item in items {
             let ast::Item::Module(module) = item else {
@@ -649,10 +661,12 @@ impl<F: FnMut(&Path) -> bool> ModuleWalker<'_, F> {
                 },
                 |relative| (vec![base.join(relative)], SourceRole::PathModule),
             );
-            let existing = candidates
-                .into_iter()
-                .filter(|candidate| (self.is_file)(candidate))
-                .collect::<Vec<_>>();
+            let mut existing = Vec::new();
+            for candidate in candidates {
+                if (self.is_file)(&candidate)? {
+                    existing.push(candidate);
+                }
+            }
             if existing.len() > 1 {
                 return Err(AmbiguousModuleSourceError::new(
                     diagnostic_path(self.declaring_file),
@@ -980,7 +994,7 @@ mod tests {
         role: SourceRole,
         existing: &BTreeSet<PathBuf>,
     ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
-        let mut is_file = |candidate: &Path| existing.contains(&lexical_normalize(candidate));
+        let mut is_file = |candidate: &Path| Ok(existing.contains(&lexical_normalize(candidate)));
         module_declarations(path, &analysis.syntax, role, &BTreeSet::new(), &mut is_file)
     }
 
@@ -1430,6 +1444,43 @@ mod tests {
                 "{error}"
             );
         }
+
+        let analysis = analyze(&root, "mod child;\n");
+        let mut fail_inspection = |path: &Path| {
+            Err(ResolveCoverageSourceError::caused_by(
+                diagnostic_path(path),
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "inspection denied"),
+            )
+            .into())
+        };
+        let error = module_declarations(
+            &root,
+            &analysis.syntax,
+            SourceRole::CrateRoot,
+            &BTreeSet::new(),
+            &mut fail_inspection,
+        )
+        .expect_err("filesystem inspection failures must propagate")
+        .to_string();
+        assert!(error.contains("inspection denied"), "{error}");
+        assert!(error.contains("child.rs"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "inspects checked-in fixture paths, which Miri isolation forbids")]
+    fn source_path_inspection_treats_only_not_found_as_absent() {
+        let root = source_index_fixture_root();
+        assert!(source_path_is_file(&root.join("member/src/lib.rs")).expect("fixture file is inspectable"));
+        assert!(!source_path_is_file(&root.join("member/src/missing.rs")).expect("missing file is absent"));
+
+        let denied = classify_source_path_metadata(
+            Path::new("denied.rs"),
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "inspection denied")),
+        )
+        .expect_err("permission errors must propagate")
+        .to_string();
+        assert!(denied.contains("inspection denied"), "{denied}");
+        assert!(denied.contains("denied.rs"), "{denied}");
     }
 
     #[test]
