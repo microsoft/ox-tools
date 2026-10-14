@@ -104,7 +104,7 @@ try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONT
 | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook (§7.3), so a query never pulls. |
 | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild with `--no-cache` even when the tag resolves. Skips the resolve hook too (§7.3). |
 | `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.4). |
-| `GITHUB_TOKEN` | Forwarded into the run. Taken from the host environment, or derived from the gh CLI for a target that reads it (§5.3). |
+| `GITHUB_TOKEN` | Forwarded by name only with a leading `anvil-container --github-token` flag. Must be explicitly supplied in the host environment (§5.3). |
 
 `NO_REBUILD` is evaluated independently of `NO_CACHE`, so the two compose: `anvil-container-status` sets `NO_REBUILD`
 and `NO_RESOLVE` together and answers from local state alone. When `NO_REBUILD` stops a build the reference is still
@@ -396,24 +396,25 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 
 ### 5.3 Environment
 
-The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name, resolved the way the recipe resolves
-it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `scheduled-advisories` group and
-queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and then sleeps until the quota
-resets, so a tier needs the token to terminate rather than merely to run quickly.
+The run passes `ANVIL_IN_CONTAINER=1` (§5.4). By default it does **not** forward `GITHUB_TOKEN`, even if the host
+environment contains one, and never acquires a token from the host gh CLI. This applies to commands and interactive
+shells alike. No command planning or recipe inspection decides whether to expose credentials.
 
-The two sources are not treated alike. An **exported** `GITHUB_TOKEN` is forwarded whatever the target is — that is
-exact parity, since a native run exposes it to every process the shell spawns too. A token **derived** from the gh CLI
-is a credential the developer never put in this environment, and PID 1's environment is inherited by every build script
-and proc macro in the container, where natively `anvil-aprz` would mint it inside its own process. So it is derived
-only when the target's plan (`just --dry-run <target>`) reads `GITHUB_TOKEN`, or when there is no target at all: an
-interactive session can run anything, and refusing there would reintroduce the stall the token exists to prevent. The
-predicate is the variable rather than the name of a check, so a catalog that adds another GitHub-authenticated check is
-covered without touching the driver.
+To authenticate, explicitly supply a least-privilege `GITHUB_TOKEN` in the host environment and put `--github-token`
+immediately after `anvil-container`, before the command:
 
-A plan covers the bodies `just` runs itself, not the body of a recipe that one of them launches as a child process.
-The unscoped tier wrapper (§`helpers.just`) launches its tier that way, so planning `anvil-scheduled` shows the wrapper
-alone. The driver therefore follows each nested target a plan names, until nothing new appears; without that, a wrapped
-tier reads as needing nothing and `anvil-aprz` runs unauthenticated inside an image that has no `gh` of its own.
+```console
+just anvil-container --github-token just anvil-aprz
+just anvil-container --github-token
+```
+
+The launcher consumes the flag instead of passing it to the command. If the token is missing, empty, or whitespace,
+it fails before resolving the engine or image. There is no gh fallback. `anvil-aprz` queries the GitHub advisory API;
+unauthenticated requests have a much smaller hourly quota and may wait for its reset.
+
+`GITHUB_TOKEN` is reserved in `Anvil-RunEnv`: a hook returning that name without the flag is rejected. With opt-in,
+the explicitly supplied host token is authoritative and the hook's value for that name is ignored. Other hook
+variables retain their existing behavior.
 
 It also forwards the recipe contract's own inputs when they are set — `PR_TITLE`, `BASE_REF`, `GITHUB_BASE_REF`,
 `SYSTEM_PULLREQUEST_TARGETBRANCH`, `ANVIL_IMPACT` and `ANVIL_MIRI_JOBS` — because a check that reads one
@@ -434,9 +435,11 @@ The rejection is gated on consume because that is the only mode that reads the o
 variable is ignored, so a container cannot diverge and there is nothing to reject. An explicit input that cannot be
 honored fails; it never falls back.
 
-A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
-command line. Inside the container it is readable by everything the run executes, including build scripts and proc
-macros.
+The token is passed by name (`-e GITHUB_TOKEN`), never as a value in engine arguments. Inside the container it is
+readable by everything the run executes, including build scripts and proc macros. Use credentials only with
+reviewed, trusted code. Recipes and hooks already execute host code and can access the host environment; this
+opt-in prevents accidental exposure, not arbitrary malicious recipe edits. It is not a sandbox or a credential
+isolation boundary.
 
 Everything else a run needs comes from the hook (§7).
 

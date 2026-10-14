@@ -3609,52 +3609,154 @@ fn unscoped_wrapper_exports_impact_off_before_dependencies_run() {
     );
 }
 
-/// `just --dry-run` reports the bodies just runs itself, not the body of a
-/// recipe that one of them launches as a child process. The unscoped wrapper
-/// launches its tier that way, so a plan of the public tier name reveals the
-/// wrapper alone.
-///
-/// The container driver decides whether to mint a GitHub token by matching the
-/// plan for `GITHUB_TOKEN`, so this is why it has to follow each nested target
-/// rather than reading one plan. If this test ever fails because a plan now
-/// reaches through the child process, that expansion can be deleted.
-#[test]
-fn a_wrapped_tier_hides_its_checks_from_a_plan() {
-    const PROBE: &str = "[private]\n[script(\"pwsh\", \"-NoProfile\")]\n_anvil-probe:\n    \
-        if (-not $env:GITHUB_TOKEN) { exit 1 }\n\n\
-        probe: (_anvil-unscoped \"probe\")\n";
+fn container_launcher_fixture() -> TempDir {
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    stub_msrv_resolver(root);
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
+    write(
+        &root.join("fake-bin/docker.ps1"),
+        r#"
+Add-Content -LiteralPath (Join-Path $env:FAKE_WORKSPACE_ROOT 'engine.log') -Value ($args -join "`n")
+if ($args[0] -eq 'run') {
+    if ($env:GITHUB_TOKEN -and $env:GITHUB_TOKEN -ne 'synthetic-host-token') { exit 91 }
+    if ($env:GITHUB_TOKEN) { Write-Output 'synthetic host input available to engine' }
+}
+exit 0
+"#,
+    );
+    write(
+        &root.join("fake-bin/gh.ps1"),
+        "Set-Content -LiteralPath (Join-Path $env:FAKE_WORKSPACE_ROOT 'gh.log') -Value 'called'\nexit 92\n",
+    );
+    tmp
+}
 
+fn run_container_launcher(root: &Path, arguments: &[&str], token: &str) -> Output {
+    run_just(
+        root,
+        arguments,
+        &[
+            ("GITHUB_TOKEN", OsStr::new(token)),
+            ("ANVIL_CONTAINER_ENGINE", OsStr::new("docker")),
+            ("ANVIL_IN_CONTAINER", OsStr::new("")),
+            ("ANVIL_CONTAINER_NO_CACHE", OsStr::new("")),
+            ("ANVIL_CONTAINER_NO_RESOLVE", OsStr::new("1")),
+        ],
+    )
+}
+
+#[test]
+fn container_github_token_is_opt_in_for_commands_and_interactive_shells() {
     if !tools_available() {
         return;
     }
-    let tmp = fixture(&[("helpers.just", HELPERS), ("probe.just", PROBE)], &[]);
-    let root = tmp.path();
+    for command in [vec!["just", "probe"], vec![], vec!["cargo", "--github-token"]] {
+        for opt_in in [false, true] {
+            let tmp = container_launcher_fixture();
+            let root = tmp.path();
+            let mut arguments = vec!["anvil-container"];
+            if opt_in {
+                arguments.push("--github-token");
+            }
+            arguments.extend_from_slice(&command);
+            let output = run_container_launcher(root, &arguments, "synthetic-host-token");
+            assert!(
+                output.status.success(),
+                "launcher failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let calls = fs::read_to_string(root.join("engine.log")).unwrap();
+            assert_eq!(calls.contains("-e\nGITHUB_TOKEN\n"), opt_in, "{calls}");
+            assert!(
+                !calls.contains("synthetic-host-token"),
+                "token values must not reach engine arguments"
+            );
+            assert_eq!(
+                calls.matches("--github-token").count(),
+                usize::from(command.contains(&"--github-token")),
+                "only the leading launcher flag is consumed"
+            );
+            assert_eq!(calls.contains("-it\n"), command.is_empty(), "{calls}");
+            assert!(!root.join("gh.log").exists(), "the launcher must never query host gh credentials");
+        }
+    }
+}
 
-    let wrapped = run_just(root, &["--dry-run", "probe"], &[]);
-    let wrapped_plan = format!(
-        "{}{}",
-        String::from_utf8_lossy(&wrapped.stdout),
-        String::from_utf8_lossy(&wrapped.stderr)
-    );
-    assert!(
-        !wrapped_plan.contains("GITHUB_TOKEN"),
-        "a wrapped tier's plan must not reach the recipe it launches, or the driver's expansion is dead code\n{wrapped_plan}"
-    );
-    assert!(
-        wrapped_plan.contains("_anvil-probe"),
-        "the wrapper must still name the recipe it launches, which is what the driver follows\n{wrapped_plan}"
-    );
+#[test]
+fn container_github_token_missing_fails_before_engine_resolution() {
+    if !tools_available() {
+        return;
+    }
+    for token in ["", "   "] {
+        let tmp = container_launcher_fixture();
+        let output = run_container_launcher(tmp.path(), &["anvil-container", "--github-token"], token);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--github-token requires an explicitly supplied GITHUB_TOKEN"));
+        assert!(
+            !tmp.path().join("engine.log").exists(),
+            "validation must precede even image inspection"
+        );
+        assert!(!tmp.path().join("gh.log").exists());
+    }
+}
 
-    let direct = run_just(root, &["--dry-run", "_anvil-probe"], &[]);
-    let direct_plan = format!(
-        "{}{}",
-        String::from_utf8_lossy(&direct.stdout),
-        String::from_utf8_lossy(&direct.stderr)
-    );
-    assert!(
-        direct_plan.contains("GITHUB_TOKEN"),
-        "planning the launched recipe directly must reveal the variable, or this test proves nothing\n{direct_plan}"
-    );
+#[test]
+fn container_github_token_is_not_acquired_for_a_tokenless_default_run() {
+    if !tools_available() {
+        return;
+    }
+    for command in [vec!["just", "probe"], vec![]] {
+        let tmp = container_launcher_fixture();
+        let root = tmp.path();
+        let mut arguments = vec!["anvil-container"];
+        arguments.extend_from_slice(&command);
+        let output = run_container_launcher(root, &arguments, "");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let calls = fs::read_to_string(root.join("engine.log")).unwrap();
+        assert!(!calls.contains("GITHUB_TOKEN"));
+        assert!(
+            !root.join("gh.log").exists(),
+            "even an interactive shell must not acquire a host token"
+        );
+    }
+}
+
+#[test]
+fn container_github_token_run_hook_cannot_enable_forwarding() {
+    if !tools_available() {
+        return;
+    }
+    for opt_in in [false, true] {
+        let tmp = container_launcher_fixture();
+        let root = tmp.path();
+        write(
+            &root.join(".anvil/container/hooks.ps1"),
+            "function Anvil-RunEnv { @{ Env = @{ github_token = 'synthetic-hook-token'; OTHER_CREDENTIAL = 'synthetic-other' } } }\n",
+        );
+        let arguments = if opt_in {
+            vec!["anvil-container", "--github-token", "cargo", "build"]
+        } else {
+            vec!["anvil-container", "cargo", "build"]
+        };
+        let output = run_container_launcher(root, &arguments, "synthetic-host-token");
+        assert_eq!(output.status.success(), opt_in, "{}", String::from_utf8_lossy(&output.stderr));
+        let calls = fs::read_to_string(root.join("engine.log")).unwrap();
+        assert_eq!(calls.contains("run\n"), opt_in);
+        if opt_in {
+            assert!(calls.contains("-e\nGITHUB_TOKEN\n"));
+            assert!(
+                calls.contains("-e\nOTHER_CREDENTIAL\n"),
+                "generic hook forwarding must be preserved"
+            );
+            assert!(!calls.contains("synthetic-hook-token"));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("synthetic host input available to engine"));
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Anvil-RunEnv cannot forward it without --github-token"));
+        }
+        assert!(!root.join("gh.log").exists());
+    }
 }
 
 /// The engine derives the ignore file's name from the Dockerfile's, and anvil

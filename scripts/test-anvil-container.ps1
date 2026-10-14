@@ -22,8 +22,7 @@
       2. The first run builds an image and runs the recipe inside it.
       3. A second run reuses the image (the tag resolves, nothing is built),
          no cache volume masks the tools the image installed, and a host
-         GITHUB_TOKEN is forwarded — from the environment, or from the gh CLI
-         when the environment has none.
+         GITHUB_TOKEN is forwarded only with explicit opt-in from the environment.
       3b. A recipe run from a linked worktree can still reach git history.
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
       5. Reverting that input returns to the original tag.
@@ -327,19 +326,11 @@ set unstable
 e2e-show-env:
     @echo "E2E:$ANVIL_E2E_RUNTIME"
 
-# Proves the driver forwards a host token, and invents one when it should not.
+# Proves the driver forwards only an explicitly opted-in synthetic host token.
 # `:-` because just runs recipe lines under `sh -u`, where a bare $NAME that
 # was correctly *not* forwarded would abort instead of printing empty.
 e2e-show-token:
     @echo "E2E-TOKEN:[${GITHUB_TOKEN:-}]"
-
-# The negative case for the same rule. A derived token is minted only when the
-# target's plan reads GITHUB_TOKEN, so this recipe must observe the environment
-# *without naming the variable* -- naming it is what would opt it in. Dumping
-# every name lets the assertion look for the value without the plan mentioning
-# it.
-e2e-dump-env:
-    @env | sed 's/=.*//' | sort | tr '\n' ' '
 
 # Proves git resolves inside the container, which a linked worktree breaks
 # unless the driver mounts the common git directory.
@@ -439,63 +430,29 @@ Assert-Equal 'a tool installed by the image survives the cache mounts' 0 $probe.
 Assert-That 'the tool resolves inside the image, not a volume' `
     ($probe.StdOut -match '/usr/local/cargo/bin/cargo-binstall') "$($probe.StdOut)$($probe.StdErr)"
 
-# anvil-aprz runs in scheduled-advisories and blocks on the rate limit without a token, so a
-# host token has to reach the container. The driver resolves it the way the
-# recipe does natively: the environment first, then the gh CLI.
-#
-# Failure details are redacted: on a developer machine the value below is a real
-# credential, and a test that prints it to the terminal on failure is a leak.
+# Only synthetic credentials are used; never inspect the developer's gh token.
 function Hide-Token([string]$Text) { $Text -replace 'E2E-TOKEN:\[[^\]]+\]', 'E2E-TOKEN:[<redacted>]' }
 
-$withToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
+$defaultToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
     -Environment @{ GITHUB_TOKEN = 'e2e-forwarded-token' }
-Assert-That 'a host GITHUB_TOKEN reaches a recipe in the container' `
+Assert-That 'a host GITHUB_TOKEN is not forwarded by default' `
+    ($defaultToken.StdOut -match 'E2E-TOKEN:\[\]') (Hide-Token "$($defaultToken.StdOut)$($defaultToken.StdErr)")
+
+$withToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', '--github-token', 'just', 'e2e-show-token') `
+    -Environment @{ GITHUB_TOKEN = 'e2e-forwarded-token' }
+Assert-That 'an explicitly opted-in GITHUB_TOKEN reaches a recipe in the container' `
     ($withToken.StdOut -match 'E2E-TOKEN:\[e2e-forwarded-token\]') (Hide-Token "$($withToken.StdOut)$($withToken.StdErr)")
 
-# No environment token and no gh CLI: nothing is forwarded. gh is hidden by
-# dropping its directory from PATH, which is what the driver actually probes --
-# `GH_CONFIG_DIR` does not work here, because modern gh keeps credentials in the
-# OS keyring rather than in its config directory.
-$pathWithoutGh = $env:PATH
-$ghCommand = Get-Command gh -ErrorAction SilentlyContinue
-if ($ghCommand) {
-    $ghDir = (Split-Path $ghCommand.Source).TrimEnd('\', '/')
-    $separator = if ($IsWindows) { ';' } else { ':' }
-    $pathWithoutGh = (($env:PATH -split $separator) |
-        Where-Object { $_ -and $_.TrimEnd('\', '/') -ne $ghDir }) -join $separator
-}
 $withoutToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
-    -Environment @{ GITHUB_TOKEN = ''; GH_TOKEN = ''; PATH = $pathWithoutGh }
+    -Environment @{ GITHUB_TOKEN = ''; GH_TOKEN = '' }
 Assert-That 'no token is invented when the host has none' `
     ($withoutToken.StdOut -match 'E2E-TOKEN:\[\]') (Hide-Token "$($withoutToken.StdOut)$($withoutToken.StdErr)")
 
-# The gh fallback itself, which is what keeps a containerized tier from blocking
-# for a developer who signed in with `gh auth login` and never exported a token.
-# Skipped rather than failed when the host is not signed in, since that is a
-# property of the machine running the suite.
-$hostGhToken = $null
-if (Get-Command gh -ErrorAction SilentlyContinue) {
-    try { $hostGhToken = (gh auth token --hostname github.com 2>$null) } catch { $hostGhToken = $null }
-}
-if ($hostGhToken -and $hostGhToken.Trim()) {
-    $viaGh = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
-        -Environment @{ GITHUB_TOKEN = '' }
-    Assert-That 'the gh CLI token is used when the environment has none' `
-        ($viaGh.StdOut -match ('E2E-TOKEN:\[' + [regex]::Escape($hostGhToken.Trim()) + '\]')) `
-        (Hide-Token "$($viaGh.StdOut)$($viaGh.StdErr)")
-
-    # The other half of the rule. Minting a credential the developer never put
-    # in this environment hands it to every build script and proc macro in the
-    # container, where natively the recipe would mint it in its own process --
-    # so a target that never reads the variable must not receive it.
-    $noNeed = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-dump-env') `
-        -Environment @{ GITHUB_TOKEN = '' }
-    Assert-That 'no token is derived for a target that does not read it' `
-        ($noNeed.StdOut -notmatch 'GITHUB_TOKEN') `
-        (Hide-Token "$($noNeed.StdOut)$($noNeed.StdErr)")
-} else {
-    Write-Step 'skipping the gh-fallback check: this host has no gh credential'
-}
+$missingToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', '--github-token', 'just', 'e2e-show-token') `
+    -Environment @{ GITHUB_TOKEN = '' } -AllowFailure
+Assert-That 'opt-in without a supplied token fails' ($missingToken.ExitCode -ne 0)
+Assert-That 'the missing-token failure explains the explicit input' `
+    ($missingToken.StdErr -match '--github-token requires an explicitly supplied GITHUB_TOKEN')
 
 # --------------------------------------------------------- 3b. worktrees -----
 
