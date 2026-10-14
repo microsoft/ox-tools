@@ -235,6 +235,9 @@ fn validate_target_filters(
     target_kinds: &BTreeSet<TargetKind>,
     target_filters: &[TargetPredicate],
 ) -> Result<(), EachError> {
+    // Target filtering follows kind selection, so metadata on members without
+    // any requested-kind target cannot affect the plan and is outside this
+    // preflight.
     for member in members.iter().filter(|member| {
         member
             .targets

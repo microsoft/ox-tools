@@ -29599,7 +29599,7 @@ files:
     test: empty_filtered_selection_skips_workspace_rust_version_resolution
   - package: cargo-each
     target: cli
-    test: exclude_filter_metadata_drops_matching_member
+    test: negated_metadata_filter_drops_matching_member
   - package: cargo-each
     target: cli
     test: exclude_with_workspace_removes_member
@@ -29632,7 +29632,7 @@ files:
     test: once_with_boolean_filter_uses_explicit_packages_not_workspace
   - package: cargo-each
     target: cli
-    test: once_with_exclude_filter_uses_explicit_packages_not_workspace
+    test: once_with_negated_filter_uses_explicit_packages_not_workspace
   - package: cargo-each
     target: cli
     test: package_file_input_errors_fail_loudly
@@ -32688,7 +32688,7 @@ files:
     test: metadata_load_error_has_exact_run_context
   - package: cargo-each
     target: cli
-    test: multiple_exclude_filters_union
+    test: multiple_negated_filters_intersect
   - package: cargo-each
     target: cli
     test: multiple_filters_intersect
@@ -86307,7 +86307,7 @@ generalized:
     test: empty_filtered_selection_skips_workspace_rust_version_resolution
   - package: cargo-each
     target: cli
-    test: exclude_filter_metadata_drops_matching_member
+    test: negated_metadata_filter_drops_matching_member
   - package: cargo-each
     target: cli
     test: exclude_with_workspace_removes_member
@@ -86343,7 +86343,7 @@ generalized:
     test: missing_manifest_reports_workspace_load_context
   - package: cargo-each
     target: cli
-    test: multiple_exclude_filters_union
+    test: multiple_negated_filters_intersect
   - package: cargo-each
     target: cli
     test: multiple_filters_intersect
@@ -86364,7 +86364,7 @@ generalized:
     test: once_with_boolean_filter_uses_explicit_packages_not_workspace
   - package: cargo-each
     target: cli
-    test: once_with_exclude_filter_uses_explicit_packages_not_workspace
+    test: once_with_negated_filter_uses_explicit_packages_not_workspace
   - package: cargo-each
     target: cli
     test: once_with_filter_uses_explicit_packages_not_workspace

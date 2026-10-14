@@ -980,7 +980,7 @@ fn target_filters_support_boolean_composition() {
             "--each-target",
             "example",
             "--target-filter",
-            "required-feature:loom or name:demo",
+            "(required-feature:loom and name:loom-*) or name:demo",
             "--dry-run",
             "--",
             "echo",

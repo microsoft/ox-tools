@@ -294,6 +294,8 @@ pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
 mod tests {
     use std::fs;
 
+    use serde_json::from_str;
+
     use super::*;
     use crate::filter::Predicate;
 
@@ -347,7 +349,7 @@ mod tests {
     #[test]
     fn metadata_doctest_capability_drives_filtering_and_composition() {
         let metadata: Metadata =
-            serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture is valid");
+            from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture is valid");
         let workspace = Workspace::from_metadata(&metadata);
 
         let capability = workspace

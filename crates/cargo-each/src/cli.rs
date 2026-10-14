@@ -85,8 +85,9 @@ pub(crate) struct EachArgs {
     #[arg(long = "each-target", value_name = "KIND", conflicts_with = "once")]
     pub(crate) each_targets: Vec<String>,
 
-    /// Keep only targets matching this Boolean expression. Repeatable;
-    /// expressions are AND-combined. Supports `not`, `and`, `or`, and
+    /// Keep only targets matching this Boolean expression.
+    ///
+    /// Repeatable; expressions are AND-combined. Supports `not`, `and`, `or`, and
     /// parentheses over `name:<glob>`, `required-feature:<name>`, and
     /// `name-in-metadata:<dotted.key>`.
     #[arg(long = "target-filter", value_name = "EXPR", requires = "each_targets")]

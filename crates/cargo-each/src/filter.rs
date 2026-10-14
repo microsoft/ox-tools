@@ -36,44 +36,6 @@ pub(crate) enum Expression<Atom> {
     Atom(Atom),
 }
 
-/// An atomic package predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PackageAtom {
-    /// `target-kind:<kind>`: member has a target of that Cargo kind.
-    HasTargetKind(TargetKind),
-    /// `doctest`: Cargo reports at least one target with doctests enabled.
-    Doctest,
-    /// `publishable`: Cargo permits publishing the package.
-    Publishable,
-    /// `feature:<name>`: member declares the named feature.
-    HasFeature(String),
-    /// `dep:<name>`: member declares `<name>` as a dependency.
-    DependsOn(String),
-    /// `metadata:<dotted.key>`: the metadata key is present.
-    MetadataPresent(String),
-    /// `metadata:<dotted.key>=<value>`: the metadata key equals `<value>`.
-    MetadataEquals {
-        /// The dotted metadata key path.
-        key: String,
-        /// The expected value.
-        value: String,
-    },
-}
-
-/// An atomic target predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TargetAtom {
-    /// `name:<glob>`: target name matches a Unix-style glob.
-    Name(String),
-    /// `required-feature:<name>`: target declares the named required feature.
-    RequiredFeature(String),
-    /// `name-in-metadata:<dotted.key>`: target name occurs in the metadata list.
-    NameInMetadata(String),
-}
-
-pub(crate) type Predicate = Expression<PackageAtom>;
-pub(crate) type TargetPredicate = Expression<TargetAtom>;
-
 impl Expression<PackageAtom> {
     /// Parse a Boolean filter expression.
     ///
@@ -171,7 +133,11 @@ impl Expression<TargetAtom> {
         }
     }
 
-    /// Validate metadata values referenced by this expression for one member.
+    /// Preflight metadata values referenced by this expression for one member.
+    ///
+    /// This deliberately visits every Boolean operand independently of match
+    /// results. Matching short-circuits `and` and `or`, but configuration
+    /// errors must not depend on operand order or an earlier match.
     pub(crate) fn validate(&self, member: &Member) -> Result<(), EachError> {
         match self {
             Self::And(predicates) | Self::Or(predicates) => {
@@ -198,7 +164,13 @@ impl Expression<TargetAtom> {
             Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member, target)),
             Self::Not(predicate) => !predicate.matches(member, target),
             Self::Atom(atom) => match atom {
-                TargetAtom::Name(pattern) => glob_matches(pattern, &target.name),
+                TargetAtom::Name(pattern) => {
+                    if pattern.contains(['*', '?']) {
+                        glob_matches(pattern, &target.name)
+                    } else {
+                        pattern == &target.name
+                    }
+                }
                 TargetAtom::RequiredFeature(name) => target.required_features.contains(name),
                 TargetAtom::NameInMetadata(key) => lookup(&member.metadata, key).is_some_and(|value| {
                     value
@@ -209,6 +181,44 @@ impl Expression<TargetAtom> {
         }
     }
 }
+
+/// An atomic package predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PackageAtom {
+    /// `target-kind:<kind>`: member has a target of that Cargo kind.
+    HasTargetKind(TargetKind),
+    /// `doctest`: Cargo reports at least one target with doctests enabled.
+    Doctest,
+    /// `publishable`: Cargo permits publishing the package.
+    Publishable,
+    /// `feature:<name>`: member declares the named feature.
+    HasFeature(String),
+    /// `dep:<name>`: member declares `<name>` as a dependency.
+    DependsOn(String),
+    /// `metadata:<dotted.key>`: the metadata key is present.
+    MetadataPresent(String),
+    /// `metadata:<dotted.key>=<value>`: the metadata key equals `<value>`.
+    MetadataEquals {
+        /// The dotted metadata key path.
+        key: String,
+        /// The expected value.
+        value: String,
+    },
+}
+
+/// An atomic target predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetAtom {
+    /// `name:<glob>`: target name matches a Unix-style glob.
+    Name(String),
+    /// `required-feature:<name>`: target declares the named required feature.
+    RequiredFeature(String),
+    /// `name-in-metadata:<dotted.key>`: target name occurs in the metadata list.
+    NameInMetadata(String),
+}
+
+pub(crate) type Predicate = Expression<PackageAtom>;
+pub(crate) type TargetPredicate = Expression<TargetAtom>;
 
 /// Parse the portion of a `metadata:` predicate after the prefix.
 fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
@@ -413,7 +423,12 @@ impl<'a, Atom> ExpressionParser<'a, Atom> {
     }
 }
 
-/// Match a Unix-style glob supporting `*` and `?`.
+/// Tiny Unix-style glob matcher: `*` matches any run of characters
+/// (including empty), `?` matches exactly one character. Everything else
+/// matches literally.
+///
+/// Uses dynamic programming, so ambiguous `*` backtracking remains bounded by
+/// `O(len(pattern) * len(name))`.
 pub(crate) fn glob_matches(pattern: &str, name: &str) -> bool {
     let name: Vec<char> = name.chars().collect();
     let mut previous = vec![false; name.len() + 1];
@@ -658,6 +673,16 @@ mod tests {
             predicate.validate(&member).expect("valid metadata");
             assert!(predicate.matches(&member, &target));
         }
+        assert!(
+            TargetPredicate::parse("name:loom-test")
+                .expect("literal name filter")
+                .matches(&member, &target)
+        );
+        assert!(
+            !TargetPredicate::parse("name:ordinary-test")
+                .expect("literal name filter")
+                .matches(&member, &target)
+        );
         assert!(
             !TargetPredicate::parse("name:unit-*")
                 .expect("name filter")
