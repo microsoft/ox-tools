@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
+- ✨ Features
+
+  - resume interrupted campaigns and streamline mutant testing ([#248](https://github.com/microsoft/ox-tools/pull/248))
+  - improve campaign scheduling and UX ([#208](https://github.com/microsoft/ox-tools/pull/208))
+
+- 🐛 Bug Fixes
+
+  - address self-review findings
+  - make test attribute policy explicit
+  - harden cfg and module resolution
+  - preserve raw evaluation compatibility
+  - filter reports to released surfaces
+  - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
+
+- ✔️ Tasks
+
+  - defer Anvil rollout until release
+
+- ♻️ Code Refactoring
+
+  - default to released surfaces
+
+- 🧩 Miscellaneous
+
+  - Address Sander's 'Tsunami of Feedback' ([#221](https://github.com/microsoft/ox-tools/pull/221))
+
 ## [0.6.0] - 2026-09-23
 
 - ✨ Features
