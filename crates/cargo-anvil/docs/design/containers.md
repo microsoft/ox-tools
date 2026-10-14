@@ -398,7 +398,7 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 
 The run passes `ANVIL_IN_CONTAINER=1` (§5.4). By default it does **not** forward `GITHUB_TOKEN`, even if the host
 environment contains one, and never acquires a token from the host gh CLI. This applies to commands and interactive
-shells alike. No command planning or recipe inspection decides whether to expose credentials.
+shells alike.
 
 To authenticate, explicitly supply a least-privilege `GITHUB_TOKEN` in the host environment and put `--github-token`
 immediately after `anvil-container`, before the command:

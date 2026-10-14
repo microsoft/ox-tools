@@ -5695,8 +5695,6 @@ anvil-container *command:
     $forwardedEnv = @()
     $hookEnv = @()
 
-    # Never discover credentials or plan branch-controlled commands to decide
-    # whether to expose them. The same explicit choice applies to a shell.
     if ($forwardGithubToken) {
         $forwardedEnv += 'GITHUB_TOKEN'
         $runArgs += @('-e', 'GITHUB_TOKEN')
