@@ -236,8 +236,10 @@ test-attributes = ["my_runtime::test"]
 
 The entries are exact Rust attribute paths. The list is workspace-scoped so a
 source file shared by multiple packages receives one classification;
-package-scoped `test-attributes` is a configuration error. There are no
-qualified built-in defaults.
+released-surface filtering rejects package-scoped `test-attributes` as a
+configuration error. The explicit `evaluate_unfiltered*` escape hatch does not
+consume or validate this filtering-only key. There are no qualified built-in
+defaults.
 
 #### `expect-no-coverable-lines`: empty crates vs. opt-out
 

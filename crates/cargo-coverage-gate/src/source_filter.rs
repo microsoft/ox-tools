@@ -487,14 +487,16 @@ fn path_marks_test(path: &ast::Path, test_attributes: &BTreeSet<String>) -> bool
 }
 
 fn normalize_attribute_path(path: &ast::Path) -> String {
-    path.syntax()
-        .text()
-        .to_string()
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .trim_start_matches("::")
-        .to_owned()
+    let mut segments = Vec::new();
+    let mut current = Some(path.clone());
+    while let Some(path) = current {
+        if let Some(name) = path.segment().and_then(|segment| segment.name_ref()) {
+            segments.push(name.text().trim_start_matches("r#").to_owned());
+        }
+        current = path.qualifier();
+    }
+    segments.reverse();
+    segments.join("::")
 }
 
 fn cfg_predicate_is_test_only(predicate: &ast::CfgPredicate) -> bool {
@@ -685,11 +687,7 @@ fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_nam
         let ast::Meta::KeyValueMeta(meta) = attribute_meta else {
             continue;
         };
-        let is_path = meta
-            .path()
-            .and_then(|path| path.segment())
-            .and_then(|segment| segment.name_ref())
-            .is_some_and(|name| name.text() == "path");
+        let is_path = meta.path().is_some_and(|path| normalize_attribute_path(&path) == "path");
         if !is_path {
             continue;
         }
@@ -722,11 +720,7 @@ fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_nam
 
 fn meta_contains_path(meta: &ast::Meta) -> bool {
     match meta {
-        ast::Meta::KeyValueMeta(meta) => meta
-            .path()
-            .and_then(|path| path.segment())
-            .and_then(|segment| segment.name_ref())
-            .is_some_and(|name| name.text() == "path"),
+        ast::Meta::KeyValueMeta(meta) => meta.path().is_some_and(|path| normalize_attribute_path(&path) == "path"),
         ast::Meta::CfgAttrMeta(meta) => meta.metas().any(|inner| meta_contains_path(&inner)),
         ast::Meta::CfgMeta(_) | ast::Meta::PathMeta(_) | ast::Meta::TokenTreeMeta(_) | ast::Meta::UnsafeMeta(_) => false,
     }
@@ -887,6 +881,73 @@ mod tests {
         analyze_source_text(path, source, Edition::Edition2024, &BTreeSet::new()).expect("fixture source parses")
     }
 
+    fn source_index_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index")
+    }
+
+    fn source_index_fixture_metadata(root: &Path) -> Metadata {
+        let member = root.join("member");
+        let package_id = "path+file:///coverage-source-index#member@0.1.0";
+        serde_json::from_value(json!({
+            "packages": [{
+                "name": "member",
+                "version": "0.1.0",
+                "authors": [],
+                "id": package_id,
+                "source": null,
+                "description": null,
+                "dependencies": [],
+                "license": null,
+                "license_file": null,
+                "targets": [
+                    {
+                        "kind": ["lib"],
+                        "crate_types": ["lib"],
+                        "name": "member",
+                        "src_path": member.join("src/lib.rs"),
+                        "edition": "2024",
+                        "doc": true,
+                        "doctest": true,
+                        "test": true
+                    },
+                    {
+                        "kind": ["test"],
+                        "crate_types": ["bin"],
+                        "name": "integration",
+                        "src_path": member.join("tests/integration.rs"),
+                        "edition": "2024",
+                        "doc": false,
+                        "doctest": false,
+                        "test": true
+                    }
+                ],
+                "features": {},
+                "manifest_path": member.join("Cargo.toml"),
+                "categories": [],
+                "keywords": [],
+                "readme": null,
+                "repository": null,
+                "homepage": null,
+                "documentation": null,
+                "edition": "2024",
+                "metadata": {"coverage-gate": {"min-lines-percent": 0}},
+                "links": null,
+                "publish": null,
+                "default_run": null,
+                "rust_version": null
+            }],
+            "workspace_members": [package_id],
+            "workspace_default_members": [package_id],
+            "resolve": null,
+            "workspace_root": root,
+            "target_directory": root.join("target"),
+            "build_directory": root.join("target"),
+            "metadata": {},
+            "version": 1
+        }))
+        .expect("fixture metadata parses")
+    }
+
     fn declarations(
         path: &Path,
         analysis: &SourceAnalysis,
@@ -902,6 +963,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn cfg_semantics_only_exclude_predicates_that_require_test() {
         let source = SourceFile::parse(
             "#[cfg(test)] fn a() {}\n\
@@ -939,6 +1004,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn configured_test_attributes_are_exact_workspace_paths() {
         assert!(parse_configured_test_attributes(None).expect("absent policy is valid").is_empty());
         assert_eq!(
@@ -985,6 +1054,21 @@ mod tests {
             .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &configured)))
             .collect::<Vec<_>>();
         assert_eq!(configured_marks, [false, true]);
+
+        let commented = SourceFile::parse(
+            "#[company /* formatting trivia */ :: test] fn commented_test() {}\n",
+            Edition::Edition2024,
+        )
+        .tree();
+        let configured = BTreeSet::from(["company::test".to_owned()]);
+        assert!(
+            commented
+                .items()
+                .next()
+                .expect("one item")
+                .attrs()
+                .any(|attribute| attribute_marks_test(&attribute, &configured))
+        );
     }
 
     #[test]
@@ -1026,6 +1110,160 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn visit_states_are_distinct_and_preserve_the_first_released_path() {
+        let cases = [
+            (Surface::Released, SourceRole::CrateRoot, 1),
+            (Surface::Released, SourceRole::PlainModule, 2),
+            (Surface::Released, SourceRole::PathModule, 4),
+            (Surface::NonReleased, SourceRole::CrateRoot, 8),
+            (Surface::NonReleased, SourceRole::PlainModule, 16),
+            (Surface::NonReleased, SourceRole::PathModule, 32),
+        ];
+        for (surface, role, expected_bit) in cases {
+            assert_eq!(visit_bit(surface, role), expected_bit);
+            let mut indexed = IndexedSource {
+                analysis: analyze(Path::new("fixture.rs"), "pub fn fixture() {}\n"),
+                edition: Edition::Edition2024,
+                released_path: None,
+                visits: 0,
+            };
+            assert!(!indexed.has_visit(surface, role));
+            let first_path = (surface == Surface::Released).then(|| PathBuf::from("first.rs"));
+            indexed.add_visit(surface, role, first_path.clone());
+            assert!(indexed.has_visit(surface, role));
+            assert_eq!(indexed.released_path, first_path);
+            let second_path = (surface == Surface::Released).then(|| PathBuf::from("second.rs"));
+            indexed.add_visit(surface, role, second_path);
+            assert_eq!(
+                indexed.released_path,
+                (surface == Surface::Released).then(|| PathBuf::from("first.rs"))
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn enqueueing_declarations_propagates_release_semantics() {
+        let root = source_index_fixture_root();
+        let shared = root.join("member/src/shared.rs");
+        let declarations = vec![
+            ModuleDeclaration {
+                path: shared.clone(),
+                test_only: false,
+                role: SourceRole::PlainModule,
+            },
+            ModuleDeclaration {
+                path: shared,
+                test_only: true,
+                role: SourceRole::PathModule,
+            },
+        ];
+        let mut queue = VecDeque::new();
+        enqueue_declarations(&mut queue, declarations.clone(), Edition::Edition2024, Surface::Released)
+            .expect("released declarations enqueue");
+        assert_eq!(queue[0].surface, Surface::Released);
+        assert_eq!(queue[0].role, SourceRole::PlainModule);
+        assert_eq!(queue[1].surface, Surface::NonReleased);
+        assert_eq!(queue[1].role, SourceRole::PathModule);
+
+        queue.clear();
+        enqueue_declarations(&mut queue, declarations, Edition::Edition2024, Surface::NonReleased)
+            .expect("non-release declarations enqueue");
+        assert!(queue.iter().all(|pending| pending.surface == Surface::NonReleased));
+    }
+
+    #[test]
+    fn cargo_editions_and_line_offsets_map_exactly() {
+        assert_eq!(
+            [
+                syntax_edition(CargoEdition::E2015, Path::new("2015.rs")).expect("2015"),
+                syntax_edition(CargoEdition::E2018, Path::new("2018.rs")).expect("2018"),
+                syntax_edition(CargoEdition::E2021, Path::new("2021.rs")).expect("2021"),
+                syntax_edition(CargoEdition::E2024, Path::new("2024.rs")).expect("2024"),
+            ],
+            [
+                Edition::Edition2015,
+                Edition::Edition2018,
+                Edition::Edition2021,
+                Edition::Edition2024,
+            ]
+        );
+
+        let starts = line_starts("one\nαβ\nthree");
+        assert_eq!(starts, [0, 4, 9]);
+        assert_eq!(offset_to_line(&starts, 0), 0);
+        assert_eq!(offset_to_line(&starts, 3), 0);
+        assert_eq!(offset_to_line(&starts, 4), 1);
+        assert_eq!(offset_to_line(&starts, 8), 1);
+        assert_eq!(offset_to_line(&starts, 9), 2);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn cfg_possibilities_cover_every_operator_and_literal() {
+        fn possibilities(predicate: &str) -> CfgPossibilities {
+            let parsed = SourceFile::parse(&format!("#[cfg({predicate})] fn fixture() {{}}\n"), Edition::Edition2024).tree();
+            let attribute = parsed.items().next().expect("one item").attrs().next().expect("one attribute");
+            let ast::Meta::CfgMeta(meta) = attribute.meta().expect("attribute metadata") else {
+                panic!("cfg metadata");
+            };
+            cfg_possibilities_without_test(&meta.cfg_predicate().expect("cfg predicate"))
+        }
+
+        assert_eq!(possibilities("true"), CfgPossibilities::TRUE);
+        assert_eq!(possibilities("false"), CfgPossibilities::FALSE);
+        assert_eq!(possibilities("test"), CfgPossibilities::FALSE);
+        assert_eq!(possibilities("unix"), CfgPossibilities::EITHER);
+        assert_eq!(
+            possibilities("all(test, unix)"),
+            CfgPossibilities {
+                can_be_true: false,
+                can_be_false: true
+            }
+        );
+        assert_eq!(possibilities("any(test, unix)"), CfgPossibilities::EITHER);
+        assert_eq!(possibilities("not(test)"), CfgPossibilities::TRUE);
+        assert_eq!(possibilities("not(test, unix)"), CfgPossibilities::EITHER);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn source_index_composes_relative_paths_and_release_wins() {
+        let root = source_index_fixture_root();
+        let metadata = source_index_fixture_metadata(&root);
+        let index = SourceIndex::from_metadata(&metadata).expect("source index builds");
+        let shared = fs::canonicalize(root.join("member/src/shared.rs")).expect("canonical shared source");
+        let indexed = index.files.get(&shared).expect("shared source indexed");
+        assert!(indexed.has_visit(Surface::Released, SourceRole::PathModule));
+        assert!(indexed.has_visit(Surface::NonReleased, SourceRole::PathModule));
+        assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
+
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:member/src/shared.rs\nDA:1,1\nDA:2,0\nDA:3,0\nend_of_record\n")],
+            &metadata,
+        )
+        .expect("relative report filters");
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].contains("DA:1,1"), "{}", filtered[0]);
+        assert!(!filtered[0].contains("DA:2,"), "{}", filtered[0]);
+        assert!(!filtered[0].contains("DA:3,"), "{}", filtered[0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn inner_cfg_test_propagates_to_external_module_files() {
         let root = PathBuf::from("/workspace/src/lib.rs");
         let child = PathBuf::from("/workspace/src/child.rs");
@@ -1047,6 +1285,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn plain_and_path_modules_use_their_distinct_child_directories() {
         let source = PathBuf::from("/workspace/src/lib.rs");
         let crate_root_child = PathBuf::from("/workspace/src/child.rs");
@@ -1076,7 +1318,7 @@ mod tests {
 
         let root = PathBuf::from("/workspace/lib.rs");
         let path_target = PathBuf::from("/workspace/weird/file.rs");
-        let analysis = analyze(&root, "#[path = \"weird/file.rs\"] mod alias;\n");
+        let analysis = analyze(&root, "#[path /* formatting trivia */ = \"weird/file.rs\"] mod alias;\n");
         let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([path_target.clone()]))
             .expect("path declaration resolves");
         assert_eq!(found.len(), 1);
@@ -1085,6 +1327,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn conditional_module_paths_fail_explicitly() {
         let root = PathBuf::from("/workspace/lib.rs");
         let analysis = analyze(&root, "#[cfg_attr(test, path = \"tests.rs\")] mod selected;\n");
@@ -1094,6 +1340,30 @@ mod tests {
 
         assert!(error.contains("conditional path attribute"), "{error}");
         assert!(error.contains("not supported"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn qualified_tool_path_attributes_do_not_override_module_sources() {
+        let root = PathBuf::from("/workspace/lib.rs");
+        let child = PathBuf::from("/workspace/child.rs");
+        let ignored = PathBuf::from("/workspace/ignored.rs");
+        let existing = BTreeSet::from([child.clone(), ignored]);
+
+        for source in [
+            "#[clippy::path = \"ignored.rs\"] mod child;\n",
+            "#[cfg_attr(test, clippy::path = \"ignored.rs\")] mod child;\n",
+        ] {
+            let analysis = analyze(&root, source);
+            let found =
+                declarations(&root, &analysis, SourceRole::CrateRoot, &existing).expect("qualified tool attributes are not module paths");
+            assert_eq!(found.len(), 1);
+            assert_eq!(lexical_normalize(&found[0].path), child);
+            assert_eq!(found[0].role, SourceRole::PlainModule);
+        }
     }
 
     #[test]
@@ -1116,6 +1386,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     #[expect(
         clippy::too_many_lines,
         reason = "one table-shaped scenario keeps target ownership, cfg regions, and LCOV record filtering in one agreement test"
@@ -1281,6 +1555,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn unsupported_source_states_fail_instead_of_hiding_counters() {
         let lib = PathBuf::from("/workspace/surface/src/lib.rs");
         let orphan = PathBuf::from("/workspace/surface/src/orphan.rs");
