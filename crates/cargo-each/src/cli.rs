@@ -221,7 +221,10 @@ mod tests {
         let error = CargoCli::try_parse_from(["cargo", "each", "--target-filter", "name:unit", "--", "echo"])
             .expect_err("target filtering requires per-target mode");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-        assert!(error.to_string().contains("--each-target"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "error: the following required arguments were not provided:\n  --each-target <KIND>\n\nUsage: cargo each --each-target <KIND> --target-filter <EXPR> -- <COMMAND>...\n\nFor more information, try '--help'.\n"
+        );
     }
 
     #[test]

@@ -583,7 +583,10 @@ mod tests {
             },
         )
         .expect_err("malformed metadata must fail before matching");
-        assert!(error.to_string().contains("must be an array of strings"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "package `relevant` metadata `cargo-each.excluded-targets` must be an array of strings when used by `name-in-metadata:cargo-each.excluded-targets`"
+        );
 
         let mut irrelevant = member("irrelevant");
         irrelevant.metadata = relevant.metadata.clone();
