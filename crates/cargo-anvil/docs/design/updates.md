@@ -104,13 +104,16 @@ hosts use `<!-- >>> anvil-managed: <id> -->` and
 element, attribute, or larger comment is ordinary user content. XML region IDs
 containing `--`, CR, or LF are rejected during catalog construction. Marker-
 shaped lines inside CDATA or other non-comment XML content are not ownership
-boundaries. When an XML region is
-absent from an existing MSBuild project, it is inserted before a complete-line
+boundaries. XML placement is intentionally scoped to existing MSBuild project
+hosts, whose document element is `Project`; arbitrary XML root elements are not
+inferred. When an XML region is absent from an existing MSBuild project, it is
+inserted before a complete-line
 `</Project>` closing element outside XML comments so the generated content
 remains inside the root. TOML-specific placement rules are applied only to hash
 comment regions, even when an XML region happens to reuse one of their IDs.
-If no such complete-line closing element exists, introduction refuses rather
-than appending invalid content after the root. Changing the declared syntax of
+If the host is missing, has another root, or has no such complete-line closing
+element, introduction refuses rather than scaffolding a document or appending
+invalid content after the root. Changing the declared syntax of
 an existing `(host, id)` is refused whenever marker lines in the previous
 syntax remain, including an unpaired marker; the manifest does not record the
 old syntax, so treating those markers as absent could duplicate an unbounded

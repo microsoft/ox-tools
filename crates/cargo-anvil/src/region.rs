@@ -325,6 +325,7 @@ fn xml_lexical_ranges(text: &str) -> (Vec<ByteRange>, Vec<ByteRange>) {
     let mut comments = Vec::new();
     let mut ignored = Vec::new();
     let mut cursor = 0;
+    // #[gamma::skip(relational.lt_to_le, reason = "cursor == text.len() performs one extra empty iteration that records no range and only advances the local cursor past EOF")]
     while cursor < text.len() {
         let rest = &text[cursor..];
         if rest.starts_with("<!--") {
@@ -349,12 +350,15 @@ pub(crate) fn xml_project_closing_line_offset(text: &str) -> Option<usize> {
     iterate_lines(text)
         .filter_map(|line| {
             let content = text[line.start..line.end].trim_end_matches(is_line_ending);
+            // #[gamma::skip(arith.sub_to_div, reason = "a complete-line closing tag is wholly inside or outside each ignored XML range, so any byte on the tag line has the same membership")]
             let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
             let trimmed = content.trim();
             if trimmed != "</Project>" {
                 return None;
             }
+            // #[gamma::skip(arith.add_to_sub, arith.add_to_mul, reason = "a complete-line closing tag is wholly inside or outside each ignored XML range, so any byte on the tag line has the same membership")]
             let tag_start = line.start + leading;
+            // #[gamma::skip(relational.lt_to_le, reason = "an ignored range ends before the next physical line; a complete-line closing tag cannot start exactly at that exclusive endpoint")]
             (!ignored.iter().any(|range| range.start <= tag_start && tag_start < range.end)).then_some(line.start)
         })
         .last()
@@ -2694,6 +2698,54 @@ mod tests {
             repair_markers(text, "x", CommentSyntax::Xml),
             MarkerRepair::Repaired(text.to_owned())
         );
+    }
+
+    #[test]
+    fn xml_comment_lines_require_the_comment_to_fill_the_trimmed_line() {
+        let text = "prefix <!-- first -->\n<!-- second --> suffix\n  <!-- third -->  \n";
+        let third_start = text.find("  <!-- third").unwrap();
+        assert_eq!(
+            xml_comment_lines(text),
+            vec![ByteRange {
+                start: third_start,
+                end: text.len(),
+            }]
+        );
+    }
+
+    #[test]
+    fn xml_lexical_ranges_report_exact_comment_and_cdata_bounds() {
+        let text = "x<!--c-->y<![CDATA[z]]>q";
+        let comment_start = text.find("<!--").unwrap();
+        let comment_end = comment_start + "<!--c-->".len();
+        let cdata_start = text.find("<![CDATA[").unwrap();
+        let cdata_end = cdata_start + "<![CDATA[z]]>".len();
+
+        assert_eq!(
+            xml_lexical_ranges(text),
+            (
+                vec![ByteRange {
+                    start: comment_start,
+                    end: comment_end,
+                }],
+                vec![
+                    ByteRange {
+                        start: comment_start,
+                        end: comment_end,
+                    },
+                    ByteRange {
+                        start: cdata_start,
+                        end: cdata_end,
+                    },
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn xml_project_close_detection_ignores_indented_lines_inside_comments_and_cdata() {
+        let text = "<Project>\n<!--\n  </Project>\n-->\n<![CDATA[\n  </Project>\n]]>\n  </Project>\n";
+        assert_eq!(xml_project_closing_line_offset(text), Some(text.rfind("  </Project>").unwrap()));
     }
 
     #[test]

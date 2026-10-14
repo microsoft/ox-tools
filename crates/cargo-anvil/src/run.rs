@@ -830,8 +830,8 @@ fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
              their generated body before retrying with the new syntax."
         }
         RefusalRemedy::XmlPlacement => {
-            "Put the closing `</Project>` element on its own line so anvil can insert the managed region \
-             inside the XML root, then retry."
+            "Create or restore the MSBuild host with its closing `</Project>` element on its own line so \
+             anvil can insert the managed region inside the XML root, then retry."
         }
     }
 }
@@ -1007,10 +1007,12 @@ fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str
     {
         return Ok(placement);
     }
-    if syntax == CommentSyntax::Xml
-        && let Some(text) = current
-        && find_region(text, region_id, syntax).ok().flatten().is_none()
-    {
+    if syntax == CommentSyntax::Xml {
+        let text =
+            current.ok_or("the XML host does not exist, so its MSBuild `Project` root and a safe insertion point cannot be established")?;
+        if find_region(text, region_id, syntax).ok().flatten().is_some() {
+            return Ok(RegionPlacement::End);
+        }
         let offset = xml_project_closing_line_offset(text)
             .ok_or(
                 "the XML host has no complete-line `</Project>` closing element, so a safe insertion point inside the root cannot be established",
@@ -1773,7 +1775,7 @@ mod tests {
             ),
             (
                 RefusalRemedy::XmlPlacement,
-                "Put the closing `</Project>` element on its own line so anvil can insert the managed region inside the XML root, then retry.",
+                "Create or restore the MSBuild host with its closing `</Project>` element on its own line so anvil can insert the managed region inside the XML root, then retry.",
             ),
             (
                 RefusalRemedy::EditedRegion,
@@ -2882,11 +2884,31 @@ mod tests {
         assert_eq!(
             plan.refusals(),
             &["Refused to manage dirs.proj [projects]: the XML host has no complete-line `</Project>` closing element, so a safe insertion point inside the root \
-               cannot be established. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Put the closing \
-               `</Project>` element on its own line so anvil can insert the managed region inside the XML root, then retry."
+               cannot be established. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Create or restore \
+               the MSBuild host with its closing `</Project>` element on its own line so anvil can insert the managed region inside the XML root, then retry."
                 .to_owned()]
         );
         assert_eq!(hosts.cached("dirs.proj").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn missing_xml_host_refuses_region_introduction() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("projects"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, hosts) = managed_region_plan(None, &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage dirs.proj [projects]: the XML host does not exist, so its MSBuild `Project` root and a safe insertion point cannot be established. \
+               This region was left unchanged; other regions in the same file and other artifacts may still be updated. Create or restore the MSBuild host with its \
+               closing `</Project>` element on its own line so anvil can insert the managed region inside the XML root, then retry."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("dirs.proj"), None);
     }
 
     #[test]
