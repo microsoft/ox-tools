@@ -657,7 +657,8 @@ runs:
       shell: pwsh -NoProfile -Command ". '{0}'"
       env:
         # cargo-binstall queries GitHub Releases. Use the workflow's built-in
-        # read token so setup gets the authenticated API quota.
+        # token so setup gets the authenticated API quota. Its effective
+        # permissions are defined by the calling workflow.
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         $minimum = [version]'1.46.0'
