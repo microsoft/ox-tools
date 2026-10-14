@@ -30,6 +30,7 @@ use std::fmt::Write as _;
 
 use ohno::{AppError, app_err, bail};
 use toml_edit::{Item, Key, RawString, Table};
+use xmlparser::{ElementEnd, Token, Tokenizer};
 
 /// Comment syntax used by the host file.
 ///
@@ -349,23 +350,74 @@ fn xml_lexical_ranges(text: &str) -> (Vec<ByteRange>, Vec<ByteRange>) {
     (comments, ignored)
 }
 
-pub(crate) fn xml_project_closing_line_offset(text: &str) -> Option<usize> {
-    let (_, ignored) = xml_lexical_ranges(text);
-    iterate_lines(text)
-        .filter_map(|line| {
-            let content = text[line.start..line.end].trim_end_matches(is_line_ending);
-            // #[gamma::skip(arith.sub_to_div, reason = "a complete-line closing tag is wholly inside or outside each ignored XML range, so any byte on the tag line has the same membership")]
-            let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
-            let trimmed = content.trim();
-            if trimmed != "</Project>" {
-                return None;
+pub(crate) fn xml_root_closing_line_offset(text: &str) -> Result<Option<usize>, String> {
+    fn qualified_name(prefix: &str, local: &str) -> String {
+        if prefix.is_empty() {
+            local.to_owned()
+        } else {
+            format!("{prefix}:{local}")
+        }
+    }
+
+    let mut pending = None;
+    let mut stack: Vec<(String, String)> = Vec::new();
+    for token in Tokenizer::from(text) {
+        match token.map_err(|error| format!("the XML host is malformed: {error}"))? {
+            Token::ElementStart { prefix, local, .. } => {
+                pending = Some((prefix.as_str().to_owned(), local.as_str().to_owned()));
             }
-            // #[gamma::skip(arith.add_to_sub, arith.add_to_mul, reason = "a complete-line closing tag is wholly inside or outside each ignored XML range, so any byte on the tag line has the same membership")]
-            let tag_start = line.start + leading;
-            // #[gamma::skip(relational.lt_to_le, reason = "an ignored range ends before the next physical line; a complete-line closing tag cannot start exactly at that exclusive endpoint")]
-            (!ignored.iter().any(|range| range.start <= tag_start && tag_start < range.end)).then_some(line.start)
-        })
-        .last()
+            Token::ElementEnd { end: ElementEnd::Open, .. } => {
+                stack.push(
+                    pending
+                        .take()
+                        .ok_or_else(|| "the XML tokenizer reported an opening delimiter without an element".to_owned())?,
+                );
+            }
+            Token::ElementEnd {
+                end: ElementEnd::Empty, ..
+            } => {
+                let root_is_empty = stack.is_empty();
+                pending = None;
+                if root_is_empty {
+                    return Ok(None);
+                }
+            }
+            Token::ElementEnd {
+                end: ElementEnd::Close(prefix, local),
+                span,
+            } => {
+                let Some(opened) = stack.pop() else {
+                    return Err(format!(
+                        "the XML host closes `{}` without a matching opening element",
+                        qualified_name(prefix.as_str(), local.as_str())
+                    ));
+                };
+                let closed = (prefix.as_str(), local.as_str());
+                if opened.0 != closed.0 || opened.1 != closed.1 {
+                    return Err(format!(
+                        "the XML host closes `{}` while `{}` is still open",
+                        qualified_name(closed.0, closed.1),
+                        qualified_name(&opened.0, &opened.1),
+                    ));
+                }
+                if stack.is_empty() {
+                    let range = span.range();
+                    let line_start = text[..range.start].rfind('\n').map_or(0, |newline| newline + 1);
+                    let line_end = text[range.end..].find('\n').map_or(text.len(), |newline| range.end + newline);
+                    let line = text[line_start..line_end].trim_end_matches('\r');
+                    return Ok((line.trim() == &text[range]).then_some(line_start));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some((prefix, local)) = stack.last() {
+        return Err(format!(
+            "the XML host has no closing element for `{}`",
+            qualified_name(prefix, local)
+        ));
+    }
+    Ok(None)
 }
 
 /// Locate ownership only at TOML comment tokens, including in a duplicate-table intermediate.
@@ -2753,9 +2805,30 @@ mod tests {
     }
 
     #[test]
-    fn xml_project_close_detection_ignores_indented_lines_inside_comments_cdata_and_processing_instructions() {
-        let text = "<Project>\n<!--\n  </Project>\n-->\n<![CDATA[\n  </Project>\n]]>\n<?data\n  </Project>\n?>\n  </Project>\n";
-        assert_eq!(xml_project_closing_line_offset(text), Some(text.rfind("  </Project>").unwrap()));
+    fn xml_root_close_detection_is_vocabulary_agnostic_and_ignores_non_element_content() {
+        let text = concat!(
+            "<build:graph xmlns:build=\"urn:build\">\n",
+            "<!--\n  </build:graph>\n-->\n",
+            "<![CDATA[\n  </build:graph>\n]]>\n",
+            "<?data\n  </build:graph>\n?>\n",
+            "<child />\n",
+            "  </build:graph>\n",
+        );
+        assert_eq!(
+            xml_root_closing_line_offset(text).unwrap(),
+            Some(text.rfind("  </build:graph>").unwrap())
+        );
+    }
+
+    #[test]
+    fn xml_root_close_detection_refuses_compact_self_closing_and_malformed_documents() {
+        assert_eq!(xml_root_closing_line_offset("<root></root>\n").unwrap(), None);
+        assert_eq!(xml_root_closing_line_offset("<root />\n").unwrap(), None);
+        assert!(
+            xml_root_closing_line_offset("<root>\n</other>\n")
+                .unwrap_err()
+                .contains("closes `other`")
+        );
     }
 
     #[test]

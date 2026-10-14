@@ -241,10 +241,10 @@ The tool produces a small set of files. They fall into three categories:
   `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`, `//` hosts use the
   equivalent line comments, and XML/MSBuild hosts use
   `<!-- >>> anvil-managed: <id> -->` … `<!-- <<< anvil-managed: <id> -->`.
-  XML region IDs may not contain `--`, CR, or LF. XML placement currently
-  targets existing MSBuild project hosts: a new region is inserted before the
-  complete-line `</Project>` closing element. A missing host or a different
-  XML root is refused rather than scaffolded or guessed.
+  XML region IDs may not contain `--`, CR, or LF. In an existing XML host, a
+  new region is inserted before the complete-line closing tag of the document's
+  actual root element. A missing, malformed, self-closing, or compact-root host
+  is refused rather than scaffolded or guessed.
   The pair delimits the region body and identifies it by stable ID; the manifest
   tracks the last-rendered checksum per `(host, id)`. Outside the sentinels, the
   user's content is preserved byte-for-byte — except that first adoption into a
