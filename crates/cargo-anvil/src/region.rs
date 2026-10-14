@@ -117,8 +117,6 @@ pub enum RegionPlacement {
 }
 
 impl CommentSyntax {
-    const ALL: [Self; 3] = [Self::Hash, Self::SlashSlash, Self::Xml];
-
     fn marker(self, id: &str, opens: bool) -> String {
         let direction = if opens { ">>>" } else { "<<<" };
         match self {
@@ -237,7 +235,7 @@ fn is_horizontal_whitespace(character: char) -> bool {
 /// The host is left exactly as found and the caller refuses the region.
 #[must_use]
 pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
-    repair_markers_in_lines(text, id, syntax, iterate_lines(text))
+    repair_markers_in_lines(text, id, syntax, marker_lines(text, syntax).into_iter())
 }
 
 pub(crate) fn repair_toml_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
@@ -292,7 +290,74 @@ fn repair_markers_in_lines(text: &str, id: &str, syntax: CommentSyntax, lines: i
 /// sentinels for the same id, an opening sentinel with no matching close,
 /// or a close before its open.
 pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
-    find_region_in_lines(text, id, syntax, iterate_lines(text))
+    find_region_in_lines(text, id, syntax, marker_lines(text, syntax).into_iter())
+}
+
+fn marker_lines(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
+    if syntax == CommentSyntax::Xml {
+        xml_comment_lines(text)
+    } else {
+        iterate_lines(text).collect()
+    }
+}
+
+fn xml_comment_lines(text: &str) -> Vec<ByteRange> {
+    let comments = xml_comment_ranges(text);
+    iterate_lines(text)
+        .filter(|line| {
+            let content = &text[line.start..line.end];
+            let without_ending = content.trim_end_matches(is_line_ending);
+            let leading = without_ending.len() - without_ending.trim_start_matches(is_horizontal_whitespace).len();
+            let trimmed = without_ending.trim_end_matches(is_horizontal_whitespace);
+            let end = line.start + trimmed.len();
+            comments
+                .iter()
+                .any(|comment| comment.start == line.start + leading && comment.end == end)
+        })
+        .collect()
+}
+
+fn xml_comment_ranges(text: &str) -> Vec<ByteRange> {
+    xml_lexical_ranges(text).0
+}
+
+fn xml_lexical_ranges(text: &str) -> (Vec<ByteRange>, Vec<ByteRange>) {
+    let mut comments = Vec::new();
+    let mut ignored = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        if rest.starts_with("<!--") {
+            let end = rest.find("-->").map_or(text.len(), |offset| cursor + offset + 3);
+            let range = ByteRange { start: cursor, end };
+            comments.push(range);
+            ignored.push(range);
+            cursor = end;
+        } else if rest.starts_with("<![CDATA[") {
+            let end = rest.find("]]>").map_or(text.len(), |offset| cursor + offset + 3);
+            ignored.push(ByteRange { start: cursor, end });
+            cursor = end;
+        } else {
+            cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    (comments, ignored)
+}
+
+pub(crate) fn xml_project_closing_line_offset(text: &str) -> Option<usize> {
+    let (_, ignored) = xml_lexical_ranges(text);
+    iterate_lines(text)
+        .filter_map(|line| {
+            let content = text[line.start..line.end].trim_end_matches(is_line_ending);
+            let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
+            let trimmed = content.trim();
+            if trimmed != "</Project>" {
+                return None;
+            }
+            let tag_start = line.start + leading;
+            (!ignored.iter().any(|range| range.start <= tag_start && tag_start < range.end)).then_some(line.start)
+        })
+        .last()
 }
 
 /// Locate ownership only at TOML comment tokens, including in a duplicate-table intermediate.
@@ -574,18 +639,6 @@ fn render_region(id: &str, body: &str, syntax: CommentSyntax, newline: &str) -> 
     out.push_str(&syntax.marker(id, false));
     out.push_str(newline);
     out
-}
-
-/// Identify the syntax of a complete marker line for `id`, if present.
-pub(crate) fn comment_syntax_for_region(text: &str, id: &str) -> Option<CommentSyntax> {
-    CommentSyntax::ALL.into_iter().find(|syntax| {
-        let opener = syntax.marker(id, true);
-        let closer = syntax.marker(id, false);
-        iterate_lines(text).any(|line| {
-            let value = text[line.start..line.end].trim();
-            value == opener || value == closer
-        })
-    })
 }
 
 /// Splice the named region out of `text`, returning the host content
@@ -1536,7 +1589,7 @@ fn toml_region_ranges(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
 
 /// Lexical sentinel pairs, independent of the host format.
 fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {
-    region_ranges_in_lines(text, syntax, iterate_lines(text))
+    region_ranges_in_lines(text, syntax, marker_lines(text, syntax).into_iter())
 }
 
 fn toml_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {
@@ -2524,6 +2577,35 @@ mod tests {
     }
 
     #[test]
+    fn header_comment_detection_excludes_markers_for_every_syntax() {
+        for (syntax, header, opener, closer) in [
+            (
+                CommentSyntax::Hash,
+                "# copyright",
+                "# >>> anvil-managed: x",
+                "# <<< anvil-managed: x",
+            ),
+            (
+                CommentSyntax::SlashSlash,
+                "// copyright",
+                "// >>> anvil-managed: x",
+                "// <<< anvil-managed: x",
+            ),
+            (
+                CommentSyntax::Xml,
+                "<!-- copyright -->",
+                "<!-- >>> anvil-managed: x -->",
+                "<!-- <<< anvil-managed: x -->",
+            ),
+        ] {
+            assert!(syntax.is_header_comment(header));
+            assert!(!syntax.is_header_comment(opener));
+            assert!(!syntax.is_header_comment(closer));
+            assert!(!syntax.is_header_comment("not a comment"));
+        }
+    }
+
+    #[test]
     fn xml_syntax_renders_a_complete_comment_line_pair() {
         let new = upsert_region(
             "",
@@ -2601,7 +2683,17 @@ mod tests {
             repair_markers(text, "x", CommentSyntax::Xml),
             MarkerRepair::Repaired(text.to_owned())
         );
-        assert_eq!(comment_syntax_for_region(text, "x"), None);
+    }
+
+    #[test]
+    fn xml_marker_shaped_lines_inside_cdata_are_not_regions() {
+        let text = "<Project>\n<![CDATA[\n<!-- >>> anvil-managed: x -->\nuser text\n<!-- <<< anvil-managed: x -->\n]]>\n</Project>\n";
+
+        assert_eq!(find_region(text, "x", CommentSyntax::Xml).unwrap(), None);
+        assert_eq!(
+            repair_markers(text, "x", CommentSyntax::Xml),
+            MarkerRepair::Repaired(text.to_owned())
+        );
     }
 
     #[test]

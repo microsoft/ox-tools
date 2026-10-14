@@ -102,9 +102,13 @@ slash-slash hosts use `# >>> anvil-managed: <id>` and
 hosts use `<!-- >>> anvil-managed: <id> -->` and
 `<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
 element, attribute, or larger comment is ordinary user content. XML region IDs
-containing `--` are rejected during catalog construction. When an XML region is
+containing `--`, CR, or LF are rejected during catalog construction. Marker-
+shaped lines inside CDATA or other non-comment XML content are not ownership
+boundaries. When an XML region is
 absent from an existing MSBuild project, it is inserted before a complete-line
-`</Project>` closing element so the generated content remains inside the root.
+`</Project>` closing element outside XML comments so the generated content
+remains inside the root. TOML-specific placement rules are applied only to hash
+comment regions, even when an XML region happens to reuse one of their IDs.
 If no such complete-line closing element exists, introduction refuses rather
 than appending invalid content after the root. Changing the declared syntax of
 an existing `(host, id)` is refused whenever marker lines in the previous

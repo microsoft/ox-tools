@@ -437,7 +437,11 @@ fn splice(scanner: HostScanner, host_text: Option<&str>, request: ManagedRegionR
         base
     };
 
-    let placement = lint_region_placement(region_id, Some(base)).unwrap_or(placement);
+    let placement = if syntax == CommentSyntax::Hash {
+        lint_region_placement(region_id, Some(base)).unwrap_or(placement)
+    } else {
+        placement
+    };
     let region = scanner
         .find(base, region_id, syntax)
         .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?;

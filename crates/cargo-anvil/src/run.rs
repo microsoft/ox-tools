@@ -28,8 +28,8 @@ use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
 use crate::region::{
-    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, comment_syntax_for_region, find_region, legacy_lint_region_id,
-    lint_region_placement, remove_region,
+    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, remove_region,
+    xml_project_closing_line_offset,
 };
 use crate::workspace::{self, Workspace};
 
@@ -236,12 +236,12 @@ fn build_plan_with_hosts(
     // Only regions on their way out are repaired here. A live one is repaired
     // by `push_region_at` when it plans the region, with that region's declared
     // comment syntax.
-    for key in manifest.regions.keys() {
+    for (key, recorded_checksum) in &manifest.regions {
         let host = (hosts.resolve)(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let syntax = recorded_region_syntax(repo_root, hosts, &host, &key.id)?;
+            let syntax = recorded_region_syntax(repo_root, hosts, &host, &key.id, recorded_checksum)?;
             let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, syntax)?;
         }
     }
@@ -989,10 +989,11 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
 }
 
 fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str>) -> Result<RegionPlacement, &'static str> {
-    if matches!(region_id, DELTA_REGION_ID | "anvil-spellcheck-root") {
+    if syntax == CommentSyntax::Hash && matches!(region_id, DELTA_REGION_ID | "anvil-spellcheck-root") {
         return Ok(RegionPlacement::Start);
     }
-    if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
+    if syntax == CommentSyntax::Hash
+        && matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
         && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
         && crate::region::ends_in_toml_table(old.body_str(), &["Hunspell", "quirks"])
     {
@@ -1001,26 +1002,20 @@ fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str
         // empty block establishes no table context; append replacements instead.
         return Ok(RegionPlacement::At(old.start_line.start));
     }
-    if let Some(placement) = lint_region_placement(region_id, current) {
+    if syntax == CommentSyntax::Hash
+        && let Some(placement) = lint_region_placement(region_id, current)
+    {
         return Ok(placement);
     }
     if syntax == CommentSyntax::Xml
         && let Some(text) = current
         && find_region(text, region_id, syntax).ok().flatten().is_none()
     {
-        let offset = text
-            .match_indices("</Project>")
-            .map(|(offset, _)| offset)
-            .filter(|offset| {
-                let line_start = text[..*offset].rfind('\n').map_or(0, |newline| newline + 1);
-                let line_end = text[*offset..].find('\n').map_or(text.len(), |newline| *offset + newline);
-                text[line_start..line_end].trim_end_matches('\r').trim() == "</Project>"
-            })
-            .last()
+        let offset = xml_project_closing_line_offset(text)
             .ok_or(
                 "the XML host has no complete-line `</Project>` closing element, so a safe insertion point inside the root cannot be established",
             )?;
-        return Ok(RegionPlacement::At(text[..offset].rfind('\n').map_or(0, |newline| newline + 1)));
+        return Ok(RegionPlacement::At(offset));
     }
     Ok(RegionPlacement::End)
 }
@@ -1354,7 +1349,7 @@ fn plan_removals(
             }));
             continue;
         }
-        let syntax = recorded_region_syntax(repo_root, hosts, &resolved_host, &key.id)?;
+        let syntax = recorded_region_syntax(repo_root, hosts, &resolved_host, &key.id, last)?;
         if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true)? {
             // The lock entry survives with the region, so the next run still
             // knows it is anvil's to retire once the boundary is repaired.
@@ -1422,12 +1417,51 @@ fn plan_removals(
     Ok(())
 }
 
-fn recorded_region_syntax(repo_root: &Path, hosts: &mut HostTextCache, host: &str, id: &str) -> Result<CommentSyntax, AppError> {
-    Ok(hosts
-        .get_or_read(repo_root, host)?
-        .as_deref()
-        .and_then(|text| comment_syntax_for_region(text, id))
-        .unwrap_or(CommentSyntax::Hash))
+fn recorded_region_syntax(
+    repo_root: &Path,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    recorded_checksum: &str,
+) -> Result<CommentSyntax, AppError> {
+    let Some(text) = hosts.get_or_read(repo_root, host)? else {
+        return Ok(CommentSyntax::Hash);
+    };
+    let scanner = HostScanner::for_path(host);
+    let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
+    let complete: Vec<_> = syntaxes
+        .into_iter()
+        .filter_map(|syntax| {
+            scanner
+                .find(&text, id, syntax)
+                .ok()
+                .flatten()
+                .map(|region| (syntax, checksum_str(region.body_str())))
+        })
+        .collect();
+    let matching: Vec<_> = complete
+        .iter()
+        .filter_map(|(syntax, checksum)| (checksum == recorded_checksum).then_some(*syntax))
+        .collect();
+    match matching.as_slice() {
+        [syntax] => return Ok(*syntax),
+        [] => {}
+        _ => bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum"),
+    }
+    match complete.as_slice() {
+        [(syntax, _)] => return Ok(*syntax),
+        [] => {}
+        _ => bail!("managed region '{id}' in '{host}' has multiple complete marker pairs and none uniquely matches the recorded checksum"),
+    }
+    let evidence: Vec<_> = syntaxes
+        .into_iter()
+        .filter(|syntax| !matches!(scanner.find(&text, id, *syntax), Ok(None)))
+        .collect();
+    match evidence.as_slice() {
+        [syntax] => Ok(*syntax),
+        [] => Ok(CommentSyntax::Hash),
+        _ => bail!("managed region '{id}' in '{host}' has ambiguous marker lines in multiple comment syntaxes"),
+    }
 }
 
 fn live_files(plan: &Plan) -> BTreeSet<String> {
@@ -2855,6 +2889,44 @@ mod tests {
         assert_eq!(hosts.cached("dirs.proj").as_deref(), Some(host));
     }
 
+    #[test]
+    fn xml_insertion_ignores_project_close_text_inside_trailing_comment() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("projects"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let host = "<Project>\n</Project>\n<!--\n</Project>\n-->\n";
+        let (plan, _) = managed_region_plan(Some(host), &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some(
+                "<Project>\n\n<!-- >>> anvil-managed: projects -->\n  <Project Include=\"generated.proj\" />\n<!-- <<< anvil-managed: projects -->\n\n</Project>\n<!--\n</Project>\n-->\n"
+            )
+        );
+    }
+
+    #[test]
+    fn xml_region_ids_that_match_toml_special_cases_still_insert_inside_root() {
+        for id in ["anvil-rust-lints", "anvil-delta", "anvil-spellcheck-root"] {
+            assert_eq!(
+                region_placement(id, CommentSyntax::Xml, Some("<Project>\n</Project>\n")),
+                Ok(RegionPlacement::At("<Project>\n".len()))
+            );
+        }
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("anvil-rust-lints"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, _) = managed_region_plan(Some("<Project>\n</Project>\n"), &Manifest::default(), &spec);
+        let spliced = plan.items()[0].spliced_host.as_deref().unwrap();
+        assert!(spliced.find("anvil-managed").unwrap() < spliced.find("</Project>").unwrap());
+    }
+
     /// A region that has lost one of its sentinels still holds a body anvil
     /// generated, and nothing can prove where that body ends. Discarding the
     /// surviving marker -- which this used to do -- hands the body back to the
@@ -2962,6 +3034,33 @@ mod tests {
         assert_eq!(
             plan.items()[0].spliced_host.as_deref(),
             Some("<Project>\n  <Target Name=\"User\" />\n</Project>\n")
+        );
+    }
+
+    #[test]
+    fn retirement_uses_recorded_checksum_to_disambiguate_marker_syntax() {
+        let host = "# >>> anvil-managed: retired\nhash body\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nslash body\n// <<< anvil-managed: retired\n";
+        let mut previous = Manifest::default();
+        previous.set_region("host.txt", "retired", checksum_str("slash body\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", host.to_owned());
+        hosts.newlines.insert("host.txt".to_owned(), crate::region::text_newline(host));
+        let mut plan = Plan::default();
+
+        plan_removals(
+            Path::new("in-memory-managed-region-tests"),
+            &previous,
+            &mut plan,
+            &mut hosts,
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.items()[0].decision, Decision::Remove);
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some("# >>> anvil-managed: retired\nhash body\n# <<< anvil-managed: retired\n")
         );
     }
 
