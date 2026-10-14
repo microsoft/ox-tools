@@ -103,8 +103,10 @@ hosts use `<!-- >>> anvil-managed: <id> -->` and
 `<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
 element, attribute, or larger comment is ordinary user content. XML region IDs
 containing `--`, CR, or LF are rejected during catalog construction. Marker-
-shaped lines inside CDATA, processing instructions, or other non-comment XML
-content are not ownership boundaries. When an XML region is absent, the XML
+shaped lines inside DTD/entity values, CDATA, processing instructions, or other
+non-comment XML content are not ownership boundaries. Comment recognition and
+root discovery use XML tokenizer tokens rather than raw substring matching.
+When an XML region is absent, the XML
 tokenizer discovers the document's actual root element and the region is
 inserted before that root's complete-line closing tag. The comment syntax does
 not assume MSBuild, `Project`, or any other XML vocabulary. TOML-specific

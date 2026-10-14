@@ -319,35 +319,18 @@ fn xml_comment_lines(text: &str) -> Vec<ByteRange> {
 }
 
 fn xml_comment_ranges(text: &str) -> Vec<ByteRange> {
-    xml_lexical_ranges(text).0
-}
-
-fn xml_lexical_ranges(text: &str) -> (Vec<ByteRange>, Vec<ByteRange>) {
-    let mut comments = Vec::new();
-    let mut ignored = Vec::new();
-    let mut cursor = 0;
-    // #[gamma::skip(relational.lt_to_le, reason = "cursor == text.len() performs one extra empty iteration that records no range and only advances the local cursor past EOF")]
-    while cursor < text.len() {
-        let rest = &text[cursor..];
-        if rest.starts_with("<!--") {
-            let end = rest.find("-->").map_or(text.len(), |offset| cursor + offset + 3);
-            let range = ByteRange { start: cursor, end };
-            comments.push(range);
-            ignored.push(range);
-            cursor = end;
-        } else if rest.starts_with("<![CDATA[") {
-            let end = rest.find("]]>").map_or(text.len(), |offset| cursor + offset + 3);
-            ignored.push(ByteRange { start: cursor, end });
-            cursor = end;
-        } else if rest.starts_with("<?") {
-            let end = rest.find("?>").map_or(text.len(), |offset| cursor + offset + 2);
-            ignored.push(ByteRange { start: cursor, end });
-            cursor = end;
-        } else {
-            cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    (comments, ignored)
+    Tokenizer::from(text)
+        .filter_map(|token| match token {
+            Ok(Token::Comment { span, .. }) => {
+                let range = span.range();
+                Some(ByteRange {
+                    start: range.start,
+                    end: range.end,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2785,49 +2768,48 @@ mod tests {
 
     #[test]
     fn xml_comment_lines_require_the_comment_to_fill_the_trimmed_line() {
-        let text = "prefix <!-- first -->\n<!-- second --> suffix\n  <!-- third -->  \n";
+        let text = "<root>\nprefix <!-- first -->\n<!-- second --> suffix\n  <!-- third -->  \n</root>\n";
         let third_start = text.find("  <!-- third").unwrap();
+        let third_end = text[third_start..].find('\n').map_or(text.len(), |offset| third_start + offset + 1);
         assert_eq!(
             xml_comment_lines(text),
             vec![ByteRange {
                 start: third_start,
-                end: text.len(),
+                end: third_end,
             }]
         );
     }
 
     #[test]
-    fn xml_lexical_ranges_report_exact_comment_cdata_and_processing_instruction_bounds() {
-        let text = "x<!--c-->y<![CDATA[z]]>q<?data value?>r";
+    fn xml_comment_ranges_report_only_actual_comment_tokens() {
+        let text = "<root><!--c--><![CDATA[z]]><?data value?></root>";
         let comment_start = text.find("<!--").unwrap();
         let comment_end = comment_start + "<!--c-->".len();
-        let cdata_start = text.find("<![CDATA[").unwrap();
-        let cdata_end = cdata_start + "<![CDATA[z]]>".len();
-        let pi_start = text.find("<?data").unwrap();
-        let pi_end = pi_start + "<?data value?>".len();
 
         assert_eq!(
-            xml_lexical_ranges(text),
-            (
-                vec![ByteRange {
-                    start: comment_start,
-                    end: comment_end,
-                }],
-                vec![
-                    ByteRange {
-                        start: comment_start,
-                        end: comment_end,
-                    },
-                    ByteRange {
-                        start: cdata_start,
-                        end: cdata_end,
-                    },
-                    ByteRange {
-                        start: pi_start,
-                        end: pi_end,
-                    },
-                ],
-            )
+            xml_comment_ranges(text),
+            vec![ByteRange {
+                start: comment_start,
+                end: comment_end,
+            }]
+        );
+    }
+
+    #[test]
+    fn xml_marker_shaped_lines_inside_dtd_entities_are_not_regions() {
+        let text = "<!DOCTYPE root [\n\
+                    <!ENTITY generated \"\n\
+                    <!-- >>> anvil-managed: x -->\n\
+                    user text\n\
+                    <!-- <<< anvil-managed: x -->\n\
+                    \">\n\
+                    ]>\n\
+                    <root />\n";
+
+        assert_eq!(find_region(text, "x", CommentSyntax::Xml).unwrap(), None);
+        assert_eq!(
+            repair_markers(text, "x", CommentSyntax::Xml),
+            MarkerRepair::Repaired(text.to_owned())
         );
     }
 
