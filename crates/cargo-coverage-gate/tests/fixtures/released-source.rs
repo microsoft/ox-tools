@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 pub const COVERAGE_LINE_001: u32 = 1;
 pub const COVERAGE_LINE_002: u32 = 2;
 pub const COVERAGE_LINE_003: u32 = 3;

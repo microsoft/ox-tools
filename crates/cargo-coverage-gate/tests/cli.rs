@@ -257,10 +257,17 @@ fn all_pass_mixed_sources() {
 fn external_lcov_filters_test_only_source_lines() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_source(tmp.path(), &[("alpha", Some("100"))], None, RELEASED_AND_TEST_ONLY_SOURCE);
-    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 2, 1)]);
+    let source = tmp.path().join("alpha/src/lib.rs").to_string_lossy().replace('\\', "/");
+    let lcov_path = tmp.path().join("lcov.info");
+    fs::write(
+        &lcov_path,
+        format!("TN:\nSF:{source}\nDA:4,1\nDA:5,0\nDA:6,0\nLF:3\nLH:1\nend_of_record\n"),
+    )
+    .expect("write filtering LCOV");
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &lcov_path])
+        .arg("--lcov")
+        .arg(&lcov_path)
         .assert()
         .success()
         .stdout(predicate::str::contains("100.0%"))
@@ -782,8 +789,9 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     );
     for configuration in ["all-features", "no-default"] {
         let published = fs::read_to_string(coverage_dir.join(format!("lcov-{configuration}.info"))).expect("read filtered LCOV");
-        assert!(published.contains("DA:1,1"), "{published}");
-        assert!(!published.contains("DA:2,"), "{published}");
+        assert!(published.contains("DA:4,1"), "{published}");
+        assert!(!published.contains("DA:5,"), "{published}");
+        assert!(!published.contains("DA:6,"), "{published}");
         assert!(published.contains("LF:1"), "{published}");
     }
 

@@ -1315,16 +1315,16 @@ mod tests {
 
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov(concat!(
-                "TN:\nSF:member/src/shared.rs\nDA:1,1\nDA:2,0\nDA:3,0\nend_of_record\n",
-                "TN:\nSF:member/tests/integration.rs\nDA:1,1\nDA:2,1\nend_of_record\n"
+                "TN:\nSF:member/src/shared.rs\nDA:4,1\nDA:5,0\nDA:6,0\nend_of_record\n",
+                "TN:\nSF:member/tests/integration.rs\nDA:4,1\nDA:5,1\nend_of_record\n"
             ))],
             &metadata,
         )
         .expect("relative report filters");
         assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].contains("DA:1,1"), "{}", filtered[0]);
-        assert!(!filtered[0].contains("DA:2,"), "{}", filtered[0]);
-        assert!(!filtered[0].contains("DA:3,"), "{}", filtered[0]);
+        assert!(filtered[0].contains("DA:4,1"), "{}", filtered[0]);
+        assert!(!filtered[0].contains("DA:5,"), "{}", filtered[0]);
+        assert!(!filtered[0].contains("DA:6,"), "{}", filtered[0]);
         assert!(!filtered[0].contains("integration.rs"), "{}", filtered[0]);
     }
 
