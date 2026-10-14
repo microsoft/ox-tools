@@ -459,10 +459,7 @@ fn offset_to_line(starts: &[usize], offset: usize) -> usize {
 }
 
 fn attribute_marks_test(attribute: &ast::Attr, test_attributes: &BTreeSet<String>) -> bool {
-    let Some(meta) = attribute.meta() else {
-        return false;
-    };
-    meta_marks_test(&meta, test_attributes)
+    attribute.meta().is_some_and(|meta| meta_marks_test(&meta, test_attributes))
 }
 
 fn meta_marks_test(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> bool {
@@ -470,15 +467,12 @@ fn meta_marks_test(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> bool
         ast::Meta::CfgMeta(cfg) => cfg.cfg_predicate().is_some_and(|predicate| cfg_predicate_is_test_only(&predicate)),
         ast::Meta::PathMeta(path_meta) => path_meta.path().is_some_and(|path| path_marks_test(&path, test_attributes)),
         ast::Meta::TokenTreeMeta(token_tree) => token_tree.path().is_some_and(|path| path_marks_test(&path, test_attributes)),
-        ast::Meta::CfgAttrMeta(cfg_attr) => {
-            let Some(predicate) = cfg_attr.cfg_predicate() else {
-                return false;
-            };
+        ast::Meta::CfgAttrMeta(cfg_attr) => cfg_attr.cfg_predicate().is_some_and(|predicate| {
             let possibilities = cfg_possibilities_without_test(&predicate);
             possibilities.can_be_true
                 && !possibilities.can_be_false
                 && cfg_attr.metas().any(|inner| meta_marks_test(&inner, test_attributes))
-        }
+        }),
         ast::Meta::KeyValueMeta(_) | ast::Meta::UnsafeMeta(_) => false,
     }
 }
@@ -674,10 +668,10 @@ impl<F: FnMut(&Path) -> bool> ModuleWalker<'_, F> {
 
 fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_name: &str) -> Result<Option<PathBuf>, CoverageGateError> {
     let mut found = None;
-    for attribute in module.attrs() {
-        let Some(attribute_meta) = attribute.meta() else {
-            continue;
-        };
+    for (attribute, attribute_meta) in module
+        .attrs()
+        .filter_map(|attribute| attribute.meta().map(|meta| (attribute, meta)))
+    {
         if matches!(attribute_meta, ast::Meta::CfgAttrMeta(_)) && meta_contains_path(&attribute_meta) {
             return Err(ConditionalModulePathError::new(
                 declaring_file.display().to_string(),
@@ -1361,6 +1355,12 @@ mod tests {
             Some(PathBuf::from("/workspace/outer"))
         );
         assert_eq!(owned_directory(Path::new(""), SourceRole::PlainModule), None);
+        let empty_path_analysis = analyze(Path::new(""), "mod child;\n");
+        assert!(
+            declarations(Path::new(""), &empty_path_analysis, SourceRole::PlainModule, &BTreeSet::new())
+                .expect("a path without an owned directory has no declarations")
+                .is_empty()
+        );
 
         for source in [
             "#[path = 42] mod child;\n",
@@ -1781,12 +1781,12 @@ mod tests {
     fn normalized_source_sections_merge_without_replacing_counters() {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::new();
-        let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1\nDA:2,0\nend_of_record\n\
-                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,checksum\nDA:2,0\nend_of_record\n";
+        let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1,checksum\nDA:2,0\nend_of_record\n\
+                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,checksum\nDA:3,0\nend_of_record\n";
         let filtered = filter_report_with(parse_lcov(input), |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
-                line_count: 2,
+                line_count: 3,
                 test_only_lines: &test_only,
             })
         })
@@ -1794,8 +1794,8 @@ mod tests {
         let report = parse_lcov(&filtered);
         let section = report.sections.values().next().expect("one merged section");
         assert_eq!(report.sections.len(), 1);
-        assert_eq!(section.lines.len(), 2);
-        assert_eq!(section.lines.values().map(|line| line.count).collect::<Vec<_>>(), [3, 0]);
+        assert_eq!(section.lines.len(), 3);
+        assert_eq!(section.lines.values().map(|line| line.count).collect::<Vec<_>>(), [3, 0, 0]);
         assert_eq!(
             section.lines.values().next().expect("line one").checksum.as_deref(),
             Some("checksum")
