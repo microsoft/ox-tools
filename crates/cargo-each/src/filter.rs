@@ -44,7 +44,7 @@ impl Expression<PackageAtom> {
     /// Returns [`EachError`] if the Boolean syntax is malformed, an atom is not
     /// a recognized predicate, or a predicate argument is invalid.
     pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
-        ExpressionParser::new(spec, Self::parse_atom)?.parse()
+        ExpressionParser::new(spec, Self::parse_atom, true)?.parse()
     }
 
     /// Parse one atomic predicate from its command-line spelling.
@@ -108,7 +108,7 @@ impl Expression<PackageAtom> {
 impl Expression<TargetAtom> {
     /// Parse a target Boolean filter expression with the shared grammar.
     pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
-        ExpressionParser::new(spec, Self::parse_atom)?.parse()
+        ExpressionParser::new(spec, Self::parse_atom, false)?.parse()
     }
 
     fn parse_atom(spec: &str) -> Result<Self, EachError> {
@@ -312,18 +312,24 @@ struct ExpressionParser<'a, Atom> {
     position: usize,
     nesting: usize,
     parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>,
+    allow_whitespace_in_atom: bool,
 }
 
 impl<'a, Atom> ExpressionParser<'a, Atom> {
     const MAX_NESTING: usize = 64;
 
-    fn new(spec: &'a str, parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>) -> Result<Self, EachError> {
+    fn new(
+        spec: &'a str,
+        parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>,
+        allow_whitespace_in_atom: bool,
+    ) -> Result<Self, EachError> {
         Ok(Self {
             spec,
             tokens: tokenize(spec)?,
             position: 0,
             nesting: 0,
             parse_atom,
+            allow_whitespace_in_atom,
         })
     }
 
@@ -331,7 +337,7 @@ impl<'a, Atom> ExpressionParser<'a, Atom> {
         if self.tokens.is_empty() {
             return Err(invalid(self.spec, "empty expression"));
         }
-        if self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
+        if self.allow_whitespace_in_atom && self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
             return (self.parse_atom)(self.spec.trim());
         }
         let expression = self.parse_or()?;
@@ -743,6 +749,17 @@ mod tests {
             let error = TargetPredicate::parse(expression).expect_err(expression);
             assert_eq!(error.to_string(), format!("invalid filter expression `{expression}`: {reason}"));
         }
+    }
+
+    #[test]
+    fn target_filter_rejects_adjacent_atoms_without_boolean_operator() {
+        let error = TargetPredicate::parse("name:loom-* required-feature:loom").expect_err("adjacent atoms require `and`");
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected predicate; expected `and`, `or`, or end of expression"),
+            "{error}"
+        );
     }
 
     #[test]

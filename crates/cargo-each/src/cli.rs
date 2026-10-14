@@ -217,6 +217,14 @@ mod tests {
     }
 
     #[test]
+    fn target_filter_requires_target_mode() {
+        let error = CargoCli::try_parse_from(["cargo", "each", "--target-filter", "name:unit", "--", "echo"])
+            .expect_err("target filtering requires per-target mode");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--each-target"), "{error}");
+    }
+
+    #[test]
     fn parses_positive_and_auto_jobs() {
         assert_eq!(
             parse_jobs_with("7", || panic!("numeric jobs must not detect parallelism")),
