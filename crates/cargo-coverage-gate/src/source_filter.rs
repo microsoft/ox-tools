@@ -1268,6 +1268,41 @@ mod tests {
         miri,
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
     )]
+    fn cfg_attr_marks_tests_only_when_the_predicate_is_unconditional_without_test() {
+        let source = SourceFile::parse(
+            "#[cfg_attr(false, test)] fn never() {}\n\
+             #[cfg_attr(unix, test)] fn conditional() {}\n\
+             #[cfg_attr(true, test)] fn always() {}\n",
+            Edition::Edition2024,
+        )
+        .tree();
+        assert_eq!(
+            source
+                .items()
+                .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &BTreeSet::new())))
+                .collect::<Vec<_>>(),
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn mixed_lines_remain_released_while_pure_test_lines_are_excluded() {
+        let pure = analyze(Path::new("pure.rs"), "#[cfg(test)] fn test_only() {}\n");
+        assert_eq!(pure.test_only_lines, BTreeSet::from([1]));
+
+        let mixed = analyze(Path::new("mixed.rs"), "#[cfg(test)] fn test_only() {} pub fn released() {}\n");
+        assert!(mixed.test_only_lines.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn source_index_composes_relative_paths_and_release_wins() {
         let root = source_index_fixture_root();
         let metadata = source_index_fixture_metadata(&root);
@@ -1336,6 +1371,10 @@ mod tests {
         let mut flags = [0_u8; 1];
         mark_range_lines(&mut flags, &[0], TextRange::empty(0.into()), LINE_TEST_ONLY);
         assert_eq!(flags, [0]);
+
+        let mut flags = [0_u8; 2];
+        mark_range_lines(&mut flags, &[0, 4], TextRange::new(0.into(), 4.into()), LINE_TEST_ONLY);
+        assert_eq!(flags, [LINE_TEST_ONLY, 0]);
     }
 
     #[test]
@@ -1731,6 +1770,7 @@ mod tests {
         .to_string();
         assert!(error.contains("could not parse Rust source"), "{error}");
         assert!(error.contains("at 2:"), "{error}");
+        assert!(error.contains("at 2:15"), "{error}");
 
         let error = filter_many(&["not lcov"], None)
             .expect_err("malformed LCOV must fail before metadata discovery")
