@@ -61,7 +61,7 @@ use serde_json::Value;
     PackageScopedTestAttributesError,
     UnownedCoverageSourceError,
     UnattributableReleasedSourceError,
-    NormalizedSourceCollisionError,
+    NormalizedSourceChecksumError,
     CoverageLineOutOfRangeError,
     InvalidPackageSelectorError,
     UnknownPackageSelectorError
@@ -370,15 +370,17 @@ pub(crate) struct UnattributableReleasedSourceError {
     pub path: String,
 }
 
-/// Two LCOV sections became the same key after source-path normalization.
+/// Two LCOV sections became the same key after source-path normalization but
+/// disagreed on the checksum for one source line.
 #[ohno::error]
 #[display(
-    "multiple LCOV sections for test `{test_name}` normalize to source `{path}`; \
-     produce one consistent source path per file"
+    "LCOV sections for test `{test_name}` normalize to source `{path}` but carry \
+     conflicting checksums for line {line}; regenerate coverage from one consistent source tree"
 )]
-pub(crate) struct NormalizedSourceCollisionError {
+pub(crate) struct NormalizedSourceChecksumError {
     pub test_name: String,
     pub path: String,
+    pub line: u32,
 }
 
 /// An LCOV line-bearing record referenced a line beyond the source file.

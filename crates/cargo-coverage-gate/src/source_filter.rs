@@ -9,6 +9,7 @@
 //! rules. Within released files, syntax ranges guarded exclusively by test
 //! configuration are removed from every line-bearing LCOV record.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
@@ -21,7 +22,7 @@ use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, TextRange};
 use crate::CoverageGateError;
 use crate::error::{
     AmbiguousModuleSourceError, ConditionalModulePathError, ConflictingSourceEditionError, CoverageLineOutOfRangeError,
-    InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError, NormalizedSourceCollisionError,
+    InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError, NormalizedSourceChecksumError,
     PackageScopedTestAttributesError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError,
     UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
 };
@@ -158,7 +159,8 @@ fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<B
             let path = value
                 .as_str()
                 .ok_or_else(|| InvalidTestAttributesValueError::new("workspace".to_owned(), value.clone()))?;
-            parse_configured_test_attribute(path).ok_or_else(|| InvalidTestAttributePathError::new(path.to_owned()).into())
+            parse_configured_test_attribute(path)
+                .ok_or_else(|| InvalidTestAttributePathError::new(crate::package_glob::diagnostic(path)).into())
         })
         .collect()
 }
@@ -581,9 +583,9 @@ fn module_declarations(
     let Some(directory) = owned_directory(path, role) else {
         return Ok(Vec::new());
     };
-    let Some(base) = path.parent() else {
-        return Ok(Vec::new());
-    };
+    let base = path
+        .parent()
+        .expect("owned_directory returns Some only after confirming that the declaring path has a parent");
     let mut declarations = Vec::new();
     let source_test_only = ast::attrs_including_inner(source).any(|attribute| attribute_marks_test(&attribute, test_attributes));
     ModuleWalker {
@@ -776,10 +778,36 @@ fn filter_report_with<'a>(
         section.branches.clear();
         section.functions.clear();
         if !section.is_empty() {
-            let test_name = key.test_name.clone();
-            let path = key.source_file.display().to_string();
-            if filtered.insert(key, section).is_some() {
-                return Err(NormalizedSourceCollisionError::new(test_name, path).into());
+            match filtered.entry(key) {
+                Entry::Vacant(entry) => {
+                    let _ = entry.insert(section);
+                }
+                Entry::Occupied(mut entry) => {
+                    let test_name = entry.key().test_name.clone();
+                    let path = entry.key().source_file.display().to_string();
+                    for (line, incoming) in section.lines {
+                        match entry.get_mut().lines.entry(line) {
+                            Entry::Vacant(entry) => {
+                                let _ = entry.insert(incoming);
+                            }
+                            Entry::Occupied(mut entry) => {
+                                let existing = entry.get_mut();
+                                if existing
+                                    .checksum
+                                    .as_ref()
+                                    .zip(incoming.checksum.as_ref())
+                                    .is_some_and(|(left, right)| left != right)
+                                {
+                                    return Err(NormalizedSourceChecksumError::new(test_name, path, line.line).into());
+                                }
+                                if incoming.checksum.is_some() {
+                                    existing.checksum = incoming.checksum;
+                                }
+                                existing.count = existing.count.saturating_add(incoming.count);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1018,6 +1046,14 @@ mod tests {
         for invalid in [json!("tokio::test"), json!([7]), json!(["tokio::test()"])] {
             assert!(parse_configured_test_attributes(Some(&invalid)).is_err(), "{invalid}");
         }
+        assert!(parse_configured_test_attribute("[").is_none());
+        let controls = parse_configured_test_attributes(Some(&json!(["bad\n\r\u{1b}[2J"])))
+            .expect_err("invalid controlled path must fail")
+            .to_string();
+        assert!(controls.contains(r"bad\n\r\u{1b}[2J"), "{controls:?}");
+        assert!(!controls.contains('\n'), "{controls:?}");
+        assert!(!controls.contains('\r'), "{controls:?}");
+        assert!(!controls.contains('\u{1b}'), "{controls:?}");
 
         let package_metadata = json!({"coverage-gate": {"test-attributes": ["company::test"]}});
         let error = reject_package_test_attributes([("alpha", &package_metadata)])
@@ -1249,7 +1285,10 @@ mod tests {
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
 
         let filtered = filter_reports_with_metadata(
-            vec![parse_lcov("TN:\nSF:member/src/shared.rs\nDA:1,1\nDA:2,0\nDA:3,0\nend_of_record\n")],
+            vec![parse_lcov(concat!(
+                "TN:\nSF:member/src/shared.rs\nDA:1,1\nDA:2,0\nDA:3,0\nend_of_record\n",
+                "TN:\nSF:member/tests/integration.rs\nDA:1,1\nDA:2,1\nend_of_record\n"
+            ))],
             &metadata,
         )
         .expect("relative report filters");
@@ -1257,6 +1296,86 @@ mod tests {
         assert!(filtered[0].contains("DA:1,1"), "{}", filtered[0]);
         assert!(!filtered[0].contains("DA:2,"), "{}", filtered[0]);
         assert!(!filtered[0].contains("DA:3,"), "{}", filtered[0]);
+        assert!(!filtered[0].contains("integration.rs"), "{}", filtered[0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn source_index_rejects_conflicting_editions_and_package_test_policy() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[1].src_path = metadata.packages[0].targets[0].src_path.clone();
+        metadata.packages[0].targets[1].edition = CargoEdition::E2021;
+        let error = SourceIndex::from_metadata(&metadata)
+            .expect_err("one source cannot use conflicting editions")
+            .to_string();
+        assert!(error.contains("conflicting editions"), "{error}");
+
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].metadata = json!({"coverage-gate": {"test-attributes": ["company::test"]}});
+        let error = SourceIndex::from_metadata(&metadata)
+            .expect_err("package-scoped test attributes must fail")
+            .to_string();
+        assert!(error.contains("workspace-scoped"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn defensive_attribute_and_range_branches_are_conservative() {
+        let parsed = SourceFile::parse(
+            "#[] fn malformed() {}\n#[cfg_attr()] fn empty_cfg_attr() {}\n",
+            Edition::Edition2024,
+        )
+        .tree();
+        let mut items = parsed.items();
+        let malformed = items.next().expect("malformed item").attrs().next().expect("malformed attribute");
+        let empty_cfg_attr = items.next().expect("cfg_attr item").attrs().next().expect("cfg_attr attribute");
+        assert!(!attribute_marks_test(&malformed, &BTreeSet::new()));
+        assert!(!attribute_marks_test(&empty_cfg_attr, &BTreeSet::new()));
+
+        let mut flags = [0_u8; 1];
+        mark_range_lines(&mut flags, &[0], TextRange::empty(0.into()), LINE_TEST_ONLY);
+        assert_eq!(flags, [0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn module_edge_cases_preserve_plain_resolution_and_reject_invalid_paths() {
+        let root = PathBuf::from("/workspace/lib.rs");
+        let child = PathBuf::from("/workspace/child.rs");
+        let analysis = analyze(&root, "#[cfg_attr(test, cfg(unix))] mod child;\n");
+        let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child.clone()]))
+            .expect("non-path cfg_attr is supported");
+        assert_eq!(lexical_normalize(&found[0].path), child);
+        assert_eq!(
+            owned_directory(Path::new("/workspace/outer/mod.rs"), SourceRole::PlainModule),
+            Some(PathBuf::from("/workspace/outer"))
+        );
+        assert_eq!(owned_directory(Path::new(""), SourceRole::PlainModule), None);
+
+        for source in [
+            "#[path = 42] mod child;\n",
+            "#[path = concat!(\"child.rs\")] mod child;\n",
+            "#[path = \"child.rs\"] #[path = \"other.rs\"] mod child;\n",
+        ] {
+            let analysis = analyze(&root, source);
+            let error = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::new())
+                .expect_err("invalid path attribute must fail")
+                .to_string();
+            assert!(
+                error.contains("unsupported `#[path]`") || error.contains("multiple #[path]"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -1659,22 +1778,47 @@ mod tests {
     }
 
     #[test]
-    fn normalized_source_collisions_fail_instead_of_replacing_counters() {
+    fn normalized_source_sections_merge_without_replacing_counters() {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::new();
-        let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1\nend_of_record\n\
-                     TN:same\nSF:/other/spelling/lib.rs\nDA:2,0\nend_of_record\n";
-        let error = filter_report_with(parse_lcov(input), |_| {
+        let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1\nDA:2,0\nend_of_record\n\
+                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,checksum\nDA:2,0\nend_of_record\n";
+        let filtered = filter_report_with(parse_lcov(input), |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
                 line_count: 2,
                 test_only_lines: &test_only,
             })
         })
-        .expect_err("normalization collisions must not discard a section")
+        .expect("normalized sections merge");
+        let report = parse_lcov(&filtered);
+        let section = report.sections.values().next().expect("one merged section");
+        assert_eq!(report.sections.len(), 1);
+        assert_eq!(section.lines.len(), 2);
+        assert_eq!(section.lines.values().map(|line| line.count).collect::<Vec<_>>(), [3, 0]);
+        assert_eq!(
+            section.lines.values().next().expect("line one").checksum.as_deref(),
+            Some("checksum")
+        );
+    }
+
+    #[test]
+    fn normalized_source_sections_reject_conflicting_checksums() {
+        let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
+        let test_only = BTreeSet::new();
+        let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1,first\nend_of_record\n\
+                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,second\nend_of_record\n";
+        let error = filter_report_with(parse_lcov(input), |_| {
+            Ok(SourceDisposition::Include {
+                source_file: normalized.clone(),
+                line_count: 1,
+                test_only_lines: &test_only,
+            })
+        })
+        .expect_err("conflicting checksums must fail")
         .to_string();
 
-        assert!(error.contains("multiple LCOV sections"), "{error}");
-        assert!(error.contains("same"), "{error}");
+        assert!(error.contains("conflicting checksums"), "{error}");
+        assert!(error.contains("line 1"), "{error}");
     }
 }

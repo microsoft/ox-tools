@@ -1533,6 +1533,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn filtered_report_staging_errors_are_returned() {
+        let tmp = tempdir().expect("tempdir");
+        let scratch = tmp.path().join("scratch");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        let workspace = workspace(tmp.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = scratch.join("cargo-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch,
+            coverage_target_root: &coverage_target_root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: scratch.join("raw.info"),
+            stable_path: tmp.path().join("missing/lcov.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        fs::write(&collected[0].raw_path, "raw").expect("write raw");
+
+        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| Ok(vec!["filtered".to_owned()]))
+            .expect_err("missing staging directory must fail");
+        assert!(error.to_string().contains("failed to create temporary file"), "{error}");
+    }
+
+    #[test]
     fn scratch_paths_use_stable_component_names() {
         let workspace = workspace(Path::new("repo"));
         assert_eq!(coverage_scratch_parent(&workspace), PathBuf::from("repo/target/coverage-gate"));
