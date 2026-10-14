@@ -338,6 +338,10 @@ fn xml_lexical_ranges(text: &str) -> (Vec<ByteRange>, Vec<ByteRange>) {
             let end = rest.find("]]>").map_or(text.len(), |offset| cursor + offset + 3);
             ignored.push(ByteRange { start: cursor, end });
             cursor = end;
+        } else if rest.starts_with("<?") {
+            let end = rest.find("?>").map_or(text.len(), |offset| cursor + offset + 2);
+            ignored.push(ByteRange { start: cursor, end });
+            cursor = end;
         } else {
             cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
         }
@@ -2714,12 +2718,14 @@ mod tests {
     }
 
     #[test]
-    fn xml_lexical_ranges_report_exact_comment_and_cdata_bounds() {
-        let text = "x<!--c-->y<![CDATA[z]]>q";
+    fn xml_lexical_ranges_report_exact_comment_cdata_and_processing_instruction_bounds() {
+        let text = "x<!--c-->y<![CDATA[z]]>q<?data value?>r";
         let comment_start = text.find("<!--").unwrap();
         let comment_end = comment_start + "<!--c-->".len();
         let cdata_start = text.find("<![CDATA[").unwrap();
         let cdata_end = cdata_start + "<![CDATA[z]]>".len();
+        let pi_start = text.find("<?data").unwrap();
+        let pi_end = pi_start + "<?data value?>".len();
 
         assert_eq!(
             xml_lexical_ranges(text),
@@ -2737,15 +2743,30 @@ mod tests {
                         start: cdata_start,
                         end: cdata_end,
                     },
+                    ByteRange {
+                        start: pi_start,
+                        end: pi_end,
+                    },
                 ],
             )
         );
     }
 
     #[test]
-    fn xml_project_close_detection_ignores_indented_lines_inside_comments_and_cdata() {
-        let text = "<Project>\n<!--\n  </Project>\n-->\n<![CDATA[\n  </Project>\n]]>\n  </Project>\n";
+    fn xml_project_close_detection_ignores_indented_lines_inside_comments_cdata_and_processing_instructions() {
+        let text = "<Project>\n<!--\n  </Project>\n-->\n<![CDATA[\n  </Project>\n]]>\n<?data\n  </Project>\n?>\n  </Project>\n";
         assert_eq!(xml_project_closing_line_offset(text), Some(text.rfind("  </Project>").unwrap()));
+    }
+
+    #[test]
+    fn xml_marker_shaped_lines_inside_processing_instructions_are_not_regions() {
+        let text = "<Project>\n<?data\n<!-- >>> anvil-managed: x -->\nuser text\n<!-- <<< anvil-managed: x -->\n?>\n</Project>\n";
+
+        assert_eq!(find_region(text, "x", CommentSyntax::Xml).unwrap(), None);
+        assert_eq!(
+            repair_markers(text, "x", CommentSyntax::Xml),
+            MarkerRepair::Repaired(text.to_owned())
+        );
     }
 
     #[test]

@@ -103,8 +103,8 @@ hosts use `<!-- >>> anvil-managed: <id> -->` and
 `<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
 element, attribute, or larger comment is ordinary user content. XML region IDs
 containing `--`, CR, or LF are rejected during catalog construction. Marker-
-shaped lines inside CDATA or other non-comment XML content are not ownership
-boundaries. XML placement is intentionally scoped to existing MSBuild project
+shaped lines inside CDATA, processing instructions, or other non-comment XML
+content are not ownership boundaries. XML placement is intentionally scoped to existing MSBuild project
 hosts, whose document element is `Project`; arbitrary XML root elements are not
 inferred. When an XML region is absent from an existing MSBuild project, it is
 inserted before a complete-line
