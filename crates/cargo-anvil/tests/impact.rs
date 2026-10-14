@@ -86,8 +86,8 @@ fn core_tools_available() -> bool {
 }
 
 /// A scratch directory prepended to `PATH` that holds pwsh command shims
-/// (`<name>.ps1`) used to make the recipe's `cargo` / `rustup` calls observable
-/// -- or to prove they never happen. pwsh resolves a bare `cargo`/`rustup` to
+/// (`<name>.ps1`) used to make the recipe's `cargo` / `cargo-delta` / `rustup` calls
+/// observable -- or to prove they never happen. pwsh resolves a bare command to
 /// the `.ps1` on PATH cross-platform, so the emitted recipes call the shim
 /// instead of the real tool. Kept in its own `TempDir` (not the workspace) so
 /// the shims never surface in the workspace's `git status` -- which the recipe's
@@ -114,9 +114,10 @@ impl ShimBin {
         Self { _dir: dir, path, log }
     }
 
-    /// A `cargo` shim that records every invocation to `ANVIL_TEST_LOG` and then
-    /// fails hard (exit 97). Used to assert a recipe path never shells out to
-    /// cargo-delta: any call both fails the recipe and leaves a log entry.
+    /// `cargo` and `cargo-delta` shims that record every invocation to
+    /// `ANVIL_TEST_LOG` and then fail hard (exit 97). Used to assert a recipe
+    /// path never shells out to cargo-delta through either invocation form:
+    /// any call both fails the recipe and leaves a log entry.
     ///
     /// 97 is an arbitrary recognizable test-only sentinel: no assertion checks
     /// for it specifically (callers verify the log is empty / the recipe
@@ -124,12 +125,10 @@ impl ShimBin {
     /// distinct from the recipe contract exit codes (1/2) so an unexpected
     /// failure surfacing this code is obviously the tripwire firing.
     fn tripwire_cargo() -> Self {
-        Self::new(&[(
-            "cargo.ps1",
-            "if ($env:ANVIL_TEST_LOG) { Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ') }\n\
-             [Console]::Error.WriteLine('cargo tripwire: unexpected cargo invocation: ' + ($args -join ' '))\n\
-             exit 97\n",
-        )])
+        let body = "if ($env:ANVIL_TEST_LOG) { Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ') }\n\
+                    [Console]::Error.WriteLine('impact computation tripwire: unexpected ' + $MyInvocation.MyCommand.Name + ' invocation: ' + ($args -join ' '))\n\
+                    exit 97\n";
+        Self::new(&[("cargo.ps1", body), ("cargo-delta.ps1", body)])
     }
 
     /// The lines logged by the shims so far (empty when nothing was invoked).
@@ -1626,7 +1625,7 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
     let complete = command(&["anvil-impact"]);
     assert!(
         complete.status.success(),
-        "consume with a complete injected cache must succeed:\n{}{}",
+        "consume with a complete injected cache must succeed:\n{}\n{}",
         String::from_utf8_lossy(&complete.stdout),
         String::from_utf8_lossy(&complete.stderr)
     );
@@ -1638,7 +1637,7 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
         let include = command(&["_anvil-impact-include", tier]);
         assert!(
             include.status.success(),
-            "reading the injected {tier} tier failed:\n{}{}",
+            "reading the injected {tier} tier failed:\n{}\n{}",
             String::from_utf8_lossy(&include.stdout),
             String::from_utf8_lossy(&include.stderr)
         );
@@ -1652,7 +1651,7 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
     fs::remove_file(injected.join("include_affected.txt")).unwrap();
     for args in [&["anvil-impact"][..], &["_anvil-impact-include", "affected"][..]] {
         let out = command(args);
-        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let combined = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(
             !out.status.success(),
             "an injected cache missing one tier must fail instead of falling back:\n{combined}"
@@ -1663,10 +1662,10 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
         );
     }
 
+    let invocations = shim.log_lines();
     assert!(
-        shim.log_lines().is_empty(),
-        "consume must not invoke cargo-delta while reading an injected cache, but did: {:?}",
-        shim.log_lines()
+        invocations.is_empty(),
+        "consume must not invoke cargo-delta while reading an injected cache, but did: {invocations:?}"
     );
 }
 

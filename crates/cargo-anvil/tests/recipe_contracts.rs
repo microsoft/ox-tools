@@ -617,6 +617,7 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     // that exercise those contracts pass the relevant values explicitly.
     command.env_remove("ANVIL_IMPACT");
     command.env_remove("ANVIL_IMPACT_INPUT_DIR");
+    command.env_remove("ANVIL_IN_CONTAINER");
     command.env_remove("ANVIL_MIRI_JOBS");
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
@@ -1555,6 +1556,7 @@ fn container_rejects_impact_input_override_only_in_consume_mode() {
     if !tools_available() {
         return;
     }
+    let _powershell = powershell_process_lock();
     let tmp = fixture(&[("container.just", CONTAINER)], &[]);
     let root = tmp.path();
     let justfile_path = root.join("Justfile");
@@ -1587,12 +1589,12 @@ exit 0
     let engine_log = root.join("container-engine.log");
     let input = TempDir::new().unwrap();
 
-    let run = |mode: Option<&str>| {
+    let run = |mode: Option<&str>, input_override: &OsStr| {
         let mut command = just_command(
             root,
             &["anvil-container", "echo", "ok"],
             &[
-                ("ANVIL_IMPACT_INPUT_DIR", input.path().as_os_str()),
+                ("ANVIL_IMPACT_INPUT_DIR", input_override),
                 ("FAKE_CONTAINER_ENGINE", engine.as_os_str()),
                 ("FAKE_CONTAINER_LOG", engine_log.as_os_str()),
             ],
@@ -1603,7 +1605,7 @@ exit 0
         command.output().expect("just is required to verify generated recipe behavior")
     };
 
-    let consume = run(Some("consume"));
+    let consume = run(Some("consume"), input.path().as_os_str());
     assert_failed(&consume, "running a container with an injected consume cache");
     let consume_stderr = String::from_utf8_lossy(&consume.stderr);
     assert!(
@@ -1617,15 +1619,26 @@ exit 0
         "consume mode must reject the override before invoking the container engine"
     );
 
-    for mode in [Some("off"), None] {
-        let output = run(mode);
+    for (mode, input_override) in [
+        (Some("off"), input.path().as_os_str()),
+        (None, input.path().as_os_str()),
+        (Some("consume"), OsStr::new("")),
+    ] {
+        let output = run(mode, input_override);
         assert!(
             output.status.success(),
-            "an ignored impact-cache override must not block container execution in mode {mode:?}\nstdout:\n{}\nstderr:\n{}",
+            "an ignored or empty impact-cache override must not block container execution in mode {mode:?} with input {input_override:?}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         let arguments = fs::read_to_string(&engine_log).unwrap();
+        let args: Vec<_> = arguments.lines().collect();
+        let forwards_impact = args.windows(2).any(|pair| pair == ["-e", "ANVIL_IMPACT"]);
+        assert_eq!(
+            forwards_impact,
+            mode.is_some(),
+            "unexpected impact-mode forwarding for {mode:?}:\n{arguments}"
+        );
         assert!(
             !arguments.contains("ANVIL_IMPACT_INPUT_DIR"),
             "the host-only cache path must never be forwarded to the container engine:\n{arguments}"
