@@ -102,9 +102,13 @@ leaving errors and summary-file rendering intact.
 
 ## Diagnostic pipeline
 
-The CLI and ordinary `evaluate*` APIs use the complete pipeline below.
-Explicit `evaluate_unfiltered*` APIs skip source discovery/filtering and begin
-at the filtered-report parsing/attribution stages.
+The CLI and ordinary `evaluate*` APIs use the complete pipeline below for
+non-empty LCOV input. An empty `evaluate_many*` batch still validates workspace
+policy, package selection, and target policy but skips source-graph
+construction. `filter_lcov_many(&[])` remains a no-op without workspace
+discovery. Explicit `evaluate_unfiltered*` APIs skip source
+discovery/filtering and begin at the filtered-report parsing/attribution
+stages.
 
 1. Each LCOV input is parsed before source discovery. Malformed LCOV therefore
    fails without touching source state.

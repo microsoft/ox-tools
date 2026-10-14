@@ -651,14 +651,26 @@ mod tests {
              [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
         )
         .expect("write member manifest");
-        fs::write(tmp.path().join("explicit-manifest-only/src/lib.rs"), "").expect("write member source");
+        let selected_source = tmp.path().join("explicit-manifest-only/src/lib.rs");
+        fs::write(&selected_source, "pub fn released() {}\n").expect("write member source");
         fs::write(
             tmp.path().join("must-remain-unselected/Cargo.toml"),
             "[package]\nname = \"must-remain-unselected\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
              [package.metadata.coverage-gate]\nmin-lines-percent = 80\n",
         )
         .expect("write unselected member manifest");
-        fs::write(tmp.path().join("must-remain-unselected/src/lib.rs"), "").expect("write unselected member source");
+        fs::write(tmp.path().join("must-remain-unselected/src/lib.rs"), "pub fn released() {}\n").expect("write unselected member source");
+
+        let valid_lcov = format!("TN:\nSF:{}\nDA:1,1\nend_of_record\n", selected_source.display());
+        let filtered = filter_lcov(&valid_lcov, Some(&tmp.path().join("Cargo.toml"))).expect("public filter wrapper succeeds");
+        assert!(filtered.contains("DA:1,1"), "{filtered}");
+        let evaluated = evaluate(
+            &valid_lcov,
+            Some(&tmp.path().join("Cargo.toml")),
+            &["explicit-manifest-only".to_owned()],
+        )
+        .expect("released evaluation must preserve manifest/package forwarding");
+        assert_eq!(evaluated.verdict(), Verdict::Pass);
 
         let missing_source = tmp.path().join("explicit-manifest-only/src/missing.rs").display().to_string();
         let lcov = format!("TN:\nSF:{missing_source}\nDA:999,0\nend_of_record\n");
