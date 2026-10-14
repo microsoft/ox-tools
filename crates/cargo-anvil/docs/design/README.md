@@ -244,7 +244,10 @@ The tool produces a small set of files. They fall into three categories:
   XML region IDs may not contain `--`, CR, or LF. In an existing XML host, a
   new region is inserted before the complete-line closing tag of the document's
   actual root element. A missing, malformed, self-closing, or compact-root host
-  is refused rather than scaffolded or guessed.
+  is refused rather than scaffolded or guessed. Root-end insertion is an
+  intentional first-step trade-off: it is simple and sufficient for the
+  current adopter use cases, while the artifact model can grow a more explicit
+  placement specification when catalogs need regions at other XML locations.
   The pair delimits the region body and identifies it by stable ID; the manifest
   tracks the last-rendered checksum per `(host, id)`. Outside the sentinels, the
   user's content is preserved byte-for-byte — except that first adoption into a

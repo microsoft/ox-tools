@@ -112,7 +112,16 @@ placement rules are applied only to hash comment regions, even when an XML
 region happens to reuse one of their IDs. If the host is missing or malformed,
 the root is self-closing, or its closing tag shares a line with other content,
 introduction refuses rather than scaffolding a document or appending invalid
-content after the root. Changing the declared syntax of
+content after the root.
+
+Always introducing an absent XML region at the end of the document root is a
+deliberate simplicity trade-off. It covers the current adopter-owned project
+lists without adding XML-path selectors, sibling anchors, or host-specific
+placement rules to `RegionSpec`. The region model can add an explicit placement
+specification later when a catalog needs to target a more precise XML location;
+existing regions will continue to update in place.
+
+Changing the declared syntax of
 an existing `(host, id)` is refused whenever marker lines in the previous
 syntax remain, including an unpaired marker; the manifest does not record the
 old syntax, so treating those markers as absent could duplicate an unbounded
