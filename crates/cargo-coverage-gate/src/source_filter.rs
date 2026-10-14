@@ -230,7 +230,7 @@ impl SourceIndex {
             if let Some(indexed) = files.get_mut(&pending.path) {
                 if indexed.edition != pending.edition {
                     return Err(ConflictingSourceEditionError::new(
-                        pending.path.display().to_string(),
+                        diagnostic_path(&pending.path),
                         format!("{:?}", indexed.edition),
                         format!("{:?}", pending.edition),
                     )
@@ -271,7 +271,7 @@ impl SourceIndex {
         let source = self
             .files
             .get(&resolved)
-            .ok_or_else(|| UnownedCoverageSourceError::new(path.display().to_string()))?;
+            .ok_or_else(|| UnownedCoverageSourceError::new(diagnostic_path(path)))?;
         Ok(source)
     }
 }
@@ -289,7 +289,7 @@ fn released_source_attributed_path(member_dirs: &[MemberDirectory], pending: &Pe
         Surface::NonReleased => Ok(None),
         Surface::Released => attributed_path(member_dirs, &pending.path)
             .map(Some)
-            .ok_or_else(|| UnattributableReleasedSourceError::new(pending.path.display().to_string()).into()),
+            .ok_or_else(|| UnattributableReleasedSourceError::new(diagnostic_path(&pending.path)).into()),
     }
 }
 
@@ -346,16 +346,20 @@ fn syntax_edition(edition: CargoEdition, path: &Path) -> Result<Edition, Coverag
         CargoEdition::E2018 => Ok(Edition::Edition2018),
         CargoEdition::E2021 => Ok(Edition::Edition2021),
         CargoEdition::E2024 => Ok(Edition::Edition2024),
-        _ => Err(UnsupportedSourceEditionError::new(path.display().to_string(), format!("{edition:?}")).into()),
+        _ => Err(UnsupportedSourceEditionError::new(diagnostic_path(path), format!("{edition:?}")).into()),
     }
 }
 
+fn diagnostic_path(path: &Path) -> String {
+    crate::package_glob::diagnostic(&path.display().to_string())
+}
+
 fn resolve_source_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
-    fs::canonicalize(path).map_err(|error| ResolveCoverageSourceError::caused_by(path.display().to_string(), error).into())
+    fs::canonicalize(path).map_err(|error| ResolveCoverageSourceError::caused_by(diagnostic_path(path), error).into())
 }
 
 fn analyze_source(path: &Path, edition: Edition, test_attributes: &BTreeSet<String>) -> Result<SourceAnalysis, CoverageGateError> {
-    let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(path.display().to_string(), error))?;
+    let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
     analyze_source_text(path, &source, edition, test_attributes)
 }
 
@@ -385,7 +389,7 @@ fn analyze_source_text(
             })
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(ParseCoverageSourceError::new(path.display().to_string(), diagnostics).into());
+        return Err(ParseCoverageSourceError::new(diagnostic_path(path), diagnostics).into());
     }
     let tree = parse.tree();
     let root = tree.syntax();
@@ -651,10 +655,10 @@ impl<F: FnMut(&Path) -> bool> ModuleWalker<'_, F> {
                 .collect::<Vec<_>>();
             if existing.len() > 1 {
                 return Err(AmbiguousModuleSourceError::new(
-                    self.declaring_file.display().to_string(),
+                    diagnostic_path(self.declaring_file),
                     name,
-                    existing[0].display().to_string(),
-                    existing[1].display().to_string(),
+                    diagnostic_path(&existing[0]),
+                    diagnostic_path(&existing[1]),
                 )
                 .into());
             }
@@ -674,9 +678,9 @@ fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_nam
     {
         if matches!(attribute_meta, ast::Meta::CfgAttrMeta(_)) && meta_contains_path(&attribute_meta) {
             return Err(ConditionalModulePathError::new(
-                declaring_file.display().to_string(),
+                diagnostic_path(declaring_file),
                 module_name.to_owned(),
-                attribute.syntax().text().to_string(),
+                crate::package_glob::diagnostic(&attribute.syntax().text().to_string()),
             )
             .into());
         }
@@ -696,15 +700,15 @@ fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_nam
         };
         let Some(value) = value else {
             return Err(InvalidModulePathAttributeError::new(
-                declaring_file.display().to_string(),
+                diagnostic_path(declaring_file),
                 module_name.to_owned(),
-                attribute.syntax().text().to_string(),
+                crate::package_glob::diagnostic(&attribute.syntax().text().to_string()),
             )
             .into());
         };
         if found.replace(value).is_some() {
             return Err(InvalidModulePathAttributeError::new(
-                declaring_file.display().to_string(),
+                diagnostic_path(declaring_file),
                 module_name.to_owned(),
                 "multiple #[path] attributes".to_owned(),
             )
@@ -777,8 +781,8 @@ fn filter_report_with<'a>(
                     let _ = entry.insert(section);
                 }
                 Entry::Occupied(mut entry) => {
-                    let test_name = entry.key().test_name.clone();
-                    let path = entry.key().source_file.display().to_string();
+                    let test_name = crate::package_glob::diagnostic(&entry.key().test_name);
+                    let path = diagnostic_path(&entry.key().source_file);
                     for (line, incoming) in section.lines {
                         match entry.get_mut().lines.entry(line) {
                             Entry::Vacant(entry) => {
@@ -826,7 +830,7 @@ fn validate_line(path: &Path, line: u32, line_count: usize) -> Result<(), Covera
     if valid {
         Ok(())
     } else {
-        Err(CoverageLineOutOfRangeError::new(path.display().to_string(), line, line_count).into())
+        Err(CoverageLineOutOfRangeError::new(diagnostic_path(path), line, line_count).into())
     }
 }
 
@@ -1326,6 +1330,17 @@ mod tests {
         assert!(!filtered[0].contains("DA:5,"), "{}", filtered[0]);
         assert!(!filtered[0].contains("DA:6,"), "{}", filtered[0]);
         assert!(!filtered[0].contains("integration.rs"), "{}", filtered[0]);
+
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 100}});
+        let evaluated = crate::evaluate_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:member/src/shared.rs\nDA:4,1\nDA:5,0\nDA:6,0\nend_of_record\n")],
+            &metadata,
+            &[],
+            None,
+        )
+        .expect("pre-recorded report evaluates");
+        assert_eq!(evaluated.verdict(), crate::Verdict::Pass);
     }
 
     #[test]
@@ -1861,5 +1876,33 @@ mod tests {
 
         assert!(error.contains("conflicting checksums"), "{error}");
         assert!(error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn lcov_control_characters_are_encoded_in_filter_diagnostics() {
+        let controlled = "bad\u{1b}[2J";
+        let normalized = PathBuf::from(format!("/workspace/{controlled}.rs"));
+        let test_only = BTreeSet::new();
+        let input = format!(
+            "TN:{controlled}\nSF:first.rs\nDA:1,1,first\nend_of_record\n\
+             TN:{controlled}\nSF:second.rs\nDA:1,2,second\nend_of_record\n"
+        );
+        let error = filter_report_with(parse_lcov(&input), |_| {
+            Ok(SourceDisposition::Include {
+                source_file: normalized.clone(),
+                line_count: 1,
+                test_only_lines: &test_only,
+            })
+        })
+        .expect_err("controlled checksum conflict must fail")
+        .to_string();
+        assert!(error.contains(r"bad\u{1b}[2J"), "{error:?}");
+        assert!(!error.contains('\u{1b}'), "{error:?}");
+
+        let error = resolve_source_path(Path::new(controlled))
+            .expect_err("missing controlled path must fail")
+            .to_string();
+        assert!(error.contains(r"bad\u{1b}[2J"), "{error:?}");
+        assert!(!error.contains('\u{1b}'), "{error:?}");
     }
 }

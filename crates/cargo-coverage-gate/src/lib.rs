@@ -308,9 +308,9 @@ pub use error::CoverageGateError;
 /// # Errors
 ///
 /// Returns [`CoverageGateError`] when Cargo metadata cannot be loaded, the
-/// LCOV input is malformed, a referenced source cannot be resolved/read/parsed,
-/// target ownership cannot be determined, or LCOV line data does not match the
-/// current source tree.
+/// LCOV input is malformed, any source reachable from a Cargo target root
+/// cannot be resolved/read/parsed, target ownership cannot be determined, or
+/// LCOV line data does not match the current source tree.
 pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
     source_filter::filter_one(lcov_text, manifest_path)
 }
@@ -469,10 +469,19 @@ pub fn evaluate_many_for_target(
 ) -> Result<EvaluatedReport, CoverageGateError> {
     let reports = source_filter::parse_reports(lcov_texts)?;
     let metadata = workspace::load_metadata(manifest_path)?;
-    let filtered = source_filter::filter_reports_with_metadata(reports, &metadata)?;
+    evaluate_reports_with_metadata(reports, &metadata, gated_packages, target)
+}
+
+fn evaluate_reports_with_metadata(
+    reports: Vec<lcov::Report>,
+    metadata: &cargo_metadata::Metadata,
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<EvaluatedReport, CoverageGateError> {
+    let filtered = source_filter::filter_reports_with_metadata(reports, metadata)?;
     let filtered_refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
     let report = lcov_cov::CoverageReport::from_strs(&filtered_refs)?;
-    let ws = workspace::Workspace::from_metadata(&metadata, target)?;
+    let ws = workspace::Workspace::from_metadata(metadata, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
