@@ -583,6 +583,21 @@ mod tests {
     }
 
     #[test]
+    fn rounding_boundary_composes_evaluation_and_text_rendering() {
+        let report = make_report(vec![make_file("/repo/crates/alpha/src/lib.rs", 2_000, 1_999)]);
+        let workspace = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", Some(100.0))], None);
+        let evaluated = evaluate(&report, &workspace, &[]).expect("evaluate");
+        assert_eq!(evaluated.verdict(), Verdict::Fail);
+
+        let mut output = Vec::new();
+        crate::render::text::render(&mut output, &evaluated).expect("render");
+        let output = String::from_utf8(output).expect("text output is UTF-8");
+        for expected in ["99.9%", "100.0%", "-<0.1pp", "FAIL", "alpha: 1999/2000 lines covered; 1 uncovered."] {
+            assert!(output.contains(expected), "{expected:?} missing from:\n{output}");
+        }
+    }
+
+    #[test]
     fn displayed_rounding_does_not_lower_threshold() {
         // Both values render as "82.0%", but the configured 82.04 floor is
         // still greater than the measured 82.0%.

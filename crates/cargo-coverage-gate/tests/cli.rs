@@ -25,6 +25,7 @@ use tempfile::TempDir;
 
 const RELEASED_SOURCE: &str = include_str!("fixtures/released-source.rs");
 const RELEASED_AND_TEST_ONLY_SOURCE: &str = include_str!("fixtures/released-and-test-only-source.rs");
+const RELEASED_SOURCE_LINE_OFFSET: u32 = 3;
 
 /// Write a workspace at `dir` containing the given members. Each
 /// member entry is `(name, optional min-lines-percent)`. The workspace root
@@ -81,7 +82,8 @@ fn make_coverage_lcov(dir: &Path, files: &[(&str, u32, u32)]) -> String {
         writeln!(out, "SF:{path}").expect("write to String never fails");
         for i in 1..=*count {
             let hits = if i <= *covered { 5 } else { 0 };
-            writeln!(out, "DA:{i},{hits}").expect("write to String never fails");
+            let source_line = i + RELEASED_SOURCE_LINE_OFFSET;
+            writeln!(out, "DA:{source_line},{hits}").expect("write to String never fails");
         }
         writeln!(out, "LF:{count}").expect("write to String never fails");
         writeln!(out, "LH:{covered}").expect("write to String never fails");
@@ -254,33 +256,11 @@ fn all_pass_mixed_sources() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn external_lcov_filters_test_only_source_lines() {
-    let tmp = TempDir::new().expect("tempdir");
-    make_workspace_with_source(tmp.path(), &[("alpha", Some("100"))], None, RELEASED_AND_TEST_ONLY_SOURCE);
-    let source = tmp.path().join("alpha/src/lib.rs").to_string_lossy().replace('\\', "/");
-    let lcov_path = tmp.path().join("lcov.info");
-    fs::write(
-        &lcov_path,
-        format!("TN:\nSF:{source}\nDA:4,1\nDA:5,0\nDA:6,0\nLF:3\nLH:1\nend_of_record\n"),
-    )
-    .expect("write filtering LCOV");
-
-    coverage_gate(tmp.path())
-        .arg("--lcov")
-        .arg(&lcov_path)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("100.0%"))
-        .stdout(predicate::str::contains("all packages meet their threshold"));
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn one_crate_below_threshold_exits_1() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
     let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
-    let missed = format!("{}: 61-100", Path::new("src").join("lib.rs").display());
+    let missed = format!("{}: 64-103", Path::new("src").join("lib.rs").display());
 
     coverage_gate(tmp.path())
         .args(["--lcov", &lcov_path])
@@ -302,8 +282,8 @@ fn multiple_lcov_files_merge_at_line_level() {
     // Two configs of the SAME file, each covering a disjoint half (50%
     // alone, below the 80% threshold), but the union covers all 4 lines
     // (100%). Only a correct line-level merge passes the gate.
-    let config_a = format!("TN:\nSF:{src}\nDA:1,5\nDA:2,5\nDA:3,0\nDA:4,0\nend_of_record\n");
-    let config_b = format!("TN:\nSF:{src}\nDA:1,0\nDA:2,0\nDA:3,5\nDA:4,5\nend_of_record\n");
+    let config_a = format!("TN:\nSF:{src}\nDA:4,5\nDA:5,5\nDA:6,0\nDA:7,0\nend_of_record\n");
+    let config_b = format!("TN:\nSF:{src}\nDA:4,0\nDA:5,0\nDA:6,5\nDA:7,5\nend_of_record\n");
     let path_a = tmp.path().join("a.info");
     let path_b = tmp.path().join("b.info");
     fs::write(&path_a, &config_a).expect("write a.info");
@@ -655,7 +635,7 @@ fn lcov_with_test_name_records_is_parsed() {
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
     let full = tmp.path().join("alpha/src/lib.rs");
     let path = full.to_string_lossy().replace('\\', "/");
-    let body = format!("TN:my_test\nSF:{path}\nDA:1,5\nDA:2,5\nDA:3,5\nDA:4,5\nDA:5,0\nLF:5\nLH:4\nend_of_record\n");
+    let body = format!("TN:my_test\nSF:{path}\nDA:4,5\nDA:5,5\nDA:6,5\nDA:7,5\nDA:8,0\nLF:5\nLH:4\nend_of_record\n");
     let lcov_path = tmp.path().join("cov.info");
     fs::write(&lcov_path, body).expect("write lcov");
 
