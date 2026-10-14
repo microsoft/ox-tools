@@ -166,6 +166,15 @@ mod tests {
         "scheduled-exhaustive",
     ];
 
+    fn setup_action_step(name: &str) -> &str {
+        let marker = format!("    - name: {name}\n");
+        let remainder = SETUP_ACTION
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("setup action should contain step '{name}'"))
+            .1;
+        remainder.split_once("\n    - ").map_or(remainder, |(step, _)| step)
+    }
+
     #[test]
     fn artifacts_keep_their_emission_order() {
         let paths: Vec<_> = all()
@@ -236,11 +245,10 @@ mod tests {
         assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
-        assert_eq!(
-            SETUP_ACTION.matches("GITHUB_TOKEN: ${{ github.token }}").count(),
-            2,
-            "both setup binstall call sites must use GitHub's authenticated API quota"
-        );
+        let install_just = setup_action_step("Install just");
+        assert!(install_just.contains("GITHUB_TOKEN: ${{ github.token }}"));
+        let install_catalog = setup_action_step("Install anvil toolchains + tools");
+        assert!(install_catalog.contains("GITHUB_TOKEN: ${{ github.token }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));
@@ -283,11 +291,13 @@ mod tests {
         assert!(SETUP_ACTION.contains("runner.environment == 'github-hosted'"));
         assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
-        assert!(SETUP_ACTION.contains("Install libclang (Linux spellcheck groups)"));
-        assert!(SETUP_ACTION.contains("sudo apt-get update && sudo apt-get install -y libclang-dev"));
-        assert!(SETUP_ACTION.contains("inputs.group == 'pr-fast'"));
-        assert!(SETUP_ACTION.contains("inputs.group == 'spellcheck'"));
-        assert!(!SETUP_ACTION.contains("inputs.group == 'none'"));
+        let install_libclang = setup_action_step("Install libclang (Linux spellcheck groups)");
+        assert!(install_libclang.contains("runner.environment == 'github-hosted'"));
+        assert!(install_libclang.contains("runner.os == 'Linux'"));
+        assert!(install_libclang.contains("sudo apt-get update && sudo apt-get install -y libclang-dev"));
+        assert!(install_libclang.contains("inputs.group == 'pr-fast'"));
+        assert!(install_libclang.contains("inputs.group == 'spellcheck'"));
+        assert!(!install_libclang.contains("inputs.group == 'none'"));
     }
 
     #[test]
