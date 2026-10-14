@@ -1879,6 +1879,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes a missing path, which Miri isolation forbids")]
     fn lcov_control_characters_are_encoded_in_filter_diagnostics() {
         let controlled = "bad\u{1b}[2J";
         let normalized = PathBuf::from(format!("/workspace/{controlled}.rs"));
