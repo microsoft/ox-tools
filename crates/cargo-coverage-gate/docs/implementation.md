@@ -108,11 +108,15 @@ policy, package selection, and target policy but skips source-graph
 construction. `filter_lcov_many(&[])` remains a no-op without workspace
 discovery. Explicit `evaluate_unfiltered*` APIs skip source
 discovery/filtering and begin at the filtered-report parsing/attribution
-stages.
+stages. `run` reaches the same stages through separate calls: workspace/package
+selection, `filter_lcov_many`, then `evaluate_unfiltered*` over the published
+files. It therefore loads Cargo metadata once per stage; every load resolves
+the workspace discovered from the invocation directory.
 
 1. Each LCOV input is parsed before source discovery. Malformed LCOV therefore
    fails without touching source state.
-2. One Cargo metadata snapshot drives both source ownership and package policy.
+2. Within one `evaluate*` call, one Cargo metadata snapshot drives both source
+   ownership and package policy.
    It enumerates every workspace target and classifies released
    libraries (including proc macros and explicit library crate types) and bins
    separately from every other target kind. A module walk follows plain

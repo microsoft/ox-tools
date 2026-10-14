@@ -1770,7 +1770,8 @@ mod tests {
         .to_string();
         assert!(error.contains("could not parse Rust source"), "{error}");
         assert!(error.contains("at 2:"), "{error}");
-        assert!(error.contains("at 2:15"), "{error}");
+        assert_eq!(error.matches("at 2:15").count(), 2, "{error}");
+        assert_eq!(error.matches("at 2:17").count(), 1, "{error}");
 
         let error = filter_many(&["not lcov"], None)
             .expect_err("malformed LCOV must fail before metadata discovery")

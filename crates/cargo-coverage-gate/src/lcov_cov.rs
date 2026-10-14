@@ -3,10 +3,12 @@
 
 //! lcov tracefile parser.
 //!
-//! Reads a released-surface-filtered [lcov tracefile][lcov] (derived from the
-//! format `cargo llvm-cov --lcov` emits) and produces a per-file view of line
-//! coverage that the rest of the gate consumes. Raw reports are filtered by
-//! [`crate::source_filter`] before they reach this parser.
+//! Reads an [lcov tracefile][lcov] (derived from the format
+//! `cargo llvm-cov --lcov` emits) and produces a per-file view of line coverage
+//! that the rest of the gate consumes. On the released-surface path,
+//! [`crate::source_filter`] filters raw reports first. The
+//! `evaluate_unfiltered*` entry points parse caller-supplied reports as-is, so
+//! this parser assumes nothing about filtering.
 //!
 //! ## Why lcov, not the JSON
 //!
