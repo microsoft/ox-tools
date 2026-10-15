@@ -42,6 +42,10 @@ pub enum CommentSyntax {
     /// `//`-prefixed line comments — JSON5 and friends.
     SlashSlash,
     /// `<!-- ... -->` comments — XML and `MSBuild` project files.
+    ///
+    /// The region ID must not contain `--`, CR, LF, or characters forbidden
+    /// by XML 1.0. [`crate::catalog::CatalogBuilder::build`] validates this
+    /// syntax-specific requirement.
     Xml,
 }
 
@@ -128,12 +132,17 @@ impl CommentSyntax {
     }
 
     fn marker_id(self, line: &str, opens: bool) -> Option<&str> {
-        let direction = if opens { ">>>" } else { "<<<" };
         match self {
-            Self::Hash => line.strip_prefix(&format!("# {direction} anvil-managed:")).map(str::trim),
-            Self::SlashSlash => line.strip_prefix(&format!("// {direction} anvil-managed:")).map(str::trim),
+            Self::Hash if opens => line.strip_prefix("# >>> anvil-managed:").map(str::trim),
+            Self::Hash => line.strip_prefix("# <<< anvil-managed:").map(str::trim),
+            Self::SlashSlash if opens => line.strip_prefix("// >>> anvil-managed:").map(str::trim),
+            Self::SlashSlash => line.strip_prefix("// <<< anvil-managed:").map(str::trim),
+            Self::Xml if opens => line
+                .strip_prefix("<!-- >>> anvil-managed:")
+                .and_then(|rest| rest.strip_suffix("-->"))
+                .map(str::trim),
             Self::Xml => line
-                .strip_prefix(&format!("<!-- {direction} anvil-managed:"))
+                .strip_prefix("<!-- <<< anvil-managed:")
                 .and_then(|rest| rest.strip_suffix("-->"))
                 .map(str::trim),
         }
@@ -236,7 +245,11 @@ fn is_horizontal_whitespace(character: char) -> bool {
 /// The host is left exactly as found and the caller refuses the region.
 #[must_use]
 pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
-    repair_markers_in_lines(text, id, syntax, marker_lines(text, syntax).into_iter())
+    if syntax == CommentSyntax::Xml {
+        repair_markers_in_lines(text, id, syntax, xml_comment_lines(text).into_iter())
+    } else {
+        repair_markers_in_lines(text, id, syntax, iterate_lines(text))
+    }
 }
 
 pub(crate) fn repair_toml_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
@@ -291,17 +304,19 @@ fn repair_markers_in_lines(text: &str, id: &str, syntax: CommentSyntax, lines: i
 /// sentinels for the same id, an opening sentinel with no matching close,
 /// or a close before its open.
 pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
-    find_region_in_lines(text, id, syntax, marker_lines(text, syntax).into_iter())
-}
-
-fn marker_lines(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
     if syntax == CommentSyntax::Xml {
-        xml_comment_lines(text)
+        find_region_in_lines(text, id, syntax, xml_comment_lines(text).into_iter())
     } else {
-        iterate_lines(text).collect()
+        find_region_in_lines(text, id, syntax, iterate_lines(text))
     }
 }
 
+/// Complete physical lines occupied by actual XML comment tokens.
+///
+/// This is marker evidence only. Tokenizer failures end discovery early, so an
+/// empty result does not prove that a malformed document contains no later
+/// marker-shaped text; callers that need proof of absence must separately
+/// validate the complete XML document.
 fn xml_comment_lines(text: &str) -> Vec<ByteRange> {
     let comments = xml_comment_ranges(text);
     iterate_lines(text)
@@ -318,6 +333,13 @@ fn xml_comment_lines(text: &str) -> Vec<ByteRange> {
         .collect()
 }
 
+/// Byte ranges for XML comment tokens observed before any tokenizer failure.
+///
+/// Errors are intentionally discarded here because marker discovery is also
+/// used on non-XML hosts while inferring legacy syntax. The result is therefore
+/// evidence of comments that were seen, not proof that no later comments
+/// exist. Retirement combines it with [`xml_comment_scan_failed`] and raw
+/// marker-line evidence before concluding that a tracked XML region is absent.
 fn xml_comment_ranges(text: &str) -> Vec<ByteRange> {
     Tokenizer::from(text)
         .filter_map(|token| match token {
@@ -333,6 +355,24 @@ fn xml_comment_ranges(text: &str) -> Vec<ByteRange> {
         .collect()
 }
 
+pub(crate) fn xml_comment_scan_failed(text: &str) -> bool {
+    Tokenizer::from(text).any(|token| token.is_err())
+}
+
+pub(crate) fn raw_marker_line_present(text: &str, id: &str, syntax: CommentSyntax) -> bool {
+    let opener = syntax.marker(id, true);
+    let closer = syntax.marker(id, false);
+    iterate_lines(text).any(|line| {
+        let value = text[line.start..line.end].trim();
+        value == opener || value == closer
+    })
+}
+
+/// Parsed document-root byte bounds used to validate ownership and placement.
+///
+/// `opening_end` and `closing_start` bound content inside the root element.
+/// `closing_line_start` is present only when the closing tag occupies a whole
+/// trimmed physical line and can therefore anchor an absent managed region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct XmlRootBounds {
     pub opening_end: usize,
@@ -340,6 +380,17 @@ pub(crate) struct XmlRootBounds {
     pub closing_line_start: Option<usize>,
 }
 
+fn complete_line_start(text: &str, range: std::ops::Range<usize>) -> Option<usize> {
+    let line_start = text[..range.start].rfind('\n').map_or(0, |newline| newline + 1);
+    let line_end = text[range.end..].find('\n').map_or(text.len(), |newline| range.end + newline);
+    let line = text[line_start..line_end].trim_end_matches('\r');
+    (line.trim() == &text[range]).then_some(line_start)
+}
+
+/// Validate the complete XML token stream and return document-root bounds.
+///
+/// `Ok(None)` means the document element is self-closing. Missing, malformed,
+/// mismatched, incomplete, or trailing document content returns an error.
 pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, String> {
     fn qualified_name(prefix: &str, local: &str) -> String {
         if prefix.is_empty() {
@@ -350,14 +401,14 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
     }
 
     let mut pending = None;
-    let mut stack: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<(&str, &str)> = Vec::new();
     let mut root_opening_end = None;
     let mut root_close = None;
     let mut root_is_empty = false;
     for token in Tokenizer::from(text) {
         match token.map_err(|error| format!("the XML host is malformed: {error}"))? {
             Token::ElementStart { prefix, local, .. } => {
-                pending = Some((prefix.as_str().to_owned(), local.as_str().to_owned()));
+                pending = Some((prefix.as_str(), local.as_str()));
             }
             Token::ElementEnd {
                 end: ElementEnd::Open,
@@ -396,15 +447,12 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
                     return Err(format!(
                         "the XML host closes `{}` while `{}` is still open",
                         qualified_name(closed.0, closed.1),
-                        qualified_name(&opened.0, &opened.1),
+                        qualified_name(opened.0, opened.1),
                     ));
                 }
                 if stack.is_empty() {
                     let range = span.range();
-                    let line_start = text[..range.start].rfind('\n').map_or(0, |newline| newline + 1);
-                    let line_end = text[range.end..].find('\n').map_or(text.len(), |newline| range.end + newline);
-                    let line = text[line_start..line_end].trim_end_matches('\r');
-                    root_close = Some((range.start, (line.trim() == &text[range]).then_some(line_start)));
+                    root_close = Some((range.start, complete_line_start(text, range)));
                 }
             }
             _ => {}
@@ -1659,7 +1707,11 @@ fn toml_region_ranges(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
 
 /// Lexical sentinel pairs, independent of the host format.
 fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {
-    region_ranges_in_lines(text, syntax, marker_lines(text, syntax).into_iter())
+    if syntax == CommentSyntax::Xml {
+        region_ranges_in_lines(text, syntax, xml_comment_lines(text).into_iter())
+    } else {
+        region_ranges_in_lines(text, syntax, iterate_lines(text))
+    }
 }
 
 fn toml_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {

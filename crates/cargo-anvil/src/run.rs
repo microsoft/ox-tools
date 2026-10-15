@@ -28,8 +28,8 @@ use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
 use crate::region::{
-    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, remove_region,
-    xml_document_root,
+    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement,
+    raw_marker_line_present, remove_region, xml_comment_scan_failed, xml_document_root,
 };
 use crate::workspace::{self, Workspace};
 
@@ -564,7 +564,11 @@ fn push_region_at(
     let Some(placement) = region_placement_or_refuse(plan, &host, spec, composed_host, current.as_deref()) else {
         return Ok(());
     };
-    let body = match delta_region_body(current.as_deref(), spec) {
+    let body = match if spec.syntax == CommentSyntax::Hash {
+        delta_region_body(current.as_deref(), spec)
+    } else {
+        DeltaRegionBody::Managed
+    } {
         DeltaRegionBody::Managed => spec.body.as_str(),
         DeltaRegionBody::PreserveRepositoryKey => {
             plan.note(
@@ -1426,6 +1430,13 @@ fn plan_removals(
     Ok(())
 }
 
+/// Infer the marker syntax of a retired region from current host evidence.
+///
+/// Manifest schema 1 records the body checksum but not marker syntax. A unique
+/// checksum match proves ownership; otherwise all complete and malformed marker
+/// evidence must identify one syntax. Ambiguous or incomplete XML scans refuse
+/// rather than being treated as historical fact or proof that the region is
+/// absent.
 fn recorded_region_syntax(
     repo_root: &Path,
     hosts: &mut HostTextCache,
@@ -1438,38 +1449,50 @@ fn recorded_region_syntax(
     };
     let scanner = HostScanner::for_path(host);
     let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
-    let complete: Vec<_> = syntaxes
-        .into_iter()
-        .filter_map(|syntax| {
-            scanner
-                .find(&text, id, syntax)
-                .ok()
-                .flatten()
-                .map(|region| (syntax, checksum_str(region.body_str())))
-        })
-        .collect();
-    let matching: Vec<_> = complete
-        .iter()
-        .filter_map(|(syntax, checksum)| (checksum == recorded_checksum).then_some(*syntax))
-        .collect();
-    match matching.as_slice() {
-        [syntax] => return Ok(*syntax),
-        [] => {}
-        _ => bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum"),
+    let xml_scan_failed = xml_comment_scan_failed(&text);
+    if xml_scan_failed && raw_marker_line_present(&text, id, CommentSyntax::Xml) {
+        bail!(
+            "managed region '{id}' in '{host}' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
+        );
     }
-    match complete.as_slice() {
-        [(syntax, _)] => return Ok(*syntax),
-        [] => {}
-        _ => bail!("managed region '{id}' in '{host}' has multiple complete marker pairs and none uniquely matches the recorded checksum"),
+    let mut checksum_match = None;
+    let mut checksum_matches = 0;
+    let mut evidence = None;
+    let mut evidence_count = 0;
+
+    for syntax in syntaxes {
+        let found = scanner.find(&text, id, syntax);
+        let complete = match &found {
+            Ok(Some(region)) => {
+                if checksum_str(region.body_str()) == recorded_checksum {
+                    checksum_matches += 1;
+                    checksum_match = Some(syntax);
+                }
+                true
+            }
+            Ok(None) | Err(_) => false,
+        };
+        let has_evidence =
+            !matches!(found, Ok(None)) || (syntax == CommentSyntax::Xml && xml_scan_failed && raw_marker_line_present(&text, id, syntax));
+        if complete || has_evidence {
+            evidence_count += 1;
+            evidence = Some(syntax);
+        }
     }
-    let evidence: Vec<_> = syntaxes
-        .into_iter()
-        .filter(|syntax| !matches!(scanner.find(&text, id, *syntax), Ok(None)))
-        .collect();
-    match evidence.as_slice() {
-        [syntax] => Ok(*syntax),
-        [] => Ok(CommentSyntax::Hash),
-        _ => bail!("managed region '{id}' in '{host}' has ambiguous marker lines in multiple comment syntaxes"),
+
+    if checksum_matches == 1 {
+        return Ok(checksum_match.expect("one checksum match records its syntax"));
+    }
+    if checksum_matches > 1 {
+        bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum");
+    }
+    if evidence_count == 1 {
+        return Ok(evidence.expect("one marker-evidence syntax was recorded"));
+    }
+    if evidence_count == 0 {
+        Ok(CommentSyntax::Hash)
+    } else {
+        bail!("managed region '{id}' in '{host}' has ambiguous marker lines in multiple comment syntaxes")
     }
 }
 
@@ -1543,7 +1566,7 @@ mod tests {
 
     fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache) {
         let HostSelector::Path(host) = &spec.host else {
-            panic!("the focused managed-region seam requires a literal host");
+            panic!("the managed-region test helper requires HostSelector::Path");
         };
         let mut hosts = memory_hosts();
         hosts.texts.insert(host.clone(), text.map(str::to_owned));
@@ -3034,6 +3057,16 @@ mod tests {
         let (plan, _) = managed_region_plan(Some("<Project>\n</Project>\n"), &Manifest::default(), &spec);
         let spliced = plan.items()[0].spliced_host.as_deref().unwrap();
         assert!(spliced.find("anvil-managed").unwrap() < spliced.find("</Project>").unwrap());
+
+        let delta_spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new(DELTA_REGION_ID),
+            body: "  <generated />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, _) = managed_region_plan(Some("<root>\n</root>\n"), &Manifest::default(), &delta_spec);
+        assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+        assert!(plan.items()[0].spliced_host.as_deref().unwrap().contains("<generated />"));
     }
 
     /// A region that has lost one of its sentinels still holds a body anvil
@@ -3171,6 +3204,52 @@ mod tests {
             plan.items()[0].spliced_host.as_deref(),
             Some("# >>> anvil-managed: retired\nhash body\n# <<< anvil-managed: retired\n")
         );
+    }
+
+    #[test]
+    fn retirement_refuses_complete_and_malformed_evidence_in_different_syntaxes() {
+        for malformed in [
+            "// >>> anvil-managed: retired\n// >>> anvil-managed: retired\nowned body\n// <<< anvil-managed: retired\n",
+            "// >>> anvil-managed: retired\nowned body\n",
+        ] {
+            let host = format!("# >>> anvil-managed: retired\n# <<< anvil-managed: retired\n{malformed}");
+            let mut hosts = memory_hosts();
+            hosts.set("host.txt", host);
+
+            assert_eq!(
+                recorded_region_syntax(
+                    Path::new("in-memory-managed-region-tests"),
+                    &mut hosts,
+                    "host.txt",
+                    "retired",
+                    &checksum_str("owned body\n"),
+                )
+                .unwrap_err()
+                .to_string(),
+                "managed region 'retired' in 'host.txt' has ambiguous marker lines in multiple comment syntaxes"
+            );
+        }
+    }
+
+    #[test]
+    fn retirement_refuses_when_xml_tokenization_hides_marker_lines() {
+        let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
+        let mut hosts = memory_hosts();
+        hosts.set("config.xml", host.to_owned());
+
+        assert_eq!(
+            recorded_region_syntax(
+                Path::new("in-memory-managed-region-tests"),
+                &mut hosts,
+                "config.xml",
+                "settings",
+                &checksum_str("  <generated />\n"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
+        );
+        assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem")]
