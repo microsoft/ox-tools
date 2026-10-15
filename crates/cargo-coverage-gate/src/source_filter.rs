@@ -16,8 +16,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::{Edition as CargoEdition, Metadata, TargetKind};
-use ra_ap_syntax::ast::{self, HasAttrs, HasModuleItem, HasName, LiteralKind};
-use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, TextRange};
+use ra_ap_syntax::ast::{self, HasAttrs, HasName, LiteralKind};
+use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
 
 use crate::CoverageGateError;
 use crate::error::{
@@ -166,12 +166,17 @@ fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<B
 }
 
 fn parse_configured_test_attribute(value: &str) -> Option<String> {
-    let source = format!("#[{value}]\nfn __coverage_gate_test_attribute() {{}}\n");
+    let expected_attribute = format!("#[{value}]");
+    let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
     let parse = SourceFile::parse(&source, Edition::CURRENT);
     if !parse.errors().is_empty() {
         return None;
     }
-    let attribute = parse.tree().syntax().descendants().find_map(ast::Attr::cast)?;
+    let tree = parse.tree();
+    let attribute = tree.syntax().descendants().find_map(ast::Attr::cast)?;
+    if attribute.syntax().text().to_string() != expected_attribute {
+        return None;
+    }
     let ast::Meta::PathMeta(meta) = attribute.meta()? else {
         return None;
     };
@@ -409,7 +414,7 @@ fn analyze_source_text(
         .descendants()
         .filter_map(ast::Attr::cast)
         .filter(|attribute| attribute_marks_test(attribute, test_attributes))
-        .map(attributed_syntax_range)
+        .map(|attribute| attributed_syntax_range(&attribute))
         .collect::<Vec<_>>();
     let mut line_flags = vec![0_u8; line_starts.len()];
     for range in &test_ranges {
@@ -434,12 +439,12 @@ fn analyze_source_text(
         .collect();
     Ok(SourceAnalysis {
         syntax: tree,
-        line_count: line_starts.len(),
+        line_count: source.lines().count(),
         test_only_lines,
     })
 }
 
-fn attributed_syntax_range(attribute: ast::Attr) -> TextRange {
+fn attributed_syntax_range(attribute: &ast::Attr) -> TextRange {
     let owner = attribute
         .syntax()
         .parent()
@@ -570,7 +575,11 @@ fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibili
             if atom.true_token().is_some() {
                 return CfgPossibilities::TRUE;
             }
-            if atom.false_token().is_some() || (atom.eq_token().is_none() && atom.ident_token().is_some_and(|token| token.text() == "test"))
+            if atom.false_token().is_some()
+                || (atom.eq_token().is_none()
+                    && atom
+                        .ident_token()
+                        .is_some_and(|token| token.text().trim_start_matches("r#") == "test"))
             {
                 return CfgPossibilities::FALSE;
             }
@@ -619,7 +628,7 @@ fn module_declarations(
         declarations: &mut declarations,
         is_file,
     }
-    .walk(source.items().collect(), &directory, base, source_test_only)?;
+    .walk_syntax(source.syntax(), &directory, base, source_test_only)?;
     Ok(declarations)
 }
 
@@ -646,54 +655,68 @@ struct ModuleWalker<'a, F> {
 }
 
 impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
-    fn walk(&mut self, items: Vec<ast::Item>, directory: &Path, base: &Path, inherited_test_only: bool) -> Result<(), CoverageGateError> {
-        for item in items {
-            let ast::Item::Module(module) = item else {
-                continue;
-            };
-            let name = module
-                .name()
-                .expect("a parsed module declaration always has a name")
-                .text()
-                .trim_start_matches("r#")
-                .to_owned();
+    fn walk_syntax(
+        &mut self,
+        node: &SyntaxNode,
+        directory: &Path,
+        base: &Path,
+        inherited_test_only: bool,
+    ) -> Result<(), CoverageGateError> {
+        for child in node.children() {
             let test_only = inherited_test_only
-                || ast::attrs_including_inner(&module).any(|attribute| attribute_marks_test(&attribute, self.test_attributes));
-            let path_override = module_path_attribute(&module, self.declaring_file, &name)?;
-
-            if let Some(item_list) = module.item_list() {
-                let nested = path_override.map_or_else(|| directory.join(&name), |relative| base.join(relative));
-                self.walk(item_list.items().collect(), &nested, &nested, test_only)?;
-                continue;
+                || ast::AnyHasAttrs::cast(child.clone()).is_some_and(|owner| {
+                    ast::attrs_including_inner(&owner).any(|attribute| attribute_marks_test(&attribute, self.test_attributes))
+                });
+            if let Some(module) = ast::Module::cast(child.clone()) {
+                self.walk_module(&module, directory, base, test_only)?;
+            } else {
+                self.walk_syntax(&child, directory, base, test_only)?;
             }
+        }
+        Ok(())
+    }
 
-            let (candidates, role) = path_override.map_or_else(
-                || {
-                    (
-                        vec![directory.join(format!("{name}.rs")), directory.join(&name).join("mod.rs")],
-                        SourceRole::PlainModule,
-                    )
-                },
-                |relative| (vec![base.join(relative)], SourceRole::PathModule),
-            );
-            let mut existing = Vec::new();
-            for candidate in candidates {
-                if (self.is_file)(&candidate)? {
-                    existing.push(candidate);
-                }
-            }
-            if existing.len() > 1 {
-                return Err(AmbiguousModuleSourceError::new(
-                    diagnostic_path(self.declaring_file),
-                    name,
-                    diagnostic_path(&existing[0]),
-                    diagnostic_path(&existing[1]),
+    fn walk_module(&mut self, module: &ast::Module, directory: &Path, base: &Path, test_only: bool) -> Result<(), CoverageGateError> {
+        let name = module
+            .name()
+            .expect("a parsed module declaration always has a name")
+            .text()
+            .trim_start_matches("r#")
+            .to_owned();
+        let path_override = module_path_attribute(module, self.declaring_file, &name)?;
+
+        if let Some(item_list) = module.item_list() {
+            let nested = path_override.map_or_else(|| directory.join(&name), |relative| base.join(relative));
+            self.walk_syntax(item_list.syntax(), &nested, &nested, test_only)?;
+            return Ok(());
+        }
+
+        let (candidates, role) = path_override.map_or_else(
+            || {
+                (
+                    vec![directory.join(format!("{name}.rs")), directory.join(&name).join("mod.rs")],
+                    SourceRole::PlainModule,
                 )
-                .into());
+            },
+            |relative| (vec![base.join(relative)], SourceRole::PathModule),
+        );
+        let mut existing = Vec::new();
+        for candidate in candidates {
+            if (self.is_file)(&candidate)? {
+                existing.push(candidate);
             }
-            if let Some(path) = existing.into_iter().next() {
-                self.declarations.push(ModuleDeclaration { path, test_only, role });
-            }
+        }
+        if existing.len() > 1 {
+            return Err(AmbiguousModuleSourceError::new(
+                diagnostic_path(self.declaring_file),
+                name,
+                diagnostic_path(&existing[0]),
+                diagnostic_path(&existing[1]),
+            )
+            .into());
+        }
+        if let Some(path) = existing.into_iter().next() {
+            self.declarations.push(ModuleDeclaration { path, test_only, role });
         }
         Ok(())
     }
@@ -900,6 +923,7 @@ fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
 mod tests {
     use std::fmt::Write as _;
 
+    use ra_ap_syntax::ast::HasModuleItem;
     use serde_json::json;
 
     use super::*;
@@ -1070,7 +1094,12 @@ mod tests {
             BTreeSet::from(["company::async_test".to_owned(), "tokio::test".to_owned()])
         );
 
-        for invalid in [json!("tokio::test"), json!([7]), json!(["tokio::test()"])] {
+        for invalid in [
+            json!("tokio::test"),
+            json!([7]),
+            json!(["tokio::test()"]),
+            json!(["my_runtime::test] #[other"]),
+        ] {
             assert!(parse_configured_test_attributes(Some(&invalid)).is_err(), "{invalid}");
         }
         assert!(parse_configured_test_attribute("[").is_none());
@@ -1087,6 +1116,14 @@ mod tests {
             .expect_err("package policy must be rejected")
             .to_string();
         assert!(error.contains("workspace-scoped"), "{error}");
+
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.workspace_metadata = json!({"coverage-gate": {"test-attributes": "tokio::test"}});
+        let error = crate::evaluate_reports_with_metadata(Vec::new(), &metadata, &[], None)
+            .expect_err("empty evaluation must validate workspace filtering policy")
+            .to_string();
+        assert!(error.contains("array of Rust attribute paths"), "{error}");
 
         let target_metadata = json!({
             "coverage-gate": {
@@ -1263,6 +1300,18 @@ mod tests {
         assert_eq!(offset_to_line(&starts, 4), 1);
         assert_eq!(offset_to_line(&starts, 8), 1);
         assert_eq!(offset_to_line(&starts, 9), 2);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn source_line_counts_exclude_eof_sentinels() {
+        assert_eq!(analyze(Path::new("empty.rs"), "").line_count, 0);
+        assert_eq!(analyze(Path::new("trailing.rs"), "pub fn released() {}\n").line_count, 1);
+        assert!(validate_line(Path::new("empty.rs"), 1, 0).is_err());
+        assert!(validate_line(Path::new("trailing.rs"), 2, 1).is_err());
     }
 
     #[test]
@@ -1534,6 +1583,11 @@ mod tests {
         assert!(found[0].test_only);
         assert_eq!(found[0].role, SourceRole::PlainModule);
 
+        let analysis = analyze(&root, "#[cfg(r#test)] mod child;\n");
+        let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child]))
+            .expect("raw test cfg declaration resolves");
+        assert!(found[0].test_only);
+
         let nested = PathBuf::from("/workspace/src/outer/nested.rs");
         let analysis = analyze(&root, "mod outer { #![cfg(test)] mod nested; }\n");
         let found =
@@ -1541,6 +1595,36 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(lexical_normalize(&found[0].path), nested);
         assert!(found[0].test_only);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn block_local_modules_are_discovered_with_enclosing_test_semantics() {
+        let root = PathBuf::from("/workspace/src/lib.rs");
+        let released = PathBuf::from("/workspace/src/released_helper.rs");
+        let test_only = PathBuf::from("/workspace/src/test_helper.rs");
+        let analysis = analyze(
+            &root,
+            "fn released() { #[path = \"released_helper.rs\"] mod helper; }\n\
+             #[cfg(test)] fn tests() { #[path = \"test_helper.rs\"] mod helper; }\n",
+        );
+        let found = declarations(
+            &root,
+            &analysis,
+            SourceRole::CrateRoot,
+            &BTreeSet::from([released.clone(), test_only.clone()]),
+        )
+        .expect("block-local modules resolve");
+        assert_eq!(
+            found
+                .into_iter()
+                .map(|declaration| (lexical_normalize(&declaration.path), declaration.test_only, declaration.role))
+                .collect::<Vec<_>>(),
+            [(released, false, SourceRole::PathModule), (test_only, true, SourceRole::PathModule),]
+        );
     }
 
     #[test]

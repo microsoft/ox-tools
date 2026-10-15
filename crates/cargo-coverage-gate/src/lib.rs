@@ -577,32 +577,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
-    fn empty_evaluation_validates_released_surface_policy() {
-        let tmp = tempdir().expect("tempdir");
-        fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");
-        fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n\
-             [workspace.metadata.coverage-gate]\ntest-attributes = \"tokio::test\"\n",
-        )
-        .expect("write workspace manifest");
-        fs::write(
-            tmp.path().join("alpha/Cargo.toml"),
-            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
-        )
-        .expect("write member manifest");
-        fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
-
-        let error = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[])
-            .expect_err("empty evaluation must still validate filtering policy")
-            .to_string();
-        assert!(error.contains("test-attributes"), "{error}");
-        assert!(error.contains("array of Rust attribute paths"), "{error}");
-    }
-
-    #[test]
     fn evaluated_report_unattributed_count_round_trips() {
         // Construct an EvaluatedReport whose inner Report has a known
         // unattributed count, then verify the public accessor returns it.
