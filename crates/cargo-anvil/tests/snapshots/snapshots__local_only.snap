@@ -6930,7 +6930,7 @@ anvil-tool-cargo-bolero-install installer="install": anvil-toolchain-stable-inst
         Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & just _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
+    & '{{ replace(just_executable(), "'", "''") }}' _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-bolero` tool is available.
@@ -7055,7 +7055,7 @@ anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-ins
         Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & just _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
+    & '{{ replace(just_executable(), "'", "''") }}' _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-mutants` tool is available.
