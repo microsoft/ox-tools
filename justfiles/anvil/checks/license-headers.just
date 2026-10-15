@@ -12,7 +12,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-license-headers: no modified packages; skipping'; exit 0 }

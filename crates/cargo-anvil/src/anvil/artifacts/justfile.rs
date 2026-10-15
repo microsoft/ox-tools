@@ -311,6 +311,31 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
     }
 
+    #[test]
+    fn powershell_nested_just_invocations_escape_the_executable_path() {
+        const UNSAFE_INVOCATION: &str = r#"& "{{ just_executable() }}""#;
+
+        let top_level_files = [
+            (MOD_JUST_PATH, MOD_JUST),
+            (VERSIONS_JUST_PATH, VERSIONS_JUST),
+            (TOOLS_JUST_PATH, TOOLS_JUST),
+            (HELPERS_JUST_PATH, HELPERS_JUST),
+            (IMPACT_JUST_PATH, IMPACT_JUST),
+            (TIERS_JUST_PATH, TIERS_JUST),
+        ];
+        for (path, body) in top_level_files
+            .into_iter()
+            .chain(DEV_FILES.iter().copied())
+            .chain(CHECK_FILES.iter().copied())
+            .chain(GROUP_FILES.iter().copied())
+        {
+            assert!(
+                !body.contains(UNSAFE_INVOCATION),
+                "{path} must single-quote and escape just_executable() for PowerShell"
+            );
+        }
+    }
+
     /// All `checks/*.just` bodies concatenated, for content assertions.
     fn all_check_bodies() -> String {
         CHECK_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
@@ -420,7 +445,7 @@ mod tests {
 
     #[test]
     fn impact_scoped_checks_propagate_scope_resolution_failures() {
-        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
+        const CALL: &str = "$include = (& '{{ replace(just_executable(), \"'\", \"''\") }}' _anvil-impact-include";
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
             let lines: Vec<&str> = body.lines().collect();
@@ -577,7 +602,7 @@ mod tests {
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                        execution_body.contains("$include = (& '{{ replace(just_executable(), \"'\", \"''\") }}' _anvil-impact-include"),
                         "{path} must capture _anvil-impact-include into a local $include variable"
                     );
                 }

@@ -12,7 +12,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-cyclic-deps: no modified packages; skipping'; exit 0 }

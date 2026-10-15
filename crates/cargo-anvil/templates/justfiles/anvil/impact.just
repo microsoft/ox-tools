@@ -168,7 +168,7 @@ _anvil-impact-snapshot:
     $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
         ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
     $baseSha = $null
-    $base = (& "{{ just_executable() }}" _anvil-base-ref 2>$null)
+    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref 2>$null)
     if (($LASTEXITCODE -eq 0) -and $base) {
         $base = ($base | Select-Object -First 1).Trim()
         git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
@@ -199,7 +199,7 @@ _anvil-impact-snapshot:
     # `just anvil-<group>` still fails fast if it is missing; keeping it off
     # anvil-impact's dependency line is what lets the no-op paths stay
     # tool-agnostic.
-    & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
+    & '{{ replace(just_executable(), "'", "''") }}' anvil-tool-cargo-delta-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
 
@@ -209,7 +209,7 @@ _anvil-impact-snapshot:
     # NOT `git fetch`: mutating git state as a side effect of a build check is
     # surprising and can race the user's own git operations.
     if (-not $baseSha) {
-        $base = (& "{{ just_executable() }}" _anvil-base-ref)
+        $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $base = $base.Trim()
         git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
@@ -490,7 +490,7 @@ anvil-impact: _anvil-impact-snapshot
     # package-name translation live there, used identically by the cloud
     # impact steps).
     foreach ($tier in @('modified', 'affected', 'required')) {
-        $value = (& "{{ just_executable() }}" _anvil-impact-format $tier $impactJson)
+        $value = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-format $tier $impactJson)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Set-Content -LiteralPath (Join-Path $impactDir "include_$tier.txt") -Value $value.Trim() -Encoding UTF8 -NoNewline
         Write-Host "anvil-impact: $tier -> $($value.Trim())"
@@ -528,7 +528,7 @@ anvil-impact: _anvil-impact-snapshot
 # Working with objects sidesteps that entire class of bug.
 #
 # Usage:
-#   pwsh : $val = (& "{{ just_executable() }}" _anvil-impact-format affected $impactJson)
+#   pwsh : $val = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-format affected $impactJson)
 [script("pwsh", "-NoProfile")]
 _anvil-impact-format tier impactJson:
     $ErrorActionPreference = 'Stop'

@@ -143,7 +143,7 @@ anvil-tool-rustc-validate-prereqs:
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
         exit 1
     }
-    & "{{ just_executable() }}" _anvil-resolve-stable validate-workspace-msrv
+    & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable validate-workspace-msrv
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
