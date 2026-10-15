@@ -318,7 +318,10 @@ pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result
 /// marker-shaped text; callers that need proof of absence must separately
 /// validate the complete XML document.
 fn xml_comment_lines(text: &str) -> Vec<ByteRange> {
-    let comments = xml_comment_ranges(text);
+    let comments: BTreeSet<_> = xml_comment_ranges(text)
+        .into_iter()
+        .map(|comment| (comment.start, comment.end))
+        .collect();
     iterate_lines(text)
         .filter(|line| {
             let content = &text[line.start..line.end];
@@ -326,9 +329,7 @@ fn xml_comment_lines(text: &str) -> Vec<ByteRange> {
             let leading = without_ending.len() - without_ending.trim_start_matches(is_horizontal_whitespace).len();
             let trimmed = without_ending.trim_end_matches(is_horizontal_whitespace);
             let end = line.start + trimmed.len();
-            comments
-                .iter()
-                .any(|comment| comment.start == line.start + leading && comment.end == end)
+            comments.contains(&(line.start + leading, end))
         })
         .collect()
 }

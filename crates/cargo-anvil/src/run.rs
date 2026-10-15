@@ -241,7 +241,9 @@ fn build_plan_with_hosts(
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let syntax = recorded_region_syntax(repo_root, hosts, &host, &key.id, recorded_checksum)?;
+            let Some(syntax) = retirement_syntax_or_refuse(repo_root, &mut plan, hosts, &host, &key.id, recorded_checksum)? else {
+                continue;
+            };
             let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, syntax)?;
         }
     }
@@ -673,7 +675,7 @@ fn refuse_region_syntax_change(plan: &mut Plan, manifest: &Manifest, host: &str,
     if !has_evidence && !hidden_xml_evidence {
         return false;
     }
-    let existing = match infer_recorded_region_syntax(text, scanner, host, spec.id.as_str(), recorded_checksum) {
+    let existing = match infer_recorded_region_syntax(Some(text), scanner, host, spec.id.as_str(), recorded_checksum) {
         Ok(existing) => existing,
         Err(reason) => {
             refuse_region(
@@ -1381,7 +1383,9 @@ fn plan_removals(
             }));
             continue;
         }
-        let syntax = recorded_region_syntax(repo_root, hosts, &resolved_host, &key.id, last)?;
+        let Some(syntax) = retirement_syntax_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, last)? else {
+            continue;
+        };
         if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true)? {
             // The lock entry survives with the region, so the next run still
             // knows it is anvil's to retire once the boundary is repaired.
@@ -1456,6 +1460,25 @@ fn plan_removals(
 /// evidence must identify one syntax. Ambiguous or incomplete XML scans refuse
 /// rather than being treated as historical fact or proof that the region is
 /// absent.
+fn retirement_syntax_or_refuse(
+    repo_root: &Path,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    recorded_checksum: &str,
+) -> Result<Option<CommentSyntax>, AppError> {
+    let text = hosts.get_or_read(repo_root, host)?;
+    match infer_recorded_region_syntax(text.as_deref(), HostScanner::for_path(host), host, id, recorded_checksum) {
+        Ok(syntax) => Ok(Some(syntax)),
+        Err(reason) => {
+            refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::MalformedMarkers);
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
 fn recorded_region_syntax(
     repo_root: &Path,
     hosts: &mut HostTextCache,
@@ -1463,20 +1486,20 @@ fn recorded_region_syntax(
     id: &str,
     recorded_checksum: &str,
 ) -> Result<CommentSyntax, AppError> {
-    let Some(text) = hosts.get_or_read(repo_root, host)? else {
-        return Ok(CommentSyntax::Hash);
-    };
-    let scanner = HostScanner::for_path(host);
-    infer_recorded_region_syntax(&text, scanner, host, id, recorded_checksum)
+    let text = hosts.get_or_read(repo_root, host)?;
+    infer_recorded_region_syntax(text.as_deref(), HostScanner::for_path(host), host, id, recorded_checksum)
 }
 
 fn infer_recorded_region_syntax(
-    text: &str,
+    text: Option<&str>,
     scanner: HostScanner,
     host: &str,
     id: &str,
     recorded_checksum: &str,
 ) -> Result<CommentSyntax, AppError> {
+    let Some(text) = text else {
+        return Ok(CommentSyntax::Hash);
+    };
     let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
     let xml_scan_failed = scanner == HostScanner::Lines && xml_comment_scan_failed(text);
     if xml_scan_failed && raw_marker_line_present(text, id, CommentSyntax::Xml) {
@@ -3343,6 +3366,48 @@ mod tests {
                 "managed region 'retired' in 'host.txt' has ambiguous marker lines in multiple comment syntaxes"
             );
         }
+    }
+
+    #[test]
+    fn ambiguous_retirement_refuses_only_that_region_and_plans_unrelated_artifacts() {
+        let host = "# >>> anvil-managed: retired\nsame body\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nsame body\n// <<< anvil-managed: retired\n";
+        let mut previous = Manifest::default();
+        previous.set_region("host.txt", "retired", checksum_str("same body\n"));
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file("generated.txt", "generated\n"))
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", host.to_owned());
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-managed-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &previous,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+
+        assert_eq!(plan.refusals().len(), 1);
+        assert!(plan.refusals()[0].contains("multiple marker syntaxes"));
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::File {
+                    path: "generated.txt".to_owned(),
+                }
+                && item.decision == Decision::Write
+        }));
+        let recorded = checksum_str("same body\n");
+        assert_eq!(
+            plan.projected_manifest(&previous).region_checksum("host.txt", "retired"),
+            Some(recorded.as_str())
+        );
     }
 
     #[test]
