@@ -31,13 +31,13 @@ use crate::workspace::load_metadata;
 const LINE_RELEASED: u8 = 1;
 const LINE_TEST_ONLY: u8 = 1 << 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Surface {
     Released,
     NonReleased,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SourceRole {
     CrateRoot,
     PlainModule,
@@ -46,7 +46,8 @@ enum SourceRole {
 
 #[derive(Debug, Clone)]
 struct PendingSource {
-    path: PathBuf,
+    canonical_path: PathBuf,
+    resolution_path: PathBuf,
     edition: Edition,
     surface: Surface,
     role: SourceRole,
@@ -71,30 +72,19 @@ struct IndexedSource {
     analysis: SourceAnalysis,
     edition: Edition,
     released_path: Option<PathBuf>,
-    visits: u8,
+    visit_contexts: BTreeSet<(Surface, SourceRole, PathBuf)>,
 }
 
 impl IndexedSource {
-    fn has_visit(&self, surface: Surface, role: SourceRole) -> bool {
-        self.visits & visit_bit(surface, role) != 0
+    fn has_visit(&self, surface: Surface, role: SourceRole, resolution_path: &Path) -> bool {
+        self.visit_contexts.contains(&(surface, role, resolution_path.to_path_buf()))
     }
 
-    fn add_visit(&mut self, surface: Surface, role: SourceRole, released_path: Option<PathBuf>) {
-        self.visits |= visit_bit(surface, role);
+    fn add_visit(&mut self, surface: Surface, role: SourceRole, resolution_path: &Path, released_path: Option<PathBuf>) {
+        let _ = self.visit_contexts.insert((surface, role, resolution_path.to_path_buf()));
         if let Some(path) = released_path {
             let _ = self.released_path.get_or_insert(path);
         }
-    }
-}
-
-fn visit_bit(surface: Surface, role: SourceRole) -> u8 {
-    match (surface, role) {
-        (Surface::Released, SourceRole::CrateRoot) => 1,
-        (Surface::Released, SourceRole::PlainModule) => 1 << 1,
-        (Surface::Released, SourceRole::PathModule) => 1 << 2,
-        (Surface::NonReleased, SourceRole::CrateRoot) => 1 << 3,
-        (Surface::NonReleased, SourceRole::PlainModule) => 1 << 4,
-        (Surface::NonReleased, SourceRole::PathModule) => 1 << 5,
     }
 }
 
@@ -186,8 +176,15 @@ fn parse_configured_test_attribute(value: &str) -> Option<String> {
 impl SourceIndex {
     #[ohno::enrich_err("failed to load Cargo target ownership for coverage filtering")]
     fn from_metadata(metadata: &Metadata) -> Result<Self, CoverageGateError> {
+        Self::from_metadata_with_source_resolver(metadata, &mut resolve_source_path)
+    }
+
+    fn from_metadata_with_source_resolver(
+        metadata: &Metadata,
+        resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
+    ) -> Result<Self, CoverageGateError> {
         let test_attributes = configured_test_attributes(metadata)?;
-        let workspace_root = resolve_source_path(metadata.workspace_root.as_std_path())?;
+        let workspace_root = resolve_source(metadata.workspace_root.as_std_path())?;
         let mut member_dirs = metadata
             .workspace_packages()
             .iter()
@@ -197,7 +194,7 @@ impl SourceIndex {
                     .parent()
                     .expect("cargo metadata always reports a manifest path with a parent directory");
                 Ok(MemberDirectory {
-                    canonical: resolve_source_path(directory.as_std_path())?,
+                    canonical: resolve_source(directory.as_std_path())?,
                     reported: directory.as_std_path().to_path_buf(),
                 })
             })
@@ -216,8 +213,11 @@ impl SourceIndex {
         for package in metadata.workspace_packages() {
             for target in &package.targets {
                 let edition = syntax_edition(target.edition, target.src_path.as_std_path())?;
+                let canonical_path = resolve_source(target.src_path.as_std_path())?;
+                let resolution_path = resolve_module_resolution_path(target.src_path.as_std_path())?;
                 queue.push_back(PendingSource {
-                    path: resolve_source_path(target.src_path.as_std_path())?,
+                    canonical_path,
+                    resolution_path,
                     edition,
                     surface: if target_is_released(&target.kind) {
                         Surface::Released
@@ -232,35 +232,35 @@ impl SourceIndex {
         let mut files: BTreeMap<PathBuf, IndexedSource> = BTreeMap::new();
         while let Some(pending) = queue.pop_front() {
             let released_path = released_source_attributed_path(&member_dirs, &pending)?;
-            if let Some(indexed) = files.get_mut(&pending.path) {
+            if let Some(indexed) = files.get_mut(&pending.canonical_path) {
                 if indexed.edition != pending.edition {
                     return Err(ConflictingSourceEditionError::new(
-                        diagnostic_path(&pending.path),
+                        diagnostic_path(&pending.canonical_path),
                         format!("{:?}", indexed.edition),
                         format!("{:?}", pending.edition),
                     )
                     .into());
                 }
-                if indexed.has_visit(pending.surface, pending.role) {
+                if indexed.has_visit(pending.surface, pending.role, &pending.resolution_path) {
                     continue;
                 }
-                indexed.add_visit(pending.surface, pending.role, released_path);
-                let declarations = source_declarations(&pending.path, &indexed.analysis, pending.role, &test_attributes)?;
-                enqueue_declarations(&mut queue, declarations, pending.edition, pending.surface)?;
+                indexed.add_visit(pending.surface, pending.role, &pending.resolution_path, released_path);
+                let declarations = source_declarations(&pending.resolution_path, &indexed.analysis, pending.role, &test_attributes)?;
+                enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
                 continue;
             }
 
-            let analysis = analyze_source(&pending.path, pending.edition, &test_attributes)?;
-            let declarations = source_declarations(&pending.path, &analysis, pending.role, &test_attributes)?;
+            let analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
+            let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &test_attributes)?;
             let mut indexed = IndexedSource {
                 analysis,
                 edition: pending.edition,
                 released_path: None,
-                visits: 0,
+                visit_contexts: BTreeSet::new(),
             };
-            indexed.add_visit(pending.surface, pending.role, released_path);
-            let _ = files.insert(pending.path.clone(), indexed);
-            enqueue_declarations(&mut queue, declarations, pending.edition, pending.surface)?;
+            indexed.add_visit(pending.surface, pending.role, &pending.resolution_path, released_path);
+            let _ = files.insert(pending.canonical_path.clone(), indexed);
+            enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
         }
 
         Ok(Self { workspace_root, files })
@@ -292,21 +292,25 @@ fn attributed_path(member_dirs: &[MemberDirectory], path: &Path) -> Option<PathB
 fn released_source_attributed_path(member_dirs: &[MemberDirectory], pending: &PendingSource) -> Result<Option<PathBuf>, CoverageGateError> {
     match pending.surface {
         Surface::NonReleased => Ok(None),
-        Surface::Released => attributed_path(member_dirs, &pending.path)
+        Surface::Released => attributed_path(member_dirs, &pending.canonical_path)
             .map(Some)
-            .ok_or_else(|| UnattributableReleasedSourceError::new(diagnostic_path(&pending.path)).into()),
+            .ok_or_else(|| UnattributableReleasedSourceError::new(diagnostic_path(&pending.canonical_path)).into()),
     }
 }
 
-fn enqueue_declarations(
+fn enqueue_declarations_with_source_resolver(
     queue: &mut VecDeque<PendingSource>,
     declarations: Vec<ModuleDeclaration>,
     edition: Edition,
     parent_surface: Surface,
+    resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
 ) -> Result<(), CoverageGateError> {
     for declaration in declarations {
+        let canonical_path = resolve_source(&declaration.path)?;
+        let resolution_path = resolve_module_resolution_path(&declaration.path)?;
         queue.push_back(PendingSource {
-            path: resolve_source_path(&declaration.path)?,
+            canonical_path,
+            resolution_path,
             edition,
             surface: if parent_surface == Surface::Released && !declaration.test_only {
                 Surface::Released
@@ -317,6 +321,17 @@ fn enqueue_declarations(
         });
     }
     Ok(())
+}
+
+fn resolve_module_resolution_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
+    // Preserve a file symlink's declared name while collapsing directory aliases so visit contexts remain bounded.
+    let parent = path
+        .parent()
+        .expect("Cargo target and resolved module source paths always have a parent directory");
+    let file_name = path
+        .file_name()
+        .expect("Cargo target and resolved module source paths always name a source file");
+    resolve_source_path(parent).map(|canonical_parent| canonical_parent.join(file_name))
 }
 
 fn source_declarations(
@@ -1178,7 +1193,8 @@ mod tests {
             reported: PathBuf::from("/workspace/member"),
         }];
         let inside = PendingSource {
-            path: PathBuf::from("/workspace/member/src/lib.rs"),
+            canonical_path: PathBuf::from("/workspace/member/src/lib.rs"),
+            resolution_path: PathBuf::from("/workspace/member/src/lib.rs"),
             edition: Edition::Edition2024,
             surface: Surface::Released,
             role: SourceRole::CrateRoot,
@@ -1189,7 +1205,8 @@ mod tests {
         );
 
         let outside = PendingSource {
-            path: PathBuf::from("/workspace/shared.rs"),
+            canonical_path: PathBuf::from("/workspace/shared.rs"),
+            resolution_path: PathBuf::from("/workspace/shared.rs"),
             edition: Edition::Edition2024,
             surface: Surface::Released,
             role: SourceRole::PathModule,
@@ -1214,30 +1231,32 @@ mod tests {
         miri,
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
     )]
-    fn visit_states_are_distinct_and_preserve_the_first_released_path() {
+    fn visit_contexts_are_distinct_and_preserve_the_first_released_path() {
         let cases = [
-            (Surface::Released, SourceRole::CrateRoot, 1),
-            (Surface::Released, SourceRole::PlainModule, 2),
-            (Surface::Released, SourceRole::PathModule, 4),
-            (Surface::NonReleased, SourceRole::CrateRoot, 8),
-            (Surface::NonReleased, SourceRole::PlainModule, 16),
-            (Surface::NonReleased, SourceRole::PathModule, 32),
+            (Surface::Released, SourceRole::CrateRoot),
+            (Surface::Released, SourceRole::PlainModule),
+            (Surface::Released, SourceRole::PathModule),
+            (Surface::NonReleased, SourceRole::CrateRoot),
+            (Surface::NonReleased, SourceRole::PlainModule),
+            (Surface::NonReleased, SourceRole::PathModule),
         ];
-        for (surface, role, expected_bit) in cases {
-            assert_eq!(visit_bit(surface, role), expected_bit);
+        for (surface, role) in cases {
             let mut indexed = IndexedSource {
                 analysis: analyze(Path::new("fixture.rs"), "pub fn fixture() {}\n"),
                 edition: Edition::Edition2024,
                 released_path: None,
-                visits: 0,
+                visit_contexts: BTreeSet::new(),
             };
-            assert!(!indexed.has_visit(surface, role));
+            let first_context = Path::new("/workspace/first.rs");
+            assert!(!indexed.has_visit(surface, role, first_context));
             let first_path = (surface == Surface::Released).then(|| PathBuf::from("first.rs"));
-            indexed.add_visit(surface, role, first_path.clone());
-            assert!(indexed.has_visit(surface, role));
+            indexed.add_visit(surface, role, first_context, first_path.clone());
+            assert!(indexed.has_visit(surface, role, first_context));
+            assert!(!indexed.has_visit(surface, role, Path::new("/workspace/second.rs")));
             assert_eq!(indexed.released_path, first_path);
             let second_path = (surface == Surface::Released).then(|| PathBuf::from("second.rs"));
-            indexed.add_visit(surface, role, second_path);
+            indexed.add_visit(surface, role, Path::new("/workspace/second.rs"), second_path);
+            assert!(indexed.has_visit(surface, role, Path::new("/workspace/second.rs")));
             assert_eq!(
                 indexed.released_path,
                 (surface == Surface::Released).then(|| PathBuf::from("first.rs"))
@@ -1263,16 +1282,28 @@ mod tests {
             },
         ];
         let mut queue = VecDeque::new();
-        enqueue_declarations(&mut queue, declarations.clone(), Edition::Edition2024, Surface::Released)
-            .expect("released declarations enqueue");
+        enqueue_declarations_with_source_resolver(
+            &mut queue,
+            declarations.clone(),
+            Edition::Edition2024,
+            Surface::Released,
+            &mut resolve_source_path,
+        )
+        .expect("released declarations enqueue");
         assert_eq!(queue[0].surface, Surface::Released);
         assert_eq!(queue[0].role, SourceRole::PlainModule);
         assert_eq!(queue[1].surface, Surface::NonReleased);
         assert_eq!(queue[1].role, SourceRole::PathModule);
 
         queue.clear();
-        enqueue_declarations(&mut queue, declarations, Edition::Edition2024, Surface::NonReleased)
-            .expect("non-release declarations enqueue");
+        enqueue_declarations_with_source_resolver(
+            &mut queue,
+            declarations,
+            Edition::Edition2024,
+            Surface::NonReleased,
+            &mut resolve_source_path,
+        )
+        .expect("non-release declarations enqueue");
         assert!(queue.iter().all(|pending| pending.surface == Surface::NonReleased));
     }
 
@@ -1403,8 +1434,18 @@ mod tests {
         let index = SourceIndex::from_metadata(&metadata).expect("source index builds");
         let shared = fs::canonicalize(root.join("member/src/shared.rs")).expect("canonical shared source");
         let indexed = index.files.get(&shared).expect("shared source indexed");
-        assert!(indexed.has_visit(Surface::Released, SourceRole::PathModule));
-        assert!(indexed.has_visit(Surface::NonReleased, SourceRole::PathModule));
+        assert!(
+            indexed
+                .visit_contexts
+                .iter()
+                .any(|(surface, role, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
+        );
+        assert!(
+            indexed
+                .visit_contexts
+                .iter()
+                .any(|(surface, role, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
+        );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
 
         let filtered = filter_reports_with_metadata(
@@ -1431,6 +1472,36 @@ mod tests {
         )
         .expect("pre-recorded report evaluates");
         assert_eq!(evaluated.verdict(), crate::Verdict::Pass);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn source_index_preserves_symlinked_module_resolution_context() {
+        let root = source_index_fixture_root();
+        let alias = root.join("member/src/linked-root.rs");
+        let canonical_root = fs::canonicalize(root.join("member/src/implementation/root.rs")).expect("canonical root source");
+        let helper = fs::canonicalize(root.join("member/src/helper.rs")).expect("canonical helper source");
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = alias.to_string_lossy().into_owned().into();
+
+        let mut resolve_source = |path: &Path| {
+            if path == alias {
+                Ok(canonical_root.clone())
+            } else {
+                resolve_source_path(path)
+            }
+        };
+        let index =
+            SourceIndex::from_metadata_with_source_resolver(&metadata, &mut resolve_source).expect("simulated symlink source index builds");
+
+        assert!(index.files.contains_key(&helper));
+        let indexed_root = index.files.get(&canonical_root).expect("canonical root source indexed");
+        let resolution_path = resolve_module_resolution_path(&alias).expect("simulated symlink has a module-resolution path");
+        assert!(
+            indexed_root
+                .visit_contexts
+                .contains(&(Surface::Released, SourceRole::CrateRoot, resolution_path))
+        );
     }
 
     #[test]
@@ -1584,8 +1655,8 @@ mod tests {
         assert_eq!(found[0].role, SourceRole::PlainModule);
 
         let analysis = analyze(&root, "#[cfg(r#test)] mod child;\n");
-        let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child]))
-            .expect("raw test cfg declaration resolves");
+        let found =
+            declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child])).expect("raw test cfg declaration resolves");
         assert!(found[0].test_only);
 
         let nested = PathBuf::from("/workspace/src/outer/nested.rs");
