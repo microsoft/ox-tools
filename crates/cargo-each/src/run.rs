@@ -1064,8 +1064,15 @@ mod tests {
             1
         );
         let error = parse_target_predicates(&["unknown".to_owned()]).expect_err("unknown target atom");
-        assert!(error.to_string().contains("invalid target filter expression"), "{error}");
-        assert!(error.to_string().contains("invalid filter expression `unknown`"), "{error}");
+        let rendered = error.to_string();
+        let normalized = rendered
+            .rsplit_once(" (at ")
+            .map(|(message, _location)| message)
+            .expect("AppError context always includes its captured source location");
+        assert_eq!(
+            normalized,
+            "invalid filter expression `unknown`: expected one of: name:<glob>, required-feature:<name>, name-in-metadata:<dotted.key>\n> invalid target filter expression"
+        );
     }
 
     #[test]

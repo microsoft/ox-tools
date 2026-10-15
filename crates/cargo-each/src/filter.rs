@@ -726,7 +726,10 @@ mod tests {
                 .expect("metadata filter")
                 .validate(&member)
                 .expect_err("metadata must be a string array");
-            assert!(error.to_string().contains("must be an array of strings"), "{error}");
+            assert_eq!(
+                error.to_string(),
+                "package `m` metadata `checks.skip` must be an array of strings when used by `name-in-metadata:checks.skip`"
+            );
         }
     }
 
@@ -754,11 +757,9 @@ mod tests {
     #[test]
     fn target_filter_rejects_adjacent_atoms_without_boolean_operator() {
         let error = TargetPredicate::parse("name:loom-* required-feature:loom").expect_err("adjacent atoms require `and`");
-        assert!(
-            error
-                .to_string()
-                .contains("unexpected predicate; expected `and`, `or`, or end of expression"),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "invalid filter expression `name:loom-* required-feature:loom`: unexpected predicate; expected `and`, `or`, or end of expression"
         );
     }
 
