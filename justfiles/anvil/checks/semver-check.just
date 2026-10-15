@@ -123,7 +123,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
     $base = $base.Trim()
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {

@@ -313,7 +313,20 @@ mod tests {
 
     #[test]
     fn powershell_nested_just_invocations_escape_the_executable_path() {
-        const UNSAFE_INVOCATION: &str = r#"& "{{ just_executable() }}""#;
+        const UNSAFE_INVOCATION: &str = r#"&"{{just_executable()}}""#;
+        let contains_unsafe_invocation = |body: &str| {
+            body.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .contains(UNSAFE_INVOCATION)
+        };
+        for whitespace_variant in [
+            r#"& "{{ just_executable() }}""#,
+            r#"&"{{just_executable()}}""#,
+            "& \t\"{{\njust_executable ( )\n}}\"",
+        ] {
+            assert!(contains_unsafe_invocation(whitespace_variant));
+        }
 
         let top_level_files = [
             (MOD_JUST_PATH, MOD_JUST),
@@ -330,7 +343,7 @@ mod tests {
             .chain(GROUP_FILES.iter().copied())
         {
             assert!(
-                !body.contains(UNSAFE_INVOCATION),
+                !contains_unsafe_invocation(body),
                 "{path} must single-quote and escape just_executable() for PowerShell"
             );
         }

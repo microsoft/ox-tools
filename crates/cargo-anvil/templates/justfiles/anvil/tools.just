@@ -474,7 +474,7 @@ _install-tool-core name version installer source_prereq="":
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
     if ($sourcePrereq) {
-        & "{{just_executable()}}" $sourcePrereq
+        & '{{ replace(just_executable(), "'", "''") }}' $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"

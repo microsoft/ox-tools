@@ -3798,7 +3798,7 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     }
     # Resolve the diff base via the shared resolver (single source of truth
     # across the impact steps and this recipe; see _anvil-base-ref).
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # cargo-mutants --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
@@ -4201,7 +4201,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
     $base = $base.Trim()
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -7701,7 +7701,7 @@ _install-tool-core name version installer source_prereq="":
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
     if ($sourcePrereq) {
-        & "{{just_executable()}}" $sourcePrereq
+        & '{{ replace(just_executable(), "'", "''") }}' $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"

@@ -33,7 +33,7 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     }
     # Resolve the diff base via the shared resolver (single source of truth
     # across the impact steps and this recipe; see _anvil-base-ref).
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # cargo-mutants --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
