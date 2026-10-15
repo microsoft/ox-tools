@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-15
+
+- 🐛 Bug Fixes
+
+  - restore eager libclang setup ([#262](https://github.com/microsoft/ox-tools/pull/262))
+
 ## [0.14.0] - 2026-10-12
 
 - ✨ Features
