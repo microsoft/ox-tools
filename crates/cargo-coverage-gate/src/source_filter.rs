@@ -852,9 +852,7 @@ fn filter_report_with<'a>(
                     let path = diagnostic_path(&entry.key().source_file);
                     for (line, incoming) in section.lines {
                         match entry.get_mut().lines.entry(line) {
-                            Entry::Vacant(entry) => {
-                                let _ = entry.insert(incoming);
-                            }
+                            Entry::Vacant(entry) => _ = entry.insert(incoming),
                             Entry::Occupied(mut entry) => {
                                 let existing = entry.get_mut();
                                 if existing
@@ -1352,15 +1350,20 @@ mod tests {
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
     )]
     fn cfg_possibilities_cover_every_operator_and_literal() {
-        fn possibilities(predicate: &str) -> CfgPossibilities {
-            let parsed = SourceFile::parse(&format!("#[cfg({predicate})] fn fixture() {{}}\n"), Edition::Edition2024).tree();
+        fn possibilities_for_source(source: &str) -> Option<CfgPossibilities> {
+            let parsed = SourceFile::parse(source, Edition::Edition2024).tree();
             let attribute = parsed.items().next().expect("one item").attrs().next().expect("one attribute");
-            let ast::Meta::CfgMeta(meta) = attribute.meta().expect("attribute metadata") else {
-                panic!("cfg metadata");
-            };
-            cfg_possibilities_without_test(&meta.cfg_predicate().expect("cfg predicate"))
+            match attribute.meta().expect("attribute metadata") {
+                ast::Meta::CfgMeta(meta) => Some(cfg_possibilities_without_test(&meta.cfg_predicate().expect("cfg predicate"))),
+                _ => None,
+            }
         }
 
+        fn possibilities(predicate: &str) -> CfgPossibilities {
+            possibilities_for_source(&format!("#[cfg({predicate})] fn fixture() {{}}\n")).expect("fixture attribute has cfg metadata")
+        }
+
+        assert_eq!(possibilities_for_source("#[test] fn fixture() {}\n"), None);
         assert_eq!(possibilities("true"), CfgPossibilities::TRUE);
         assert_eq!(possibilities("false"), CfgPossibilities::FALSE);
         assert_eq!(possibilities("test"), CfgPossibilities::FALSE);
@@ -1570,6 +1573,15 @@ mod tests {
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
     )]
     fn defensive_attribute_and_range_branches_are_conservative() {
+        fn normalized_path_attribute(source: &str) -> Option<String> {
+            let parsed = SourceFile::parse(source, Edition::Edition2024).tree();
+            let attribute = parsed.items().next().expect("one item").attrs().next().expect("one attribute");
+            match attribute.meta().expect("attribute metadata") {
+                ast::Meta::PathMeta(meta) => meta.path().map(|path| normalize_attribute_path(&path)),
+                _ => None,
+            }
+        }
+
         let parsed = SourceFile::parse(
             "#[] fn malformed() {}\n#[cfg_attr()] fn empty_cfg_attr() {}\n",
             Edition::Edition2024,
@@ -1581,21 +1593,11 @@ mod tests {
         assert!(!attribute_marks_test(&malformed, &BTreeSet::new()));
         assert!(!attribute_marks_test(&empty_cfg_attr, &BTreeSet::new()));
 
-        let malformed_path = SourceFile::parse("#[company::] fn incomplete() {}\n", Edition::Edition2024).tree();
-        let attribute = malformed_path
-            .items()
-            .next()
-            .expect("incomplete-path item")
-            .attrs()
-            .next()
-            .expect("incomplete-path attribute");
-        let ast::Meta::PathMeta(path_meta) = attribute.meta().expect("incomplete attribute has metadata") else {
-            panic!("incomplete path attribute has path metadata");
-        };
         assert_eq!(
-            normalize_attribute_path(&path_meta.path().expect("incomplete attribute has a path")),
-            "company"
+            normalized_path_attribute("#[company::] fn incomplete() {}\n"),
+            Some("company".to_owned())
         );
+        assert_eq!(normalized_path_attribute("#[cfg(test)] fn configured() {}\n"), None);
 
         let mut flags = [0_u8; 1];
         mark_range_lines(&mut flags, &[0], TextRange::empty(0.into()), LINE_TEST_ONLY);
@@ -1608,6 +1610,7 @@ mod tests {
         let mut flags = [0_u8; 1];
         mark_range_lines(&mut flags, &[0, 4], TextRange::new(4.into(), 5.into()), LINE_TEST_ONLY);
         assert_eq!(flags, [0]);
+        assert_eq!(lexical_normalize(Path::new("./workspace")), PathBuf::from("workspace"));
     }
 
     #[test]
