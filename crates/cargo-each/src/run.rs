@@ -59,7 +59,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.
-    let packages = if selection.is_whole_workspace() && args.filters.is_empty() && args.exclude_filters.is_empty() {
+    let packages = if selection.is_whole_workspace() && args.filters.is_empty() {
         PackagesExpansion::Workspace
     } else {
         PackagesExpansion::Explicit
@@ -147,7 +147,6 @@ fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
         (!args.exclude.is_empty(), "--exclude"),
         (args.none, "--none"),
         (!args.filters.is_empty(), "--filter"),
-        (!args.exclude_filters.is_empty(), "--exclude-filter"),
         (args.once, "--once"),
         (!args.each_targets.is_empty(), "--each-target"),
         (!args.target_required_feature.is_empty(), "--target-required-feature"),
@@ -165,13 +164,11 @@ fn build_selection(args: &EachArgs) -> Result<Selection, crate::error::EachError
     Selection::from_sources(&args.packages, &args.package_files, args.workspace, &args.exclude, args.none)
 }
 
-/// Narrow `members` by package keep and drop expressions. Repeated `--filter`
-/// expressions are AND-combined; repeated `--exclude-filter` expressions are
-/// OR-combined, and exclusion wins.
+/// Narrow `members` by package filter expressions. Repeated expressions are
+/// AND-combined; exclusion is expressed with the Boolean `not` operator.
 fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
-    let keep = parse_predicates(&args.filters)?;
-    let drop = parse_predicates(&args.exclude_filters)?;
-    members.retain(|m| keep.iter().all(|p| p.matches(m)) && !drop.iter().any(|p| p.matches(m)));
+    let filters = parse_predicates(&args.filters)?;
+    members.retain(|member| filters.iter().all(|filter| filter.matches(member)));
     Ok(())
 }
 
@@ -1002,8 +999,8 @@ mod tests {
         Invocation, InvocationResult, OutputEmitError, PLAN_BUILD_CONTEXT, PROCESS_POLL_INTERVAL, Plan, RunningWorker,
         SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
-        add_infrastructure_failure, apply_filters, combine_captured_output, create_output_capture_with, display_duration,
-        display_invocation, effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
+        add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
+        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
         record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
         run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
@@ -1020,7 +1017,6 @@ mod tests {
             "--exclude",
             "--none",
             "--filter",
-            "--exclude-filter",
             "--once",
             "--each-target",
             "--target-required-feature",
@@ -1037,7 +1033,6 @@ mod tests {
                 "--exclude" => args.exclude.push("fixture".to_owned()),
                 "--none" => args.none = true,
                 "--filter" => args.filters.push("publishable".to_owned()),
-                "--exclude-filter" => args.exclude_filters.push("publishable".to_owned()),
                 "--once" => args.once = true,
                 "--each-target" => args.each_targets.push("bin".to_owned()),
                 "--target-required-feature" => args.target_required_feature.push("feature".to_owned()),
@@ -2351,17 +2346,6 @@ mod tests {
             rendered.contains("invalid filter expression `feature:`: empty feature name"),
             "{rendered}"
         );
-    }
-
-    #[test]
-    fn invalid_exclude_filter_propagates_through_filter_application() {
-        let CargoCli::Each(args) = CargoCli::try_parse_from(["cargo", "each", "--exclude-filter", "feature:", "--", "echo"])
-            .expect("the parser leaves expression validation to execution");
-        let mut members = Vec::new();
-
-        let error = apply_filters(&mut members, &args).expect_err("invalid exclusion expression");
-
-        assert!(error.to_string().contains("empty feature name"), "{error}");
     }
 
     #[test]

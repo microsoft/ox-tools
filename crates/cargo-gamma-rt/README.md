@@ -222,19 +222,19 @@ how nearly every `no_std` library is tested anyway.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-rt">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQboc30_khWDIAb1hI-7Yvoldob0G-Y5y-3bOUbRyayOQZAf21hZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuMi4xbmNhcmdvX2dhbW1hX3J0
- [__link0]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=a
- [__link1]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=a
- [__link10]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=a
- [__link11]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=active
- [__link12]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=any
- [__link13]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=Either
- [__link14]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=Either
- [__link2]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link3]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=NONE
- [__link4]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=NONE
- [__link5]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
- [__link6]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=CENSUS_VAR
- [__link7]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link8]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link9]: https://docs.rs/cargo-gamma-rt/0.2.1/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQboc30_khWDIAb1hI-7Yvoldob0G-Y5y-3bOUbRyayOQZAf21hZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuMy4wbmNhcmdvX2dhbW1hX3J0
+ [__link0]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=a
+ [__link1]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=a
+ [__link10]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=a
+ [__link11]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=active
+ [__link12]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=any
+ [__link13]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=Either
+ [__link14]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=Either
+ [__link2]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link3]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=NONE
+ [__link4]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=NONE
+ [__link5]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
+ [__link6]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=CENSUS_VAR
+ [__link7]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link8]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link9]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER

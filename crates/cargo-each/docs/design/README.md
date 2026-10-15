@@ -65,8 +65,8 @@ per object.
    to commands that provision or validate a shared toolchain. *JSON-record*
    runs once per input object without loading Cargo metadata and expands
    top-level string fields through `{json:key}`.
-4. **A small, general filter language** (`--filter` and `--exclude-filter`)
-   with `not`, `and`, `or`, and parentheses over cargo metadata — target kinds,
+4. **A small, general `--filter` language** with `not`, `and`, `or`, and
+   parentheses over cargo metadata — target kinds, resolved doctest capability,
    publication state, declared features and dependencies, and
    `metadata:<dotted.key>[=<value>]` — so bespoke `cargo metadata` filtering in
    recipes collapses to flags.
@@ -207,14 +207,12 @@ running the command.
 ### 4.2 Filters
 
 `--filter <EXPR>` keeps only members matching the Boolean expression. Repeated
-`--filter` expressions are AND-combined. `--exclude-filter <EXPR>` drops
-members matching the Boolean expression; repeated exclusions are OR-combined,
-and exclusion wins. Formally:
+`--filter` expressions are AND-combined. Exclusion uses the same expression
+language through the `not` operator. Formally:
 
 ```
 result = selection
        ∩ all(--filter)
-       − any(--exclude-filter)
 ```
 
 Expressions use `not`, `and`, `or`, and parentheses, with conventional
@@ -228,6 +226,7 @@ atoms are:
 |-----------|-----------------------|
 | `lib` | has a plain `lib` target. Proc-macro, `cdylib`, and `staticlib` crates are **not** matched — the predicate means the plain `lib` target kind only. |
 | `bin` | has a `bin` target. |
+| `doctest` | has at least one target for which Cargo metadata reports `doctest = true`. |
 | `target-kind:<kind>` | has a target whose Cargo metadata kind is `<kind>`; accepted spellings are `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`, `bin`, `example`, `test`, `bench`, and `custom-build`. |
 | `publishable` | may be published: `package.publish` is absent or names at least one registry. `publish = false` is not publishable. |
 | `feature:<name>` | declares the named package feature. |
@@ -235,11 +234,16 @@ atoms are:
 | `metadata:<dotted.key>` | has `package.metadata.<dotted.key>` present. |
 | `metadata:<dotted.key>=<value>` | has `package.metadata.<dotted.key>` equal to `<value>` (numeric compare when both parse as a number, else string compare). |
 
+The `doctest` predicate uses Cargo's resolved capability bit rather than target
+kind: `[lib] doctest = false` is excluded, compatible proc-macro and library
+crate types remain eligible, and bin-only packages are excluded.
+
 For example:
 
 ```
 --filter 'publishable and (target-kind:lib or target-kind:proc-macro)'
---exclude-filter 'metadata:ox-gen-readme.disable=true or feature:internal-only'
+--filter 'doctest and publishable'
+--filter 'not (metadata:ox-gen-readme.disable=true or feature:internal-only)'
 ```
 
 Filtering runs after package selection and before any target selection. If the

@@ -63,7 +63,7 @@ pub(crate) struct UnknownSelectorError {
     pub(crate) selector: String,
 }
 
-/// A `--filter` / `--exclude-filter` expression could not be parsed.
+/// A `--filter` expression could not be parsed.
 #[ohno::error]
 #[display("invalid filter expression `{expression}`: {reason}")]
 pub(crate) struct InvalidFilterExpressionError {

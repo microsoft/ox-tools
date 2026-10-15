@@ -330,6 +330,7 @@ mod tests {
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),
             manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
             publishable: true,
+            doctest: true,
             features: BTreeSet::new(),
             targets: Vec::new(),
             dependencies: BTreeSet::new(),

@@ -995,6 +995,34 @@ fn trivial_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     (dir, work)
 }
 
+#[test]
+fn convergence_still_checks_a_library_without_a_test_harness() -> Result<()> {
+    let (_dir, work) = trivial_workspace("build-library-without-harness-");
+    fs::write(
+        work.root.join("Cargo.toml").as_std_path(),
+        "[package]\nname = \"trivial\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\ntest = false\n\n[workspace]\n",
+    )?;
+    let mut plan = empty_plan(&work);
+    let _previous = plan.specs.insert("trivial".to_owned(), (Utf8PathBuf::new(), "0.0.0".to_owned()));
+    let mut converger = Converger::default();
+    converger.library_packages(std::iter::once("trivial".to_owned()).collect());
+
+    let checked = converger.converge_check(
+        &work,
+        &plan,
+        None,
+        BuildLimits::default(),
+        false,
+        &mut crate::testing::Recorder::default(),
+    )?;
+
+    assert!(
+        matches!(checked, Convergence::Built(stdout) if stdout.contains("\"reason\":\"compiler-artifact\"")),
+        "the library source was skipped by the target selectors"
+    );
+    Ok(())
+}
+
 /// A build that fails for a reason no guard explains stops rather than looping forever.
 #[test]
 fn a_build_that_no_guard_explains_stops_with_the_compiler_output() {

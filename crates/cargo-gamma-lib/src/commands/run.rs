@@ -1335,7 +1335,14 @@ fn resumed_testing<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, s
     state.validate_artifacts()?;
     let record = state.record.clone();
     let retained_info = resumed_report_info(record.report_info.as_ref());
-    let work = exec::Workspace::resume_testing(&state.plan.root, &state.record.base, state.workspace.clone(), lock, valid_bytes)?;
+    let work = exec::Workspace::resume_testing(
+        &state.plan.root,
+        &state.record.base,
+        state.workspace.clone(),
+        lock,
+        valid_bytes,
+        exec::TestingResumeIo::FILESYSTEM,
+    )?;
     let reporting_args = prepare_resumed_reporting(host, args, &state, &work, styler)?;
     let visible = progress_when.resolve(host.is_terminal());
     let mut verdict_log = VerdictLog::default();

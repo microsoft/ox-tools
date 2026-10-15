@@ -365,7 +365,9 @@ libclang satisfies clang-sys.
 
 On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
 scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
-package-manager choice stay with the user. The cargo-spellcheck install recipe passes
+package-manager choice stay with the local or self-hosted user. GitHub-hosted Linux
+spellcheck jobs install `libclang-dev` eagerly in the generated setup action, where
+the runner's package-manager contract is known. The cargo-spellcheck install recipe passes
 `anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
 The prerequisite runs for an explicit source-build `install` backend and when `binstall`
 cannot provide a binary. Anvil disables binstall's own compile strategy and performs the

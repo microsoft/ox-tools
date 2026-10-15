@@ -74,10 +74,16 @@ been scanned, the complete population is instrumented and handed to global
 schema convergence.
 
 Schema convergence first checks normal libraries, binaries, and test targets
-for every package with pending mutations. Compiler diagnostics are decoded
-with package and target context; unattributed failures use bounded,
-target-specific proof checks over the failing package's dependency cone. `build/isolation.rs`
-owns diagnostic contexts, tier construction, invocation-wide context/proof budgets, exact active
+for every package with pending mutations. Cargo metadata identifies which
+selected packages have library targets. If none do, the check uses `--bins --tests`
+without `--lib`. A mixed selection keeps `--lib --bins --tests`: Cargo accepts
+the selectors because at least one selected package has a library, and checks
+all available targets under one feature graph. No manifests or sources are
+added for this choice.
+Compiler diagnostics are decoded with package and target context; unattributed
+failures use bounded, target-specific proof checks over the failing package's
+dependency cone. `build/isolation.rs` owns diagnostic contexts, tier construction,
+invocation-wide context/proof budgets, exact active
 schemas, package-root and target selection, memoized proof verdicts, and interaction minimization. A context is charged to the
 invocation budget only after tier construction finds a nonempty tier within the candidate bound.
 `build.rs` snapshots all

@@ -395,7 +395,8 @@
 //! The campaign establishes a compiler-viable mutant schema before any mutant is executed.
 //! `cargo check` examines the instrumented packages together and compiler-rejected mutants are
 //! withdrawn until the schema checks; a code-generating build then produces the converged test
-//! binaries. A code-generation or linking failure uses the same bounded convergence rules.
+//! binaries. Packages without library targets work both on their own and alongside library packages
+//! in a workspace run. A code-generation or linking failure uses the same bounded convergence rules.
 //! `--build-timeout` bounds each compiler invocation, while
 //! `--build-timeout-multiplier` bounds later convergence rounds relative to the first.
 //!

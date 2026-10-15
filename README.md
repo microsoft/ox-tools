@@ -80,6 +80,8 @@ this simple process:
 3. Run `./scripts/release-crate.ps1 <crate_name> [new_version]` to bump a crate's version and update the crate's
    `CHANGELOG.md` file.
    Run the script many times if you want to release several crates in the same PR.
+   Generated notes prefer a PR-linked release entry over a duplicate unlinked
+   preparation entry for the same crate and version.
 
    To reconstruct a missing changelog section for an existing tagged release without changing
    the crate version, run `./scripts/release-crate.ps1 <crate_name> -BackfillVersion <version>`.

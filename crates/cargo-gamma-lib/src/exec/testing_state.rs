@@ -183,7 +183,7 @@ fn inspect_artifact(path: &Utf8Path, follow: bool) -> std::io::Result<(ArtifactK
 }
 
 #[derive(Debug)]
-pub(super) struct TestingJournal {
+pub(crate) struct TestingJournal {
     file: File,
     pub(super) previous_sweep: Option<super::session::SweepCost>,
 }

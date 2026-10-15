@@ -93,11 +93,11 @@ pub(crate) use verdict::run_loom_models;
 pub(crate) use workspace::mark_cache_owned_for_test;
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::production_campaign_base;
+pub(crate) use workspace::{
+    TestingResumeIo, campaign_base_from_state, claim_cache, claim_campaign_state, claim_testing_state, claim_workspace,
+    remember_campaign_base, same_existing_path,
+};
 #[doc(inline)]
 pub use workspace::{Workspace, campaign_base, clean_cache, footprint, gamma_base, scratch_tree};
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
-pub(crate) use workspace::{
-    campaign_base_from_state, claim_cache, claim_campaign_state, claim_testing_state, claim_workspace, remember_campaign_base,
-    same_existing_path,
-};
