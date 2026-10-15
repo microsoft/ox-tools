@@ -160,7 +160,9 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
     let mut queue: Vec<&Utf8Path> = roots.iter().map(Utf8PathBuf::as_path).collect();
 
     while let Some(file) = queue.pop() {
+        // #[gamma::skip(cond.always_false, tag = "timeout", reason = "without the visited-file guard cyclic live module edges are enqueued indefinitely")]
         if !live.insert(file.to_owned()) {
+            // #[gamma::skip(loop.delete_continue, tag = "timeout", reason = "already visited live module edges must not be enqueued again in a cycle")]
             continue;
         }
 
@@ -201,6 +203,26 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn survivor_a_self_referential_module_declaration_does_not_revisit_its_live_root_forever() {
+        let source = Utf8PathBuf::from("workspace/lib.rs");
+        let ast = syn::parse_file("#[path = \"lib.rs\"] mod recursive;\n").expect("a cyclic module path is still valid Rust syntax");
+        let edges = declarations_with(&source, &ast, &CfgSet::unconditional(), |path| {
+            assert_eq!(path, source);
+            true
+        });
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, source);
+        let excluded = crate::testing::within(crate::testing::WATCHDOG, "cyclic module reachability", move || {
+            let declarations = [(source.clone(), edges)];
+            excluded_files(std::slice::from_ref(&source), &declarations)
+        });
+        assert!(
+            excluded.is_empty(),
+            "a live root remains live even when its module declarations cycle"
+        );
+    }
 
     fn parse(text: &str) -> syn::File {
         syn::parse_file(text).unwrap()

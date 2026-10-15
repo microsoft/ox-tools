@@ -594,6 +594,20 @@ members = ["cra*tes"]
         assert!(error.to_string().contains("non-UTF-8 directory name"), "{error}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn glob_expansion_returns_non_utf8_windows_directory_name_errors() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let root = Path::new("workspace");
+        let member = root.join("crates").join(OsString::from_wide(&[0xd800]));
+        let mut members = Vec::new();
+        let error = expand_member_pattern_with(root, "crates/*", &mut members, |_| true, |_| Ok(vec![member])).unwrap_err();
+        assert!(error.to_string().contains("non-UTF-8 directory name"), "{error}");
+        assert!(members.is_empty());
+    }
+
     #[test]
     fn member_entry_errors_are_not_discarded() {
         let parent = Path::new("crates");

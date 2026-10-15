@@ -212,13 +212,31 @@ impl Provider {
     }
 
     async fn calculate_docs_metrics_and_remove(zst_path: impl AsRef<Path>, crate_spec: &CrateSpec) -> Result<DocsData> {
+        Self::calculate_docs_metrics_and_remove_with(
+            zst_path,
+            crate_spec,
+            |worker_path, worker_spec| Self::calculate_docs_metrics(worker_path, &worker_spec),
+            |path| async move { tokio::fs::remove_file(path).await },
+        )
+        .await
+    }
+
+    async fn calculate_docs_metrics_and_remove_with<RemoveFuture>(
+        zst_path: impl AsRef<Path>,
+        crate_spec: &CrateSpec,
+        worker: impl FnOnce(PathBuf, CrateSpec) -> Result<DocsData> + Send + 'static,
+        remove: impl FnOnce(PathBuf) -> RemoveFuture,
+    ) -> Result<DocsData>
+    where
+        RemoveFuture: Future<Output = std::io::Result<()>>,
+    {
         let path = zst_path.as_ref().to_path_buf();
         let worker_path = path.clone();
         let worker_spec = crate_spec.clone();
-        let result = tokio::task::spawn_blocking(move || Self::calculate_docs_metrics(worker_path, &worker_spec))
+        let result = tokio::task::spawn_blocking(move || worker(worker_path, worker_spec))
             .await
             .map_err(|cause| app_err!("documentation metric worker failed for {crate_spec}: {cause}"))?;
-        tokio::fs::remove_file(&path)
+        remove(path.clone())
             .await
             .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", path.display()));
         result
@@ -318,6 +336,34 @@ mod tests {
 
     fn test_crate_spec(name: &str, version: &str) -> CrateSpec {
         CrateSpec::from_arcs(Arc::from(name), Arc::new(Version::parse(version).unwrap()))
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "runs a blocking worker")]
+    async fn documentation_worker_panics_return_the_crate_context_without_claiming_cleanup() {
+        let path = Path::new("docs.zst");
+        let spec = test_crate_spec("worker-fault", "2.3.4");
+        let error = Provider::calculate_docs_metrics_and_remove_with(
+            path,
+            &spec,
+            |worker_path, worker_spec| {
+                assert_eq!(worker_path, Path::new("docs.zst"));
+                assert_eq!(worker_spec.to_string(), "worker-fault@2.3.4");
+                panic!("injected documentation worker failure");
+            },
+            |_| -> std::future::Ready<std::io::Result<()>> {
+                panic!("cleanup must not run after the worker join error");
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("documentation metric worker failed for worker-fault@2.3.4"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("injected documentation worker failure"), "{error}");
     }
 
     #[tokio::test]

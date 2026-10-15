@@ -177,3 +177,19 @@ pub(super) fn leading(found: &[Diagnostic], limit: usize) -> String {
 
     format!("{shown}\n(and {} not shown)\n", crate::report::quantity(omitted, "further error"))
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    #[test]
+    fn progress_verbs_at_end_of_line_disappear_but_internal_blank_lines_survive() {
+        assert_eq!(
+            complaints("\nChecking\nerror: original\n\n  caused by detail\n"),
+            "error: original\n\n  caused by detail\n"
+        );
+        assert_eq!(complaints("Checking\rerror: original\r\n\nsecond\n"), "error: original\n\nsecond\n");
+        assert_eq!(complaints("Checking"), "cargo said nothing on stderr either.");
+    }
+}

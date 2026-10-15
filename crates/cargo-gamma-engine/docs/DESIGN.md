@@ -32,6 +32,10 @@ configuration and therefore audits the whole file.
   campaign verdicts.
 - Stable identities are content-derived so reports and incremental knowledge
   remain meaningful as unrelated source changes.
+- Expression mutation families do not descend into patterns, including literal
+  and range patterns in `let ... else` declarations. Evaluated initializers,
+  diverging `else` expressions, and later statements remain eligible for mutation.
+  Dedicated match-arm and match-guard rewrites are handled separately.
 - Mutation discovery uses source-visible type evidence and never identifier
   spelling to screen candidates. Unsigned, textual, and temporal evidence
   propagates through parameters, annotated locals, fields, casts, assignments,

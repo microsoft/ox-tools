@@ -353,6 +353,26 @@ mod tests {
         check(&file("#[gamma::value::extra(1)] fn f(){ 2 }")).unwrap();
     }
 
+    #[test]
+    fn extended_stated_attribute_paths_remain_unclaimed_even_with_invalid_value_tokens() {
+        for source in [
+            "#[gamma::value::metadata(1 +)] fn f() { 2; }",
+            "#[gamma::value::metadata(1 +)] struct S;",
+            "trait S { #[gamma::value::metadata(1 +)] fn f(); }",
+        ] {
+            let parsed = file(source);
+            check(&parsed).unwrap();
+            let mut audit = Audit::default();
+            audit.visit_file(&parsed.ast);
+            assert!(audit.stated.is_empty(), "{source}");
+            assert!(audit.on_functions.is_empty(), "{source}");
+            assert!(audit.faults.is_empty(), "{source}");
+        }
+        let error = check(&file("#[gamma::value(1 +)] fn f() { 2; }")).unwrap_err();
+        assert!(error.is_usage());
+        assert!(error.to_string().contains(MALFORMED));
+    }
+
     fn file(source: &str) -> SourceFile {
         SourceFile::parse("test.rs", source.to_owned()).expect("the fixture must parse")
     }

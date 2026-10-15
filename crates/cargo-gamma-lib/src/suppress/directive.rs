@@ -324,6 +324,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_argument_token_shapes_keep_multiplier_aliases_and_first_error() {
+        for name in ["test_timeout_multiplier", "timeout_multiplier", "multiplier", "factor"] {
+            for (value, expected) in [
+                ("2", Some(2.0)),
+                ("+2", Some(2.0)),
+                ("-2", None),
+                ("2 3", None),
+                ("x 2", None),
+                ("2 3 4", None),
+            ] {
+                let tokens = format!("{name} = {value}").parse().unwrap();
+                let parsed = parse_arguments(&tokens);
+                assert_eq!(parsed.test_timeout_multiplier, expected, "{name} = {value}");
+                assert_eq!(parsed.errors.is_empty(), expected.is_some(), "{name} = {value}");
+            }
+        }
+        let tokens: TokenStream = "factor = x, factor = -2".parse().unwrap();
+        let source = file("fn f() {}");
+        let error = build(None, &tokens, Channel::Attribute, 7, 0..9, &source).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "test.rs:7: timeout multiplier must be a positive number, got `x`"
+        );
+        let literal = TokenTree::Group(Group::new(Delimiter::None, "arith".parse().unwrap()));
+        let parsed = parse_arguments(&TokenStream::from(literal));
+        assert_eq!(parsed.selectors, "arith");
+        let parenthesized = parse_arguments(&"(arith)".parse().unwrap());
+        assert_eq!(parenthesized.selectors, "(arith)");
+        assert_eq!(unquote("r###"), "r###");
+    }
+
+    #[test]
     fn empty_comma_delimited_arguments_are_rejected() {
         for arguments in [",arith", "arith,,reason = \"covered\"", "arith,", ","] {
             let source = format!("#[gamma::skip({arguments})]\nfn f(a: i32) -> i32 {{ a + 1 }}");

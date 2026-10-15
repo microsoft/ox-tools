@@ -63,6 +63,15 @@ pub(crate) fn stages(packages: &[String], reach: &HashMap<String, HashSet<String
 mod tests {
     use super::*;
 
+    #[test]
+    fn survivor_unknown_packages_sort_with_zero_reach_instead_of_after_explicit_empty_sets() {
+        let reach = reach(&[("z-empty", &[]), ("leaf", &["leaf"])]);
+        assert_eq!(
+            stages(&["leaf".into(), "z-empty".into(), "a-unknown".into()], &reach),
+            [vec!["a-unknown"], vec!["z-empty"], vec!["leaf"]]
+        );
+    }
+
     fn reach(entries: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
         entries
             .iter()

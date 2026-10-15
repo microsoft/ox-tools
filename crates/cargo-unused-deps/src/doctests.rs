@@ -231,17 +231,23 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
         target_dir,
         shim_path,
         selected_cargo(|key| std::env::var_os(key)),
+        |path| std::fs::create_dir(path),
         selected_rustdoc,
         |mut command| command.output(),
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "capture creation and tool execution are independently injectable I/O boundaries"
+)]
 fn gather_package_with(
     manifest_path: &Path,
     package: &str,
     target_dir: &Path,
     shim_path: &Path,
     cargo: OsString,
+    create: impl FnOnce(&Path) -> std::io::Result<()>,
     select_rustdoc: impl FnOnce() -> Result<OsString>,
     run: impl FnOnce(Command) -> std::io::Result<Output>,
 ) -> Result<PackageDoctests> {
@@ -249,7 +255,7 @@ fn gather_package_with(
 
     let capture = target_dir.join(format!("doctests-{package}"));
     clear_capture(&capture)?;
-    create_capture(&capture, |path| std::fs::create_dir(path))?;
+    create_capture(&capture, create)?;
     let rustdoc = select_rustdoc()?;
 
     let mut command = Command::new(cargo);
@@ -516,6 +522,42 @@ mod tests {
     }
 
     #[test]
+    fn doctest_collection_returns_capture_creation_errors_before_selecting_or_spawning_tools() {
+        let directory = TempDir::new().expect("the test owns its capture output directory");
+        let target = directory.path().join("target");
+        let capture = target.join("doctests-fixture");
+        let created = std::cell::Cell::new(false);
+        let error = gather_package_with(
+            Path::new("Cargo.toml"),
+            "fixture",
+            &target,
+            Path::new("shim"),
+            "unused-cargo".into(),
+            |path| {
+                assert_eq!(path, capture);
+                created.set(true);
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "capture creation denied"))
+            },
+            || panic!("capture creation failed before selecting rustdoc"),
+            |_| panic!("capture creation failed before spawning Cargo"),
+        )
+        .unwrap_err();
+        assert!(created.get(), "the error must come from capture creation");
+        assert_eq!(error.message(), "capture creation denied");
+        assert!(
+            error.to_string().contains(&format!("failed to create {}", capture.display())),
+            "{error}"
+        );
+        let cause = error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("the injected capture creation error is preserved");
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "capture creation denied");
+        assert!(target.is_dir());
+    }
+
+    #[test]
     fn doctest_collection_forwards_every_argument_and_error_stage() {
         let directory = TempDir::new().expect("test workspace exists");
         let target = directory.path().join("target");
@@ -525,6 +567,7 @@ mod tests {
             &target,
             Path::new("shim"),
             "custom-cargo".into(),
+            |path| fs::create_dir(path),
             || Ok("selected-rustdoc".into()),
             |command| {
                 assert_eq!(command.get_program(), "custom-cargo");
@@ -580,6 +623,7 @@ mod tests {
             &target,
             Path::new("shim"),
             "cargo".into(),
+            |path| fs::create_dir(path),
             || Err(ohno::app_err!("rustdoc selection failed")),
             |_| panic!("must not run Cargo"),
         )
@@ -593,6 +637,7 @@ mod tests {
             &blocked,
             Path::new("shim"),
             "cargo".into(),
+            |path| fs::create_dir(path),
             || panic!("must not select rustdoc"),
             |_| panic!("must not run Cargo"),
         )
@@ -605,6 +650,7 @@ mod tests {
             &target,
             Path::new("shim"),
             "cargo".into(),
+            |path| fs::create_dir(path),
             || panic!("must not select rustdoc"),
             |_| panic!("must not run Cargo"),
         )

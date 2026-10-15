@@ -7,8 +7,8 @@
 //! Integration tests for the hosting provider against a `wiremock` server.
 //!
 //! The provider normally talks to the GitHub and Codeberg REST APIs. Every test here
-//! redirects it at a local mock server through [`Endpoints`], so no test touches the
-//! network and none of them depend on an ambient `GITHUB_TOKEN`.
+//! redirects it at a loopback mock server through [`Endpoints`], so no test contacts an
+//! external service and none of them depend on an ambient `GITHUB_TOKEN`.
 
 #![cfg(not(miri))]
 
@@ -150,6 +150,42 @@ fn expect_error(result: ProviderResult<HostingData>) -> String {
         ProviderResult::Error(e) => format!("{e:#}"),
         other => panic!("expected Error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_last_page_link_does_not_request_another_issue_page() {
+    let server = MockServer::start().await;
+    mount_repo(&server, "owner", "repo", repo_body(0, 0, 0)).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/issues"))
+        .and(query_param("page", "1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", r#"<https://example.invalid/last>; rel="last""#)
+                .set_body_json(json!([{
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "closed_at": null,
+                    "state": "open",
+                    "pull_request": null,
+                    "labels": []
+                }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let cache = tempfile::tempdir().unwrap();
+    let provider = provider_for(&server, cache_in(cache.path(), true));
+    let data = expect_found(fetch_one(&provider, spec_for("last-page", "github.com", "owner", "repo")).await);
+    assert_eq!(data.open_issues, 1);
+    let requests = server.received_requests().await.expect("wiremock records requests");
+    assert_eq!(requests.len(), 2, "one repository request and exactly one issue request");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/repos/owner/repo/issues")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

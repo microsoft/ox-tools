@@ -111,6 +111,15 @@ mod tests {
     use crate::testing::ci_fixture::{mutant, root};
 
     #[test]
+    fn survivor_annotation_cap_does_not_announce_truncation_at_exactly_ten() {
+        let mutants: Vec<_> = (1..=10).map(|line| mutant("/w/src/x.rs", line, "m", Outcome::Survived)).collect();
+        let lines = annotations(&mutants, &root());
+        assert_eq!(lines.len(), 10);
+        assert!(lines.iter().all(|line| line.starts_with("::warning ")));
+        assert_eq!(escape_data("x%0D\r\n"), r"x%250D\r\n");
+    }
+
+    #[test]
     fn an_annotation_points_at_a_relative_path() {
         let mutants = vec![mutant("/w/src/a.rs", 12, "relational.gt_to_ge", Outcome::Survived)];
         let lines = annotations(&mutants, &root());

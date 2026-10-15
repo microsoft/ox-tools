@@ -5,7 +5,7 @@
 
 use core::time::Duration;
 
-/// Weight retained by generalized-hint scheduling while persisted observations accumulate.
+/// Weight retained by inferred-test scheduling while persisted observations accumulate.
 const PRIOR_STRENGTH: f64 = 8.0;
 
 /// The share of a whole binary a killed mutant is initially assumed to reach.
@@ -24,8 +24,8 @@ const NARROW_PROBE_SHARE: f64 = 0.25;
 /// A durable exact hint is checked knowledge and almost always convicts again.
 const EXACT_HIT_SHARE: f64 = 0.95;
 
-/// Generalized and incomplete-census hints are useful but deliberately less trusted.
-const GENERALIZED_HIT_SHARE: f64 = 0.65;
+/// Inferred tests and incomplete-census selections are useful but deliberately less trusted.
+const INFERRED_HIT_SHARE: f64 = 0.65;
 
 /// The execution shape used to predict one mutant's test cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,18 +75,18 @@ impl MutationWork {
     pub(crate) fn hinted(kind: WorkKind, probe: Duration, fallback: Duration) -> Self {
         let hit_share = match kind {
             WorkKind::Exact => EXACT_HIT_SHARE,
-            WorkKind::Hinted => GENERALIZED_HIT_SHARE,
+            WorkKind::Hinted => INFERRED_HIT_SHARE,
             _ => 0.0,
         };
         Self::hinted_with_hit_share(kind, probe, fallback, hit_share)
     }
 
-    /// Builds a generalized-hint prediction using its persisted transfer evidence.
+    /// Builds an inferred-test prediction using its persisted transfer evidence.
     #[must_use]
     pub(crate) fn hinted_with_observations(probe: Duration, fallback: Duration, hits: u32, misses: u32) -> Self {
         let samples = hits.saturating_add(misses);
         let denominator = PRIOR_STRENGTH + f64::from(samples);
-        let hit_share = PRIOR_STRENGTH.mul_add(GENERALIZED_HIT_SHARE, f64::from(hits)) / denominator;
+        let hit_share = PRIOR_STRENGTH.mul_add(INFERRED_HIT_SHARE, f64::from(hits)) / denominator;
 
         Self::hinted_with_hit_share(WorkKind::Hinted, probe, fallback, hit_share)
     }
@@ -113,14 +113,27 @@ fn scale_duration(duration: Duration, factor: f64) -> Duration {
     Duration::try_from_secs_f64(duration.as_secs_f64() * factor).unwrap_or(Duration::MAX)
 }
 
-pub(crate) fn generalized_fallback_cost(fallback: Duration) -> Duration {
-    scale_duration(scale_duration(fallback, KILLED_SHARE), 1.0 - GENERALIZED_HIT_SHARE)
+pub(crate) fn inferred_fallback_cost(fallback: Duration) -> Duration {
+    scale_duration(scale_duration(fallback, KILLED_SHARE), 1.0 - INFERRED_HIT_SHARE)
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn survivor_observed_hint_cost_matrix_updates_both_hit_and_miss_evidence() {
+        for (hits, misses, expected_ms) in [(0, 0, 2_400), (8, 0, 1_700), (0, 8, 3_700), (8, 8, 2_800)] {
+            let work = MutationWork::hinted_with_observations(Duration::from_secs(1), Duration::from_secs(8), hits, misses);
+            assert_eq!(work.kind, WorkKind::Hinted);
+            assert_eq!(work.scheduling_cost().as_millis(), expected_ms, "{hits} hits, {misses} misses");
+        }
+        assert_eq!(
+            MutationWork::hinted(WorkKind::Hinted, Duration::from_secs(1), Duration::from_secs(8)).scheduling_cost(),
+            Duration::from_millis(2_400)
+        );
+    }
 
     #[test]
     fn whole_binary_scheduling_still_starts_at_half_the_measured_baseline() {
@@ -130,11 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn exact_and_generalized_hints_have_distinct_scheduling_costs() {
+    fn exact_hints_and_inferred_tests_have_distinct_scheduling_costs() {
         let exact = MutationWork::hinted(WorkKind::Exact, Duration::from_secs(2), Duration::from_mins(1));
-        let generalized = MutationWork::hinted(WorkKind::Hinted, Duration::from_secs(2), Duration::from_mins(1));
+        let inferred = MutationWork::hinted(WorkKind::Hinted, Duration::from_secs(2), Duration::from_mins(1));
 
-        assert!(exact.scheduling_cost() < generalized.scheduling_cost());
+        assert!(exact.scheduling_cost() < inferred.scheduling_cost());
     }
 
     #[test]

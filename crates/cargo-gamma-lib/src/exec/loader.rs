@@ -61,10 +61,43 @@ pub(super) struct Launch {
 impl Launch {
     /// Derives the launch environment from a workspace's library directories.
     pub(super) fn derive(libraries: &[Utf8PathBuf]) -> Self {
+        Self::derive_with(libraries, |name| env::var_os(name))
+    }
+
+    fn derive_with(libraries: &[Utf8PathBuf], mut lookup: impl FnMut(&str) -> Option<OsString>) -> Self {
         Self {
-            loader: loader_path(libraries),
-            stack: stack_floor(env::var(STACK_VAR).ok().as_deref()),
+            loader: joined(libraries, lookup(LOADER_VAR)),
+            stack: stack_floor(lookup(STACK_VAR).and_then(|value| value.into_string().ok()).as_deref()),
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    #[test]
+    fn derived_launch_keeps_the_requested_library_and_resolved_stack() {
+        let library = Utf8PathBuf::from("gamma-distinct-library");
+        let inherited = env::join_paths(["inherited-library"]).expect("synthetic path is valid");
+        let launch = Launch::derive_with(core::slice::from_ref(&library), |name| match name {
+            LOADER_VAR => Some(inherited.clone()),
+            STACK_VAR => Some("50331648".into()),
+            _ => panic!("unexpected environment lookup: {name}"),
+        });
+        assert_eq!(launch.stack, "50331648");
+        let loader = launch.loader.as_ref().expect("the single library is a valid search path");
+        assert_eq!(
+            env::split_paths(loader).collect::<Vec<_>>(),
+            [library.into_std_path_buf(), PathBuf::from("inherited-library")]
+        );
+        let mut command = Command::new("not-executed");
+        configure_loader(&mut command, &launch);
+        assert_eq!(
+            command.get_envs().find(|(key, _)| *key == LOADER_VAR).unwrap().1,
+            Some(loader.as_os_str())
+        );
     }
 }
 
@@ -91,12 +124,6 @@ fn stack_floor(inherited: Option<&str>) -> String {
 
     // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
     inherited.unwrap_or(0).max(STACK_FLOOR).to_string()
-}
-
-/// Builds the loader search path, keeping whatever the caller already had.
-// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-pub(super) fn loader_path(libraries: &[Utf8PathBuf]) -> Option<OsString> {
-    joined(libraries, env::var_os(LOADER_VAR))
 }
 
 /// Joins the toolchain's directories ahead of whatever search path the caller inherited.
@@ -261,7 +288,7 @@ mod tests {
     fn an_empty_library_list_does_not_set_a_loader_path() {
         // Most toolchains are statically linked; setting an empty loader variable would be a
         // needless change to the test process environment.
-        assert_eq!(loader_path(&[]), None);
+        assert_eq!(joined(&[], None), None);
     }
 
     #[test]

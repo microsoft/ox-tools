@@ -12,6 +12,7 @@ use url::Url;
 
 use super::provider::LOG_TARGET;
 use crate::Result;
+use crate::facts::process::{RunError, run_with_timeout, wait_with_timeout};
 
 pub(super) const GIT_TIMEOUT: Duration = Duration::from_mins(5);
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -271,31 +272,57 @@ async fn run_git_with_timeout(args: &[&str], timeout: Duration) -> Result<std::p
 }
 
 async fn run_git_executable_with_timeout(executable: &Path, args: &[&str], timeout: Duration) -> Result<std::process::Output> {
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "spawning an external git process is an adapter boundary whose errors must remain recoverable")]
-    let child = Command::new(executable)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        // Timeout cancellation drops the child handle; kill-on-drop prevents an orphaned Git
-        // process from continuing after the operation has been reported as timed out.
-        // #[gamma::skip(call.replace_with_default, call_result.default, reason = "subprocess cleanup policy is only observable when an external git process outlives a timed-out invocation")]
-        .kill_on_drop(true)
-        .spawn()
-        .into_app_err("spawning git command")?;
+    run_git_executable_with(
+        executable,
+        args,
+        timeout,
+        |executable, args, kill_on_drop| {
+            let child = Command::new(executable)
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(kill_on_drop)
+                .spawn()?;
+            Ok(child.wait_with_output())
+        },
+        wait_with_timeout,
+    )
+    .await
+}
 
-    classify_git_run(tokio::time::timeout(timeout, child.wait_with_output()).await, args, timeout)
+async fn run_git_executable_with<F, T>(
+    executable: &Path,
+    args: &[&str],
+    timeout: Duration,
+    spawn: impl FnOnce(&Path, &[&str], bool) -> std::io::Result<F>,
+    wait: impl FnOnce(Duration, F) -> T,
+) -> Result<std::process::Output>
+where
+    F: Future<Output = std::io::Result<std::process::Output>>,
+    T: Future<Output = Result<std::io::Result<std::process::Output>, ()>>,
+{
+    classify_git_run(
+        match run_with_timeout(timeout, |kill_on_drop| spawn(executable, args, kill_on_drop), wait).await {
+            Err(RunError::Spawn(error)) => return Err(error).into_app_err("spawning git command"),
+            Err(RunError::Wait(error)) => Ok(Err(error)),
+            Err(RunError::Timeout) => Err(()),
+            Ok(output) => Ok(Ok(output)),
+        },
+        args,
+        timeout,
+    )
 }
 
 /// Turn the outcome of a timed git invocation into a [`Result`].
 fn classify_git_run(
-    result: Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>,
+    result: Result<std::io::Result<std::process::Output>, ()>,
     args: &[&str],
     timeout: Duration,
 ) -> Result<std::process::Output> {
     match result {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(e)) => Err(e).into_app_err_with(|| format!("running 'git {}'", args.join(" "))),
-        Err(_) => {
+        Err(()) => {
             bail!("'git {}' timed out after {} seconds", args.join(" "), timeout.as_secs());
         }
     }
@@ -935,17 +962,82 @@ mod tests {
         assert!(error.to_string().contains("removing fixture repository"), "{error}");
     }
 
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
-    async fn test_run_git_with_timeout_reports_expiry() {
-        // A future that never completes always trips the timeout, whereas a real git
-        // process may finish on the first poll and win the race against a zero budget.
-        let elapsed = tokio::time::timeout(Duration::ZERO, core::future::pending::<()>())
-            .await
-            .expect_err("a pending future can never complete, so the budget must expire");
-
-        let error = classify_git_run(Err(elapsed), &["--version"], GIT_TIMEOUT).expect_err("an expired budget must surface as an error");
+    #[test]
+    fn test_run_git_with_timeout_reports_expiry() {
+        let error = classify_git_run(Err(()), &["--version"], GIT_TIMEOUT).expect_err("an expired budget must surface as an error");
         assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn timed_out_git_children_cannot_write_a_later_marker() {
+        use std::cell::Cell;
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
+        use std::rc::Rc;
+
+        use crate::facts::process::test_util::{ScriptedChild, expire};
+
+        let completed = Rc::new(Cell::new(false));
+        let dropped = Rc::new(Cell::new(false));
+        let executable = Path::new("scripted-git");
+        let args = ["-C", "repository", "fetch", "origin"];
+        let timeout = Duration::from_secs(10);
+        let output = run_git_executable_with(
+            executable,
+            &args,
+            timeout,
+            |program, actual_args, kill_on_drop| {
+                assert_eq!(program, executable);
+                assert_eq!(actual_args, args);
+                assert!(kill_on_drop);
+                Ok(ScriptedChild {
+                    output: Some(Output {
+                        status: ExitStatus::from_raw(0),
+                        stdout: b"completed".to_vec(),
+                        stderr: Vec::new(),
+                    }),
+                    completed: Rc::clone(&completed),
+                    dropped: Rc::clone(&dropped),
+                })
+            },
+            |budget, child| async move {
+                assert_eq!(budget, Duration::from_secs(10));
+                Ok(child.await)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"completed");
+        assert_eq!(output.stderr, b"");
+        assert!(completed.get());
+        assert!(dropped.get());
+
+        completed.set(false);
+        dropped.set(false);
+        let error = run_git_executable_with(
+            executable,
+            &args,
+            timeout,
+            |program, actual_args, kill_on_drop| {
+                assert_eq!(program, executable);
+                assert_eq!(actual_args, args);
+                assert!(kill_on_drop);
+                Ok(ScriptedChild {
+                    output: None,
+                    completed: Rc::clone(&completed),
+                    dropped: Rc::clone(&dropped),
+                })
+            },
+            expire,
+        )
+        .await
+        .expect_err("the scripted deadline must be reported");
+        assert_eq!(error.message(), "'git -C repository fetch origin' timed out after 10 seconds");
+        assert!(dropped.get(), "the pending child must be dropped before returning");
+        assert!(!completed.get(), "the timed-out child must not complete its later side effect");
     }
 
     #[test]

@@ -72,15 +72,54 @@ fn run_with_current_dir(catalog: &Catalog, cli: &Cli, current_dir: io::Result<Pa
 /// Propagates errors from any subsystem (workspace discovery, manifest
 /// I/O, emitter, plan application).
 pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
-    let repo_root = workspace::find_workspace_root(start_dir)?;
-    let manifest = Manifest::load(&repo_root)?;
+    run_update_with(
+        catalog,
+        args,
+        start_dir,
+        |start| {
+            let root = workspace::find_workspace_root(start)?;
+            let manifest = Manifest::load(&root)?;
+            Ok((root, manifest))
+        },
+        |root, manifest| {
+            let ws = workspace::load_workspace(root)?;
+            let backends = backend::resolve(&args.backends, args.no_backends, root)?;
+            info!(
+                repo_root = %root.display(),
+                backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
+                dry_run = args.dry_run,
+                "anvil"
+            );
+            let plan = build_plan(root, &ws, manifest, &backends, catalog)?;
+            Ok((plan, backends))
+        },
+        read_file_if_present,
+        |root, plan, next| {
+            plan.apply_files(root)?;
+            next.save(root)
+        },
+    )
+}
+
+// The comparison read is distinct from initial manifest discovery: a late read failure must
+// stop publication even after planning has succeeded. Injecting both boundaries pins that order.
+fn run_update_with(
+    catalog: &Catalog,
+    args: &Cli,
+    start_dir: &Path,
+    discover: impl FnOnce(&Path) -> Result<(PathBuf, Manifest), AppError>,
+    plan_update: impl FnOnce(&Path, &Manifest) -> Result<(Plan, Vec<Backend>), AppError>,
+    read_manifest: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
+    publish: impl FnOnce(&Path, &Plan, &Manifest) -> Result<(), AppError>,
+) -> Result<RunOutcome, AppError> {
+    let (repo_root, manifest) = discover(start_dir)?;
 
     // The single-tool guard: a repository is managed by exactly one
     // anvil-family tool. If the lock records a *different* tool, refuse
     // before doing any other work — content-free, and honored even under
     // --dry-run — unless --force is passed to switch ownership to this tool.
     // A lock with no `tool` field (first run, or a legacy pre-split lock) is
-    // never blocked. See updates.md §1 "The single-tool guard".
+    // never blocked.
     //
     // This runs immediately after loading the lock and before
     // `load_workspace`, so a mismatched lock reliably refuses regardless of
@@ -88,31 +127,19 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     // parsing, which could otherwise surface unrelated errors first.
     enforce_single_tool_guard(catalog, args, &manifest)?;
 
-    let ws = workspace::load_workspace(&repo_root)?;
-
-    let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
-    info!(
-        repo_root = %repo_root.display(),
-        backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
-        dry_run = args.dry_run,
-        "anvil"
-    );
-
-    let mut plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
+    let (mut plan, backends) = plan_update(&repo_root, &manifest)?;
     let mut next = plan.projected_manifest(&manifest);
     next.tool = Some(catalog.cli().subcommand.clone());
     next.tool_version = Some(catalog.cli().version.clone());
     next.catalog_checksum = Some(catalog.checksum());
 
     let expected_manifest = next.to_toml();
-    let manifest_is_current = manifest_matches(read_file_if_present(&Manifest::path_for(&repo_root)), &expected_manifest)?;
+    let manifest_is_current = manifest_matches(read_manifest(&Manifest::path_for(&repo_root)), &expected_manifest)?;
     plan.set_manifest_update_required(!manifest_is_current);
 
     let applied = !args.dry_run;
     if applied {
-        plan.apply_files(&repo_root)?;
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "timeout", reason = "a forced panic aborts manifest-write failure reporting before the mutation subprocess can publish a verdict")]
-        next.save(&repo_root)?;
+        publish(&repo_root, &plan, &next)?;
     }
 
     Ok(RunOutcome {
@@ -1365,6 +1392,31 @@ mod tests {
     use crate::anvil::artifacts::region;
     use crate::{CliMeta, RegionId};
 
+    #[test]
+    fn update_returns_a_late_manifest_read_error_before_publishing_any_changes() {
+        let root = Path::new("workspace");
+        let error = run_update_with(
+            &Catalog::anvil(),
+            &local_only(),
+            root,
+            |start| {
+                assert_eq!(start, root);
+                Ok((root.to_owned(), Manifest::default()))
+            },
+            |path, _| {
+                assert_eq!(path, root);
+                Ok((Plan::default(), Vec::new()))
+            },
+            |path| {
+                assert_eq!(path, Manifest::path_for(root));
+                Err(ohno::app_err!("injected late manifest read failure"))
+            },
+            |_, _, _| panic!("a failed manifest read must prevent all publication"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected late manifest read failure"), "{error}");
+    }
+
     fn array_catalog(ordinary: Option<RegionSpec>, array_first: bool) -> Catalog {
         let array = crate::catalog::TomlArrayRegionSpec {
             region: RegionSpec {
@@ -1410,6 +1462,43 @@ mod tests {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
             ..HostTextCache::default()
         }
+    }
+
+    #[test]
+    fn array_and_plain_regions_can_share_an_id_without_sharing_a_host() {
+        let catalog = array_catalog(
+            Some(RegionSpec {
+                host: HostSelector::Path("other.conf".to_owned()),
+                id: RegionId::new("entries"),
+                body: "user documentation.\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }),
+            true,
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.toml", "[plugins]\ndefault = []\n".to_owned());
+        hosts.set("other.conf", String::new());
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(plan.items().len(), 2);
+        let outputs = plan
+            .items()
+            .iter()
+            .map(|item| item.spliced_host.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.iter().filter(|text| text.contains("\"required\",")).count(), 1);
+        assert_eq!(outputs.iter().filter(|text| text.contains("user documentation.")).count(), 1);
+        assert!(outputs.iter().all(|text| text.contains("# >>> anvil-managed: entries")));
     }
 
     #[test]
@@ -3357,11 +3446,9 @@ mod tests {
         assert!(composed.reported.contains(declared.path));
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn malformed_marker_refusals_distinguish_live_and_retired_regions() {
-        let tmp = TempDir::new().unwrap();
-        write(&tmp.path().join("host.txt"), "# >>> anvil-managed: test\ngenerated\n");
+        let text = "# >>> anvil-managed: test\ngenerated\n";
 
         for (retiring, expected, rejected) in [
             (
@@ -3376,11 +3463,13 @@ mod tests {
             ),
         ] {
             let mut plan = Plan::default();
+            let mut hosts = memory_hosts();
+            hosts.set("host.txt", text.to_owned());
             assert!(
                 !repair_or_refuse(
-                    tmp.path(),
+                    Path::new("workspace"),
                     &mut plan,
-                    &mut HostTextCache::default(),
+                    &mut hosts,
                     "host.txt",
                     "test",
                     CommentSyntax::Hash,
@@ -3392,6 +3481,40 @@ mod tests {
             assert!(refusal.contains(expected), "{refusal}");
             assert!(!refusal.contains(rejected), "{refusal}");
         }
+    }
+
+    #[test]
+    fn planning_a_live_region_reports_live_marker_refusal() {
+        let text = "# >>> anvil-managed: test\ngenerated\n";
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", text.to_owned());
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: crate::catalog::RegionId::new("test"),
+            body: "replacement\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let mut plan = Plan::default();
+
+        push_region_at(
+            Path::new("workspace"),
+            &Manifest::default(),
+            &mut plan,
+            &mut hosts,
+            &mut ComposedHosts::default(),
+            "host.txt",
+            &spec,
+        )
+        .unwrap();
+
+        assert_eq!(plan.refusals().len(), 1);
+        let refusal = &plan.refusals()[0];
+        assert!(
+            refusal.contains("this region's marker lines do not form a matching pair"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("retired managed region"), "{refusal}");
+        assert_eq!(hosts.cached("host.txt").as_deref(), Some(text));
     }
 
     // Lock ownership, workspace lookup, and process-exit contracts.

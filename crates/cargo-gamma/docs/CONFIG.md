@@ -299,7 +299,7 @@ not merely slower under a threaded harness; it is red, and a red baseline stops 
 still judged against binaries this run built itself, so nextest never invokes cargo and a mutant
 costs one extra process rather than one extra build.
 
-By default gamma performs no case-level census: exact and generalized probes still run first, and
+By default gamma performs no case-level census: exact-hint and inferred-test probes still run first, and
 anything they do not kill falls back to the complete reachable test binary. Set
 `optimize-test-execution = true` (or pass `--optimize-test-execution`) to enable the experimental
 census. The opt-in still passes through an economic gate: gamma measures listing startup cost and

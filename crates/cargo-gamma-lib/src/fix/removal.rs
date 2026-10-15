@@ -53,3 +53,22 @@ pub fn removable(line: &str) -> bool {
 
     opened == body.matches(')').count() && !body.contains("//")
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests {
+    use super::*;
+
+    #[test]
+    fn survivor_removal_requires_balanced_parentheses_and_no_comment_within_the_directive() {
+        for (line, expected) in [
+            ("#[gamma::skip(arith)]", true),
+            ("// #[gamma::skip(arith)]", true),
+            ("#[gamma::skip(arith]", false),
+            ("#[gamma::skip(arith))]", false),
+            ("#[gamma::skip(reason = \"https://example.invalid\")]", false),
+        ] {
+            assert_eq!(removable(line), expected, "{line}");
+        }
+    }
+}

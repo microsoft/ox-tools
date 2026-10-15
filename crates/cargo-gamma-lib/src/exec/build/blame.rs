@@ -194,29 +194,7 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
         // enclosing-site attribution—it routinely names innocent declarations—but intersection
         // with a mutated branch is exact evidence: that text exists only because gamma emitted it.
         if exact.is_empty() {
-            let mut remaining = SECONDARY_ATTRIBUTION_BUDGET;
-            for span in diagnostic.spans.iter().filter(|span| !span.is_primary) {
-                let Some(file_name) = span.file_name.as_deref() else {
-                    continue;
-                };
-                let relative = Utf8Path::new(file_name)
-                    .strip_prefix(root.as_str())
-                    .unwrap_or_else(|_ignored| Utf8Path::new(file_name));
-                let Some(reported) = position_range(span) else {
-                    continue;
-                };
-                let matched = by_path.get(relative).map(Vec::as_slice).unwrap_or_default();
-                if matched.len() > remaining {
-                    break;
-                }
-                remaining -= matched.len();
-
-                for (ordinal, guard) in matched.iter().copied() {
-                    if guard.mutated.as_ref().is_some_and(|mutated| overlaps(mutated, &reported)) {
-                        let _ = exact.insert(ordinal);
-                    }
-                }
-            }
+            secondary_attribution(&diagnostic, root, &by_path, &mut exact, SECONDARY_ATTRIBUTION_BUDGET);
         }
 
         let (ordinals, blamed) = if exact.is_empty() {
@@ -266,6 +244,36 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
     // deletion containment from those follow-ons in the same round would falsely withdraw siblings.
     // If an independent deletion also fails, the next rollback round will expose and attribute it.
     if exact_blame.is_empty() { deletion_blame } else { exact_blame }
+}
+
+fn secondary_attribution(
+    diagnostic: &CompilerMessage<'_>,
+    root: &Utf8Path,
+    by_path: &HashMap<&Utf8Path, Vec<(u32, &Guard)>>,
+    exact: &mut HashSet<u32>,
+    mut remaining: usize,
+) {
+    for span in diagnostic.spans.iter().filter(|span| !span.is_primary) {
+        let Some(file_name) = span.file_name.as_deref() else {
+            continue;
+        };
+        let relative = Utf8Path::new(file_name)
+            .strip_prefix(root.as_str())
+            .unwrap_or_else(|_ignored| Utf8Path::new(file_name));
+        let Some(reported) = position_range(span) else {
+            continue;
+        };
+        let matched = by_path.get(relative).map(Vec::as_slice).unwrap_or_default();
+        if matched.len() > remaining {
+            break;
+        }
+        remaining -= matched.len();
+        for (ordinal, guard) in matched.iter().copied() {
+            if guard.mutated.as_ref().is_some_and(|mutated| overlaps(mutated, &reported)) {
+                let _ = exact.insert(ordinal);
+            }
+        }
+    }
 }
 
 /// Reduces rustc's primary message to a bounded category without retaining source or host text.
@@ -513,4 +521,429 @@ pub(super) fn covers(range: &Range<Position>, reported: &Range<Position>) -> boo
 /// Whether two non-empty source regions share any text.
 fn overlaps(left: &Range<Position>, right: &Range<Position>) -> bool {
     left.start < right.end && right.start < left.end
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use core::num::NonZeroU32;
+
+    use super::*;
+
+    #[test]
+    fn diagnostic_categories_collapse_each_interior_whitespace_run() {
+        for message in ["alpha   beta", "alpha \t\n beta", "\talpha  beta\n"] {
+            assert_eq!(normalize_category(message), "alpha beta");
+        }
+    }
+
+    fn span(file: Option<&str>, start: u32, end: u32, primary: bool) -> serde_json::Value {
+        serde_json::json!({
+            "file_name": file, "line_start": start, "line_end": end,
+            "column_start": 1, "column_end": 4, "is_primary": primary
+        })
+    }
+
+    fn diagnostic(level: &str, code: &str, spans: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "reason": "compiler-message",
+            "message": {"level": level, "code": {"code": code}, "message": "mismatched types", "spans": spans}
+        })
+        .to_string()
+    }
+
+    fn range(start: NonZeroU32, end: NonZeroU32) -> Range<Position> {
+        Position::new(start.get(), 1).unwrap()..Position::new(end.get(), 8).unwrap()
+    }
+
+    #[test]
+    fn secondary_attribution_spends_the_exact_remaining_budget_and_stops_before_later_cheaper_spans() {
+        let hit = Guard {
+            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let miss = Guard {
+            site: range(NonZeroU32::new(20).unwrap(), NonZeroU32::new(30).unwrap()),
+            mutated: Some(range(NonZeroU32::new(21).unwrap(), NonZeroU32::new(22).unwrap())),
+        };
+        let by_path = HashMap::from_iter([
+            (Utf8Path::new("a.rs"), vec![(101, &hit), (102, &miss)]),
+            (Utf8Path::new("b.rs"), vec![(201, &hit), (202, &miss)]),
+            (Utf8Path::new("c.rs"), vec![(301, &hit)]),
+        ]);
+        let message = diagnostic(
+            "error",
+            "E0308",
+            &[
+                span(None, 6, 7, false),
+                span(Some("a.rs"), 0, 7, false),
+                span(Some("a.rs"), 6, 7, false),
+                span(Some("b.rs"), 6, 7, false),
+                span(Some("c.rs"), 6, 7, false),
+            ],
+        );
+        let message = cargo_message(&message).unwrap().message.unwrap();
+        for (budget, wanted) in [(4, vec![101, 201]), (3, vec![101])] {
+            let mut exact = HashSet::default();
+            secondary_attribution(&message, Utf8Path::new("workspace"), &by_path, &mut exact, budget);
+            assert_eq!(exact, wanted.into_iter().collect(), "budget={budget}");
+        }
+    }
+
+    #[test]
+    fn primary_generated_evidence_excludes_an_innocent_secondary_replacement() {
+        let guards = Guards::from_iter([
+            (
+                1,
+                (
+                    "a.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+                        mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+                    },
+                ),
+            ),
+            (
+                2,
+                (
+                    "a.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(15).unwrap(), NonZeroU32::new(20).unwrap()),
+                        mutated: Some(range(NonZeroU32::new(16).unwrap(), NonZeroU32::new(18).unwrap())),
+                    },
+                ),
+            ),
+        ]);
+        let text = diagnostic(
+            "error",
+            "E0308",
+            &[span(Some("a.rs"), 6, 7, true), span(Some("a.rs"), 16, 17, false)],
+        );
+        let blamed = blame(&text, Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([1]));
+        assert_eq!(blamed[&1].evidence, AttributionEvidence::ReplacementPrimary);
+    }
+
+    #[test]
+    fn enclosing_deletions_choose_the_later_narrower_guard_and_contained_ties_retain_every_ordinal() {
+        let direct = diagnostic("error", "E0308", &[span(Some("a.rs"), 6, 7, true)]);
+        for (wide, narrow) in [(1, 2), (2, 1)] {
+            let guards = Guards::from_iter([
+                (
+                    wide,
+                    (
+                        "a.rs".into(),
+                        Guard {
+                            site: range(NonZeroU32::new(1).unwrap(), NonZeroU32::new(20).unwrap()),
+                            mutated: None,
+                        },
+                    ),
+                ),
+                (
+                    narrow,
+                    (
+                        "a.rs".into(),
+                        Guard {
+                            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+                            mutated: None,
+                        },
+                    ),
+                ),
+            ]);
+            assert_eq!(
+                blame(&direct, Utf8Path::new("workspace"), &guards)
+                    .keys()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                HashSet::from_iter([narrow])
+            );
+        }
+        let guards = Guards::from_iter([
+            (
+                1,
+                (
+                    "a.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(6).unwrap()),
+                        mutated: None,
+                    },
+                ),
+            ),
+            (
+                2,
+                (
+                    "a.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(8).unwrap(), NonZeroU32::new(9).unwrap()),
+                        mutated: None,
+                    },
+                ),
+            ),
+        ]);
+        let contained = diagnostic("error", "E0308", &[span(Some("a.rs"), 1, 20, true)]);
+        assert_eq!(
+            blame(&contained, Utf8Path::new("workspace"), &guards)
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from_iter([1, 2])
+        );
+    }
+
+    #[test]
+    fn partially_repeated_batches_keep_old_causes_while_adding_every_previously_unseen_ordinal() {
+        let guards: Guards = (1..=5)
+            .map(|ordinal| {
+                (
+                    ordinal,
+                    (
+                        "a.rs".into(),
+                        Guard {
+                            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+                            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+                        },
+                    ),
+                )
+            })
+            .collect();
+        for known in 1..=5 {
+            let first = diagnostic("error", "E0308", &[span(Some("a.rs"), 6, 7, true)]);
+            let mut first: serde_json::Value = serde_json::from_str(&first).unwrap();
+            first["message"]["spans"][0]["file_name"] = "known.rs".into();
+            let mut scoped = guards.clone();
+            scoped.get_mut(&known).unwrap().0 = "known.rs".into();
+            let second = diagnostic(
+                "error",
+                "E0382",
+                &[span(Some("a.rs"), 6, 7, true), span(Some("known.rs"), 6, 7, true)],
+            );
+            let blamed = blame(&format!("{first}\n{second}"), Utf8Path::new("workspace"), &scoped);
+            assert_eq!(blamed.len(), 5);
+            for ordinal in 1..=5 {
+                assert_eq!(blamed[&ordinal].code, if ordinal == known { "E0308" } else { "E0382" });
+            }
+        }
+    }
+
+    #[test]
+    fn flow_fallback_skips_an_early_outside_guard_requires_a_flow_code_and_returns_none_for_no_deletions() {
+        let outside = Guard {
+            site: range(NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap()),
+            mutated: None,
+        };
+        let deletion = Guard {
+            site: range(NonZeroU32::new(15).unwrap(), NonZeroU32::new(16).unwrap()),
+            mutated: None,
+        };
+        let replacement = Guard {
+            site: range(NonZeroU32::new(16).unwrap(), NonZeroU32::new(17).unwrap()),
+            mutated: Some(range(NonZeroU32::new(16).unwrap(), NonZeroU32::new(17).unwrap())),
+        };
+        let by_path = HashMap::from_iter([(Utf8Path::new("a.rs"), vec![(1, &outside), (2, &deletion), (3, &replacement)])]);
+        for (code, from, to, expected) in [
+            ("E0382", 10, 20, Some(HashSet::from_iter([2]))),
+            ("E9999", 10, 20, None),
+            ("E0382", 35, 36, None),
+        ] {
+            let message = diagnostic("error", code, &[span(Some("a.rs"), from, to, true)]);
+            let message = cargo_message(&message).unwrap().message.unwrap();
+            assert_eq!(diverted(&message, Utf8Path::new("workspace"), &by_path), expected);
+        }
+    }
+
+    #[test]
+    fn region_collection_continues_after_an_unusable_span_in_the_same_diagnostic_node() {
+        let message = diagnostic("error", "E0382", &[span(None, 1, 2, true), span(Some("later.rs"), 10, 20, true)]);
+        let message = cargo_message(&message).unwrap().message.unwrap();
+        assert_eq!(regions(&message), HashMap::from_iter([("later.rs".to_owned(), 10..=20)]));
+    }
+
+    #[test]
+    fn diagnostic_walk_skips_unusable_records_and_distinguishes_primary_from_secondary_replacements() {
+        let guards = Guards::from_iter([
+            (
+                1,
+                (
+                    "src/lib.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+                        mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+                    },
+                ),
+            ),
+            (
+                2,
+                (
+                    "src/lib.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(20).unwrap(), NonZeroU32::new(30).unwrap()),
+                        mutated: None,
+                    },
+                ),
+            ),
+        ]);
+        let prefix = [
+            "not json".to_owned(),
+            r#"{"reason":"compiler-artifact"}"#.to_owned(),
+            r#"{"reason":"compiler-message"}"#.to_owned(),
+            diagnostic("warning", "W000", &[span(Some("src/lib.rs"), 6, 7, true)]),
+        ]
+        .join("\n");
+        for (primary, expected_evidence) in [
+            (true, AttributionEvidence::ReplacementPrimary),
+            (false, AttributionEvidence::OtherDiagnostic),
+        ] {
+            let mut spans = vec![
+                span(None, 6, 7, true),
+                span(Some("src/lib.rs"), 0, 7, true),
+                span(Some("absent.rs"), 6, 7, true),
+                span(Some("src/lib.rs"), 6, 7, primary),
+            ];
+            if !primary {
+                spans.push(span(Some("src/lib.rs"), 100, 101, true));
+            }
+            let first = diagnostic("error", "E0308", &spans);
+            let consequence = diagnostic("error", "E9999", &[span(Some("src/lib.rs"), 6, 7, true)]);
+            let blamed = blame(&format!("{prefix}\n{first}\n{consequence}"), Utf8Path::new("workspace"), &guards);
+            assert_eq!(blamed.len(), 1);
+            assert_eq!(
+                blamed[&1],
+                CompilerReason {
+                    code: "E0308".into(),
+                    category: "mismatched types".into(),
+                    evidence: expected_evidence,
+                }
+            );
+        }
+        let without_primary = diagnostic("error", "E0308", &[span(Some("src/lib.rs"), 6, 7, false)]);
+        let blamed = blame(&without_primary, Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.len(), 1);
+        assert_eq!(blamed[&1].evidence, AttributionEvidence::OtherDiagnostic);
+    }
+
+    #[test]
+    fn deletion_blame_keeps_all_equal_narrowest_sites_but_exact_generated_text_wins_the_batch() {
+        let guards = Guards::from_iter([
+            (
+                1,
+                (
+                    "src/lib.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+                        mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+                    },
+                ),
+            ),
+            (
+                2,
+                (
+                    "src/lib.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(20).unwrap(), NonZeroU32::new(40).unwrap()),
+                        mutated: None,
+                    },
+                ),
+            ),
+            (
+                3,
+                (
+                    "src/lib.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(22).unwrap(), NonZeroU32::new(28).unwrap()),
+                        mutated: None,
+                    },
+                ),
+            ),
+            (
+                4,
+                (
+                    "src/lib.rs".into(),
+                    Guard {
+                        site: range(NonZeroU32::new(22).unwrap(), NonZeroU32::new(28).unwrap()),
+                        mutated: None,
+                    },
+                ),
+            ),
+        ]);
+        let deletion = diagnostic("error", "E0382", &[span(Some("src/lib.rs"), 23, 24, true)]);
+        let blamed = blame(&deletion, Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.len(), 2);
+        for ordinal in [3, 4] {
+            assert_eq!(blamed[&ordinal].code, "E0382");
+            assert_eq!(blamed[&ordinal].evidence, AttributionEvidence::OtherDiagnostic);
+        }
+        let exact = diagnostic("error", "E0308", &[span(Some("workspace/src/lib.rs"), 6, 7, true)]);
+        for batch in [format!("{deletion}\n{exact}"), format!("{exact}\n{deletion}")] {
+            let blamed = blame(&batch, Utf8Path::new("workspace"), &guards);
+            assert_eq!(blamed.len(), 1);
+            assert_eq!(blamed[&1].evidence, AttributionEvidence::ReplacementPrimary);
+        }
+    }
+
+    #[test]
+    fn normalization_has_exact_byte_boundaries_and_trailing_punctuation() {
+        for punctuation in [':', ';', ',', '.'] {
+            assert_eq!(normalize_category(&format!("  error{punctuation} \t")), "error");
+        }
+        assert_eq!(normalize_category(" \t\r\n"), "uncategorized compiler error");
+        assert_eq!(normalize_category(" \tfirst \n \tsecond   third  "), "first second third");
+        assert_eq!(normalize_category("a1234 b567"), "a# b#");
+        assert_eq!(
+            normalize_category("before `secret` after \"other\""),
+            "before <value> after <value>"
+        );
+        assert_eq!(normalize_category("before C:\\private\\file.rs after"), "before <path> after");
+        assert_eq!(normalize_category("before /private/file.rs after"), "before <path> after");
+        for length in [95, 96, 97] {
+            assert_eq!(normalize_category(&"x".repeat(length)), "x".repeat(length.min(96)));
+        }
+        assert_eq!(normalize_category(&format!("{}éz", "x".repeat(94))), format!("{}é", "x".repeat(94)));
+        assert_eq!(normalize_category(&format!("{}éz", "x".repeat(95))), format!("{}z", "x".repeat(95)));
+        for (prefix, expected) in [(88, "x".repeat(88) + "<value>"), (89, "x".repeat(89) + "<value>")] {
+            assert_eq!(normalize_category(&format!("{}\"hidden\"", "x".repeat(prefix))), expected);
+        }
+        assert_eq!(
+            normalize_category(&format!("{}\"hidden\"", "x".repeat(90))),
+            "x".repeat(90) + "<value"
+        );
+        assert_eq!(normalize_category(&format!("{} y", "x".repeat(95))), "x".repeat(95));
+        for prefix in [95, 96] {
+            let expected = if prefix == 95 { "x".repeat(95) + "#" } else { "x".repeat(96) };
+            assert_eq!(normalize_category(&format!("{}123", "x".repeat(prefix))), expected);
+        }
+        for prefix in [89, 90] {
+            let expected = ("x".repeat(prefix) + " <path>").chars().take(96).collect::<String>();
+            assert_eq!(normalize_category(&format!("{} /private/source.rs", "x".repeat(prefix))), expected);
+        }
+    }
+
+    #[test]
+    fn pieces_stop_at_the_first_character_that_does_not_fit() {
+        for (initial, piece, limit, expected) in [
+            ("", "abc", 0, ""),
+            ("", "abc", 1, "a"),
+            ("x", "éz", 2, "x"),
+            ("x", "éz", 3, "xé"),
+            ("x", "éz", 4, "xéz"),
+        ] {
+            let mut output = initial.to_owned();
+            push_piece(&mut output, piece, limit);
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
+    fn adjacent_ranges_do_not_attribute_each_others_text() {
+        let at = |column| Position::new(1, column).unwrap();
+        for (a, b, expected) in [
+            ((1, 4), (4, 7), false),
+            ((4, 7), (1, 4), false),
+            ((1, 3), (4, 7), false),
+            ((4, 7), (1, 3), false),
+            ((1, 5), (4, 7), true),
+            ((4, 7), (1, 5), true),
+        ] {
+            assert_eq!(overlaps(&(at(a.0)..at(a.1)), &(at(b.0)..at(b.1))), expected);
+        }
+    }
 }

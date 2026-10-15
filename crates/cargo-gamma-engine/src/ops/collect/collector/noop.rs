@@ -576,8 +576,340 @@ const fn is_word(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn incomplete_outer_parentheses_cannot_be_stripped_as_a_complete_default_expression() {
+        for text in ["((value)", "(((value))", "(value", "(value) + other"] {
+            let tokens = super::lexemes(text).unwrap();
+            let stripped = super::strip_parentheses(&tokens);
+            assert_eq!(stripped.first().map(|token| token.start), Some(0), "{text}");
+            assert_eq!(stripped.last().map(|token| token.end), Some(text.len()), "{text}");
+        }
+        let tokens = super::lexemes("((value))").unwrap();
+        assert_eq!(
+            super::strip_parentheses(&tokens).iter().map(|token| token.text).collect::<Vec<_>>(),
+            ["value"]
+        );
+    }
+
     fn defaults() -> DefaultPaths {
         DefaultPaths::of(&syn::parse_file("").expect("an empty file parses"))
+    }
+
+    #[test]
+    fn constructor_noop_proofs_require_matching_types_and_both_generic_arities() {
+        let imports = HashMap::default();
+        let declarations = crate::ops::collect::Defaults::default();
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        let paths = defaults();
+        for (expression, expected_type, expected) in [
+            ("((String::new()))", "String", true),
+            ("(factory())()", "String", false),
+            ("Vec::<u8>::new()", "String", false),
+            ("String::default()", "Vec<u8>", false),
+            ("String::default()", "String<u8>", false),
+            ("Vec::<u8>::default()", "String", false),
+            ("String::new()", "String<u8>", false),
+            ("String::<u8>::default()", "String", false),
+            ("bool::new()", "bool", false),
+            ("bool::default()", "u8", false),
+            ("u8::default()", "bool", false),
+            ("bool::<u8>::default()", "bool", false),
+            ("bool::default()", "bool<u8>", false),
+            ("bool::default()", "()", false),
+            ("Option::default()", "Option", true),
+            ("Option::<u8>::default()", "Option", true),
+            ("Option::default()", "Option<u8>", true),
+            ("Option::<u8,u16>::default()", "Option<u8>", false),
+            ("Option::<u8>::default()", "Option<u8,u16>", false),
+            ("Option::<u8>::default()", "bool", false),
+            ("bool::default()", "Option<u8>", false),
+            ("Option::new()", "Option<u8>", false),
+            ("String::new::<u8>()", "String", false),
+            ("String::<u8>::new()", "String", false),
+            ("std::<u8>::string::String::new()", "String", false),
+            ("#[cfg(any())] String::new()", "String", false),
+            ("String::new(1)", "String", false),
+            ("String::other()", "String", false),
+            ("<String as Default>::default()", "String", false),
+            ("<Owner>::bool::default()", "bool", false),
+            ("default()", "String", false),
+        ] {
+            assert_eq!(
+                is_standard_default_constructor(
+                    &syn::parse_str(expression).unwrap(),
+                    &syn::parse_str(expected_type).unwrap(),
+                    &types,
+                    &paths
+                ),
+                expected,
+                "{expression} -> {expected_type}"
+            );
+        }
+        for bounded in [false, true] {
+            let names = ["std".into(), "Default".into()];
+            let shadowed = if bounded {
+                Types {
+                    defaulted: &names,
+                    ..types
+                }
+            } else {
+                Types {
+                    abstracts: &names,
+                    ..types
+                }
+            };
+            assert!(!is_standard_default_constructor(
+                &syn::parse_quote!(std::string::String::new()),
+                &syn::parse_quote!(String),
+                &shadowed,
+                &paths
+            ));
+        }
+        let shadowed_paths = DefaultPaths::of(&syn::parse_file("struct Default;").unwrap());
+        assert!(!is_standard_default_constructor(
+            &syn::parse_quote!(String::new()),
+            &syn::parse_quote!(String),
+            &types,
+            &shadowed_paths
+        ));
+    }
+
+    #[test]
+    fn constructor_name_shadows_are_independent_from_the_default_trait_shadow() {
+        let imports = HashMap::default();
+        let declarations = crate::ops::collect::Defaults::default();
+        let plain = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (shadow, text) in [("bool", "bool::default()"), ("std", "std::primitive::bool::default()")] {
+            let names = [shadow.into()];
+            for bounded in [false, true] {
+                let types = if bounded {
+                    Types {
+                        defaulted: &names,
+                        ..plain
+                    }
+                } else {
+                    Types {
+                        abstracts: &names,
+                        ..plain
+                    }
+                };
+                assert!(
+                    !is_standard_default_constructor(&syn::parse_str(text).unwrap(), &syn::parse_quote!(bool), &types, &defaults()),
+                    "{text}"
+                );
+            }
+        }
+        let aliases = HashMap::from_iter([("bool".into(), None)]);
+        let types = Types {
+            aliases: Some(&aliases),
+            ..plain
+        };
+        assert!(!is_standard_default_constructor(
+            &syn::parse_quote!(bool::default()),
+            &syn::parse_quote!(bool),
+            &types,
+            &defaults()
+        ));
+        for (expression, expected) in [
+            (syn::parse_quote!(String::new()), true),
+            (syn::parse_quote!(String::other()), false),
+        ] {
+            let grouped = Expr::Group(syn::ExprGroup {
+                attrs: Vec::new(),
+                group_token: syn::token::Group::default(),
+                expr: Box::new(expression),
+            });
+            assert_eq!(
+                is_standard_default_constructor(&grouped, &syn::parse_quote!(String), &plain, &defaults()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_defaults_reject_attributed_generic_methods_and_preserve_grouped_callees() {
+        let imports = HashMap::default();
+        let declarations = crate::ops::collect::Defaults::default();
+        let names = ["T".into()];
+        let types = Types {
+            abstracts: &[],
+            defaulted: &names,
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (text, expected) in [
+            ("((T::default()))", true),
+            ("((T::default))()", true),
+            ("(core::default::Default::default)()", true),
+            ("#[cfg(any())] T::default()", false),
+            ("T::default::<u8>()", false),
+            ("<T as Trait>::default()", false),
+            ("<Owner>::Default::default()", false),
+            ("(factory())()", false),
+            ("T::default(1)", false),
+            ("T::other()", false),
+        ] {
+            assert_eq!(
+                is_resolved_trait_default(&syn::parse_str(text).unwrap(), &types),
+                expected,
+                "{text}"
+            );
+        }
+        let grouped = |expr| {
+            Expr::Group(syn::ExprGroup {
+                attrs: Vec::new(),
+                group_token: syn::token::Group::default(),
+                expr: Box::new(expr),
+            })
+        };
+        assert!(is_resolved_trait_default(&grouped(syn::parse_quote!(T::default())), &types));
+        assert!(!is_resolved_trait_default(&grouped(syn::parse_quote!(T::other())), &types));
+        let paths = defaults();
+        assert!(is_standard_default_constructor(
+            &grouped(syn::parse_quote!(String::new())),
+            &syn::parse_quote!(String),
+            &types,
+            &paths
+        ));
+        assert!(!is_standard_default_constructor(
+            &grouped(syn::parse_quote!(String::other())),
+            &syn::parse_quote!(String),
+            &types,
+            &paths
+        ));
+    }
+
+    #[test]
+    fn constructor_proofs_check_absolute_roots_on_both_sides_of_the_comparison() {
+        let imports = HashMap::from_iter([("std".into(), None)]);
+        let declarations = crate::ops::collect::Defaults::default();
+        let types = Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        for (expression, expected) in [
+            ("::std::primitive::bool::default()", "bool"),
+            ("bool::default()", "::std::primitive::bool"),
+        ] {
+            assert!(
+                !is_standard_default_constructor(
+                    &syn::parse_str(expression).unwrap(),
+                    &syn::parse_str(expected).unwrap(),
+                    &types,
+                    &defaults()
+                ),
+                "{expression} -> {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaked_default_equivalence_requires_exact_shared_reborrow_and_complete_callees() {
+        for (text, expected) in [
+            (
+                "&*((::std::boxed::Box::leak(Box::new(Default::default()))))",
+                Some("Default::default()"),
+            ),
+            ("&mut Box::leak(Box::new(Default::default()))", None),
+            ("-*Box::leak(Box::new(Default::default()))", None),
+            ("Box::leak(Box::new((left, right)))", Some("(left, right)")),
+            ("::(Box::new(Default::default()))", None),
+            ("Box::leak(Box::new(value)", None),
+            ("(Box::leak(Box::new(value))", None),
+            ("Box::leak(Box::new(value)) + tail", None),
+        ] {
+            assert_eq!(leaked_value(text), expected, "{text}");
+        }
+        for original in [
+            "&mut Box::leak(Box::new(Default::default()))",
+            "-*Box::leak(Box::new(Default::default()))",
+        ] {
+            assert!(
+                !is_same_leak("&*Box::leak(Box::new(Default::default()))", original, &defaults(), &[]),
+                "{original}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_unit_proofs_respect_module_ancestry_imports_and_opaque_prefixes() {
+        let root = vec![(1, 0)];
+        let child = vec![(1, 0), (2, 0)];
+        let grandchild = vec![(1, 0), (2, 0), (3, 0)];
+        let sibling = vec![(1, 0), (9, 0)];
+        let empty = HashMap::default();
+        let expression: Expr = syn::parse_quote!(local);
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &syn::parse_quote!(
+                fn local() {}
+            ),
+            &root,
+        );
+        assert!(calls.returns_unit(&expression, &grandchild, &empty));
+        calls.module(&child);
+        assert!(!calls.returns_unit(&expression, &grandchild, &empty));
+        assert!(calls.returns_unit(&expression, &sibling, &empty));
+        assert!(calls.returns_unit(&expression, &root, &empty));
+        calls.opaque(&root);
+        assert!(!calls.scope_is_transparent(&grandchild));
+        assert!(calls.scope_is_transparent(&vec![(8, 0), (1, 0)]));
+        assert!(!calls.returns_unit(&expression, &grandchild, &empty));
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &syn::parse_quote!(
+                fn local() {}
+            ),
+            &root,
+        );
+        let imports = HashMap::from_iter([("*".into(), None)]);
+        assert!(!calls.returns_unit(&expression, &root, &imports));
+        calls.imported("local");
+        assert!(!calls.returns_unit(&expression, &root, &empty));
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &syn::parse_quote!(
+                #[transform]
+                fn local() {}
+            ),
+            &root,
+        );
+        assert!(!calls.returns_unit(&expression, &root, &empty));
+        assert!(!calls.scope_is_transparent(&grandchild));
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &syn::parse_quote!(
+                fn local() {}
+            ),
+            &root,
+        );
+        for text in ["::local", "<T>::local", "<T as Trait>::local", "other::local", "1"] {
+            assert!(!calls.returns_unit(&syn::parse_str(text).unwrap(), &root, &empty), "{text}");
+        }
     }
 
     #[test]
@@ -713,7 +1045,7 @@ mod tests {
             &Vec::new(),
         );
         assert!(calls.returns_unit(&syn::parse_quote!(local), &Vec::new(), &imports));
-        for text in ["1", "::local", "module::local", "<T as Trait>::local"] {
+        for text in ["1", "::local", "module::local", "<T as Trait>::local", "<T>::local"] {
             assert!(!calls.returns_unit(&syn::parse_str(text).unwrap(), &Vec::new(), &imports), "{text}");
         }
     }

@@ -896,6 +896,159 @@ mod tests {
     }
 
     #[test]
+    fn option_fallback_confidence_tracks_default_evidence_when_abstract_payload_choices_are_empty() {
+        let defaults = Defaults::default();
+        let abstracts = ["u8".into()];
+        for (imports, confidence) in [
+            (HashMap::default(), Confidence::Proven),
+            (
+                HashMap::from_iter([("u8".into(), Some(vec!["dependency".into(), "u8".into()]))]),
+                Confidence::Optimistic,
+            ),
+        ] {
+            let types = test_types(&abstracts, &imports, &defaults);
+            assert!(values_for(&parse_quote!(u8), 2, &types).is_empty());
+            assert_eq!(
+                values_for(&parse_quote!(Option<u8>), 3, &types),
+                [
+                    proven("fn_value.none", "None"),
+                    ("fn_value.some_default", "Some(Default::default())".into(), confidence),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn aliased_local_maps_without_default_do_not_gain_an_empty_default_constructor() {
+        let file = syn::parse_file("struct HashMap<K,V>(K,V); type Map = HashMap<u8,u8>;").unwrap();
+        let indexes = super::super::indexes::indexes_in(
+            &file,
+            &crate::ops::registry::Selection::everything(),
+            &crate::cfg::CfgSet::unconditional(),
+        );
+        let defaults = Defaults::of(&file);
+        let imports = HashMap::default();
+        let types = Types {
+            aliases: Some(&indexes.aliases),
+            ..test_types(&[], &imports, &defaults)
+        };
+        assert_eq!(
+            values_for(&parse_quote!(Map), 3, &types),
+            [optimistic("fn_value.one_element", "core::iter::once((0, 0)).collect()")],
+        );
+    }
+
+    #[test]
+    fn nested_return_depth_changes_payload_shape_without_losing_metadata() {
+        let imports = HashMap::default();
+        let defaults = Defaults::of(&syn::parse_file("struct Missing;").unwrap());
+        let types = test_types(&[], &imports, &defaults);
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            (
+                "Option<Option<bool>>",
+                &[("fn_value.none", "None"), ("fn_value.some_default", "Some(Default::default())")],
+            ),
+            (
+                "Result<Option<bool>,u8>",
+                &[
+                    ("fn_value.ok_default", "Ok(Default::default())"),
+                    ("fn_value.err_default", "Err(Default::default())"),
+                ],
+            ),
+            (
+                "Vec<Option<bool>>",
+                &[
+                    ("fn_value.empty_collection", "Vec::new()"),
+                    ("fn_value.one_element", "core::iter::once(Default::default()).collect()"),
+                ],
+            ),
+            (
+                "HashMap<Option<bool>,Option<u8>>",
+                &[
+                    ("fn_value.empty_collection", "HashMap::new()"),
+                    (
+                        "fn_value.one_element",
+                        "core::iter::once((Default::default(), Default::default())).collect()",
+                    ),
+                ],
+            ),
+            ("Box<Option<bool>>", &[("fn_value.default", "Box::new(Default::default())")]),
+            (
+                "Cow<'static,Option<bool>>",
+                &[("fn_value.default", "Cow::Owned(Default::default())")],
+            ),
+            (
+                "impl Iterator<Item=Option<bool>>",
+                &[
+                    ("fn_value.empty_collection", "core::iter::empty()"),
+                    ("fn_value.one_element", "core::iter::once(Default::default())"),
+                ],
+            ),
+            ("(Option<bool>,)", &[("fn_value.tuple", "(Default::default(),)")]),
+        ];
+        for &(text, expected) in cases {
+            let ty = syn::parse_str(text).unwrap();
+            assert_eq!(
+                values_for(&ty, 1, &types),
+                expected.iter().map(|&(name, text)| proven(name, text)).collect::<Vec<_>>(),
+                "{text}"
+            );
+            assert_ne!(values_for(&ty, 2, &types), values_for(&ty, 1, &types), "{text}");
+        }
+        assert_eq!(
+            values_for(&syn::parse_quote!(Option<Option<bool>>), 2, &types),
+            [
+                proven("fn_value.none", "None"),
+                proven("fn_value.some", "Some(None)"),
+                proven("fn_value.some", "Some(Some(Default::default()))"),
+            ]
+        );
+        for text in ["[u8; 33]", "[Missing; 1]", "Missing", "std::io::Error", "Result<bool,u8>"] {
+            assert!(values_for(&syn::parse_str(text).unwrap(), 0, &types).is_empty(), "{text}");
+        }
+        assert_eq!(
+            values_for(&syn::parse_quote!((Unknown, bool)), 2, &types),
+            [
+                optimistic("fn_value.tuple", "(Default::default(), true)"),
+                optimistic("fn_value.tuple", "(Default::default(), false)"),
+            ]
+        );
+    }
+
+    #[test]
+    fn tuple_absent_choices_and_optimistic_errors_do_not_invent_success_values() {
+        let imports = HashMap::default();
+        let defaults = Defaults::of(&syn::parse_file("struct Missing;").unwrap());
+        let types = test_types(&[], &imports, &defaults);
+        for text in ["(Missing, bool)", "(bool, Missing, bool)", "(Missing, Missing)"] {
+            assert!(tuple_values(&syn::parse_str(text).unwrap(), 3, &types).is_empty(), "{text}");
+        }
+        assert_eq!(
+            values_for(&syn::parse_quote!(Result<bool, Unknown>), 3, &types),
+            [proven("fn_value.ok", "Ok(true)"), proven("fn_value.ok", "Ok(false)")]
+        );
+        assert_eq!(
+            values_for(&syn::parse_quote!(other::Result<bool,u8>), 3, &types),
+            [
+                optimistic("fn_value.ok", "Ok(true)"),
+                optimistic("fn_value.ok", "Ok(false)"),
+                optimistic("fn_value.err_default", "Err(Default::default())"),
+            ]
+        );
+        assert_eq!(
+            values_for(&syn::parse_quote!(Result<bool, foreign::bool>), 3, &types),
+            [
+                proven("fn_value.ok", "Ok(true)"),
+                proven("fn_value.ok", "Ok(false)"),
+                optimistic("fn_value.err_default", "Err(Default::default())"),
+            ]
+        );
+        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Vec<str>)));
+        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Option<str>)));
+        assert!(is_unsized_string_wrapper(&syn::parse_quote!(Box<str>)));
+    }
+
+    #[test]
     fn tuple_product_order_and_width_match_an_independent_boolean_oracle() {
         let imports = HashMap::default();
         let defaults = Defaults::default();

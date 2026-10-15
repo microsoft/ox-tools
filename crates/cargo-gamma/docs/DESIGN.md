@@ -562,7 +562,7 @@ diagnostic-file-only and does not add console output or campaign phases. Census 
 and successes, the estimated walk
 cost and economic-gate decision, sample launches, and complete versus partial evidence. Sweep
 telemetry records whole, case-selected, hinted-fallback, and uncovered
-decisions; named tests available and selected; exact and generalized candidate/probe/hit funnels
+decisions; named tests available and selected; exact-hint and inferred-test candidate/probe/hit funnels
 split into item, reach, file, and census tiers; and each package's first mutant start and final
 completion relative to the sweep start. Package CPU time remains in the package breakdown, while
 the package sweep span is wall time and may overlap other packages under concurrency.
@@ -837,11 +837,15 @@ test binaries.
 
 ### Cheapest evidence first
 
-Prior killers narrow work only after canonical iteration reaches their binary. A previous killer is
-only a hint: when its test is rerun, it must convict again, and filtering is used only when that
-binary cannot instead produce a resource, confirmation-flake, or metering outcome. If the hint
-cannot be used or does not convict, normal testing continues. Stale hints can waste work but cannot
-settle or change a verdict.
+An eligible exact killer hint is probed before inferred tests, even when its binary is later in
+canonical order. A previous killer is only a hint: its test must convict again. A confirmed kill
+from the first binary settles immediately; a later-binary kill is retained while earlier binaries
+are adjudicated in canonical order, preserving their failure, resource, confirmation-flake, and
+metering precedence. A retained exact kill suppresses speculative inferred probes. If the hint
+cannot be used or does not convict, normal inferred selection and canonical fallback continue.
+Targeted attempts are deduplicated by resolved binary and test name, including aliases and
+duplicates across exact hints and inferred tests. Confirmation and necessary whole-binary fallback
+are not suppressed. Stale hints can waste work but cannot settle a verdict.
 
 Learning generalizes successful exact probes within one run and across promoted run records. Exact
 tests learned from the same `(source file, enclosing item)` are ranked ahead of test binaries that
@@ -849,10 +853,10 @@ killed another mutant in the source file. Seed evidence records why a candidate 
 only kills against another mutant count as transfer hits. Transfer hits, misses, and observed cost
 rank candidates. Two transfer misses without a hit retire a candidate until new evidence exists.
 
-Generalized probes are admitted only when their observed cost does not exceed the fallback work
+Inferred-test probes are admitted only when their observed cost does not exceed the fallback work
 their smoothed transfer probability can avoid. Unmeasured candidates receive one bounded
 exploration opportunity. Each mutant tries at most two same-item tests and one binary from each
-generalized tier. A tier with eight attempts and no hit stops exploring for that campaign; a hit
+inferred tier. A tier with eight attempts and no hit stops exploring for that campaign; a hit
 keeps it open. Exact mutant hints and canonical fallback are unaffected, so admission can change
 cost but never a verdict.
 
@@ -881,8 +885,11 @@ versioned and shared by the run record and checked-in hints artifact. Older gene
 ignored rather than migrated, without discarding exact per-mutant probes from an otherwise valid
 checked-in artifact.
 Diagnostics report candidates, attempts, hits, and rejected candidates separately for exact mutant
-hints and for generalized item, reach, file, and census tiers. Every admitted generalized candidate
+hints and for inferred item, reach, file, and census tiers. Every admitted inferred candidate
 is rerun before use; persistence never turns reach or historical ordering into a verdict.
+The saved knowledge remains in the `generalized` schema; checkpoint and diagnostic JSON retain
+their existing `generalized*` keys for compatibility. These legacy wire names do not describe
+runtime inferred selections.
 
 Hint promotion is a projection of persisted campaign state, not another discovery pass. After
 resolving and validating the current workspace identity, it uses the campaign ledger's persisted
@@ -1343,7 +1350,7 @@ After findings, one blank line introduces a compact ordered footer: `Summary:`, 
 executed campaign, an actionable `Note   :` and indented entries for idle directives, the
 conditional suppression note, the conditional hints-promotion reminder, then one `Wrote  :` line
 per published artifact. The stats line reports elapsed wall time, distinct participating test
-binaries, mutant-test subprocess launches, and exact plus generalized hint probes that killed
+binaries, mutant-test subprocess launches, and exact-hint plus inferred-test probes that killed
 their mutant. It is absent for dry runs and runs that never reached test execution. All labels
 start in column one, use the same width and styled emphasis, and artifact paths use the host's
 native separators. Hints promotion is recommended only when the successfully persisted campaign

@@ -54,7 +54,331 @@ impl Manifest {
             within: Utf8PathBuf::new(),
         })
     }
+}
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    use super::*;
+
+    #[test]
+    fn workspace_runtime_redirection_persists_feature_settings_and_change_tracking() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let path = root.join("Cargo.toml");
+        fs::write(
+            &path,
+            "[workspace.dependencies]\ncargo-gamma-rt = {version = \"1\", features = [\"loom\"], default-features = false}\n",
+        )
+        .unwrap();
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.redirect_workspace_runtime(&root.join("runtime")).unwrap();
+        assert!(manifest.changed);
+        manifest.save().unwrap();
+        let saved = Manifest::read(&path).unwrap();
+        let dependencies = &saved.document["workspace"]["dependencies"];
+        for key in [RUNTIME_CRATE, RUNTIME_PACKAGE] {
+            assert_eq!(
+                dependencies[key]["path"].as_str(),
+                Some(portable_path(&root.join("runtime")).as_str())
+            );
+        }
+        assert_eq!(
+            dependencies[RUNTIME_PACKAGE]["features"]
+                .as_array()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_str(),
+            Some("loom")
+        );
+        assert_eq!(dependencies[RUNTIME_PACKAGE]["default-features"].as_bool(), Some(false));
+        let original = "[workspace.dependencies]\nunrelated = \"1\"\n";
+        fs::write(&path, original).unwrap();
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.redirect_workspace_runtime(&root.join("runtime")).unwrap();
+        assert!(!manifest.changed);
+        manifest.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn runtime_redirection_distinguishes_top_level_target_only_and_absent_dependencies() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let path = root.join("Cargo.toml");
+        for section in ["dependencies", "target.'cfg(unix)'.dependencies"] {
+            fs::write(
+                &path,
+                format!("[{section}]\ncargo-gamma-rt = {{ version = \"1\", features = [\"loom\"] }}\n"),
+            )
+            .unwrap();
+            let mut manifest = Manifest::read(&path).unwrap();
+            manifest
+                .redirect_runtime(&root.join("runtime"), &WorkspaceRuntimeFeatures::default())
+                .unwrap();
+            manifest.save().unwrap();
+            let saved = Manifest::read(&path).unwrap();
+            assert_eq!(
+                saved.document["dependencies"][RUNTIME_CRATE]["package"].as_str(),
+                Some(RUNTIME_PACKAGE)
+            );
+            assert_eq!(
+                saved.document["dependencies"][RUNTIME_CRATE]["features"]
+                    .as_array()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .as_str(),
+                Some("loom")
+            );
+            assert!(saved.document["dependencies"].get(RUNTIME_PACKAGE).is_none());
+        }
+        let missing = root.join("missing.toml");
+        let failure = Manifest::read(&missing).expect_err("a missing manifest cannot be read");
+        assert_eq!(failure.message(), format!("could not read `{missing}`"));
+        fs::write(&path, "[not a manifest").unwrap();
+        let failure = Manifest::read(&path).expect_err("a malformed manifest cannot be parsed");
+        assert!(failure.message().starts_with(&format!("could not parse `{path}`:")));
+    }
+
+    #[test]
+    fn sparse_target_tables_do_not_hide_later_runtime_dependencies_or_path_dependencies() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let path = root.join("Cargo.toml");
+        for redirect in [false, true] {
+            fs::write(&path, format!(
+                "[target]\ndisabled = 7\n[target.empty]\nrunner = \"unused\"\n[target.live.dependencies]\n{RUNTIME_CRATE} = {{ package = \"{RUNTIME_PACKAGE}\", version = \"1\", features = [\"loom\"] }}\n"
+            )).unwrap();
+            let mut manifest = Manifest::read(&path).unwrap();
+            if redirect {
+                manifest
+                    .redirect_runtime(&root.join("runtime"), &WorkspaceRuntimeFeatures::default())
+                    .unwrap();
+            } else {
+                manifest.link_runtime(&root.join("runtime")).unwrap();
+            }
+            assert!(manifest.document["target"]["live"]["dependencies"].get(RUNTIME_CRATE).is_none());
+            assert_eq!(
+                manifest.document["dependencies"][RUNTIME_CRATE]["features"]
+                    .as_array()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .as_str(),
+                Some("loom")
+            );
+            manifest.save().unwrap();
+            assert!(fs::read_to_string(&path).unwrap().contains("loom"));
+        }
+        fs::write(
+            &path,
+            "[target]\ndisabled = 7\n[target.live.dependencies]\nordinary = \"1\"\nshared = { path = \"../../shared\" }\n",
+        )
+        .unwrap();
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.anchor_paths(&root.join("member"), Utf8Path::new("member"));
+        assert_eq!(manifest.document["target"]["live"]["dependencies"]["ordinary"].as_str(), Some("1"));
+        assert_eq!(
+            manifest.document["target"]["live"]["dependencies"]["shared"]["path"].as_str(),
+            Some(portable_path(&normalize(&root.join("member/../../shared"))).as_str())
+        );
+    }
+
+    #[test]
+    fn runtime_redirection_propagates_conflicts_and_workspace_manifest_read_failures() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let path = root.join("Cargo.toml");
+        fs::write(
+            &path,
+            format!("[dependencies]\n{RUNTIME_CRATE} = {{ package = \"another-crate\", version = \"1\" }}\n"),
+        )
+        .unwrap();
+        let mut manifest = Manifest::read(&path).unwrap();
+        let before = manifest.document.to_string();
+        let failure = manifest
+            .redirect_runtime(&root.join("runtime"), &WorkspaceRuntimeFeatures::default())
+            .expect_err("redirecting an unrelated reserved dependency must fail");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "`gamma_rt` is already a dependency in `{path}` but cargo-gamma reserves that crate name for its guard runtime.\nRename that dependency so cargo-gamma can instrument this package."
+            )
+        );
+        assert_eq!(manifest.document.to_string(), before);
+        let missing = root.join("missing.toml");
+        let Err(failure) = WorkspaceRuntimeFeatures::from_workspace(&missing) else {
+            panic!("missing workspace feature declarations must not be silently defaulted")
+        };
+        assert_eq!(failure.message(), format!("could not read `{missing}`"));
+    }
+
+    #[test]
+    fn target_runtime_removals_are_saved_even_when_a_parseable_scalar_prevents_top_level_insertion() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let runtime = root.join("runtime");
+        for key in [RUNTIME_CRATE, RUNTIME_PACKAGE] {
+            let path = root.join(format!("{key}.toml"));
+            let entry = serde_json::to_string(&portable_path(&runtime)).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    "dependencies = \"non-table input\"\n[target.'cfg(any())'.dependencies]\n{key} = {{ package = \"{RUNTIME_PACKAGE}\", path = {entry} }}\n"
+                ),
+            )
+            .unwrap();
+            let mut manifest = Manifest::read(&path).unwrap();
+            assert!(!manifest.changed);
+            manifest
+                .link_runtime_inheriting(&runtime, &WorkspaceRuntimeFeatures::default())
+                .unwrap();
+            assert!(
+                manifest.changed,
+                "removing {key} is a persisted edit even on the early non-table return"
+            );
+            manifest.save().unwrap();
+            let saved = Manifest::read(&path).unwrap();
+            assert_eq!(saved.document["dependencies"].as_str(), Some("non-table input"));
+            assert!(saved.document["target"]["cfg(any())"]["dependencies"].get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn absolute_parent_components_are_never_reanchored_and_leading_dots_are_normalized() {
+        let root = Utf8PathBuf::from(if cfg!(windows) { "C:/path-policy" } else { "/path-policy" });
+        let spelling = root.as_str();
+        let separator = std::path::MAIN_SEPARATOR;
+        let absolute = Utf8PathBuf::from(format!("{spelling}{separator}{}absolute", format!("..{separator}").repeat(32)));
+        assert!(absolute.is_absolute());
+        assert!(escapes(&absolute));
+        assert!(escapes(&Utf8Path::new("member").join(&absolute)));
+        assert_eq!(anchor(absolute.as_str(), &root, Utf8Path::new("member")), None);
+        assert_eq!(normalize(Utf8Path::new("./a/../b")).as_str(), "b");
+        assert_eq!(normalize(Utf8Path::new(".")).as_str(), "");
+    }
+
+    #[test]
+    fn cargo_configuration_prefers_modern_flags_and_reports_each_creation_collision() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let cargo = root.join(".cargo");
+        fs::create_dir(&cargo).unwrap();
+        let modern = cargo.join("config.toml");
+        let legacy = cargo.join("config");
+        fs::write(
+            &modern,
+            "[build]\nrustflags = [\"modern\"]\n[target]\nskipped = 7\n[target.valid]\nrustflags = [\"target\"]\n",
+        )
+        .unwrap();
+        let old = "[build]\nrustflags = [\"legacy\"]\n";
+        fs::write(&legacy, old).unwrap();
+        cap_lints(&root).unwrap();
+        assert!(fs::read_to_string(&modern).unwrap().contains(CAP_LINTS));
+        let configured = Manifest::read(&modern).unwrap();
+        assert!(
+            configured.document["target"]["valid"]["rustflags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag.as_str() == Some(CAP_LINTS))
+        );
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), old);
+        fs::remove_dir_all(&cargo).unwrap();
+        fs::write(&cargo, "regular parent").unwrap();
+        let failure = cap_lints(&root).expect_err("a regular file cannot become the configuration directory");
+        assert_eq!(
+            failure.message(),
+            if cfg!(windows) {
+                format!("could not create `{cargo}`")
+            } else {
+                format!("could not resolve `{modern}`")
+            }
+        );
+        fs::remove_file(&cargo).unwrap();
+        fs::create_dir(&cargo).unwrap();
+        fs::create_dir(&modern).unwrap();
+        let failure = cap_lints(&root).expect_err("a configuration write cannot replace a directory");
+        assert_eq!(failure.message(), format!("could not write `{modern}`"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn configuration_anchoring_returns_write_failure_after_a_successful_shared_read() {
+        const SHARE_READ: u32 = 1;
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        fs::create_dir(root.join(".cargo")).unwrap();
+        let path = root.join(".cargo/config.toml");
+        let original = "paths = [\"../shared\"]\n";
+        fs::write(&path, original).unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(&path).unwrap();
+        let failure =
+            anchor_cargo_config(&root, &root).expect_err("shared reading succeeds but the handle denies saving the anchored path");
+        assert_eq!(failure.message(), format!("could not update `{path}`"));
+        drop(lock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn configuration_anchoring_keeps_earlier_commits_and_visits_paths_after_unchanged_entries() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let cargo = root.join(".cargo");
+        fs::create_dir(&cargo).unwrap();
+        let modern = cargo.join("config.toml");
+        let legacy = cargo.join("config");
+        fs::write(&modern, "paths = [\"stay\", \"../shared\"]\n").unwrap();
+        fs::write(&legacy, "[broken").unwrap();
+        let failure = anchor_cargo_config(&root, &root).expect_err("the legacy configuration is malformed");
+        assert!(failure.message().starts_with(&format!("could not parse `{legacy}`")), "{failure}");
+        let document = Manifest::read(&modern).unwrap();
+        let paths = document.document["paths"].as_array().unwrap();
+        assert_eq!(paths.get(0).unwrap().as_str(), Some("stay"));
+        assert_eq!(
+            paths.get(1).unwrap().as_str(),
+            Some(portable_path(&normalize(&root.join("../shared"))).as_str())
+        );
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "[broken");
+    }
+
+    #[test]
+    fn anchoring_persists_changed_dependency_paths_in_every_supported_table() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let path = root.join("Cargo.toml");
+        for table in [
+            "dependencies",
+            "dev-dependencies",
+            "build-dependencies",
+            "replace",
+            "patch.crates-io",
+            "workspace.dependencies",
+            "target.'cfg(unix)'.dependencies",
+        ] {
+            fs::write(
+                &path,
+                format!("[{table}]\nshared = {{ path = \"../../shared\" }}\nordinary = \"1\"\n"),
+            )
+            .unwrap();
+            let mut manifest = Manifest::read(&path).unwrap();
+            manifest.anchor_paths(&root.join("member"), Utf8Path::new("member"));
+            assert!(manifest.changed, "{table}");
+            manifest.save().unwrap();
+            let actual = fs::read_to_string(&path).unwrap();
+            let expected = portable_path(&normalize(&root.join("member/../../shared")));
+            assert!(actual.contains(&format!("path = \"{expected}\"")), "{table}: {actual}");
+            assert!(actual.contains("ordinary = \"1\""), "{table}: {actual}");
+        }
+    }
+}
+
+impl Manifest {
     /// Writes the manifest back if anything changed.
     pub(super) fn save(&self) -> Result<()> {
         // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]

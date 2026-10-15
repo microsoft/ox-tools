@@ -264,6 +264,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn public_nesting_precheck_keeps_multiline_comment_locations_and_ignored_literal_contents() {
+        for text in [
+            "// (((((\nfn f() {}",
+            "\n\n/* ((( */\nfn f() {}",
+            "fn f() { let s = \"((((\"; } // trailing",
+        ] {
+            assert!(!exceeds_nesting_limit(text), "{text}");
+        }
+        let deep = format!("// ignored (((\n\n{}", "(".repeat(65));
+        assert!(exceeds_nesting_limit(&deep));
+        let error = SourceFile::parse("nested.rs", deep).unwrap_err();
+        assert!(error.to_string().starts_with("nested.rs:3:"), "{error}");
+    }
+
+    #[test]
     fn locations_cover_empty_unicode_and_every_line_boundary() {
         assert_eq!(line_starts(""), vec![0]);
         assert_eq!(line_starts("\n"), vec![0]);

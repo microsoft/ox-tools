@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{BufWriter, Read as IoRead, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -39,15 +39,14 @@ pub trait Table: Sized {
     fn open_with(mmap: Mmap, max_ttl: Duration, now: DateTime<Utc>) -> Result<Self>;
 
     fn open(tables_root: impl AsRef<Path>, max_ttl: Duration, now: DateTime<Utc>) -> Result<Self> {
-        let path = tables_root.as_ref().join(Self::TABLE_NAME);
-        let file = File::open(&path).into_app_err_with(|| format!("opening table file: {}", path.display()))?;
-
-        // Get file size for the anonymous snapshot.
-        let file_size = table_file_size(file.metadata())?;
-
-        let mmap = map_table_file(&file, file_size)?;
-
-        Self::open_with(mmap, max_ttl, now)
+        open_table_with::<Self, _>(
+            tables_root.as_ref(),
+            max_ttl,
+            now,
+            |path| File::open(path),
+            File::metadata,
+            map_table_file,
+        )
     }
 
     fn create_table(tables_root: impl AsRef<Path>, csv_entry: impl IoRead, now: DateTime<Utc>) -> Result<File> {
@@ -79,7 +78,22 @@ pub trait Table: Sized {
     fn timestamp(&self) -> DateTime<Utc>;
 }
 
-fn table_file_size(metadata: std::io::Result<std::fs::Metadata>) -> Result<usize> {
+fn open_table_with<T: Table, F>(
+    tables_root: &Path,
+    max_ttl: Duration,
+    now: DateTime<Utc>,
+    open: impl FnOnce(&Path) -> std::io::Result<F>,
+    metadata: impl FnOnce(&F) -> std::io::Result<Metadata>,
+    load_snapshot: impl FnOnce(&F, usize) -> Result<Mmap>,
+) -> Result<T> {
+    let path = tables_root.join(T::TABLE_NAME);
+    let file = open(&path).into_app_err_with(|| format!("opening table file: {}", path.display()))?;
+    let file_size = table_file_size(metadata(&file))?;
+    let mmap = load_snapshot(&file, file_size)?;
+    T::open_with(mmap, max_ttl, now)
+}
+
+fn table_file_size(metadata: std::io::Result<Metadata>) -> Result<usize> {
     let metadata = metadata.into_app_err("getting file metadata")?;
     #[expect(
         clippy::cast_possible_truncation,
@@ -381,6 +395,31 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn table_open_returns_metadata_failure_after_the_file_was_successfully_opened() {
+        let error = open_table_with::<TestTable, _>(
+            Path::new("tables"),
+            Duration::ZERO,
+            DateTime::UNIX_EPOCH,
+            |path| {
+                assert_eq!(path, Path::new("tables").join(TestTable::TABLE_NAME));
+                Ok("opened table")
+            },
+            |file| {
+                assert_eq!(*file, "opened table");
+                Err(Error::new(ErrorKind::PermissionDenied, "injected table metadata failure"))
+            },
+            |_, _| panic!("mapping must not run after metadata failure"),
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "injected table metadata failure");
+        assert_eq!(error.find_source::<Error>().unwrap().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string().lines().nth(1).unwrap().split_once(" (at ").unwrap().0,
+            "> getting file metadata"
+        );
+    }
+
     #[derive(Deserialize)]
     struct TestCsvRow<'a> {
         value: &'a str,
@@ -441,6 +480,45 @@ mod tests {
     impl Seek for FailingIo {
         fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
             Err(Error::other("synthetic table seek failure"))
+        }
+    }
+
+    impl IoRead for FailingIo {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            panic!("a failed rewind must prevent reading table data")
+        }
+    }
+
+    #[test]
+    fn table_snapshot_clone_and_rewind_failures_preserve_context_without_panicking() {
+        for (reader, expected_context, expected_cause) in [
+            (
+                Err(Error::new(ErrorKind::PermissionDenied, "synthetic table clone failure")),
+                "cloning table file handle",
+                "synthetic table clone failure",
+            ),
+            (Ok(FailingIo), "rewinding table file", "synthetic table seek failure"),
+        ] {
+            let error = map_table_file_with(
+                reader,
+                3,
+                |_size| -> std::io::Result<()> { panic!("reader failure must prevent creating mapping options") },
+                |()| -> std::io::Result<Vec<u8>> { panic!("reader failure must prevent allocating a mapping") },
+                |_bytes| -> std::io::Result<()> { panic!("reader failure must prevent protecting a mapping") },
+            )
+            .expect_err("reader setup must return its IO error");
+            assert_eq!(error.message(), expected_cause);
+            let display = error.to_string();
+            let context = display.lines().nth(1).unwrap().split_once(" (at ").unwrap().0;
+            assert_eq!(context, format!("> {expected_context}"));
+            assert_eq!(
+                error.find_source::<Error>().unwrap().kind(),
+                if expected_context == "cloning table file handle" {
+                    ErrorKind::PermissionDenied
+                } else {
+                    ErrorKind::Other
+                }
+            );
         }
     }
 
