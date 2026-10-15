@@ -1034,8 +1034,7 @@ fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str
         let root = xml_document_root(text)?;
         if let Some(region) = find_region(text, region_id, syntax).ok().flatten() {
             let root = root.ok_or_else(|| "the XML document element is self-closing, so it cannot contain a managed region".to_owned())?;
-            // #[gamma::skip(relational.lt_to_le, reason = "XML markers occupy complete lines, so a marker cannot start exactly at the opening tag's exclusive end byte")]
-            if region.start_line.start < root.opening_end || region.end_line.end > root.closing_start {
+            if !region_is_inside_xml_root(region.start_line.start, region.end_line.end, root) {
                 return Err("the existing XML managed region is outside the document root".to_owned());
             }
             return Ok(RegionPlacement::End);
@@ -1047,6 +1046,10 @@ fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str
         return Ok(RegionPlacement::At(offset));
     }
     Ok(RegionPlacement::End)
+}
+
+fn region_is_inside_xml_root(start: usize, end: usize, root: crate::region::XmlRootBounds) -> bool {
+    start >= root.opening_end && end <= root.closing_start
 }
 
 /// The composed-host declaration for a host, when it has one.
@@ -1498,6 +1501,7 @@ fn infer_recorded_region_syntax(
             }
             Ok(None) | Err(_) => false,
         };
+        // #[gamma::skip(relational.eq_to_ne, reason = "for non-XML syntaxes raw_marker_line_present checks that syntax, and any matching line already makes found non-None; the right disjunct cannot uniquely change the result")]
         let has_evidence =
             !matches!(found, Ok(None)) || (syntax == CommentSyntax::Xml && xml_scan_failed && raw_marker_line_present(text, id, syntax));
         if complete || has_evidence {
@@ -1509,6 +1513,7 @@ fn infer_recorded_region_syntax(
     if checksum_matches == 1 {
         return Ok(checksum_match.expect("one checksum match records its syntax"));
     }
+    // #[gamma::skip(relational.gt_to_ge, reason = "the preceding checksum_matches == 1 branch returned, so >= 1 and > 1 are equivalent here")]
     if checksum_matches > 1 {
         bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum");
     }
@@ -3074,6 +3079,19 @@ mod tests {
 
         assert!(plan.refusals().is_empty());
         assert_eq!(plan.items()[0].decision, Decision::InSync);
+    }
+
+    #[test]
+    fn xml_region_containment_includes_exact_root_boundaries() {
+        let root = crate::region::XmlRootBounds {
+            opening_end: 10,
+            closing_start: 20,
+            closing_line_start: Some(20),
+        };
+        assert!(region_is_inside_xml_root(10, 20, root));
+        assert!(region_is_inside_xml_root(11, 19, root));
+        assert!(!region_is_inside_xml_root(9, 20, root));
+        assert!(!region_is_inside_xml_root(10, 21, root));
     }
 
     #[test]
