@@ -531,7 +531,7 @@ fn push_region_at(
 ) -> Result<(), AppError> {
     let host = (hosts.resolve)(repo_root, host)?;
     let current = hosts.get_or_read(repo_root, &host)?;
-    if refuse_region_syntax_change(plan, &host, spec, current.as_deref()) {
+    if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref()) {
         return Ok(());
     }
     if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
@@ -658,21 +658,27 @@ fn region_placement_or_refuse(
     }
 }
 
-fn refuse_region_syntax_change(plan: &mut Plan, host: &str, spec: &RegionSpec, current: Option<&str>) -> bool {
-    let Some(text) = current else {
+fn refuse_region_syntax_change(plan: &mut Plan, manifest: &Manifest, host: &str, spec: &RegionSpec, current: Option<&str>) -> bool {
+    let (Some(text), Some(recorded_checksum)) = (current, manifest.region_checksum(host, spec.id.as_str())) else {
         return false;
     };
     let scanner = HostScanner::for_path(host);
-    if matches!(scanner.find(text, spec.id.as_str(), spec.syntax), Ok(Some(_))) {
+    let existing = match infer_recorded_region_syntax(text, scanner, host, spec.id.as_str(), recorded_checksum) {
+        Ok(existing) => existing,
+        Err(reason) => {
+            refuse_region(
+                plan,
+                host.to_owned(),
+                spec.id.as_str(),
+                &reason.to_string(),
+                RefusalRemedy::SyntaxChange,
+            );
+            return true;
+        }
+    };
+    if existing == spec.syntax {
         return false;
     }
-    let existing = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml]
-        .into_iter()
-        .filter(|syntax| *syntax != spec.syntax)
-        .find(|syntax| !matches!(scanner.find(text, spec.id.as_str(), *syntax), Ok(None)));
-    let Some(existing) = existing else {
-        return false;
-    };
     let name = |syntax| match syntax {
         CommentSyntax::Hash => "hash",
         CommentSyntax::SlashSlash => "slash-slash",
@@ -1448,9 +1454,19 @@ fn recorded_region_syntax(
         return Ok(CommentSyntax::Hash);
     };
     let scanner = HostScanner::for_path(host);
+    infer_recorded_region_syntax(&text, scanner, host, id, recorded_checksum)
+}
+
+fn infer_recorded_region_syntax(
+    text: &str,
+    scanner: HostScanner,
+    host: &str,
+    id: &str,
+    recorded_checksum: &str,
+) -> Result<CommentSyntax, AppError> {
     let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
-    let xml_scan_failed = scanner == HostScanner::Lines && xml_comment_scan_failed(&text);
-    if xml_scan_failed && raw_marker_line_present(&text, id, CommentSyntax::Xml) {
+    let xml_scan_failed = scanner == HostScanner::Lines && xml_comment_scan_failed(text);
+    if xml_scan_failed && raw_marker_line_present(text, id, CommentSyntax::Xml) {
         bail!(
             "managed region '{id}' in '{host}' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
         );
@@ -1461,7 +1477,7 @@ fn recorded_region_syntax(
     let mut evidence_count = 0;
 
     for syntax in syntaxes {
-        let found = scanner.find(&text, id, syntax);
+        let found = scanner.find(text, id, syntax);
         let complete = match &found {
             Ok(Some(region)) => {
                 if checksum_str(region.body_str()) == recorded_checksum {
@@ -1473,7 +1489,7 @@ fn recorded_region_syntax(
             Ok(None) | Err(_) => false,
         };
         let has_evidence =
-            !matches!(found, Ok(None)) || (syntax == CommentSyntax::Xml && xml_scan_failed && raw_marker_line_present(&text, id, syntax));
+            !matches!(found, Ok(None)) || (syntax == CommentSyntax::Xml && xml_scan_failed && raw_marker_line_present(text, id, syntax));
         if complete || has_evidence {
             evidence_count += 1;
             evidence = Some(syntax);
@@ -2933,6 +2949,54 @@ mod tests {
             assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
             assert_eq!(host.matches("generated").count(), 1);
         }
+    }
+
+    #[test]
+    fn empty_declared_syntax_pair_does_not_mask_the_tracked_region() {
+        let host = "# >>> anvil-managed: projects\ngenerated\n# <<< anvil-managed: projects\n\
+                    // >>> anvil-managed: projects\n// <<< anvil-managed: projects\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: RegionId::new("projects"),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("host.txt", "projects", checksum_str("generated\n"));
+        let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage host.txt [projects]: existing marker lines use hash comments, but the catalog now declares slash-slash comments. \
+               Changing marker syntax in place is not supported because the manifest does not record the previous syntax. This region was left unchanged; \
+               other regions in the same file and other artifacts may still be updated. Restore the catalog's previous comment syntax, or deliberately \
+               remove the old marker lines and their generated body before retrying with the new syntax."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn live_syntax_change_refuses_when_xml_failure_hides_the_tracked_pair() {
+        let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "setting = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.xml", "settings", checksum_str("  <generated />\n"));
+        let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage config.xml [settings]: managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so \
+               absence cannot be proven. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Restore the catalog's \
+               previous comment syntax, or deliberately remove the old marker lines and their generated body before retrying with the new syntax."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
     }
 
     #[test]
