@@ -71,7 +71,7 @@ pub(crate) struct CoverageGateArgs {
     pub(crate) command: Option<CoverageGateCommand>,
 }
 
-/// Commands that extend the backward-compatible evaluation mode.
+/// Commands that extend the bare evaluation invocation shape.
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum CoverageGateCommand {
     /// Collect coverage with cargo-llvm-cov and nextest, then evaluate it.

@@ -108,9 +108,9 @@ cargo coverage-gate [EVALUATION OPTIONS]
 cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
 ```
 
-The bare command remains the backward-compatible evaluation mode. It reads one
-or more cargo-llvm-cov lcov tracefiles, resolves policy, computes per-package
-percentages, and emits a verdict.
+The bare command retains its existing invocation shape. In 0.7 it filters one
+or more cargo-llvm-cov lcov tracefiles to the released surface before resolving
+policy, computing per-package percentages, and emitting a verdict.
 
 `run` first collects coverage through cargo-llvm-cov and nextest, then calls the
 same evaluator in-process. Exit `0` if collection succeeds and every in-scope
@@ -183,6 +183,11 @@ package. Plain nextest is used only for an explicit
 `--no-coverage-target` match. That path covers every selected package and
 requested feature configuration, emits explicit no-coverage and no-gate
 diagnostics, and creates no LCOV output.
+
+Released-surface discovery remains workspace-wide even with package selection:
+every workspace target graph is validated before reports are filtered. A source
+layout the filter cannot represent therefore fails explicitly even when its
+package is not selected for the verdict.
 
 ### 5.3 Policy metadata
 
@@ -882,8 +887,11 @@ precision cannot weaken the configured threshold — see §10.5.
 
 ### 10.2 Security
 
-Evaluation reads `Cargo.toml` files and coverage lcov tracefiles and writes only
-the selected summary file. `run` additionally writes beneath
+Released-surface evaluation reads `Cargo.toml` files, coverage lcov tracefiles,
+and reachable Rust sources for canonicalization, module discovery, parsing,
+and line classification; explicit `evaluate_unfiltered*` APIs do not inspect
+Rust sources. Evaluation writes only the selected summary file. `run`
+additionally writes beneath
 `--coverage-dir`, executes cargo-llvm-cov, nextest, Cargo, rustc, and LLVM, and
 deletes only temporary response/staging files and its per-invocation coverage
 scratch. It never invokes workspace-wide cargo-llvm-cov cleanup.

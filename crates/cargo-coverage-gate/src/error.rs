@@ -49,6 +49,7 @@ use serde_json::Value;
     ParseLcovError,
     ReadLcovError,
     ResolveCoverageSourceError,
+    InspectCoverageSourceError,
     ReadCoverageSourceError,
     ParseCoverageSourceError,
     UnsupportedSourceEditionError,
@@ -245,6 +246,15 @@ pub(crate) struct ReadLcovError {
 #[display("failed to resolve Rust source path `{path}` while filtering coverage")]
 #[from(std::io::Error)]
 pub(crate) struct ResolveCoverageSourceError {
+    pub path: String,
+}
+
+/// A candidate Rust module path could not be inspected to determine whether
+/// it names a source file.
+#[ohno::error]
+#[display("failed to inspect Rust source path `{path}` while resolving modules")]
+#[from(std::io::Error)]
+pub(crate) struct InspectCoverageSourceError {
     pub path: String,
 }
 

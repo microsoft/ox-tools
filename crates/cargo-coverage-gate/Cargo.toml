@@ -35,8 +35,8 @@ normal = ["unicode-ident"]
 allowed = ["unicode-ident"]
 
 # The gate filters test-only source regions and non-release Cargo targets before measuring this
-# crate. This floor records the lowest cross-platform released-surface result from the coverage-gate
-# CI matrix; raise it only after that matrix improves.
+# crate. The pre-0.7 floor is retained and validated by the cross-platform released-surface CI
+# matrix; raise it only after that matrix improves.
 [package.metadata.coverage-gate]
 min-lines-percent = 99.82758
 
