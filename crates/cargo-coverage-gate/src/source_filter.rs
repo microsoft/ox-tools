@@ -1151,6 +1151,7 @@ mod tests {
             }
         });
         assert!(reject_package_test_attributes([("alpha", &target_metadata)]).is_err());
+        assert!(package_test_attributes_value(&json!({"coverage-gate": {"target": "not-an-object"}})).is_none());
 
         let source = SourceFile::parse(
             "#[company::test] fn named_test() {}\n#[tokio::test] async fn configured_test() {}\n",
@@ -1447,6 +1448,11 @@ mod tests {
                 .any(|(surface, role, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
         );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
+        let error = index
+            .source_for_lcov(&root.join("member/src/helper.rs"))
+            .expect_err("an existing source outside the target graph must fail")
+            .to_string();
+        assert!(error.contains("not reachable from any Cargo target"), "{error}");
 
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov(concat!(
@@ -1512,6 +1518,20 @@ mod tests {
     fn source_index_rejects_conflicting_editions_and_package_test_policy() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
+        let duplicate = metadata.packages[0].targets[0].clone();
+        metadata.packages[0].targets.push(duplicate);
+        let index = SourceIndex::from_metadata(&metadata).expect("duplicate target visit is ignored");
+        let lib = fs::canonicalize(root.join("member/src/lib.rs")).expect("canonical library source");
+        assert_eq!(
+            index.files[&lib]
+                .visit_contexts
+                .iter()
+                .filter(|(surface, role, _)| *surface == Surface::Released && *role == SourceRole::CrateRoot)
+                .count(),
+            1
+        );
+
+        let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[1].src_path = metadata.packages[0].targets[0].src_path.clone();
         metadata.packages[0].targets[1].edition = CargoEdition::E2021;
         let error = SourceIndex::from_metadata(&metadata)
@@ -1525,6 +1545,23 @@ mod tests {
             .expect_err("package-scoped test attributes must fail")
             .to_string();
         assert!(error.contains("workspace-scoped"), "{error}");
+
+        let member = root.join("member");
+        let mut fail_member_resolution = |path: &Path| {
+            if path == member {
+                Err(ResolveCoverageSourceError::caused_by(
+                    diagnostic_path(path),
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "member resolution denied"),
+                )
+                .into())
+            } else {
+                resolve_source_path(path)
+            }
+        };
+        let error = SourceIndex::from_metadata_with_source_resolver(&source_index_fixture_metadata(&root), &mut fail_member_resolution)
+            .expect_err("member directory resolution errors propagate")
+            .to_string();
+        assert!(error.contains("member resolution denied"), "{error}");
     }
 
     #[test]
@@ -1544,6 +1581,22 @@ mod tests {
         assert!(!attribute_marks_test(&malformed, &BTreeSet::new()));
         assert!(!attribute_marks_test(&empty_cfg_attr, &BTreeSet::new()));
 
+        let malformed_path = SourceFile::parse("#[company::] fn incomplete() {}\n", Edition::Edition2024).tree();
+        let attribute = malformed_path
+            .items()
+            .next()
+            .expect("incomplete-path item")
+            .attrs()
+            .next()
+            .expect("incomplete-path attribute");
+        let ast::Meta::PathMeta(path_meta) = attribute.meta().expect("incomplete attribute has metadata") else {
+            panic!("incomplete path attribute has path metadata");
+        };
+        assert_eq!(
+            normalize_attribute_path(&path_meta.path().expect("incomplete attribute has a path")),
+            "company"
+        );
+
         let mut flags = [0_u8; 1];
         mark_range_lines(&mut flags, &[0], TextRange::empty(0.into()), LINE_TEST_ONLY);
         assert_eq!(flags, [0]);
@@ -1551,6 +1604,10 @@ mod tests {
         let mut flags = [0_u8; 2];
         mark_range_lines(&mut flags, &[0, 4], TextRange::new(0.into(), 4.into()), LINE_TEST_ONLY);
         assert_eq!(flags, [LINE_TEST_ONLY, 0]);
+
+        let mut flags = [0_u8; 1];
+        mark_range_lines(&mut flags, &[0, 4], TextRange::new(4.into(), 5.into()), LINE_TEST_ONLY);
+        assert_eq!(flags, [0]);
     }
 
     #[test]
@@ -1574,6 +1631,12 @@ mod tests {
         assert!(
             declarations(Path::new(""), &empty_path_analysis, SourceRole::PlainModule, &BTreeSet::new())
                 .expect("a path without an owned directory has no declarations")
+                .is_empty()
+        );
+        let missing = analyze(&root, "mod missing;\n");
+        assert!(
+            declarations(&root, &missing, SourceRole::CrateRoot, &BTreeSet::new())
+                .expect("a missing module source is ignored")
                 .is_empty()
         );
 
@@ -2079,7 +2142,7 @@ mod tests {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::new();
         let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1,checksum\nDA:2,0\nend_of_record\n\
-                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,checksum\nDA:3,0\nend_of_record\n";
+                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,checksum\nDA:2,1\nDA:3,0\nend_of_record\n";
         let filtered = filter_report_with(parse_lcov(input), |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
@@ -2092,11 +2155,27 @@ mod tests {
         let section = report.sections.values().next().expect("one merged section");
         assert_eq!(report.sections.len(), 1);
         assert_eq!(section.lines.len(), 3);
-        assert_eq!(section.lines.values().map(|line| line.count).collect::<Vec<_>>(), [3, 0, 0]);
+        assert_eq!(section.lines.values().map(|line| line.count).collect::<Vec<_>>(), [3, 1, 0]);
         assert_eq!(
             section.lines.values().next().expect("line one").checksum.as_deref(),
             Some("checksum")
         );
+    }
+
+    #[test]
+    fn sections_with_only_test_lines_are_removed() {
+        let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
+        let test_only = BTreeSet::from([1]);
+        let filtered = filter_report_with(parse_lcov("TN:\nSF:surface/src/lib.rs\nDA:1,1\nend_of_record\n"), |_| {
+            Ok(SourceDisposition::Include {
+                source_file: normalized.clone(),
+                line_count: 1,
+                test_only_lines: &test_only,
+            })
+        })
+        .expect("test-only section filters");
+
+        assert!(parse_lcov(&filtered).sections.is_empty());
     }
 
     #[test]
