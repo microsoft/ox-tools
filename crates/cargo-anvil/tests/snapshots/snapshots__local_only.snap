@@ -6941,7 +6941,7 @@ anvil-tool-cargo-bolero-validate-prereqs:
         Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & just _check-tool cargo-bolero {{cargo_bolero_version}}
+    & '{{ replace(just_executable(), "'", "''") }}' _check-tool cargo-bolero {{cargo_bolero_version}}
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-careful` tool.
@@ -7066,7 +7066,7 @@ anvil-tool-cargo-mutants-validate-prereqs:
         Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & just _check-tool cargo-mutants {{cargo_mutants_version}}
+    & '{{ replace(just_executable(), "'", "''") }}' _check-tool cargo-mutants {{cargo_mutants_version}}
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-nextest` tool.

@@ -844,6 +844,14 @@ mod tests {
             ),
             "the mutants installer must invoke the generated just executable for its core helper"
         );
+        assert!(
+            TOOLS_JUST.contains("& '{{ replace(just_executable(), \"'\", \"''\") }}' _check-tool cargo-bolero {{cargo_bolero_version}}"),
+            "the bolero prerequisite check must invoke the generated just executable"
+        );
+        assert!(
+            TOOLS_JUST.contains("& '{{ replace(just_executable(), \"'\", \"''\") }}' _check-tool cargo-mutants {{cargo_mutants_version}}"),
+            "the mutants prerequisite check must invoke the generated just executable"
+        );
         for component in ["clippy", "rustfmt"] {
             let expected = format!("anvil-component-default-{component}-install: anvil-toolchain-stable-install");
             assert!(
