@@ -25,6 +25,7 @@ use crate::error::{
     InspectCoverageSourceError, InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError,
     NormalizedSourceChecksumError, PackageScopedTestAttributesError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError,
     ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
+    UnsupportedSourceInclusionError,
 };
 use crate::workspace::load_metadata;
 
@@ -245,12 +246,19 @@ impl SourceIndex {
                     continue;
                 }
                 indexed.add_visit(pending.surface, pending.role, &pending.resolution_path, released_path);
+                reject_unsupported_released_includes(
+                    &pending.resolution_path,
+                    &indexed.analysis.syntax,
+                    pending.surface,
+                    &test_attributes,
+                )?;
                 let declarations = source_declarations(&pending.resolution_path, &indexed.analysis, pending.role, &test_attributes)?;
                 enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
                 continue;
             }
 
             let analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
+            reject_unsupported_released_includes(&pending.resolution_path, &analysis.syntax, pending.surface, &test_attributes)?;
             let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &test_attributes)?;
             let mut indexed = IndexedSource {
                 analysis,
@@ -460,10 +468,20 @@ fn analyze_source_text(
 }
 
 fn attributed_syntax_range(attribute: &ast::Attr) -> TextRange {
-    let owner = attribute
+    let immediate_owner = attribute
         .syntax()
         .parent()
         .expect("every parsed attribute is owned by a syntax node");
+    let owner = if attribute.kind().is_inner() {
+        attribute
+            .syntax()
+            .ancestors()
+            .filter_map(ast::AnyHasAttrs::cast)
+            .find(|candidate| candidate.inner_attributes_node().as_ref() == Some(&immediate_owner))
+            .map_or(immediate_owner, |candidate| candidate.syntax().clone())
+    } else {
+        immediate_owner
+    };
     let owner_range = owner.text_range();
     let mut end = owner_range.end();
     let mut next = owner.next_sibling_or_token();
@@ -620,6 +638,35 @@ fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibili
             }
         }
     }
+}
+
+fn reject_unsupported_released_includes(
+    path: &Path,
+    source: &ast::SourceFile,
+    surface: Surface,
+    test_attributes: &BTreeSet<String>,
+) -> Result<(), CoverageGateError> {
+    if surface == Surface::NonReleased {
+        return Ok(());
+    }
+    let source_test_only = ast::attrs_including_inner(source).any(|attribute| attribute_marks_test(&attribute, test_attributes));
+    if syntax_contains_released_include(source.syntax(), test_attributes, source_test_only) {
+        return Err(UnsupportedSourceInclusionError::new(diagnostic_path(path)).into());
+    }
+    Ok(())
+}
+
+fn syntax_contains_released_include(node: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_test_only: bool) -> bool {
+    node.children().any(|child| {
+        let test_only = inherited_test_only
+            || ast::AnyHasAttrs::cast(child.clone())
+                .is_some_and(|owner| ast::attrs_including_inner(&owner).any(|attribute| attribute_marks_test(&attribute, test_attributes)));
+        (!test_only
+            && ast::MacroCall::cast(child.clone())
+                .and_then(|macro_call| macro_call.path())
+                .is_some_and(|path| normalize_attribute_path(&path) == "include"))
+            || syntax_contains_released_include(&child, test_attributes, test_only)
+    })
 }
 
 fn module_declarations(
@@ -1425,6 +1472,9 @@ mod tests {
             "const VALUES: &[i32] = &[\n    #[cfg(test)] 1, 2,\n];\n",
         );
         assert!(shared_line.test_only_lines.is_empty());
+
+        let inner_function = analyze(Path::new("inner-function.rs"), "fn helper() {\n    #![cfg(test)]\n}\n");
+        assert_eq!(inner_function.test_only_lines, BTreeSet::from([1, 2, 3]));
     }
 
     #[test]
@@ -1466,10 +1516,18 @@ mod tests {
         )
         .expect("relative report filters");
         assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].contains("DA:4,1"), "{}", filtered[0]);
-        assert!(!filtered[0].contains("DA:5,"), "{}", filtered[0]);
-        assert!(!filtered[0].contains("DA:6,"), "{}", filtered[0]);
-        assert!(!filtered[0].contains("integration.rs"), "{}", filtered[0]);
+        let filtered = parse_lcov(&filtered[0]);
+        assert_eq!(filtered.sections.len(), 1);
+        let (key, section) = filtered.sections.iter().next().expect("one filtered section");
+        assert_eq!(key.test_name, "");
+        assert_eq!(key.source_file, root.join("member/src/shared.rs"));
+        assert_eq!(section.lines.len(), 1);
+        let (line, value) = section.lines.iter().next().expect("one filtered line");
+        assert_eq!(line.line, 4);
+        assert_eq!(value.count, 1);
+        assert_eq!(value.checksum, None);
+        assert!(section.functions.is_empty());
+        assert!(section.branches.is_empty());
 
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 100}});
@@ -1516,6 +1574,36 @@ mod tests {
                 .visit_contexts
                 .contains(&(Surface::Released, SourceRole::CrateRoot, resolution_path))
         );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn released_include_macros_fail_closed_even_when_tests_reach_the_file() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/include-root.rs").to_string_lossy().into_owned().into();
+
+        let error = SourceIndex::from_metadata(&metadata).expect_err("released include macros must be rejected");
+        let inclusion = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(|source| source.downcast_ref::<UnsupportedSourceInclusionError>())
+            .expect("unsupported inclusion cause");
+        let declaring = resolve_module_resolution_path(&root.join("member/src/include-root.rs")).expect("include root resolution path");
+        assert_eq!(inclusion.declaring, diagnostic_path(&declaring));
+
+        let test_only = analyze(
+            Path::new("/workspace/lib.rs"),
+            "#[cfg(test)] mod tests { include!(\"helper.rs\"); }\n",
+        );
+        reject_unsupported_released_includes(
+            Path::new("/workspace/lib.rs"),
+            &test_only.syntax,
+            Surface::Released,
+            &BTreeSet::new(),
+        )
+        .expect("test-only include macro is outside the released surface");
     }
 
     #[test]
@@ -1665,7 +1753,7 @@ mod tests {
 
         let analysis = analyze(&root, "mod child;\n");
         let mut fail_inspection = |path: &Path| {
-            Err(ResolveCoverageSourceError::caused_by(
+            Err(InspectCoverageSourceError::caused_by(
                 diagnostic_path(path),
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, "inspection denied"),
             )

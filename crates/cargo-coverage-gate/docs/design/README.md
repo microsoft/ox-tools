@@ -624,6 +624,9 @@ The module graph does not infer ownership through `include!`, macro-generated
 module declarations, or build-script-generated source inclusion. If such a
 path appears in LCOV without a supported Cargo target or module edge, filtering
 fails with the offending source path rather than hiding its counters.
+Additionally, a non-test `include!` encountered while walking a released
+source fails immediately: a separate test-target edge to the included file
+must not make released counters look test-only.
 
 Canonical source identity is kept separate from Rust's module-resolution
 location. If a Cargo target or module source is reached through a file symlink,
@@ -837,6 +840,12 @@ Coverage services must receive the filtered LCOV files without a second
 test-path or `test-util` ignore list. Test-only source is already absent, and a
 service-side ignore would make its displayed denominator differ from the local
 gate.
+
+The generated Anvil recipe cannot provide that artifact contract until it pins
+a published cargo-coverage-gate release containing this filter. During the
+0.7.0 publication PR it still uploads raw cargo-llvm-cov output; the follow-up
+Anvil rollout must update the pin and switch the gate and uploads to the same
+published filtered files.
 
 ### 8.2 Azure DevOps
 
