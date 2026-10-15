@@ -2728,6 +2728,20 @@ mod tests {
     }
 
     #[test]
+    fn marker_id_distinguishes_openers_and_closers_for_every_syntax() {
+        for (syntax, opener, closer) in [
+            (CommentSyntax::Hash, "# >>> anvil-managed: x", "# <<< anvil-managed: x"),
+            (CommentSyntax::SlashSlash, "// >>> anvil-managed: x", "// <<< anvil-managed: x"),
+            (CommentSyntax::Xml, "<!-- >>> anvil-managed: x -->", "<!-- <<< anvil-managed: x -->"),
+        ] {
+            assert_eq!(syntax.marker_id(opener, true), Some("x"));
+            assert_eq!(syntax.marker_id(opener, false), None);
+            assert_eq!(syntax.marker_id(closer, true), None);
+            assert_eq!(syntax.marker_id(closer, false), Some("x"));
+        }
+    }
+
+    #[test]
     fn xml_syntax_renders_a_complete_comment_line_pair() {
         let new = upsert_region(
             "",
@@ -2919,6 +2933,10 @@ mod tests {
         assert_eq!(
             xml_document_root("<!-- only a comment -->\n").unwrap_err(),
             "the XML host has no document element"
+        );
+        assert_eq!(
+            xml_document_root("<root>\n").unwrap_err(),
+            "the XML host has no closing element for `root`"
         );
     }
 

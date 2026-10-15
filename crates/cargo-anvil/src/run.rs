@@ -3328,6 +3328,27 @@ mod tests {
     }
 
     #[test]
+    fn retirement_refuses_multiple_checksum_matching_syntaxes() {
+        let host = "# >>> anvil-managed: retired\nsame body\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nsame body\n// <<< anvil-managed: retired\n";
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", host.to_owned());
+
+        assert_eq!(
+            recorded_region_syntax(
+                Path::new("in-memory-managed-region-tests"),
+                &mut hosts,
+                "host.txt",
+                "retired",
+                &checksum_str("same body\n"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "managed region 'retired' in 'host.txt' has multiple marker syntaxes whose bodies match the recorded checksum"
+        );
+    }
+
+    #[test]
     fn retirement_refuses_when_xml_tokenization_hides_marker_lines() {
         let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
         let mut hosts = memory_hosts();
