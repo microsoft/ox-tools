@@ -304,7 +304,11 @@ mod tests {
             .take_while(|line| line.is_empty() || line.starts_with("    "))
             .collect::<Vec<_>>()
             .join("\n");
-        insta::assert_snapshot!("container_launcher_recipe", body);
+        let snapshot = include_str!("snapshots/cargo_anvil__anvil__artifacts__container__tests__container_launcher_recipe.snap");
+        let (_, expected) = snapshot
+            .split_once("\n---\n")
+            .expect("the checked-in snapshot has a metadata header");
+        assert_eq!(body.trim_end_matches('\n'), expected.trim_end_matches('\n'));
     }
 
     #[test]

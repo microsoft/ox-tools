@@ -350,7 +350,7 @@
 //! ```
 //!
 //! `GITHUB_TOKEN` is not forwarded by default, and the launcher never acquires
-//! host gh credentials. To use an explicitly supplied token, run
+//! host GitHub CLI credentials. To use an explicitly supplied token, run
 //! `just anvil-container --github-token just anvil-aprz` (or omit the command
 //! for an authenticated shell). A missing token fails before engine resolution.
 //! Only use credentials with reviewed, trusted code: recipes and hooks run on
