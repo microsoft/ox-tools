@@ -1,6 +1,12 @@
 trigger:
 - main
 
+pr:
+  autoCancel: true
+  branches:
+    include:
+    - main
+
 parameters:
 - name: validationOsList
   type: object
