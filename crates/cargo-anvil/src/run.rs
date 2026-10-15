@@ -663,6 +663,16 @@ fn refuse_region_syntax_change(plan: &mut Plan, manifest: &Manifest, host: &str,
         return false;
     };
     let scanner = HostScanner::for_path(host);
+    let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
+    let has_evidence = syntaxes
+        .into_iter()
+        .any(|syntax| !matches!(scanner.find(text, spec.id.as_str(), syntax), Ok(None)));
+    let hidden_xml_evidence = scanner == HostScanner::Lines
+        && xml_comment_scan_failed(text)
+        && raw_marker_line_present(text, spec.id.as_str(), CommentSyntax::Xml);
+    if !has_evidence && !hidden_xml_evidence {
+        return false;
+    }
     let existing = match infer_recorded_region_syntax(text, scanner, host, spec.id.as_str(), recorded_checksum) {
         Ok(existing) => existing,
         Err(reason) => {
@@ -2997,6 +3007,28 @@ mod tests {
                 .to_owned()]
         );
         assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn deleted_live_region_markers_allow_regeneration_in_the_declared_syntax() {
+        for (host, syntax, path) in [
+            ("<root>\n</root>\n", CommentSyntax::Xml, "config.xml"),
+            ("user content\n", CommentSyntax::SlashSlash, "config.txt"),
+        ] {
+            let spec = RegionSpec {
+                host: HostSelector::Path(path.to_owned()),
+                id: RegionId::new("settings"),
+                body: "generated\n".to_owned(),
+                syntax,
+            };
+            let mut manifest = Manifest::default();
+            manifest.set_region(path, "settings", checksum_str("old generated\n"));
+            let (plan, _) = managed_region_plan(Some(host), &manifest, &spec);
+
+            assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+            assert_eq!(plan.items()[0].decision, Decision::Write);
+            assert!(plan.items()[0].spliced_host.as_deref().unwrap().contains("anvil-managed: settings"));
+        }
     }
 
     #[test]
