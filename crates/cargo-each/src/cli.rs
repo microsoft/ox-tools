@@ -85,8 +85,9 @@ pub(crate) struct EachArgs {
     #[arg(long = "each-target", value_name = "KIND", conflicts_with = "once")]
     pub(crate) each_targets: Vec<String>,
 
-    /// Keep only targets matching this Boolean expression. Repeatable;
-    /// expressions are AND-combined. Supports `not`, `and`, `or`, and
+    /// Keep only targets matching this Boolean expression.
+    ///
+    /// Repeatable; expressions are AND-combined. Supports `not`, `and`, `or`, and
     /// parentheses over `name:<glob>`, `required-feature:<name>`, and
     /// `name-in-metadata:<dotted.key>`.
     #[arg(long = "target-filter", value_name = "EXPR", requires = "each_targets")]
@@ -225,7 +226,21 @@ mod tests {
         let error = CargoCli::try_parse_from(["cargo", "each", "--require-target-per-package", "--", "echo"])
             .expect_err("the per-package target invariant only applies in target mode");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-        assert!(error.to_string().contains("--each-target"));
+        assert_eq!(
+            error.to_string(),
+            "error: the following required arguments were not provided:\n  --each-target <KIND>\n\nUsage: cargo each --each-target <KIND> --require-target-per-package -- <COMMAND>...\n\nFor more information, try '--help'.\n"
+        );
+    }
+
+    #[test]
+    fn target_filter_requires_target_mode() {
+        let error = CargoCli::try_parse_from(["cargo", "each", "--target-filter", "name:unit", "--", "echo"])
+            .expect_err("target filtering requires per-target mode");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            error.to_string(),
+            "error: the following required arguments were not provided:\n  --each-target <KIND>\n\nUsage: cargo each --each-target <KIND> --target-filter <EXPR> -- <COMMAND>...\n\nFor more information, try '--help'.\n"
+        );
     }
 
     #[test]

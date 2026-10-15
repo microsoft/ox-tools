@@ -400,6 +400,9 @@ pub(super) struct Converger {
     /// Cargo's successful preflight artifact stream, used only to narrow later test-target builds.
     target_discovery: Option<String>,
 
+    /// Packages with a library target in Cargo's resolved workspace metadata.
+    library_packages: Option<HashSet<String>>,
+
     /// Whether the verdict oracle is restricted to library unit-test harnesses.
     test_lib: bool,
 
@@ -490,6 +493,10 @@ impl Converger {
     /// Supplies the successful unmodified artifact stream used for target-level narrowing.
     pub(super) fn target_discovery(&mut self, discovery: String) {
         self.target_discovery = Some(discovery);
+    }
+
+    pub(super) fn library_packages(&mut self, packages: HashSet<String>) {
+        self.library_packages = Some(packages);
     }
 
     /// Invalidates position-based splice indexes after the plan is sorted.
@@ -1272,6 +1279,20 @@ impl Converger {
             );
         }
 
+        // Cargo rejects `--lib` only when every selected package lacks a library target. A mixed
+        // selection accepts the normal `--lib --bins --tests` selectors without changing manifests.
+        let only_binaries = self.library_packages.as_ref().is_some_and(|libraries| {
+            select.map_or_else(
+                || !plan.specs.is_empty() && plan.specs.keys().all(|package| !libraries.contains(package)),
+                |packages| !packages.is_empty() && packages.iter().all(|package| !libraries.contains(package)),
+            )
+        });
+        let verb: &[&str] = if only_binaries {
+            &["check", "--keep-going", "--bins", "--tests"]
+        } else {
+            &["check", "--keep-going", "--lib", "--bins", "--tests"]
+        };
+
         self.converge_scoped(
             work,
             plan,
@@ -1280,7 +1301,7 @@ impl Converger {
                 mutants: None,
                 publish_progress,
             },
-            &["check", "--keep-going", "--lib", "--bins", "--tests"],
+            verb,
             limits,
             events,
         )

@@ -286,12 +286,6 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
 }
 
-/// Tiny Unix-style glob matcher: `*` matches any run of characters
-/// (including empty), `?` matches exactly one character. Everything else
-/// matches literally.
-///
-/// Uses dynamic programming, so ambiguous `*` backtracking remains bounded by
-/// `O(len(pattern) * len(name))`.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {

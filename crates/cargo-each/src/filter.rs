@@ -36,44 +36,6 @@ pub(crate) enum Expression<Atom> {
     Atom(Atom),
 }
 
-/// An atomic package predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PackageAtom {
-    /// `target-kind:<kind>`: member has a target of that Cargo kind.
-    HasTargetKind(TargetKind),
-    /// `doctest`: Cargo reports at least one target with doctests enabled.
-    Doctest,
-    /// `publishable`: Cargo permits publishing the package.
-    Publishable,
-    /// `feature:<name>`: member declares the named feature.
-    HasFeature(String),
-    /// `dep:<name>`: member declares `<name>` as a dependency.
-    DependsOn(String),
-    /// `metadata:<dotted.key>`: the metadata key is present.
-    MetadataPresent(String),
-    /// `metadata:<dotted.key>=<value>`: the metadata key equals `<value>`.
-    MetadataEquals {
-        /// The dotted metadata key path.
-        key: String,
-        /// The expected value.
-        value: String,
-    },
-}
-
-/// An atomic target predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TargetAtom {
-    /// `name:<glob>`: target name matches a Unix-style glob.
-    Name(String),
-    /// `required-feature:<name>`: target declares the named required feature.
-    RequiredFeature(String),
-    /// `name-in-metadata:<dotted.key>`: target name occurs in the metadata list.
-    NameInMetadata(String),
-}
-
-pub(crate) type Predicate = Expression<PackageAtom>;
-pub(crate) type TargetPredicate = Expression<TargetAtom>;
-
 impl Expression<PackageAtom> {
     /// Parse a Boolean filter expression.
     ///
@@ -82,7 +44,7 @@ impl Expression<PackageAtom> {
     /// Returns [`EachError`] if the Boolean syntax is malformed, an atom is not
     /// a recognized predicate, or a predicate argument is invalid.
     pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
-        ExpressionParser::new(spec, Self::parse_atom)?.parse()
+        ExpressionParser::new(spec, Self::parse_atom, true)?.parse()
     }
 
     /// Parse one atomic predicate from its command-line spelling.
@@ -146,7 +108,7 @@ impl Expression<PackageAtom> {
 impl Expression<TargetAtom> {
     /// Parse a target Boolean filter expression with the shared grammar.
     pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
-        ExpressionParser::new(spec, Self::parse_atom)?.parse()
+        ExpressionParser::new(spec, Self::parse_atom, false)?.parse()
     }
 
     fn parse_atom(spec: &str) -> Result<Self, EachError> {
@@ -171,7 +133,11 @@ impl Expression<TargetAtom> {
         }
     }
 
-    /// Validate metadata values referenced by this expression for one member.
+    /// Preflight metadata values referenced by this expression for one member.
+    ///
+    /// This deliberately visits every Boolean operand independently of match
+    /// results. Matching short-circuits `and` and `or`, but configuration
+    /// errors must not depend on operand order or an earlier match.
     pub(crate) fn validate(&self, member: &Member) -> Result<(), EachError> {
         match self {
             Self::And(predicates) | Self::Or(predicates) => {
@@ -198,7 +164,13 @@ impl Expression<TargetAtom> {
             Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member, target)),
             Self::Not(predicate) => !predicate.matches(member, target),
             Self::Atom(atom) => match atom {
-                TargetAtom::Name(pattern) => glob_matches(pattern, &target.name),
+                TargetAtom::Name(pattern) => {
+                    if pattern.contains(['*', '?']) {
+                        glob_matches(pattern, &target.name)
+                    } else {
+                        pattern == &target.name
+                    }
+                }
                 TargetAtom::RequiredFeature(name) => target.required_features.contains(name),
                 TargetAtom::NameInMetadata(key) => lookup(&member.metadata, key).is_some_and(|value| {
                     value
@@ -209,6 +181,44 @@ impl Expression<TargetAtom> {
         }
     }
 }
+
+/// An atomic package predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PackageAtom {
+    /// `target-kind:<kind>`: member has a target of that Cargo kind.
+    HasTargetKind(TargetKind),
+    /// `doctest`: Cargo reports at least one target with doctests enabled.
+    Doctest,
+    /// `publishable`: Cargo permits publishing the package.
+    Publishable,
+    /// `feature:<name>`: member declares the named feature.
+    HasFeature(String),
+    /// `dep:<name>`: member declares `<name>` as a dependency.
+    DependsOn(String),
+    /// `metadata:<dotted.key>`: the metadata key is present.
+    MetadataPresent(String),
+    /// `metadata:<dotted.key>=<value>`: the metadata key equals `<value>`.
+    MetadataEquals {
+        /// The dotted metadata key path.
+        key: String,
+        /// The expected value.
+        value: String,
+    },
+}
+
+/// An atomic target predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetAtom {
+    /// `name:<glob>`: target name matches a Unix-style glob.
+    Name(String),
+    /// `required-feature:<name>`: target declares the named required feature.
+    RequiredFeature(String),
+    /// `name-in-metadata:<dotted.key>`: target name occurs in the metadata list.
+    NameInMetadata(String),
+}
+
+pub(crate) type Predicate = Expression<PackageAtom>;
+pub(crate) type TargetPredicate = Expression<TargetAtom>;
 
 /// Parse the portion of a `metadata:` predicate after the prefix.
 fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
@@ -302,18 +312,24 @@ struct ExpressionParser<'a, Atom> {
     position: usize,
     nesting: usize,
     parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>,
+    allow_whitespace_in_atom: bool,
 }
 
 impl<'a, Atom> ExpressionParser<'a, Atom> {
     const MAX_NESTING: usize = 64;
 
-    fn new(spec: &'a str, parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>) -> Result<Self, EachError> {
+    fn new(
+        spec: &'a str,
+        parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>,
+        allow_whitespace_in_atom: bool,
+    ) -> Result<Self, EachError> {
         Ok(Self {
             spec,
             tokens: tokenize(spec)?,
             position: 0,
             nesting: 0,
             parse_atom,
+            allow_whitespace_in_atom,
         })
     }
 
@@ -321,7 +337,7 @@ impl<'a, Atom> ExpressionParser<'a, Atom> {
         if self.tokens.is_empty() {
             return Err(invalid(self.spec, "empty expression"));
         }
-        if self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
+        if self.allow_whitespace_in_atom && self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
             return (self.parse_atom)(self.spec.trim());
         }
         let expression = self.parse_or()?;
@@ -413,7 +429,12 @@ impl<'a, Atom> ExpressionParser<'a, Atom> {
     }
 }
 
-/// Match a Unix-style glob supporting `*` and `?`.
+/// Tiny Unix-style glob matcher: `*` matches any run of characters
+/// (including empty), `?` matches exactly one character. Everything else
+/// matches literally.
+///
+/// Uses dynamic programming, so ambiguous `*` backtracking remains bounded by
+/// `O(len(pattern) * len(name))`.
 pub(crate) fn glob_matches(pattern: &str, name: &str) -> bool {
     let name: Vec<char> = name.chars().collect();
     let mut previous = vec![false; name.len() + 1];
@@ -659,6 +680,16 @@ mod tests {
             assert!(predicate.matches(&member, &target));
         }
         assert!(
+            TargetPredicate::parse("name:loom-test")
+                .expect("literal name filter")
+                .matches(&member, &target)
+        );
+        assert!(
+            !TargetPredicate::parse("name:ordinary-test")
+                .expect("literal name filter")
+                .matches(&member, &target)
+        );
+        assert!(
             !TargetPredicate::parse("name:unit-*")
                 .expect("name filter")
                 .matches(&member, &target)
@@ -718,6 +749,17 @@ mod tests {
             let error = TargetPredicate::parse(expression).expect_err(expression);
             assert_eq!(error.to_string(), format!("invalid filter expression `{expression}`: {reason}"));
         }
+    }
+
+    #[test]
+    fn target_filter_rejects_adjacent_atoms_without_boolean_operator() {
+        let error = TargetPredicate::parse("name:loom-* required-feature:loom").expect_err("adjacent atoms require `and`");
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected predicate; expected `and`, `or`, or end of expression"),
+            "{error}"
+        );
     }
 
     #[test]

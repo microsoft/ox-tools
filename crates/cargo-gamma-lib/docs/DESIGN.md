@@ -198,11 +198,15 @@ control-character-encoded stdout and stderr tails with a truncation flag.
 All selected target packages are scanned in dependency order and instrumented
 before compilation begins. Schema convergence runs `cargo check` over every
 package with pending mutations, including a package with no runnable test
-target, while the final code-generating build retains the reachability-based
-test-package selection. This keeps the complete mutation population visible to
-one convergence and lets Cargo expose independent failures together without
-generating or linking test binaries in every round. Runs whose original Cargo
-selection is a package subset retain their narrowed graph throughout.
+target. A selection in which no package has a library target omits `--lib` and
+checks the binary and test targets. A mixed selection retains `--lib --bins --tests`:
+Cargo accepts these selectors when at least one selected package has a library
+and checks the available targets under one feature graph. The final
+code-generating build retains the reachability-based test-package selection.
+This keeps the complete mutation population visible to one convergence and lets
+Cargo expose independent failures together without generating or linking test
+binaries in every round. Runs whose original Cargo selection is a package subset
+retain their narrowed graph throughout.
 
 Structured compiler messages carry package, target, diagnostic, and primary
 span context. Direct generated-text blame withdraws a mutant immediately.

@@ -238,6 +238,9 @@ fn validate_target_filters(
     target_kinds: &BTreeSet<TargetKind>,
     target_filters: &[TargetPredicate],
 ) -> Result<(), EachError> {
+    // Target filtering follows kind selection, so metadata on members without
+    // any requested-kind target cannot affect the plan and is outside this
+    // preflight.
     for member in members.iter().filter(|member| {
         member
             .targets
@@ -489,6 +492,156 @@ mod tests {
         assert_eq!(plan.invocations.len(), 1);
         assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha::loom"));
         assert_eq!(plan.invocations[0].argv, ["cargo", "test", "-p", "alpha", "--test", "loom"]);
+    }
+
+    #[test]
+    fn per_target_boolean_and_repeated_filters_compose() {
+        let mut a = member("alpha");
+        a.metadata = serde_json::json!({"cargo-each": {"excluded-targets": ["ordinary-test"]}});
+        a.targets = vec![
+            MemberTarget {
+                name: "loom-test".to_owned(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
+                required_features: std::iter::once("loom".to_owned()).collect(),
+            },
+            MemberTarget {
+                name: "ordinary-test".to_owned(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
+                required_features: BTreeSet::new(),
+            },
+            MemberTarget {
+                name: "demo".to_owned(),
+                kinds: std::iter::once(TargetKind::Example).collect(),
+                required_features: BTreeSet::new(),
+            },
+        ];
+        let kinds = [TargetKind::Example, TargetKind::Test].into_iter().collect();
+        let filters = [
+            TargetPredicate::parse("(required-feature:loom and name:loom-*) or name:demo").expect("Boolean target filter"),
+            TargetPredicate::parse("not name-in-metadata:cargo-each.excluded-targets").expect("metadata exclusion filter"),
+        ];
+        let plan = Plan::build(
+            &[&a],
+            &cmd(&["echo", "{name}::{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &filters,
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("build target plan");
+        assert_eq!(
+            plan.invocations
+                .iter()
+                .map(|invocation| invocation.argv.clone())
+                .collect::<Vec<_>>(),
+            [cmd(&["echo", "alpha::loom-test"]), cmd(&["echo", "alpha::demo"])]
+        );
+    }
+
+    #[test]
+    fn missing_target_metadata_matches_under_not_and_empty_results_are_valid() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "demo".to_owned(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let kinds = std::iter::once(TargetKind::Example).collect();
+        let include_missing = [TargetPredicate::parse("not name-in-metadata:cargo-each.excluded-targets").expect("target filter")];
+        let plan = Plan::build(
+            &[&a],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &include_missing,
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("missing metadata does not exclude the target");
+        assert_eq!(plan.invocations[0].argv, ["echo", "demo"]);
+
+        let exclude_all = [TargetPredicate::parse("name:no-such-target").expect("target filter")];
+        assert!(
+            Plan::is_empty(
+                &[&a],
+                &cmd(&["echo", "{target}"]),
+                BuildOptions {
+                    mode: Mode::PerTarget,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &kinds,
+                    target_filters: &exclude_all,
+                    require_target_per_package: false,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("an empty target result is valid")
+        );
+    }
+
+    #[test]
+    fn malformed_target_metadata_fails_preflight_for_relevant_members_only() {
+        let filter = [TargetPredicate::parse("name-in-metadata:cargo-each.excluded-targets").expect("target filter")];
+        let test_kinds = std::iter::once(TargetKind::Test).collect();
+
+        let mut relevant = member("relevant");
+        relevant.metadata = serde_json::json!({"cargo-each": {"excluded-targets": "test"}});
+        relevant.targets.push(MemberTarget {
+            name: "test".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let error = Plan::is_empty(
+            &[&relevant],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &test_kinds,
+                target_filters: &filter,
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect_err("malformed metadata must fail before matching");
+        assert_eq!(
+            error.to_string(),
+            "package `relevant` metadata `cargo-each.excluded-targets` must be an array of strings when used by `name-in-metadata:cargo-each.excluded-targets`"
+        );
+
+        let mut irrelevant = member("irrelevant");
+        irrelevant.metadata = relevant.metadata.clone();
+        irrelevant.targets.push(MemberTarget {
+            name: "example".to_owned(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
+            required_features: BTreeSet::new(),
+        });
+        assert!(
+            Plan::is_empty(
+                &[&irrelevant],
+                &cmd(&["echo", "{target}"]),
+                BuildOptions {
+                    mode: Mode::PerTarget,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &test_kinds,
+                    target_filters: &filter,
+                    require_target_per_package: false,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("members outside kind selection are outside metadata preflight")
+        );
     }
 
     #[test]

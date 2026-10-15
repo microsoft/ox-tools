@@ -2,11 +2,113 @@
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-09-24
+## [0.14.0] - 2026-10-12
 
 - ✨ Features
 
-  - select platform-specific mutants configs
+  - support managed TOML array entries ([#235](https://github.com/microsoft/ox-tools/pull/235))
+  - Add `TomlArrayRegionSpec` and `CatalogBuilder::with_toml_array_region`
+    so custom catalogs can manage required string entries without owning
+    the enclosing TOML array or table. `Catalog::toml_array_path` exposes
+    the selector for a region.
+  - Preserve repository-owned entries, comments, table headers, and
+    surrounding formatting during adoption, updates, and retirement.
+    Adoption moves one matching unmanaged string per required entry into
+    the managed region; extra copies remain repository-owned.
+  - Validate array-host composition before producing an applicable plan.
+    Invalid TOML, overlapping ownership, and structural dependencies
+    refuse without applying unrelated pending writes.
+
+- Bug Fixes
+
+  - Use unique temporary baseline worktree paths in the generated impact
+    recipe to avoid collisions when process IDs are reused. Clean up
+    partial baseline checkouts and surface cleanup failures
+    ([#248](https://github.com/microsoft/ox-tools/pull/248)).
+
+- Upgrade notes
+
+  - Array regions are opt-in for custom catalogs. Hosts must have a
+    `.toml` suffix and use hash comments. Selectors contain literal key
+    components through normal TOML tables.
+  - Templates must contain at least one string entry and end with a
+    comma. Generated compound values, inline-table scaffolding, and
+    automatic migration from whole-table regions are not supported.
+  - The `.anvil.lock` schema remains version 1. Array selectors contribute
+    to custom catalog checksums. The generated impact recipe update also
+    changes the built-in catalog checksum; updating generated
+    infrastructure follows the existing managed-file ownership rules.
+
+- Dependencies
+
+  - Add `toml_parser` 1.1.3 as a direct dependency for TOML-aware
+    managed-region scanning.
+
+## [0.13.0] - 2026-10-08
+
+- ✨ Features
+
+  - Select `.cargo/mutants.<os>.toml` for both mutation recipes when
+    present. Platform files replace the default configuration rather
+    than overlay it; otherwise normal cargo-mutants discovery applies
+    ([#203](https://github.com/microsoft/ox-tools/pull/203)).
+  - Extend the generated Copilot code-review skill with
+    `.github/skills/code-review/test-review.md`. The guide covers
+    deterministic inputs, mocked collaborators, state isolation, exact
+    assertions, doctests, tests in examples, runtime limits, Miri, and
+    root-cause fixes for flaky tests. Review applies to changed tests,
+    not unrelated existing tests
+    ([#228](https://github.com/microsoft/ox-tools/pull/228)).
+  - Add `anvil-check-all-targets` to the fast PR tier. Check each affected
+    package independently with default features and with defaults
+    disabled, preventing workspace feature unification from hiding
+    missing test or example dependencies
+    ([#224](https://github.com/microsoft/ox-tools/pull/224)).
+
+- 🐛 Bug Fixes
+
+  - Filter doctest runs by Cargo's `doctest` capability instead of
+    selecting bin-only packages. An empty eligible set is a successful
+    no-op. Cache the capability list with impact metadata and fall back
+    to locked discovery for older caches or full-workspace paths
+    ([#218](https://github.com/microsoft/ox-tools/pull/218),
+    [#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Fetch the current GitHub PR title through the REST API so workflow
+    reruns validate renamed titles rather than the original event
+    payload. Title retrieval failures remain errors
+    ([#234](https://github.com/microsoft/ox-tools/pull/234)).
+  - Prefer exact path spelling and reject ambiguous case-insensitive
+    matches. Report directory-enumeration and permission errors instead
+    of treating them as missing files
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Return dry-run status through the application entry point instead
+    of terminating inside the engine. Dirty dry runs still exit with
+    failure; clean runs exit successfully
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Distinguish invalid generated TOML bodies from invalid existing
+    hosts and table-ownership conflicts in refusal guidance
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+
+- Documentation
+
+  - Clarify generated configuration comments, including empty impact
+    reports, coverage opt-outs, and the pinned nightly formatting policy
+    ([#223](https://github.com/microsoft/ox-tools/pull/223)).
+
+- Build and maintenance
+
+  - Raise the generated `cargo-each` pin from 0.1.0 to 0.3.0 for the
+    package-isolated checks
+    ([#224](https://github.com/microsoft/ox-tools/pull/224)).
+  - Exclude test-only modules from production coverage
+    ([#229](https://github.com/microsoft/ox-tools/pull/229)).
+  - Record the crate's coverage floor as 99.86445 percent
+    ([#221](https://github.com/microsoft/ox-tools/pull/221)).
+  - Expand engine regression and mutation coverage, and refactor
+    catalog, manifest, region, and workspace helpers without changing
+    the managed-file ownership contract
+    ([#208](https://github.com/microsoft/ox-tools/pull/208),
+    [#221](https://github.com/microsoft/ox-tools/pull/221)).
 
 ## [0.12.0] - 2026-09-18
 
