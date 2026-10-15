@@ -68,16 +68,11 @@ pub(crate) struct EachArgs {
     // --- filtering ---
     /// Keep only members matching this Boolean expression. Repeatable;
     /// expressions are AND-combined. Supports `not`, `and`, `or`, and
-    /// parentheses over predicates such as `target-kind:<kind>`,
+    /// parentheses over predicates such as `doctest`, `target-kind:<kind>`,
     /// `publishable`, `feature:<name>`, `dep:<name>`, and
     /// `metadata:<key>[=<value>]`.
     #[arg(long = "filter", value_name = "EXPR")]
     pub(crate) filters: Vec<String>,
-
-    /// Drop members matching this Boolean expression. Repeatable; expressions
-    /// are OR-combined. Same expression grammar as --filter; exclusion wins.
-    #[arg(long = "exclude-filter", value_name = "EXPR")]
-    pub(crate) exclude_filters: Vec<String>,
 
     // --- execution ---
     /// Run the command exactly once for the whole set (skip when empty)
@@ -184,6 +179,7 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser as _};
 
     use super::*;
@@ -198,6 +194,13 @@ mod tests {
         let CargoCli::Each(args) =
             CargoCli::try_parse_from(["cargo", "each", "--", "echo"]).expect("documented minimal invocation must parse");
         assert_eq!(args.jobs, NonZeroUsize::MIN);
+    }
+
+    #[test]
+    fn exclude_filter_is_not_a_cli_option() {
+        let error = CargoCli::try_parse_from(["cargo", "each", "--exclude-filter", "bin", "--", "echo"])
+            .expect_err("the redundant exclusion-specific option must stay removed");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]

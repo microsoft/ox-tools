@@ -5,8 +5,8 @@
 //!
 //! Enumerates workspace members and captures, for each, the facts the
 //! selection and filter layers need: package identity, publication state,
-//! features, dependencies, targets, and the freeform `package.metadata`
-//! block.
+//! doctest capability, features, dependencies, targets, and the freeform
+//! `package.metadata` block.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,6 +43,8 @@ pub(crate) struct Member {
     pub(crate) manifest_path: PathBuf,
     /// Whether Cargo permits publishing this package.
     pub(crate) publishable: bool,
+    /// Whether Cargo reports at least one target with doctests enabled.
+    pub(crate) doctest: bool,
     /// Features declared by this package.
     pub(crate) features: BTreeSet<String>,
     /// Cargo targets declared by this package.
@@ -104,7 +106,10 @@ impl Workspace {
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
         let metadata = load_metadata(manifest_path).map_err(LoadMetadataError::caused_by)?;
+        Ok(Self::from_metadata(&metadata))
+    }
 
+    fn from_metadata(metadata: &Metadata) -> Self {
         let mut members: Vec<Member> = metadata
             .workspace_packages()
             .iter()
@@ -126,6 +131,7 @@ impl Workspace {
                     rust_version: pkg.rust_version.clone(),
                     manifest_path: pkg.manifest_path.clone().into_std_path_buf(),
                     publishable: pkg.publish.as_ref().is_none_or(|registries| !registries.is_empty()),
+                    doctest: pkg.targets.iter().any(|target| target.doctest),
                     features: pkg.features.keys().cloned().collect(),
                     targets,
                     dependencies,
@@ -142,11 +148,11 @@ impl Workspace {
             .collect();
         let root_manifest_path = metadata.workspace_root.join("Cargo.toml").into_std_path_buf();
 
-        Ok(Self {
+        Self {
             members,
             default_member_names,
             root_manifest_path,
-        })
+        }
     }
 
     /// Resolve and validate the workspace-wide Rust compatibility floor when
@@ -288,7 +294,10 @@ pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
 mod tests {
     use std::fs;
 
+    use serde_json::from_str;
+
     use super::*;
+    use crate::filter::Predicate;
 
     fn member(name: &str, manifest_path: PathBuf, rust_version: &str) -> Member {
         Member {
@@ -297,6 +306,7 @@ mod tests {
             rust_version: Some(rust_version.parse().expect("the test Rust version is semver")),
             manifest_path,
             publishable: true,
+            doctest: true,
             features: BTreeSet::new(),
             targets: Vec::new(),
             dependencies: BTreeSet::new(),
@@ -334,6 +344,49 @@ mod tests {
     #[test]
     fn rejects_unknown_target_kind() {
         assert_eq!(parse_target_kind("future-kind"), None);
+    }
+
+    #[test]
+    fn metadata_doctest_capability_drives_filtering_and_composition() {
+        let metadata: Metadata =
+            from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture is valid");
+        let workspace = Workspace::from_metadata(&metadata);
+
+        let capability = workspace
+            .members
+            .iter()
+            .map(|member| (member.name.as_str(), member.doctest))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            capability,
+            [
+                ("bin-only", false),
+                ("disabled-lib", false),
+                ("enabled-lib", true),
+                ("macros", true),
+                ("private-lib", true),
+            ]
+        );
+
+        let combined = Predicate::parse("doctest and publishable").expect("combined filter");
+        let repeated = [
+            Predicate::parse("doctest").expect("doctest filter"),
+            Predicate::parse("publishable").expect("publishable filter"),
+        ];
+        let combined_names = workspace
+            .members
+            .iter()
+            .filter(|member| combined.matches(member))
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>();
+        let repeated_names = workspace
+            .members
+            .iter()
+            .filter(|member| repeated.iter().all(|filter| filter.matches(member)))
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(combined_names, ["enabled-lib", "macros"]);
+        assert_eq!(repeated_names, combined_names);
     }
 
     #[test]

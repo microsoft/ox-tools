@@ -64,11 +64,12 @@ missing, unreadable, or non-UTF-8 files are errors.
 
 `--filter` accepts Boolean expressions using `not`, `and`, `or`, and
 parentheses, with conventional precedence. Repeated `--filter` expressions
-are AND-combined. Repeated `--exclude-filter` expressions are OR-combined,
-and exclusion wins. Metadata values containing whitespace or Boolean syntax
-can be double-quoted. Expression atoms:
+are AND-combined; use `not` to exclude matching members. Metadata values
+containing whitespace or Boolean syntax can be double-quoted. Expression
+atoms:
 
 * `lib` / `bin` / `target-kind:<kind>` — target-kind membership.
+* `doctest` — Cargo reports at least one target with doctests enabled.
 * `publishable` — Cargo permits publishing the package.
 * `feature:<name>` — the package declares the feature.
 * `dep:<name>` — the member declares `<name>` as a dependency.

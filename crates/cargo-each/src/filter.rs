@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The `--filter` / `--exclude-filter` Boolean expression language.
+//! The `--filter` Boolean expression language.
 //!
 //! Expressions combine a small, fixed set of predicates over cargo metadata
 //! with `not`, `and`, `or`, and parentheses. This is enough to express every
@@ -9,6 +9,7 @@
 //!
 //! - `lib` / `bin` / `target-kind:<kind>` — the member has a target of that
 //!   kind.
+//! - `doctest` — Cargo reports at least one target with doctests enabled.
 //! - `publishable` — Cargo permits publishing the package.
 //! - `feature:<name>` — the package declares the feature.
 //! - `dep:<name>` — the member declares `<name>` as a dependency.
@@ -33,6 +34,8 @@ pub(crate) enum Predicate {
     Not(Box<Self>),
     /// `target-kind:<kind>`: member has a target of that Cargo kind.
     HasTargetKind(TargetKind),
+    /// `doctest`: Cargo reports at least one target with doctests enabled.
+    Doctest,
     /// `publishable`: Cargo permits publishing the package.
     Publishable,
     /// `feature:<name>`: member declares the named feature.
@@ -66,6 +69,7 @@ impl Predicate {
         match spec {
             "lib" => Ok(Self::HasTargetKind(TargetKind::Lib)),
             "bin" => Ok(Self::HasTargetKind(TargetKind::Bin)),
+            "doctest" => Ok(Self::Doctest),
             "publishable" => Ok(Self::Publishable),
             _ => {
                 if let Some(kind) = spec.strip_prefix("target-kind:") {
@@ -91,7 +95,7 @@ impl Predicate {
                 } else {
                     Err(invalid(
                         spec,
-                        "expected one of: lib, bin, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
+                        "expected one of: lib, bin, doctest, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
                     ))
                 }
             }
@@ -106,6 +110,7 @@ impl Predicate {
             Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member)),
             Self::Not(predicate) => !predicate.matches(member),
             Self::HasTargetKind(kind) => member.targets.iter().any(|target| target.kinds.contains(kind)),
+            Self::Doctest => member.doctest,
             Self::Publishable => member.publishable,
             Self::HasFeature(name) => member.features.contains(name),
             Self::DependsOn(name) => member.dependencies.contains(name),
@@ -430,6 +435,7 @@ mod tests {
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),
             manifest_path: PathBuf::from("/ws/m/Cargo.toml"),
             publishable: true,
+            doctest: has_lib,
             features: BTreeSet::new(),
             targets,
             dependencies: deps.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
@@ -445,6 +451,7 @@ mod tests {
             Predicate::parse("target-kind:proc-macro").expect("target kind"),
             Predicate::HasTargetKind(TargetKind::ProcMacro)
         );
+        assert_eq!(Predicate::parse("doctest").expect("doctest"), Predicate::Doctest);
         assert_eq!(Predicate::parse("publishable").expect("publishable"), Predicate::Publishable);
         assert_eq!(
             Predicate::parse("feature:loom").expect("feature"),
@@ -576,7 +583,7 @@ mod tests {
             ("", "empty expression"),
             (
                 "nonsense",
-                "expected one of: lib, bin, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
+                "expected one of: lib, bin, doctest, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
             ),
             (
                 "target-kind:future",
@@ -747,8 +754,10 @@ mod tests {
     fn package_fact_predicates_match() {
         let mut m = member_with(&[], Value::Null, false, false);
         m.publishable = false;
+        m.doctest = true;
         m.features.insert("loom".to_owned());
         assert!(!Predicate::Publishable.matches(&m));
+        assert!(Predicate::Doctest.matches(&m));
         assert!(Predicate::HasFeature("loom".to_owned()).matches(&m));
         assert!(!Predicate::HasFeature("serde".to_owned()).matches(&m));
     }
@@ -758,7 +767,7 @@ mod tests {
         let mut m = member_with(&[], Value::Null, true, false);
         m.features.insert("loom".to_owned());
         assert!(
-            Predicate::parse("publishable and (bin or feature:loom)")
+            Predicate::parse("doctest and publishable and (bin or feature:loom)")
                 .expect("expression")
                 .matches(&m)
         );

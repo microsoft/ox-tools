@@ -829,6 +829,18 @@ prerequisites provision the selected compiler and tools. Its
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
   input here, so a `pr-fast` matrix leg never installs cargo-mutants.
 
+Linux setup jobs whose selected group includes spellcheck install
+`libclang-dev` before catalog tool installation. This is intentionally eager:
+cargo-spellcheck may need a source build when its release binary is unavailable,
+and the GitHub-hosted runner adapter has an unambiguous non-interactive `apt`
+contract. Other groups do not pay the package installation cost, and portable
+Just recipes retain diagnostic-only system-dependency checks for local and
+self-hosted environments.
+
+Both cargo-binstall call sites receive the workflow's built-in `GITHUB_TOKEN`,
+so GitHub Release discovery uses the authenticated API quota rather than the
+low unauthenticated limit.
+
 Before invoking Just, the action registers the generated
 `just-problem-matcher.json`. Just already prints the exact failed dependency
 recipe (for example, ``error: recipe `anvil-license-headers` failed with exit

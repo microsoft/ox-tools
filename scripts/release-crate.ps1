@@ -108,6 +108,9 @@ $script:ConventionalCommitRegex = [regex]'^(\w+)(?:\(.*\))?(!)?:\s*(.*)'
 # Pattern for PR references: (#123)
 $script:PrReferenceRegex = [regex]'\s*(\(#(\d+)\))$'
 
+# Release preparation entries superseded by linked release history.
+$script:LinkedReleaseRegex = [regex]'(?:^|:\s*)(Release [a-zA-Z0-9_-]+ \d+\.\d+\.\d+)\s+\(#\d+\)$'
+
 # Pattern for semantic version format: major.minor.patch
 $script:SemanticVersionRegex = [regex]'^\d+\.\d+\.\d+$'
 
@@ -329,6 +332,18 @@ function Format-ConventionalCommits {
     }
 
     $groupedCommits = [ordered]@{}
+    $linkedReleases = @(
+        foreach ($message in $rawCommitMessages) {
+            $conventional = $script:ConventionalCommitRegex.Match($message)
+            if ($conventional.Success -and $script:IgnoredTypes -contains $conventional.Groups[1].Value) {
+                continue
+            }
+            $linkedRelease = $script:LinkedReleaseRegex.Match($message)
+            if ($linkedRelease.Success) {
+                $linkedRelease.Groups[1].Value
+            }
+        }
+    )
 
     foreach ($message in $rawCommitMessages) {
         $type = "miscellaneous"
@@ -345,6 +360,10 @@ function Format-ConventionalCommits {
         }
 
         if ($isConventional -and $script:IgnoredTypes -contains $type) {
+            continue
+        }
+
+        if ($linkedReleases -ccontains $description) {
             continue
         }
 
