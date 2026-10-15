@@ -625,6 +625,12 @@ module declarations, or build-script-generated source inclusion. If such a
 path appears in LCOV without a supported Cargo target or module edge, filtering
 fails with the offending source path rather than hiding its counters.
 
+Canonical source identity is kept separate from Rust's module-resolution
+location. If a Cargo target or module source is reached through a file symlink,
+child modules resolve from the declared file name in its resolved parent
+directory, rather than from the canonical file target. The canonical file
+remains the identity used for deduplication and workspace ownership.
+
 For each retained `SF:` path, the tool canonicalizes the source and determines
 which workspace member owns it by **longest-prefix match** against canonical
 workspace-member directories. It then writes the path relative to the owning

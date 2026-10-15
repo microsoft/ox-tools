@@ -124,6 +124,11 @@ the workspace discovered from the invocation directory.
    using Rust's distinct crate-root, plain-module, and path-module child
    directories. Conditional `cfg_attr(..., path = "...")` edges fail
    explicitly because they require the complete Cargo build configuration.
+   Canonical paths identify source contents and workspace ownership, while a
+   separate module-resolution path preserves the declaring file name and
+   directory semantics used by rustc, including for symlinked source files.
+   Visit deduplication includes that resolution path because one canonical
+   source can expose different child modules through different declarations.
    A file is retained when at least one released path reaches it; release
    reachability wins when a test target also shares the file.
    Every released source is validated against workspace-member directories
