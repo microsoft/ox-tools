@@ -3,3 +3,6 @@
 
 #[path = "../src/shared.rs"]
 mod shared;
+
+#[path = "../src/helper.rs"]
+mod helper;

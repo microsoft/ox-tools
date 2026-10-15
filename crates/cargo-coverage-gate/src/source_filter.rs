@@ -1452,7 +1452,7 @@ mod tests {
         );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
         let error = index
-            .source_for_lcov(&root.join("member/src/helper.rs"))
+            .source_for_lcov(&root.join("member/src/implementation/root.rs"))
             .expect_err("an existing source outside the target graph must fail")
             .to_string();
         assert!(error.contains("not reachable from any Cargo target"), "{error}");
@@ -1503,7 +1503,12 @@ mod tests {
         let index =
             SourceIndex::from_metadata_with_source_resolver(&metadata, &mut resolve_source).expect("simulated symlink source index builds");
 
-        assert!(index.files.contains_key(&helper));
+        let indexed_helper = index.files.get(&helper).expect("shared helper source indexed");
+        let helper_path = root.join("member/src/helper.rs");
+        let helper_resolution = resolve_module_resolution_path(&helper_path).expect("helper resolution path");
+        assert_eq!(indexed_helper.released_path.as_deref(), Some(helper_path.as_path()));
+        assert!(indexed_helper.has_visit(Surface::Released, SourceRole::PathModule, &helper_resolution));
+        assert!(indexed_helper.has_visit(Surface::NonReleased, SourceRole::PathModule, &helper_resolution));
         let indexed_root = index.files.get(&canonical_root).expect("canonical root source indexed");
         let resolution_path = resolve_module_resolution_path(&alias).expect("simulated symlink has a module-resolution path");
         assert!(
