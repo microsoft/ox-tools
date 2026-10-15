@@ -664,9 +664,17 @@ fn syntax_contains_released_include(node: &SyntaxNode, test_attributes: &BTreeSe
         (!test_only
             && ast::MacroCall::cast(child.clone())
                 .and_then(|macro_call| macro_call.path())
-                .is_some_and(|path| normalize_attribute_path(&path) == "include"))
+                .is_some_and(|path| path_is_builtin_include(&path)))
             || syntax_contains_released_include(&child, test_attributes, test_only)
     })
+}
+
+fn path_is_builtin_include(path: &ast::Path) -> bool {
+    let normalized = normalize_attribute_path(path);
+    normalized == "include"
+        || normalized.strip_suffix("::include").is_some_and(|qualifier| {
+            qualifier == "std" || qualifier.starts_with("std::") || qualifier == "core" || qualifier.starts_with("core::")
+        })
 }
 
 fn module_declarations(
@@ -1604,6 +1612,21 @@ mod tests {
             &BTreeSet::new(),
         )
         .expect("test-only include macro is outside the released surface");
+
+        for path in ["include", "::core::include", "std::prelude::v1::include"] {
+            let analysis = analyze(Path::new("/workspace/lib.rs"), &format!("{path}!(\"helper.rs\");\n"));
+            reject_unsupported_released_includes(
+                Path::new("/workspace/lib.rs"),
+                &analysis.syntax,
+                Surface::Released,
+                &BTreeSet::new(),
+            )
+            .expect_err("built-in include spelling must be rejected");
+        }
+
+        let custom = analyze(Path::new("/workspace/lib.rs"), "company::include!(\"helper.rs\");\n");
+        reject_unsupported_released_includes(Path::new("/workspace/lib.rs"), &custom.syntax, Surface::Released, &BTreeSet::new())
+            .expect("arbitrary qualified include macro is not the built-in");
     }
 
     #[test]

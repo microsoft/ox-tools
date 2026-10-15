@@ -624,9 +624,17 @@ The module graph does not infer ownership through `include!`, macro-generated
 module declarations, or build-script-generated source inclusion. If such a
 path appears in LCOV without a supported Cargo target or module edge, filtering
 fails with the offending source path rather than hiding its counters.
-Additionally, a non-test `include!` encountered while walking a released
-source fails immediately: a separate test-target edge to the included file
-must not make released counters look test-only.
+Additionally, a statically recognizable non-test built-in `include!`
+encountered while walking a released source fails immediately: a separate
+test-target edge to the included file must not make released counters look
+test-only.
+
+Rust macro expansion is not available to the source walker. A module generated
+by `macro_rules!`, a procedural macro, or a renamed `include!` can therefore be
+classified as non-release when the same file is also reached through a
+supported non-release edge. Repositories using those shared generated-source
+patterns must use explicit `mod` declarations for released-surface filtering,
+or choose the unfiltered library API.
 
 Canonical source identity is kept separate from Rust's module-resolution
 location. If a Cargo target or module source is reached through a file symlink,
