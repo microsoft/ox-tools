@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.15.0"
-catalog_checksum = "sha256:3cfa643d31eac7ccfe0a6989684435d90b292ca0593c64ce07db4a63f6bd8e4d"
+catalog_checksum = "sha256:15c6171082ab610186a25e4b9ac7e2a57a677f26a7e5eaebeb3a8d5a5a6df619"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"

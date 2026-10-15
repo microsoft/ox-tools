@@ -409,7 +409,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbcTEnTcXGBR8b8HCcaHW-17wbcqtabVxu0F8bRsUJJTz--cNhZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb5STqOPWzBuIbGKo1M8rA_gwbnEE39p8Pne4bJAiNAgNsx6thZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
