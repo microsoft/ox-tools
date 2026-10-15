@@ -22,9 +22,9 @@ use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, TextRange};
 use crate::CoverageGateError;
 use crate::error::{
     AmbiguousModuleSourceError, ConditionalModulePathError, ConflictingSourceEditionError, CoverageLineOutOfRangeError,
-    InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError, NormalizedSourceChecksumError,
-    PackageScopedTestAttributesError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError,
-    UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
+    InspectCoverageSourceError, InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError,
+    NormalizedSourceChecksumError, PackageScopedTestAttributesError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError,
+    ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
 };
 use crate::workspace::load_metadata;
 
@@ -331,8 +331,8 @@ fn source_path_is_file(path: &Path) -> Result<bool, CoverageGateError> {
 fn classify_source_path_metadata(path: &Path, metadata: std::io::Result<fs::Metadata>) -> Result<bool, CoverageGateError> {
     match metadata {
         Ok(metadata) => Ok(metadata.is_file()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), error).into()),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(false),
+        Err(error) => Err(InspectCoverageSourceError::caused_by(diagnostic_path(path), error).into()),
     }
 }
 
@@ -409,13 +409,7 @@ fn analyze_source_text(
         .descendants()
         .filter_map(ast::Attr::cast)
         .filter(|attribute| attribute_marks_test(attribute, test_attributes))
-        .map(|attribute| {
-            attribute
-                .syntax()
-                .parent()
-                .expect("every parsed attribute is owned by a syntax node")
-                .text_range()
-        })
+        .map(attributed_syntax_range)
         .collect::<Vec<_>>();
     let mut line_flags = vec![0_u8; line_starts.len()];
     for range in &test_ranges {
@@ -443,6 +437,27 @@ fn analyze_source_text(
         line_count: line_starts.len(),
         test_only_lines,
     })
+}
+
+fn attributed_syntax_range(attribute: ast::Attr) -> TextRange {
+    let owner = attribute
+        .syntax()
+        .parent()
+        .expect("every parsed attribute is owned by a syntax node");
+    let owner_range = owner.text_range();
+    let mut end = owner_range.end();
+    let mut next = owner.next_sibling_or_token();
+    while let Some(element) = next {
+        if matches!(element.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
+            next = element.next_sibling_or_token();
+            continue;
+        }
+        if element.as_token().is_some_and(|token| token.text() == ",") {
+            end = element.text_range().end();
+        }
+        break;
+    }
+    TextRange::new(owner_range.start(), end)
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
@@ -1314,6 +1329,18 @@ mod tests {
 
         let mixed = analyze(Path::new("mixed.rs"), "#[cfg(test)] fn test_only() {} pub fn released() {}\n");
         assert!(mixed.test_only_lines.is_empty());
+
+        let multiline_element = analyze(
+            Path::new("multiline.rs"),
+            "const VALUES: &[i32] = &[\n    #[cfg(test)]\n    1,\n    2,\n];\n",
+        );
+        assert_eq!(multiline_element.test_only_lines, BTreeSet::from([2, 3]));
+
+        let shared_line = analyze(
+            Path::new("shared-line.rs"),
+            "const VALUES: &[i32] = &[\n    #[cfg(test)] 1, 2,\n];\n",
+        );
+        assert!(shared_line.test_only_lines.is_empty());
     }
 
     #[test]
@@ -1481,6 +1508,14 @@ mod tests {
         .to_string();
         assert!(denied.contains("inspection denied"), "{denied}");
         assert!(denied.contains("denied.rs"), "{denied}");
+
+        assert!(
+            !classify_source_path_metadata(
+                Path::new("parent/mod.rs"),
+                Err(std::io::Error::new(std::io::ErrorKind::NotADirectory, "parent is a file")),
+            )
+            .expect("not-a-directory means this module candidate is absent")
+        );
     }
 
     #[test]

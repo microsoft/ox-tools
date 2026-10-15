@@ -409,7 +409,9 @@ impl EvaluatedReport {
 /// policy evaluation.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
-/// empty, every workspace member is in scope.
+/// empty, every workspace member is in scope. Package selection limits policy
+/// evaluation, not released-surface discovery: source graphs for every
+/// workspace member are validated before filtering.
 ///
 /// # Errors
 ///
@@ -429,7 +431,9 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// policy and package selection.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
-/// empty, every workspace member is in scope.
+/// empty, every workspace member is in scope. Package selection limits policy
+/// evaluation, not released-surface discovery: source graphs for every
+/// workspace member are validated before filtering.
 ///
 /// # Errors
 ///
