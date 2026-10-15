@@ -1449,7 +1449,7 @@ fn recorded_region_syntax(
     };
     let scanner = HostScanner::for_path(host);
     let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
-    let xml_scan_failed = xml_comment_scan_failed(&text);
+    let xml_scan_failed = scanner == HostScanner::Lines && xml_comment_scan_failed(&text);
     if xml_scan_failed && raw_marker_line_present(&text, id, CommentSyntax::Xml) {
         bail!(
             "managed region '{id}' in '{host}' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
@@ -3250,6 +3250,26 @@ mod tests {
             "managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
         );
         assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn retirement_ignores_xml_marker_shaped_text_inside_toml_strings() {
+        let host = "# >>> anvil-managed: settings\nowned = true\n# <<< anvil-managed: settings\n\
+                    text = '''\n<!-- >>> anvil-managed: settings -->\nuser text\n<!-- <<< anvil-managed: settings -->\n'''\n";
+        let mut hosts = memory_hosts();
+        hosts.set("config.toml", host.to_owned());
+
+        assert_eq!(
+            recorded_region_syntax(
+                Path::new("in-memory-managed-region-tests"),
+                &mut hosts,
+                "config.toml",
+                "settings",
+                &checksum_str("owned = true\n"),
+            )
+            .unwrap(),
+            CommentSyntax::Hash
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem")]
