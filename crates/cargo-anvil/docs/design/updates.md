@@ -102,7 +102,8 @@ slash-slash hosts use `# >>> anvil-managed: <id>` and
 hosts use `<!-- >>> anvil-managed: <id> -->` and
 `<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
 element, attribute, or larger comment is ordinary user content. XML region IDs
-containing `--`, CR, or LF are rejected during catalog construction. Marker-
+containing `--`, CR, LF, or characters outside the XML 1.0 character set are
+rejected during catalog construction. Marker-
 shaped lines inside DTD/entity values, CDATA, processing instructions, or other
 non-comment XML content are not ownership boundaries. Comment recognition and
 root discovery use XML tokenizer tokens rather than raw substring matching.

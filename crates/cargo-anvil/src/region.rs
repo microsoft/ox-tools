@@ -2864,6 +2864,25 @@ mod tests {
             xml_document_root("<root>\n</root>\n<extra />\n").unwrap_err(),
             "the XML host is malformed: unknown token at 3:1"
         );
+        assert_eq!(
+            xml_document_root("<!-- only a comment -->\n").unwrap_err(),
+            "the XML host has no document element"
+        );
+    }
+
+    #[test]
+    fn xml_document_root_requires_the_closing_tag_to_fill_its_line() {
+        assert_eq!(
+            xml_document_root("<root>\n</root><!-- trailing -->\n")
+                .unwrap()
+                .unwrap()
+                .closing_line_start,
+            None
+        );
+        assert_eq!(
+            xml_document_root("<root>\n  </root>  \n").unwrap().unwrap().closing_line_start,
+            Some("<root>\n".len())
+        );
     }
 
     #[test]

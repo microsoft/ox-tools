@@ -309,10 +309,17 @@ impl CatalogBuilder {
         }));
         errors.extend(self.artifacts.iter().filter_map(|artifact| {
             let region = artifact.region_spec()?;
-            let invalid = region.id.as_str().contains("--") || region.id.as_str().contains('\r') || region.id.as_str().contains('\n');
+            let invalid = region.id.as_str().contains("--")
+                || region.id.as_str().contains('\r')
+                || region.id.as_str().contains('\n')
+                || region
+                    .id
+                    .as_str()
+                    .chars()
+                    .any(|character| !matches!(character, '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'));
             (region.syntax == crate::region::CommentSyntax::Xml && invalid).then(|| {
                 format!(
-                    "region '{}' cannot use XML comments because its id contains '--', CR, or LF",
+                    "region '{}' cannot use XML comments because its id contains '--', CR, LF, or a character XML 1.0 forbids",
                     region.id
                 )
             })
@@ -716,7 +723,13 @@ mod tests {
 
     #[test]
     fn build_rejects_xml_region_ids_that_cannot_be_comment_content() {
-        for id in ["build--projects", "build\nprojects", "build\rprojects"] {
+        for id in [
+            "build--projects",
+            "build\nprojects",
+            "build\rprojects",
+            "build\u{0}projects",
+            "build\u{1}projects",
+        ] {
             let error = Catalog::builder(CliMeta::new("anvil"))
                 .with_artifact(Artifact::region(RegionSpec {
                     host: HostSelector::Path("dirs.proj".to_owned()),
@@ -729,7 +742,9 @@ mod tests {
 
             assert_eq!(
                 error.to_string(),
-                format!("invalid catalog for 'anvil':\n  - region '{id}' cannot use XML comments because its id contains '--', CR, or LF")
+                format!(
+                    "invalid catalog for 'anvil':\n  - region '{id}' cannot use XML comments because its id contains '--', CR, LF, or a character XML 1.0 forbids"
+                )
             );
         }
     }
