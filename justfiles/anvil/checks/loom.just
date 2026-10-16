@@ -28,8 +28,8 @@
 #     (source swaps std<->loom atomics on `#[cfg(loom)]`, and
 #     `[target.'cfg(loom)'.dependencies] loom` links only under the cfg).
 #     The feature does NOT replace the cfg; both are required.
-# We scope `cargo test` to the owning package with `-p` (never
-# `--workspace`) so a global `--cfg loom` never leaks into deps reachable
+# We scope `cargo test` to the owning manifest (never `--workspace`, with an
+# explicit package selector for workspace-root manifests) so `--cfg loom` never leaks into deps reachable
 # only through *other* members (e.g. concurrent-queue), and run
 # single-threaded (loom drives its own scheduling). --release per the
 # loom docs: permutation exploration is wall-clock dominated by the SUT.
@@ -59,34 +59,14 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
     }
-    $meta = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1 | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    # Optional impact-scoping: recover bare package names from the
-    # impact step's version-qualified `--package name@version` pairs.
-    # Full-workspace modes (`--workspace` -- e.g. the scheduled tier,
-    # ANVIL_IMPACT=off, or no impact cache) carry no `--package` tokens,
-    # so $affected stays $null and the package set is left unfiltered
-    # (filtering on an empty set would wrongly skip every loom target).
-    $affected = $null
-    $tokens = @(-split $include)
-    for ($i = 0; $i -lt $tokens.Count; $i++) {
-        if ($tokens[$i] -eq '--package' -and ($i + 1) -lt $tokens.Count) {
-            if ($null -eq $affected) { $affected = @() }
-            $affected += ($tokens[$i + 1] -split '@', 2)[0]
-            $i++
-        }
-    }
-    $pkgs = $meta.packages
-    if ($null -ne $affected) {
-        $pkgs = @($pkgs | Where-Object { $_.name -in $affected })
-    }
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkgs = @(Get-AnvilPackages $include -Toolchain {{_anvil_stable_toolchain_args}})
 
     # Authoritative detection: [[test]] targets with required-features = ["loom"].
     $loomTargets = @(foreach ($pkg in $pkgs) {
         foreach ($t in $pkg.targets) {
             if (($t.kind -contains 'test') -and ($t.'required-features' -contains 'loom')) {
-                [pscustomobject]@{ pkg = $pkg.name; target = $t.name }
+                [pscustomobject]@{ pkg = $pkg.name; package = $pkg; target = $t.name }
             }
         }
     })
@@ -112,7 +92,8 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
     foreach ($lt in $loomTargets) {
         Write-Host "anvil-loom: $($lt.pkg) :: $($lt.target)"
-        & cargo {{_anvil_stable_toolchain_args}} test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
+        $packageArgs = @(Get-AnvilPackageArguments @($lt.package) -Adapter manifest)
+        & cargo {{_anvil_stable_toolchain_args}} test @packageArgs --release --all-features --locked --test $lt.target -- --test-threads=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 

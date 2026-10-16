@@ -14,7 +14,8 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}})
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
     # checks) into a STABLE cache path -- ProjectDirs(de.ralfj.cargo-careful),

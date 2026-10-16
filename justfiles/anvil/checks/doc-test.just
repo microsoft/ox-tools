@@ -26,6 +26,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
     $selection = @(if ($include) { -split $include } else { '--workspace' })
     $capableText = (& "{{ just_executable() }}" _anvil-impact-doctest-packages)
     $capabilityExit = $LASTEXITCODE
@@ -57,6 +58,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         $docSelection.Add('--package')
         $docSelection.Add($spec)
     }
+    $docSelection = @(Resolve-AnvilPackageArguments ($docSelection -join ' ') -Toolchain {{_anvil_stable_toolchain_args}})
     & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --locked

@@ -522,7 +522,7 @@ a CI shell and threading the result between jobs as environment variables.
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth). An unchanged tree yields an empty impact set, which cargo-delta reports either as a report with empty tiers or by printing nothing at all, in which case the recipe stores `{}`. A bare `{}` is therefore not a reliable "nothing changed" signal: the dirty-tree and baseline-without-a-workspace paths also write `{}` as a synthetic placeholder while widening every tier to `--workspace`. Read the `include_<tier>.txt` files for the scope actually selected. |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
-| `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid a redundant metadata process. |
+| `doctest_packages.txt`       | Ordinally sorted portable `name@version` keys for workspace members with at least one metadata target marked `doctest = true`. Doc-test intersects this projection before resolving consumer-local command arguments. |
 
 Because the modified/current set comes from cargo-delta's **committed** git diff against
 the base, local scoping reflects the commits your branch adds on top of the base ref, the
@@ -563,14 +563,16 @@ Each check requests one cargo-delta **category** — the selector it passes to
 | `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
 `$include` is either the literal sentinel `--skip` (the tier is empty), a pre-built
-argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified cargo
-specs, so `-p` resolves uniquely even against a like-named transitive dependency), or a
+string like `--package alpha@1.0.0 --package beta@0.2.0` (portable workspace keys, not
+Cargo command arguments), or a
 full-workspace default (`--workspace` for affected/required, empty for modified) when the
 tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
 cache. The doc-test recipe additionally reads `doctest_packages.txt` and intersects it
-with the affected selection. A clean computed or downloaded cache therefore performs no
-metadata discovery in the doc-test process: its exact Cargo work is the locked
-all-features doctest command followed by the locked default-features command. When impact
+with the affected selection. Before invoking a tool, `.anvil/packages.ps1` resolves
+the keys through locked consumer-runner metadata, never persisting absolute IDs or
+manifests back to the cache. This handles same-name, same-version registry dependencies
+and artifacts shared across Linux and Windows checkouts. Doc-test runs the locked
+all-features command followed by the locked default-features command. When impact
 is off, local safety widening exits before projection, or a cache predates the projection,
 doc-test performs one locked metadata query and applies the same `workspace_members`
 filter before launching those two commands. Every pre-projection full-workspace fallback

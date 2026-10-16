@@ -180,7 +180,7 @@ while paired prerequisite validation remains read-only.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
-| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --package '{spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; an unscoped run selects every workspace member. | none |
+| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --manifest-path '{manifest}' --package '{spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; an unscoped run selects every workspace member. | none |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
@@ -425,11 +425,26 @@ shared `anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping-via
 runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier — via the
 `_anvil-impact-format` helper — into a pre-built `--package X@ver --package Y@ver` string
 (or the literal sentinel `--skip` when the tier is empty). Each package is a
-version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
-member even when a like-named crate is also pulled in as a different-versioned transitive
-dependency. The same locked workspace metadata read also projects the ordinally sorted
+portable workspace key (`name@version`), not a Cargo selector: dependencies may share
+both the name and version of a workspace member. The same locked metadata read projects the ordinally sorted
 `doctest_packages.txt` capability list, allowing `doc-test` to intersect its affected
-scope without another Cargo child process.
+scope before resolving runner-local package identities.
+
+Generated `.anvil/packages.ps1` owns package selection and argument adaptation. It
+resolves portable keys (or an explicit local package override) using locked metadata,
+intersecting `packages` with `workspace_members` and rejecting missing or ambiguous keys.
+No absolute producer path is stored in the impact artifact. Single-package Cargo
+commands use metadata `manifest_path`; root-package requests also carry a source-qualified
+selector so workspace `default-members` cannot broaden them. Multi-package Cargo commands
+use source-qualified IDs. Arguments remain arrays, including paths containing spaces.
+
+Tool adapters are deliberately distinct: cargo-llvm-cov matches literal metadata IDs;
+cargo-each and cargo-hack filter workspace name/version keys; coverage-gate accepts
+workspace names. Semver-checks receives a manifest and bare workspace name, including
+for root packages. Cargo-each children receive the manifest and workspace spec, isolating
+root packages from default-members too. Coverage filtering operates on selected metadata
+objects, so opted-out packages run plain nextest while the measured set alone reaches
+llvm-cov and coverage-gate, including full-workspace runs.
 
 Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
 category's scope by calling `_anvil-impact-include <category>` into a local `$include`
