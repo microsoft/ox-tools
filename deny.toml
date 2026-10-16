@@ -11,7 +11,9 @@ unmaintained = "all"
 
 # Advisories we have consciously accepted. Each entry needs a reason and,
 # where the fix is out of our hands, the upstream we are waiting on.
-ignore = []
+ignore = [
+    { crate = "zip@8.6.0", reason = "Temporarily allow the locked yanked release; remove after upgrading zip to a non-yanked version." },
+]
 
 # >>> anvil-managed: anvil-deny-bans
 [bans]
