@@ -588,6 +588,13 @@ fn filter_and_publish_reports_with(
             fs::read_to_string(&report.raw_path).into_app_err(format!("failed to read raw LCOV report `{}`", report.raw_path.display()))
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+    for (report, contents) in collected.iter().zip(&raw) {
+        lcov::Report::from_reader(lcov::Reader::new(contents.as_bytes())).into_app_err(format!(
+            "raw LCOV report for configuration `{}` at `{}` is not well-formed",
+            report.configuration.artifact_name(),
+            report.raw_path.display()
+        ))?;
+    }
     let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
     let manifest = execution.workspace.root.join("Cargo.toml");
     let filtered = filter(&raw_refs, &manifest)?;
@@ -1277,6 +1284,9 @@ mod tests {
 
     use super::*;
 
+    const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+    const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+
     fn member(name: &str, version: &str) -> WorkspaceMember {
         WorkspaceMember {
             name: name.to_owned(),
@@ -1459,13 +1469,13 @@ mod tests {
                 configuration: FeatureConfiguration::NoDefaultFeatures,
             },
         ];
-        fs::write(&collected[0].raw_path, "raw all").expect("write raw all");
-        fs::write(&collected[1].raw_path, "raw no-default").expect("write raw no-default");
+        fs::write(&collected[0].raw_path, RAW_ALL_FEATURES).expect("write raw all");
+        fs::write(&collected[1].raw_path, RAW_NO_DEFAULT).expect("write raw no-default");
         fs::write(&collected[0].stable_path, "old all").expect("write old all");
         fs::write(&collected[1].stable_path, "old no-default").expect("write old no-default");
 
         let paths = filter_and_publish_reports_with(&execution, &collected, |raw, manifest| {
-            assert_eq!(raw, ["raw all", "raw no-default"]);
+            assert_eq!(raw, [RAW_ALL_FEATURES, RAW_NO_DEFAULT]);
             assert_eq!(manifest, tmp.path().join("Cargo.toml"));
             Ok(vec!["filtered all".to_owned(), "filtered no-default".to_owned()])
         })
@@ -1523,9 +1533,24 @@ mod tests {
             stable_path: coverage.join("lcov.info"),
             configuration: FeatureConfiguration::AllFeatures,
         }];
-        fs::write(&collected[0].raw_path, "raw").expect("write raw");
         fs::write(&collected[0].stable_path, "old").expect("write old");
 
+        fs::write(&collected[0].raw_path, "not lcov").expect("write malformed raw");
+        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| panic!("malformed LCOV must fail before filtering"))
+            .expect_err("malformed raw LCOV must identify its configuration");
+        let expected = format!(
+            "raw LCOV report for configuration `all-features` at `{}` is not well-formed",
+            collected[0].raw_path.display()
+        );
+        let rendered = error.to_string();
+        let context = rendered
+            .lines()
+            .find(|line| line.starts_with("> raw LCOV report"))
+            .expect("labeled LCOV context");
+        assert!(context.starts_with(&format!("> {expected} (at ")), "{rendered}");
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
+
+        fs::write(&collected[0].raw_path, RAW_ALL_FEATURES).expect("write raw");
         let error = filter_and_publish_reports_with(&execution, &collected, |_, _| Err(app_error("filter failed")))
             .expect_err("filter failure must propagate");
         assert_eq!(error.to_string(), "filter failed");
@@ -1564,7 +1589,7 @@ mod tests {
             stable_path: tmp.path().join("missing/lcov.info"),
             configuration: FeatureConfiguration::AllFeatures,
         }];
-        fs::write(&collected[0].raw_path, "raw").expect("write raw");
+        fs::write(&collected[0].raw_path, RAW_ALL_FEATURES).expect("write raw");
 
         let error = filter_and_publish_reports_with(&execution, &collected, |_, _| Ok(vec!["filtered".to_owned()]))
             .expect_err("missing staging directory must fail");
