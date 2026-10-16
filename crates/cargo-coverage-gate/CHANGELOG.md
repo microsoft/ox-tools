@@ -11,6 +11,7 @@
 
 - 🐛 Bug Fixes
 
+  - honor target feature contracts
   - satisfy CI and review contracts
   - allow same-version metadata refresh
   - close final filtering gaps
@@ -44,6 +45,7 @@
 
 - ✔️ Tasks
 
+  - refresh 0.7 release notes
   - prepare 0.7.0 release
   - defer Anvil rollout until release
 
