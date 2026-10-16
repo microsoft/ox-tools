@@ -555,6 +555,7 @@ fn plain_configuration_command(
 }
 
 #[derive(Debug)]
+/// Private raw export and public filtered destination for one feature mode.
 struct CollectedReport {
     raw_path: PathBuf,
     stable_path: PathBuf,
@@ -588,14 +589,27 @@ fn filter_and_publish_reports(execution: &CollectionExecution<'_>, collected: &[
 fn filter_and_publish_reports_with(
     execution: &CollectionExecution<'_>,
     collected: &[CollectedReport],
+    filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_with_reader(execution, collected, read_raw_lcov, filter)
+}
+
+fn read_raw_lcov(path: &Path) -> Result<String, AppError> {
+    fs::read_to_string(path).into_app_err(format!("failed to read raw LCOV report `{}`", diagnostic_path(path)))
+}
+
+fn filter_and_publish_reports_with_reader(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    mut read: impl FnMut(&Path) -> Result<String, AppError>,
     mut filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
 ) -> Result<Vec<PathBuf>, AppError> {
+    // Finish reading, validating, filtering, and staging the complete batch
+    // before publishing. Each final rename is still an independent atomic
+    // replacement rather than a transaction across all configurations.
     let raw = collected
         .iter()
-        .map(|report| {
-            fs::read_to_string(&report.raw_path)
-                .into_app_err(format!("failed to read raw LCOV report `{}`", diagnostic_path(&report.raw_path)))
-        })
+        .map(|report| read(&report.raw_path))
         .collect::<Result<Vec<_>, AppError>>()?;
     for (report, contents) in collected.iter().zip(&raw) {
         lcov::Report::from_reader(lcov::Reader::new(contents.as_bytes())).into_app_err(format!(
@@ -1488,16 +1502,25 @@ mod tests {
                 configuration: FeatureConfiguration::NoDefaultFeatures,
             },
         ];
-        fs::write(&collected[0].raw_path, RAW_ALL_FEATURES).expect("write raw all");
-        fs::write(&collected[1].raw_path, RAW_NO_DEFAULT).expect("write raw no-default");
         fs::write(&collected[0].stable_path, "old all").expect("write old all");
         fs::write(&collected[1].stable_path, "old no-default").expect("write old no-default");
 
-        let paths = filter_and_publish_reports_with(&execution, &collected, |raw, manifest| {
-            assert_eq!(raw, [RAW_ALL_FEATURES, RAW_NO_DEFAULT]);
-            assert_eq!(manifest, tmp.path().join("Cargo.toml"));
-            Ok(vec!["filtered all".to_owned(), "filtered no-default".to_owned()])
-        })
+        let paths = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |path| {
+                if path.ends_with("raw-all.info") {
+                    Ok(RAW_ALL_FEATURES.to_owned())
+                } else {
+                    Ok(RAW_NO_DEFAULT.to_owned())
+                }
+            },
+            |raw, manifest| {
+                assert_eq!(raw, [RAW_ALL_FEATURES, RAW_NO_DEFAULT]);
+                assert_eq!(manifest, tmp.path().join("Cargo.toml"));
+                Ok(vec!["filtered all".to_owned(), "filtered no-default".to_owned()])
+            },
+        )
         .expect("filter and publish");
 
         assert_eq!(paths, collected.iter().map(|report| report.stable_path.clone()).collect::<Vec<_>>());
@@ -1554,8 +1577,10 @@ mod tests {
         }];
         fs::write(&collected[0].stable_path, "old").expect("write old");
 
-        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| panic!("missing LCOV must fail before filtering"))
-            .expect_err("missing raw LCOV must identify its path");
+        let error = filter_and_publish_reports_with_reader(&execution, &collected, read_raw_lcov, |_, _| {
+            panic!("missing LCOV must fail before filtering")
+        })
+        .expect_err("missing raw LCOV must identify its path");
         assert!(
             error.to_string().contains(&format!(
                 "failed to read raw LCOV report `{}`",
@@ -1565,9 +1590,13 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
 
-        fs::write(&collected[0].raw_path, "not lcov").expect("write malformed raw");
-        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| panic!("malformed LCOV must fail before filtering"))
-            .expect_err("malformed raw LCOV must identify its configuration");
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok("not lcov".to_owned()),
+            |_, _| panic!("malformed LCOV must fail before filtering"),
+        )
+        .expect_err("malformed raw LCOV must identify its configuration");
         let expected = format!(
             "raw LCOV report for feature configuration `all-features` at `{}` is not well-formed",
             diagnostic_path(&collected[0].raw_path)
@@ -1580,9 +1609,13 @@ mod tests {
         assert!(context.starts_with(&format!("> {expected} (at ")), "{rendered}");
         assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
 
-        fs::write(&collected[0].raw_path, RAW_ALL_FEATURES).expect("write raw");
-        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| Err(app_error("filter failed")))
-            .expect_err("filter failure must propagate");
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Err(app_error("filter failed")),
+        )
+        .expect_err("filter failure must propagate");
         assert_eq!(error.to_string(), "filter failed");
         assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
 
@@ -1591,8 +1624,13 @@ mod tests {
             stable_path: PathBuf::from(std::path::MAIN_SEPARATOR.to_string()),
             configuration: FeatureConfiguration::AllFeatures,
         }];
-        let error = filter_and_publish_reports_with(&execution, &parentless, |_, _| Ok(vec!["filtered".to_owned()]))
-            .expect_err("parentless stable LCOV path must fail");
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &parentless,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Ok(vec!["filtered".to_owned()]),
+        )
+        .expect_err("parentless stable LCOV path must fail");
         assert_eq!(
             error.to_string(),
             format!(
@@ -1634,10 +1672,13 @@ mod tests {
             stable_path: tmp.path().join("missing/lcov.info"),
             configuration: FeatureConfiguration::AllFeatures,
         }];
-        fs::write(&collected[0].raw_path, RAW_ALL_FEATURES).expect("write raw");
-
-        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| Ok(vec!["filtered".to_owned()]))
-            .expect_err("missing staging directory must fail");
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Ok(vec!["filtered".to_owned()]),
+        )
+        .expect_err("missing staging directory must fail");
         assert!(error.to_string().contains("failed to create temporary file"), "{error}");
     }
 

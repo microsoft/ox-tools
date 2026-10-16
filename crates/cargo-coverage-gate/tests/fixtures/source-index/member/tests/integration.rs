@@ -6,3 +6,9 @@ mod shared;
 
 #[path = "../src/helper.rs"]
 mod helper;
+
+#[cfg(feature = "x")]
+include!("../src/included-test.rs");
+
+#[cfg(not(feature = "x"))]
+include!("../src/included-test.rs");
