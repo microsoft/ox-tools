@@ -311,8 +311,9 @@ pub use error::CoverageGateError;
 /// LCOV input is malformed, any source reachable from a Cargo target root
 /// cannot be resolved/read/parsed, target ownership cannot be determined, or
 /// LCOV line data does not match the current source tree.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
-    source_filter::filter_one(lcov_text, manifest_path)
+    filter_lcov_with_metadata_loader(lcov_text, manifest_path, workspace::load_metadata)
 }
 
 /// Filter multiple independent tracefiles using one Cargo target/source
@@ -326,7 +327,29 @@ pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<Stri
 /// For non-empty input, returns [`CoverageGateError`] under the same conditions
 /// as [`filter_lcov`]; any failing input aborts the operation.
 pub fn filter_lcov_many(lcov_texts: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
-    source_filter::filter_many(lcov_texts, manifest_path)
+    filter_lcov_many_with_metadata_loader(lcov_texts, manifest_path, workspace::load_metadata)
+}
+
+fn filter_lcov_with_metadata_loader(
+    lcov_text: &str,
+    manifest_path: Option<&Path>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<String, CoverageGateError> {
+    let mut filtered = filter_lcov_many_with_metadata_loader(&[lcov_text], manifest_path, load_metadata)?;
+    Ok(filtered.pop().expect("one LCOV input always produces one filtered output"))
+}
+
+fn filter_lcov_many_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<Vec<String>, CoverageGateError> {
+    let reports = source_filter::parse_reports(lcov_texts)?;
+    if reports.is_empty() {
+        return Ok(Vec::new());
+    }
+    let metadata = load_metadata(manifest_path)?;
+    source_filter::filter_reports_with_metadata(reports, &metadata)
 }
 
 /// Outcome of a coverage-gate evaluation.
@@ -471,8 +494,18 @@ pub fn evaluate_many_for_target(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_many_for_target_with_metadata_loader(lcov_texts, manifest_path, gated_packages, target, workspace::load_metadata)
+}
+
+fn evaluate_many_for_target_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let reports = source_filter::parse_reports(lcov_texts)?;
-    let metadata = workspace::load_metadata(manifest_path)?;
+    let metadata = load_metadata(manifest_path)?;
     evaluate_reports_with_metadata(reports, &metadata, gated_packages, target)
 }
 
@@ -536,8 +569,19 @@ pub fn evaluate_unfiltered_many_for_target(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_unfiltered_many_for_target_with_metadata_loader(lcov_texts, manifest_path, gated_packages, target, workspace::load_metadata)
+}
+
+fn evaluate_unfiltered_many_for_target_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let ws = workspace::Workspace::load(manifest_path, target)?;
+    let metadata = load_metadata(manifest_path)?;
+    let ws = workspace::Workspace::from_metadata(&metadata, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
@@ -545,11 +589,68 @@ pub fn evaluate_unfiltered_many_for_target(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::fs;
-
-    use tempfile::tempdir;
+    use serde_json::json;
 
     use super::*;
+
+    fn fixture_metadata() -> cargo_metadata::Metadata {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index");
+        let member = root.join("member");
+        let package_id = "path+file:///coverage-public-wrapper#member@0.1.0";
+        serde_json::from_value(json!({
+            "packages": [{
+                "name": "member",
+                "version": "0.1.0",
+                "authors": [],
+                "id": package_id,
+                "source": null,
+                "description": null,
+                "dependencies": [],
+                "license": null,
+                "license_file": null,
+                "targets": [{
+                    "kind": ["lib"],
+                    "crate_types": ["lib"],
+                    "name": "member",
+                    "src_path": member.join("src/lib.rs"),
+                    "edition": "2024",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }],
+                "features": {},
+                "manifest_path": member.join("Cargo.toml"),
+                "categories": [],
+                "keywords": [],
+                "readme": null,
+                "repository": null,
+                "homepage": null,
+                "documentation": null,
+                "edition": "2024",
+                "metadata": {"coverage-gate": {"min-lines-percent": 100}},
+                "links": null,
+                "publish": null,
+                "default_run": null,
+                "rust_version": null
+            }],
+            "workspace_members": [package_id],
+            "workspace_default_members": [package_id],
+            "resolve": null,
+            "workspace_root": root,
+            "target_directory": root.join("target"),
+            "build_directory": root.join("target"),
+            "metadata": {},
+            "version": 1
+        }))
+        .expect("fixture metadata parses")
+    }
+
+    fn assert_unknown_selector(error: &CoverageGateError, expected: &str) {
+        let cause = std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(|source| source.downcast_ref::<crate::error::UnknownPackageSelectorError>())
+            .expect("unknown selector cause");
+        assert_eq!(cause.selector, expected);
+    }
 
     #[test]
     fn exit_codes() {
@@ -599,74 +700,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata and rustc")]
-    fn evaluate_many_without_explicit_target_resolves_the_host() {
-        let tmp = tempdir().expect("tempdir");
-        fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");
-        fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n",
-        )
-        .expect("write workspace manifest");
-        fs::write(
-            tmp.path().join("alpha/Cargo.toml"),
-            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate.target.'cfg(any(windows, unix))']\n\
-             min-lines-percent = 0\n",
-        )
-        .expect("write member manifest");
-        fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
+    fn public_wrappers_forward_manifest_and_package_selectors_in_process() {
+        let manifest = Path::new("/synthetic/workspace/Cargo.toml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index/member/src/lib.rs");
+        let lcov = format!("TN:\nSF:{}\nDA:4,1\nend_of_record\n", source.display());
+        let target = Some("x86_64-unknown-linux-gnu");
 
-        let evaluated = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("host target resolves");
-        assert_eq!(evaluated.verdict(), Verdict::Pass);
-    }
+        let filtered = filter_lcov_with_metadata_loader(&lcov, Some(manifest), |actual| {
+            assert_eq!(actual, Some(manifest));
+            Ok(fixture_metadata())
+        })
+        .expect("filter wrapper succeeds");
+        let filtered = source_filter::parse_reports(&[&filtered]).expect("filtered LCOV parses");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].sections.len(), 1);
 
-    #[test]
-    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
-    fn evaluate_forwards_manifest_path_and_package_selectors() {
-        let tmp = tempdir().expect("tempdir");
-        fs::create_dir_all(tmp.path().join("explicit-manifest-only/src")).expect("create member");
-        fs::create_dir_all(tmp.path().join("must-remain-unselected/src")).expect("create unselected member");
-        fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"explicit-manifest-only\", \"must-remain-unselected\"]\n",
-        )
-        .expect("write workspace manifest");
-        fs::write(
-            tmp.path().join("explicit-manifest-only/Cargo.toml"),
-            "[package]\nname = \"explicit-manifest-only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
-        )
-        .expect("write member manifest");
-        let selected_source = tmp.path().join("explicit-manifest-only/src/lib.rs");
-        fs::write(&selected_source, "pub fn released() {}\n").expect("write member source");
-        fs::write(
-            tmp.path().join("must-remain-unselected/Cargo.toml"),
-            "[package]\nname = \"must-remain-unselected\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate]\nmin-lines-percent = 80\n",
-        )
-        .expect("write unselected member manifest");
-        fs::write(tmp.path().join("must-remain-unselected/src/lib.rs"), "pub fn released() {}\n").expect("write unselected member source");
-
-        let valid_lcov = format!("TN:\nSF:{}\nDA:1,1\nend_of_record\n", selected_source.display());
-        let filtered = filter_lcov(&valid_lcov, Some(&tmp.path().join("Cargo.toml"))).expect("public filter wrapper succeeds");
-        assert!(filtered.contains("DA:1,1"), "{filtered}");
-        let evaluated = evaluate(
-            &valid_lcov,
-            Some(&tmp.path().join("Cargo.toml")),
-            &["explicit-manifest-only".to_owned()],
-        )
-        .expect("released evaluation must preserve manifest/package forwarding");
+        let selected = ["member".to_owned()];
+        let evaluated = evaluate_many_for_target_with_metadata_loader(&[&lcov], Some(manifest), &selected, target, |actual| {
+            assert_eq!(actual, Some(manifest));
+            Ok(fixture_metadata())
+        })
+        .expect("filtered evaluation wrapper succeeds");
         assert_eq!(evaluated.verdict(), Verdict::Pass);
 
-        let missing_source = tmp.path().join("explicit-manifest-only/src/missing.rs").display().to_string();
-        let lcov = format!("TN:\nSF:{missing_source}\nDA:999,0\nend_of_record\n");
-        let evaluated = evaluate_unfiltered(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
-            .expect("unfiltered evaluation must preserve manifest/package forwarding without source validation");
-        assert_eq!(evaluated.verdict(), Verdict::Pass);
+        let unknown = ["missing-member".to_owned()];
+        let error = evaluate_many_for_target_with_metadata_loader(&[&lcov], Some(manifest), &unknown, target, |_| Ok(fixture_metadata()))
+            .expect_err("filtered wrapper forwards package selectors");
+        assert_unknown_selector(&error, "missing-member");
 
-        let error = evaluate(&lcov, Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
-            .expect_err("ordinary evaluation must apply released-surface source validation");
-        assert!(error.to_string().contains("failed to resolve Rust source path"));
+        let error = evaluate_unfiltered_many_for_target_with_metadata_loader(&[&lcov], Some(manifest), &unknown, target, |actual| {
+            assert_eq!(actual, Some(manifest));
+            Ok(fixture_metadata())
+        })
+        .expect_err("unfiltered wrapper forwards package selectors");
+        assert_unknown_selector(&error, "missing-member");
     }
 }

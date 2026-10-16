@@ -27,7 +27,6 @@ use crate::error::{
     ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
     UnsupportedSourceInclusionError,
 };
-use crate::workspace::load_metadata;
 
 const LINE_RELEASED: u8 = 1;
 const LINE_TEST_ONLY: u8 = 1 << 1;
@@ -954,15 +953,6 @@ fn validate_line(path: &Path, line: u32, line_count: usize) -> Result<(), Covera
     }
 }
 
-pub(crate) fn filter_many(inputs: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
-    let reports = parse_reports(inputs)?;
-    if reports.is_empty() {
-        return Ok(Vec::new());
-    }
-    let metadata = load_metadata(manifest_path)?;
-    filter_reports_with_metadata(reports, &metadata)
-}
-
 pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata: &Metadata) -> Result<Vec<String>, CoverageGateError> {
     if reports.is_empty() {
         configured_test_attributes(metadata)?;
@@ -970,13 +960,6 @@ pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata:
     }
     let sources = SourceIndex::from_metadata(metadata)?;
     reports.into_iter().map(|report| filter_report(report, &sources)).collect()
-}
-
-pub(crate) fn filter_one(input: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
-    let report = parse_report(input)?;
-    let metadata = load_metadata(manifest_path)?;
-    let sources = SourceIndex::from_metadata(&metadata)?;
-    filter_report(report, &sources)
 }
 
 pub(crate) fn parse_reports(inputs: &[&str]) -> Result<Vec<lcov::Report>, CoverageGateError> {
@@ -2211,7 +2194,7 @@ mod tests {
         assert_eq!(error.matches("at 2:15").count(), 2, "{error}");
         assert_eq!(error.matches("at 2:17").count(), 1, "{error}");
 
-        let error = filter_many(&["not lcov"], None)
+        let error = parse_reports(&["not lcov"])
             .expect_err("malformed LCOV must fail before metadata discovery")
             .to_string();
         assert!(error.contains("lcov tracefile"), "{error}");
