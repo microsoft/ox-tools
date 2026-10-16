@@ -3525,12 +3525,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // tree would present itself as a mutable string literal.
     }
 
-    fn visit_pat(&mut self, _node: &'ast Pat) {
-        // A pattern is matched against, not evaluated, so nothing in one can be guarded: a guard
-        // is an `if` expression and no expression is legal in pattern position. This matters
-        // because `syn` models a literal pattern as an `ExprLit`, so without this every `"skip"
-        // =>` match arm would offer itself as a mutable literal and produce a mutant that cannot
-        // compile.
+    fn visit_pat(&mut self, node: &'ast Pat) {
+        // A pattern is matched against, not evaluated, so its literals cannot be guarded. `syn`
+        // keeps a match arm's executable `if` guard inside Pat::Guard, though, and that expression
+        // must still be visited for nested mutations such as relational comparisons.
+        if let Pat::Guard(guarded) = node {
+            self.visit_expr(&guarded.guard);
+        }
     }
 
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {

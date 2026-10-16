@@ -51,6 +51,10 @@ configuration and therefore audits the whole file.
   decrement; focused non-default selection can still request those optimistic
   sites. Proven text/time addition is not changed to any incompatible arithmetic
   operator; signed and unresolved arithmetic remains in the population.
+- A match pattern is not evaluated, so its literals are not mutated. The `if`
+  guard attached to a match arm is evaluated and receives ordinary expression
+  mutations, including relational substitutions, alongside whole-guard
+  `match_guard` mutations.
 - A mutation that invents `Default::default()` for a known payload requires
   positive evidence. Primitive and supported standard types, package-local
   derives or impls whose concrete generic arguments satisfy their bounds,

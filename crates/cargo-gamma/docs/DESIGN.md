@@ -323,6 +323,9 @@ original expression.
 
 ### Semantic restraint
 
+Comparisons inside a match arm's `if` guard receive the same relational
+mutations as comparisons elsewhere, while the pattern remains untouched.
+
 Instrumentation duplicates source text rather than introducing temporary bindings. A temporary
 could change moves, borrows, short-circuit behavior, or destruction order. The schema may affect
 code size, inlining, and layout, but it must preserve the unmutated program's observable semantics.
