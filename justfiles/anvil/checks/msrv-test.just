@@ -22,7 +22,8 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}})
     # `--tests` = lib/bin unit tests + integration tests. NOT `--all-targets`,
     # which adds `--benches`: `cargo test` EXECUTES bench harnesses, and a
     # `harness = false` bench needs a driver binary this group never installs.

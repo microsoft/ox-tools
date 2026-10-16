@@ -142,10 +142,11 @@ Cargo metadata and the compiler-artifact stream must come from the same pinned
 nightly Cargo. Cargo changed package-ID formatting in 1.78, so joining metadata
 from a stable or MSRV Cargo to nightly compiler artifacts would fail for older
 adopters. Metadata supplies the workspace-member set, package labels, manifest
-directories, and `[package.metadata.anvil.miri] exclude` policy. Full-workspace
-selection translates exclusions to Cargo `--exclude` arguments; impact-scoped
-selection removes excluded version-qualified package selectors before
-compilation. Excluded packages remain available as dependencies.
+directories, and `[package.metadata.anvil.miri] exclude` policy. The shared
+package helper queries this metadata once. Both full-workspace and impact-scoped
+runs remove excluded members from the selected metadata before constructing
+manifest-path or source-qualified Cargo arguments. Excluded packages remain
+available as dependencies.
 
 The compile phase uses `cargo miri test --all-features --tests --no-run` with
 Cargo's JSON diagnostic stream. Executable `compiler-artifact` records whose
@@ -264,7 +265,7 @@ Creation failures include Git's diagnostic output.
 ### Fail-closed mapping and the dirty-tree safety net
 
 cargo-delta reports library/target identifiers that do not uniquely name a Cargo package, so
-`_anvil-impact-format` reverse-maps them to version-qualified package selectors using three
+`_anvil-impact-format` reverse-maps them to portable `name@version` workspace keys using three
 Ordinal (case-sensitive) lookups (package name, lib/proc-macro target, manifest-dir leaf). When
 a reported identifier resolves to **zero** packages (an unmapped gap) or **more than one** (an
 ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
@@ -272,6 +273,9 @@ affected work. Complementarily, a dirty working tree (any uncommitted change out
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because
 cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.
+
+Consumer-side resolution and tool adapters are defined in
+[check scoping](./design/checks.md#5-impact-scoping-check--include-mapping).
 
 ### Mode routing before dependency evaluation
 

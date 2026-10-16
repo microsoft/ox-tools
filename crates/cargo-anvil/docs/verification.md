@@ -76,6 +76,13 @@ on tool availability. These checks protect the emitted artifact contract, not
 runtime PowerShell semantics; recipe execution is validated by the provisioned
 self-hosting pipeline described above.
 
+The existing Linux `regenerate-check` job also runs
+`crates/cargo-anvil/system-tests/package-identity.ps1` with PowerShell.
+It exercises the shipped helper with strict in-memory Cargo mocks, including
+Linux and Windows path inputs, package collisions, selector adapters, and
+toolchain forwarding. It needs no registry cache, network, Just, or Cargo plugins.
+Actual cross-platform CLI execution remains covered by self-hosting.
+
 ### 2.3 Fixture-based integration tests
 
 Alongside the snapshot tests, a `tests/fixtures/` corpus covers

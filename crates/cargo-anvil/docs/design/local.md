@@ -522,7 +522,7 @@ a CI shell and threading the result between jobs as environment variables.
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth). An unchanged tree yields an empty impact set, which cargo-delta reports either as a report with empty tiers or by printing nothing at all, in which case the recipe stores `{}`. A bare `{}` is therefore not a reliable "nothing changed" signal: the dirty-tree and baseline-without-a-workspace paths also write `{}` as a synthetic placeholder while widening every tier to `--workspace`. Read the `include_<tier>.txt` files for the scope actually selected. |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
-| `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid a redundant metadata process. |
+| `doctest_packages.txt`       | Ordinally sorted portable `name@version` keys for workspace members with at least one metadata target marked `doctest = true`. Doc-test intersects this projection before resolving consumer-local command arguments. |
 
 Because the modified/current set comes from cargo-delta's **committed** git diff against
 the base, local scoping reflects the commits your branch adds on top of the base ref, the
@@ -530,66 +530,25 @@ same way a PR does — not un-committed working-tree edits.
 
 ### 4.1 How checks consume it
 
-Every **impact-scoped** per-crate check depends on `anvil-impact` and, at the top of its
-body, resolves its category's scope into a local `$include` variable by calling
-`_anvil-impact-include`:
+`_anvil-impact-include <category>` reads the local or downloaded cache and returns:
 
-```just
-[script("pwsh", "-NoProfile")]
-anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
-    & cargo clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
-```
+- `--skip` for an empty tier.
+- `--package alpha@1.0.0 --package beta@0.2.0` for selected workspace members.
+- `--workspace` for unscoped affected/required tiers, or an empty string for modified.
 
-`_anvil-impact-include` reads `target/anvil/impact/` — the cache produced by the
-`: anvil-impact` dependency (which just ran with a cache hit). This one code path serves
-both worlds:
+These are portable workspace keys, not Cargo arguments. See
+[check scoping and package adapters](./checks.md#5-impact-scoping-check--include-mapping)
+for consumption rules.
 
-* **Local** — the check reads the cache the local `anvil-impact` run produced. Scoping is
-  therefore **on by default** for `just anvil-pr`.
-* **Cloud** — the group job downloaded the `target/anvil/impact/` artifact the impact job
-  uploaded, so the *same* `_anvil-impact-include` call reads the *same* cache — no scoping
-  is threaded between jobs via environment variables.
+Doc-test intersects the affected set with `doctest_packages.txt`, then resolves
+runner-local arguments. Without the projection, it discovers capable workspace
+members through locked metadata. Full-workspace fallbacks remove stale projections
+so newly capable members cannot be skipped.
 
-Each check requests one cargo-delta **category** — the selector it passes to
-`_anvil-impact-include` — which determines how it uses the returned `$include`:
-
-| Category   | What recipes do with it                                                                       |
-|------------|------------------------------------------------------------------------------------------------|
-| `modified` | `--skip` → recipe exits 0. Otherwise the recipe runs against the input domain defined by its own command; impact-selected package arguments are not forwarded. |
-| `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
-| `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
-
-`$include` is either the literal sentinel `--skip` (the tier is empty), a pre-built
-argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified cargo
-specs, so `-p` resolves uniquely even against a like-named transitive dependency), or a
-full-workspace default (`--workspace` for affected/required, empty for modified) when the
-tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
-cache. The doc-test recipe additionally reads `doctest_packages.txt` and intersects it
-with the affected selection. A clean computed or downloaded cache therefore performs no
-metadata discovery in the doc-test process: its exact Cargo work is the locked
-all-features doctest command followed by the locked default-features command. When impact
-is off, local safety widening exits before projection, or a cache predates the projection,
-doc-test performs one locked metadata query and applies the same `workspace_members`
-filter before launching those two commands. Every pre-projection full-workspace fallback
-deletes any older capability projection first, so a stale file cannot suppress a newly
-added or newly doctest-capable workspace member.
-
-`_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
-when at least one name cargo-delta reported cannot be resolved to exactly one workspace
-package. The helper resolves each reported name against three namespaces: the exact cargo
-package name, the library/proc-macro target name (snake_case, for crates whose package and
-lib names differ), and the manifest-directory leaf (for deeply nested workspaces where
-cargo-delta emits a directory name). A name is unresolvable when it maps to **no** package
-*or* to **more than one** distinct package (a genuinely ambiguous identifier). Because
-cargo-delta reports *library* identifiers rather than unique cargo specs, an unresolvable
-name signals a gap in this reverse-mapping — not a scoping decision — so the helper logs
-`cargo-delta returned unknown package '<name>'` or `cargo-delta returned ambiguous package
-identifier '<name>'` to stderr and exits non-zero rather than guessing (and risking a
-silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
-gets fixed, instead of masking it behind a silently full-workspace run.
+`_anvil-impact-format` matches cargo-delta identifiers against package names,
+library/proc-macro target names, and manifest-directory leaves. Each identifier
+must resolve to exactly one workspace member; unknown or ambiguous identifiers
+fail the recipe rather than silently skipping checks.
 
 Formatting illustrates the modified-tier contract. The tier decides only whether
 the recipe runs. Once admitted, the recipe validates its pinned tools and uses

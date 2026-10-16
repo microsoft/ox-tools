@@ -18,7 +18,9 @@ anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-hack: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} hack @(if ($include) { -split $include } else { '--workspace' }) --feature-powerset --depth 2 check
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}} -Adapter each)
+    & cargo {{_anvil_stable_toolchain_args}} hack @pkg --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-hack` recipe.

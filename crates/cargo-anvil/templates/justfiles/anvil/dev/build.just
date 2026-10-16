@@ -10,7 +10,10 @@
 [script("pwsh", "-NoProfile")]
 anvil-build package="" profile="": anvil-build-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    cargo {{_anvil_stable_toolchain_args}} build {{ if package == "" { "--workspace" } else { "--package " + package } }} {{ if profile == "" { "" } else { "--profile " + profile } }} --all-features --all-targets --locked
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $scope = '{{ if package == "" { "--workspace" } else { "--package " + package } }}'
+    $pkg = @(Resolve-AnvilPackageArguments $scope -Toolchain {{_anvil_stable_toolchain_args}})
+    cargo {{_anvil_stable_toolchain_args}} build @pkg {{ if profile == "" { "" } else { "--profile " + profile } }} --all-features --all-targets --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-build` recipe.
