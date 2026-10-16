@@ -169,6 +169,14 @@ arguments are not part of that serialized state when `--no-run` suppresses
 Cargo's runner invocation, so a requested libtest filter is passed explicitly
 to every hidden runner invocation.
 
+Every test-executable profile adds `-Zmiri-ignore-leaks` to `MIRIFLAGS`.
+Miri's leak checker also treats detached threads that remain when the main
+thread exits as an error, even though ordinary Rust process termination
+permits them. Anvil's runtime-analysis contract is undefined-behavior
+detection, so leak and remaining-thread shutdown diagnostics are excluded
+without disabling memory, aliasing, concurrency, or other UB checks. Explicit
+`--example` runs retain Miri's default leak policy.
+
 These steps are not a public cargo-anvil API and may change when the pinned
 nightly changes. A nightly update must therefore revalidate sysroot discovery,
 cargo-miri lookup, the ambient sentinel, serialized environment restoration,

@@ -455,6 +455,7 @@ mod tests {
             "ForEach-Object -Parallel",
             "-ThrottleLimit $jobs",
             "anvil miri: ANVIL_MIRI_JOBS must be a positive integer",
+            "-Zmiri-ignore-leaks",
             "Sort-Object PackageLabel, TargetKind, TargetName, Path",
             "##[group]Miri executable",
             "::group::Miri executable",

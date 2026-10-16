@@ -2134,6 +2134,11 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # `--package name@version` pairs before compilation.
 #
 # ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
+#
+# Miri's leak checker also rejects a process whose main thread exits while a
+# detached worker is still alive. Rust permits that shutdown behavior, and it
+# is not undefined behavior, so Anvil disables leak checking while retaining
+# Miri's memory, aliasing, concurrency, and other UB checks.
 
 # Run Miri tests for affected workspace packages.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -2229,6 +2234,8 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         exit 0
     }
+
+    $env:MIRIFLAGS = "-Zmiri-ignore-leaks $($env:MIRIFLAGS)".Trim()
 
     # The metadata and compiler-artifact streams must come from the same Cargo
     # version because Cargo changed package-ID formats in 1.78.

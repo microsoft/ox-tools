@@ -192,6 +192,9 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
 }
+if ($env:FAKE_CARGO_MIRIFLAGS_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_MIRIFLAGS_LOG -Value $env:MIRIFLAGS
+}
 if ($args -contains 'each') {
     $featureExit = if ($args -contains '--no-default-features') {
         $env:FAKE_EACH_NO_DEFAULT_EXIT
@@ -1006,6 +1009,11 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
             .trim(),
         "host"
     );
+    assert_eq!(
+        fs::read_to_string(run_log.with_extension("alpha-test.miriflags")).unwrap().trim(),
+        "-Zmiri-ignore-leaks",
+        "Anvil Miri runs must ignore leak and remaining-thread shutdown diagnostics"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let alpha_group = stdout.find("=== Miri executable fixture 0.1.0 :: test alpha").unwrap();
@@ -1170,9 +1178,11 @@ fn miri_profiles_set_expected_flags() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            fs::read_to_string(profile_run_log.with_extension("profile-test.miriflags"))
-                .unwrap()
-                .contains(expected_miri_flags)
+            {
+                let flags = fs::read_to_string(profile_run_log.with_extension("profile-test.miriflags")).unwrap();
+                flags.contains("-Zmiri-ignore-leaks") && flags.contains(expected_miri_flags)
+            },
+            "{recipe} must retain the base leak policy and add its profile flag"
         );
         assert!(
             fs::read_to_string(profile_run_log.with_extension("profile-test.rustflags"))
@@ -2431,10 +2441,15 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
         String::from_utf8_lossy(&filtered_output.stdout),
         String::from_utf8_lossy(&filtered_output.stderr)
     );
+    let example_miri_flags_log = tmp.path().join("example-miriflags.log");
     let example_output = run_just(
         tmp.path(),
         &["anvil-miri", "--package", "fixture", "--example", "basic"],
-        &[("FAKE_CARGO_LOG", log.as_os_str())],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_CARGO_MIRIFLAGS_LOG", example_miri_flags_log.as_os_str()),
+            ("MIRIFLAGS", OsStr::new("-Zcaller-policy")),
+        ],
     );
     assert!(example_output.status.success());
     let commands = fs::read_to_string(log).unwrap();
@@ -2458,6 +2473,11 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     assert!(
         commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"),
         "explicit example selection was not forwarded:\n{commands}"
+    );
+    assert_eq!(
+        fs::read_to_string(example_miri_flags_log).unwrap().trim(),
+        "-Zcaller-policy",
+        "explicit example runs must retain the caller's leak policy"
     );
 }
 
