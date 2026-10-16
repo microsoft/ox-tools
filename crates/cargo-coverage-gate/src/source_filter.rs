@@ -52,19 +52,21 @@ struct PendingSource {
     edition: Edition,
     surface: Surface,
     role: SourceRole,
+    guard: CfgFormula,
 }
 
 #[derive(Debug, Clone)]
 struct ModuleDeclaration {
     path: PathBuf,
-    test_only: bool,
     role: SourceRole,
+    guard: CfgFormula,
 }
 
 #[derive(Debug)]
 struct SourceAnalysis {
     syntax: ast::SourceFile,
     line_count: usize,
+    line_starts: Vec<usize>,
     test_only_lines: BTreeSet<u32>,
 }
 
@@ -73,18 +75,37 @@ struct IndexedSource {
     analysis: SourceAnalysis,
     edition: Edition,
     released_path: Option<PathBuf>,
-    visit_contexts: BTreeSet<(Surface, SourceRole, PathBuf)>,
+    test_only_lines: BTreeSet<u32>,
+    visit_contexts: BTreeSet<(Surface, SourceRole, PathBuf, CfgFormula)>,
 }
 
 impl IndexedSource {
-    fn has_visit(&self, surface: Surface, role: SourceRole, resolution_path: &Path) -> bool {
-        self.visit_contexts.contains(&(surface, role, resolution_path.to_path_buf()))
+    fn has_visit(&self, pending: &PendingSource) -> bool {
+        self.visit_contexts.contains(&(
+            pending.surface,
+            pending.role,
+            pending.resolution_path.clone(),
+            pending.guard.clone(),
+        ))
     }
 
-    fn add_visit(&mut self, surface: Surface, role: SourceRole, resolution_path: &Path, released_path: Option<PathBuf>) {
-        let _ = self.visit_contexts.insert((surface, role, resolution_path.to_path_buf()));
+    fn add_visit(&mut self, pending: &PendingSource, released_path: Option<PathBuf>) {
+        let _ = self.visit_contexts.insert((
+            pending.surface,
+            pending.role,
+            pending.resolution_path.clone(),
+            pending.guard.clone(),
+        ));
         if let Some(path) = released_path {
             let _ = self.released_path.get_or_insert(path);
+        }
+    }
+
+    fn merge_released_test_only_lines(&mut self, current: BTreeSet<u32>) {
+        if self.released_path.is_some() {
+            self.test_only_lines.retain(|line| current.contains(line));
+        } else {
+            self.test_only_lines = current;
         }
     }
 }
@@ -214,6 +235,7 @@ impl SourceIndex {
                         Surface::NonReleased
                     },
                     role: SourceRole::CrateRoot,
+                    guard: CfgFormula::Value(true),
                 });
             }
         }
@@ -229,33 +251,56 @@ impl SourceIndex {
                     )
                     .into());
                 }
-                if indexed.has_visit(pending.surface, pending.role, &pending.resolution_path) {
+                if indexed.has_visit(&pending) {
                     continue;
                 }
                 let released_path = released_source_attributed_path(&member_dirs, &pending)?;
-                indexed.add_visit(pending.surface, pending.role, &pending.resolution_path, released_path);
+                if released_path.is_some() {
+                    let current = test_only_lines_for_guard(&indexed.analysis, &pending.guard, &test_attributes);
+                    indexed.merge_released_test_only_lines(current);
+                }
+                indexed.add_visit(&pending, released_path);
                 reject_unsupported_released_includes(
                     &pending.resolution_path,
                     &indexed.analysis.syntax,
                     pending.surface,
+                    &pending.guard,
                     &test_attributes,
                 )?;
-                let declarations = source_declarations(&pending.resolution_path, &indexed.analysis, pending.role, &test_attributes)?;
+                let declarations = source_declarations(
+                    &pending.resolution_path,
+                    &indexed.analysis,
+                    pending.role,
+                    &pending.guard,
+                    &test_attributes,
+                )?;
                 enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
                 continue;
             }
 
             let analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
-            reject_unsupported_released_includes(&pending.resolution_path, &analysis.syntax, pending.surface, &test_attributes)?;
-            let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &test_attributes)?;
+            reject_unsupported_released_includes(
+                &pending.resolution_path,
+                &analysis.syntax,
+                pending.surface,
+                &pending.guard,
+                &test_attributes,
+            )?;
+            let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &pending.guard, &test_attributes)?;
             let released_path = released_source_attributed_path(&member_dirs, &pending)?;
+            let test_only_lines = if released_path.is_some() {
+                test_only_lines_for_guard(&analysis, &pending.guard, &test_attributes)
+            } else {
+                BTreeSet::new()
+            };
             let mut indexed = IndexedSource {
                 analysis,
                 edition: pending.edition,
                 released_path: None,
+                test_only_lines,
                 visit_contexts: BTreeSet::new(),
             };
-            indexed.add_visit(pending.surface, pending.role, &pending.resolution_path, released_path);
+            indexed.add_visit(&pending, released_path);
             let _ = files.insert(pending.canonical_path.clone(), indexed);
             enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
         }
@@ -309,12 +354,13 @@ fn enqueue_declarations_with_source_resolver(
             canonical_path,
             resolution_path,
             edition,
-            surface: if parent_surface == Surface::Released && !declaration.test_only {
+            surface: if parent_surface == Surface::Released && cfg_formula_possibilities_without_test(&declaration.guard).can_be_true {
                 Surface::Released
             } else {
                 Surface::NonReleased
             },
             role: declaration.role,
+            guard: declaration.guard,
         });
     }
     Ok(())
@@ -335,10 +381,11 @@ fn source_declarations(
     path: &Path,
     analysis: &SourceAnalysis,
     role: SourceRole,
+    guard: &CfgFormula,
     test_attributes: &BTreeSet<String>,
 ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
     let mut is_file = source_path_is_file;
-    module_declarations(path, &analysis.syntax, role, test_attributes, &mut is_file)
+    module_declarations(path, &analysis.syntax, role, guard, test_attributes, &mut is_file)
 }
 
 fn source_path_is_file(path: &Path) -> Result<bool, CoverageGateError> {
@@ -421,17 +468,33 @@ fn analyze_source_text(
         return Err(ParseCoverageSourceError::new(diagnostic_path(path), diagnostics).into());
     }
     let tree = parse.tree();
-    let root = tree.syntax();
-    let test_ranges = std::iter::once(root.clone())
-        .chain(root.descendants())
-        .filter_map(ast::AnyHasAttrs::cast)
-        .filter(|owner| attributes_mark_test(ast::attrs_including_inner(owner), test_attributes))
-        .map(|owner| syntax_owner_range(owner.syntax()))
-        .collect::<Vec<_>>();
+    let test_only_lines = classify_test_only_lines(tree.syntax(), &line_starts, test_attributes, &CfgFormula::Value(true));
+    Ok(SourceAnalysis {
+        syntax: tree,
+        line_count: source.lines().count(),
+        line_starts,
+        test_only_lines,
+    })
+}
+
+fn test_only_lines_for_guard(analysis: &SourceAnalysis, guard: &CfgFormula, test_attributes: &BTreeSet<String>) -> BTreeSet<u32> {
+    if *guard == CfgFormula::Value(true) {
+        return analysis.test_only_lines.clone();
+    }
+    classify_test_only_lines(analysis.syntax.syntax(), &analysis.line_starts, test_attributes, guard)
+}
+
+fn classify_test_only_lines(
+    root: &SyntaxNode,
+    line_starts: &[usize],
+    test_attributes: &BTreeSet<String>,
+    inherited_guard: &CfgFormula,
+) -> BTreeSet<u32> {
+    let test_ranges = collect_test_ranges(root, test_attributes, inherited_guard);
     let test_ranges = merge_text_ranges(test_ranges);
     let mut line_flags = vec![0_u8; line_starts.len()];
     for range in &test_ranges {
-        mark_range_lines(&mut line_flags, &line_starts, *range, LINE_TEST_ONLY);
+        mark_range_lines(&mut line_flags, line_starts, *range, LINE_TEST_ONLY);
     }
     let mut test_range_cursor = test_ranges.iter().peekable();
     for token in root.descendants_with_tokens().filter_map(ra_ap_syntax::NodeOrToken::into_token) {
@@ -443,10 +506,10 @@ fn analyze_source_text(
             let _ = test_range_cursor.next();
         }
         if !test_range_cursor.peek().is_some_and(|range| range.contains_range(token_range)) {
-            mark_range_lines(&mut line_flags, &line_starts, token.text_range(), LINE_RELEASED);
+            mark_range_lines(&mut line_flags, line_starts, token.text_range(), LINE_RELEASED);
         }
     }
-    let test_only_lines = line_flags
+    line_flags
         .iter()
         .enumerate()
         .filter(|(_, flags)| **flags & LINE_TEST_ONLY != 0 && **flags & LINE_RELEASED == 0)
@@ -454,12 +517,35 @@ fn analyze_source_text(
             u32::try_from(index + 1)
                 .expect("a source with more than u32::MAX lines cannot produce an LCOV line number for the excess lines")
         })
-        .collect();
-    Ok(SourceAnalysis {
-        syntax: tree,
-        line_count: source.lines().count(),
-        test_only_lines,
-    })
+        .collect()
+}
+
+fn collect_test_ranges(root: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula) -> Vec<TextRange> {
+    fn collect(node: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula, ranges: &mut Vec<TextRange>) {
+        let owner = ast::AnyHasAttrs::cast(node.clone());
+        let guard = owner.as_ref().map_or_else(
+            || inherited_guard.clone(),
+            |owner| {
+                CfgFormula::all([
+                    inherited_guard.clone(),
+                    attributes_guard(ast::attrs_including_inner(owner), test_attributes),
+                ])
+            },
+        );
+        if let Some(owner) = owner
+            && !cfg_formula_possibilities_without_test(&guard).can_be_true
+        {
+            ranges.push(syntax_owner_range(owner.syntax()));
+            return;
+        }
+        for child in node.children() {
+            collect(&child, test_attributes, &guard, ranges);
+        }
+    }
+
+    let mut ranges = Vec::new();
+    collect(root, test_attributes, inherited_guard, &mut ranges);
+    ranges
 }
 
 fn merge_text_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
@@ -524,35 +610,36 @@ fn offset_to_line(starts: &[usize], offset: usize) -> usize {
     starts.binary_search(&offset).unwrap_or_else(|line| line.saturating_sub(1))
 }
 
+#[cfg(test)]
 fn attribute_marks_test(attribute: &ast::Attr, test_attributes: &BTreeSet<String>) -> bool {
-    attributes_mark_test(std::iter::once(attribute.clone()), test_attributes)
+    !cfg_formula_possibilities_without_test(&attributes_guard(std::iter::once(attribute.clone()), test_attributes)).can_be_true
 }
 
-fn attributes_mark_test(attributes: impl IntoIterator<Item = ast::Attr>, test_attributes: &BTreeSet<String>) -> bool {
-    let mut cfg_predicates = Vec::new();
-    for attribute in attributes {
+fn attributes_guard(attributes: impl IntoIterator<Item = ast::Attr>, test_attributes: &BTreeSet<String>) -> CfgFormula {
+    CfgFormula::all(attributes.into_iter().map(|attribute| {
         let meta = attribute.meta().expect("source parsing succeeds before attributes are classified");
-        if let ast::Meta::CfgMeta(cfg) = &meta {
-            cfg_predicates.push(cfg.cfg_predicate().expect("successfully parsed cfg attributes have a predicate"));
-        } else if meta_marks_test(&meta, test_attributes) {
-            return true;
-        }
-    }
-    !cfg_predicates.is_empty() && !cfg_predicates_possibilities_without_test(&cfg_predicates).can_be_true
+        meta_guard(&meta, test_attributes)
+    }))
 }
 
-fn meta_marks_test(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> bool {
+fn meta_guard(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> CfgFormula {
     match meta {
-        ast::Meta::CfgMeta(cfg) => cfg.cfg_predicate().is_some_and(|predicate| cfg_predicate_is_test_only(&predicate)),
-        ast::Meta::PathMeta(path_meta) => path_meta.path().is_some_and(|path| path_marks_test(&path, test_attributes)),
-        ast::Meta::TokenTreeMeta(token_tree) => token_tree.path().is_some_and(|path| path_marks_test(&path, test_attributes)),
-        ast::Meta::CfgAttrMeta(cfg_attr) => cfg_attr.cfg_predicate().is_some_and(|predicate| {
-            let possibilities = cfg_possibilities_without_test(&predicate);
-            possibilities.can_be_true
-                && !possibilities.can_be_false
-                && cfg_attr.metas().any(|inner| meta_marks_test(&inner, test_attributes))
+        ast::Meta::CfgMeta(cfg) => cfg.cfg_predicate().map_or(CfgFormula::Value(true), |predicate| {
+            cfg_formula_from_predicate_or_unknown(&predicate)
         }),
-        ast::Meta::KeyValueMeta(_) | ast::Meta::UnsafeMeta(_) => false,
+        ast::Meta::PathMeta(path_meta) => CfgFormula::Value(!path_meta.path().is_some_and(|path| path_marks_test(&path, test_attributes))),
+        ast::Meta::TokenTreeMeta(token_tree) => {
+            CfgFormula::Value(!token_tree.path().is_some_and(|path| path_marks_test(&path, test_attributes)))
+        }
+        ast::Meta::CfgAttrMeta(cfg_attr) => {
+            let predicate = cfg_attr.cfg_predicate().map_or_else(
+                || CfgFormula::Atom(format!("?{}", cfg_attr.syntax().text())),
+                |predicate| cfg_formula_from_predicate_or_unknown(&predicate),
+            );
+            let inner = CfgFormula::all(cfg_attr.metas().map(|inner| meta_guard(&inner, test_attributes)));
+            CfgFormula::any([CfgFormula::not(predicate), inner])
+        }
+        ast::Meta::KeyValueMeta(_) | ast::Meta::UnsafeMeta(_) => CfgFormula::Value(true),
     }
 }
 
@@ -576,14 +663,67 @@ fn normalize_attribute_path(path: &ast::Path) -> String {
     segments.join("::")
 }
 
-fn cfg_predicate_is_test_only(predicate: &ast::CfgPredicate) -> bool {
-    !cfg_possibilities_without_test(predicate).can_be_true
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CfgPossibilities {
     can_be_true: bool,
     can_be_false: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CfgFormula {
+    Value(bool),
+    Atom(String),
+    All(Vec<Self>),
+    Any(Vec<Self>),
+    Not(Box<Self>),
+}
+
+impl CfgFormula {
+    fn all(parts: impl IntoIterator<Item = Self>) -> Self {
+        let mut flattened = Vec::new();
+        for part in parts {
+            match part {
+                Self::Value(false) => return Self::Value(false),
+                Self::Value(true) => {}
+                Self::All(parts) => flattened.extend(parts),
+                part => flattened.push(part),
+            }
+        }
+        flattened.sort_unstable();
+        flattened.dedup();
+        match flattened.len() {
+            0 => Self::Value(true),
+            1 => flattened.pop().expect("guarded by flattened.len() == 1 above"),
+            _ => Self::All(flattened),
+        }
+    }
+
+    fn any(parts: impl IntoIterator<Item = Self>) -> Self {
+        let mut flattened = Vec::new();
+        for part in parts {
+            match part {
+                Self::Value(true) => return Self::Value(true),
+                Self::Value(false) => {}
+                Self::Any(parts) => flattened.extend(parts),
+                part => flattened.push(part),
+            }
+        }
+        flattened.sort_unstable();
+        flattened.dedup();
+        match flattened.len() {
+            0 => Self::Value(false),
+            1 => flattened.pop().expect("guarded by flattened.len() == 1 above"),
+            _ => Self::Any(flattened),
+        }
+    }
+
+    fn not(part: Self) -> Self {
+        match part {
+            Self::Value(value) => Self::Value(!value),
+            Self::Not(part) => *part,
+            part => Self::Not(Box::new(part)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -629,30 +769,23 @@ impl CfgPossibilities {
     }
 }
 
+#[cfg(test)]
 fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibilities {
-    cfg_predicates_possibilities_without_test(std::slice::from_ref(predicate))
+    cfg_formula_from_predicate(predicate).map_or(CfgPossibilities::EITHER, |formula| cfg_formula_possibilities_without_test(&formula))
 }
 
-fn cfg_predicates_possibilities_without_test(predicates: &[ast::CfgPredicate]) -> CfgPossibilities {
+fn cfg_formula_possibilities_without_test(formula: &CfgFormula) -> CfgPossibilities {
     const MAX_EXACT_CFG_ATOMS: usize = 12;
 
     let mut atom_indexes = BTreeMap::new();
-    for predicate in predicates {
-        collect_cfg_atoms(predicate, &mut atom_indexes);
-    }
+    collect_cfg_atoms(formula, &mut atom_indexes);
     if atom_indexes.len() > MAX_EXACT_CFG_ATOMS {
-        return approximate_cfg_predicates_without_test(predicates);
+        return approximate_cfg_possibilities_without_test(formula);
     }
     for (index, atom) in atom_indexes.keys().cloned().collect::<Vec<_>>().into_iter().enumerate() {
         let _ = atom_indexes.insert(atom, index);
     }
-    let Some(expressions) = predicates
-        .iter()
-        .map(|predicate| compile_cfg_expression(predicate, &atom_indexes))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return approximate_cfg_predicates_without_test(predicates);
-    };
+    let expression = compile_cfg_expression(formula, &atom_indexes);
 
     let mut possibilities = CfgPossibilities {
         can_be_true: false,
@@ -661,7 +794,7 @@ fn cfg_predicates_possibilities_without_test(predicates: &[ast::CfgPredicate]) -
     let mut assignment = vec![false; atom_indexes.len()];
     let assignment_count = 2_usize.pow(u32::try_from(atom_indexes.len()).expect("exact cfg atom limit fits u32"));
     for _ in 0..assignment_count {
-        let value = expressions.iter().all(|expression| expression.evaluate(&assignment));
+        let value = expression.evaluate(&assignment);
         possibilities.can_be_true |= value;
         possibilities.can_be_false |= !value;
         if possibilities == CfgPossibilities::EITHER {
@@ -670,17 +803,6 @@ fn cfg_predicates_possibilities_without_test(predicates: &[ast::CfgPredicate]) -
         advance_cfg_assignment(&mut assignment);
     }
     possibilities
-}
-
-fn approximate_cfg_predicates_without_test(predicates: &[ast::CfgPredicate]) -> CfgPossibilities {
-    let parts = predicates
-        .iter()
-        .map(approximate_cfg_possibilities_without_test)
-        .collect::<Vec<_>>();
-    CfgPossibilities {
-        can_be_true: parts.iter().all(|part| part.can_be_true),
-        can_be_false: parts.iter().any(|part| part.can_be_false),
-    }
 }
 
 fn advance_cfg_assignment(assignment: &mut [bool]) {
@@ -692,18 +814,18 @@ fn advance_cfg_assignment(assignment: &mut [bool]) {
     }
 }
 
-fn collect_cfg_atoms(predicate: &ast::CfgPredicate, atoms: &mut BTreeMap<String, usize>) {
-    match predicate {
-        ast::CfgPredicate::CfgAtom(atom) => {
-            if let Some(key) = cfg_atom_key(atom) {
-                let _ = atoms.entry(key).or_default();
+fn collect_cfg_atoms(formula: &CfgFormula, atoms: &mut BTreeMap<String, usize>) {
+    match formula {
+        CfgFormula::Value(_) => {}
+        CfgFormula::Atom(atom) => {
+            let _ = atoms.entry(atom.clone()).or_default();
+        }
+        CfgFormula::All(parts) | CfgFormula::Any(parts) => {
+            for part in parts {
+                collect_cfg_atoms(part, atoms);
             }
         }
-        ast::CfgPredicate::CfgComposite(composite) => {
-            for part in composite.cfg_predicates() {
-                collect_cfg_atoms(&part, atoms);
-            }
-        }
+        CfgFormula::Not(part) => collect_cfg_atoms(part, atoms),
     }
 }
 
@@ -720,80 +842,77 @@ fn cfg_atom_key(atom: &ast::CfgAtom) -> Option<String> {
     }
 }
 
-fn compile_cfg_expression(predicate: &ast::CfgPredicate, atom_indexes: &BTreeMap<String, usize>) -> Option<CfgExpression> {
+fn cfg_formula_from_predicate(predicate: &ast::CfgPredicate) -> Option<CfgFormula> {
     match predicate {
         ast::CfgPredicate::CfgAtom(atom) => {
             if atom.true_token().is_some() {
-                return Some(CfgExpression::Value(true));
+                return Some(CfgFormula::Value(true));
             }
             if atom.false_token().is_some() {
-                return Some(CfgExpression::Value(false));
+                return Some(CfgFormula::Value(false));
             }
             if atom.eq_token().is_none()
                 && atom
                     .ident_token()
                     .is_some_and(|token| token.text().trim_start_matches("r#") == "test")
             {
-                return Some(CfgExpression::Value(false));
+                return Some(CfgFormula::Value(false));
             }
-            let index = *atom_indexes.get(&cfg_atom_key(atom)?)?;
-            Some(CfgExpression::Atom(index))
+            Some(CfgFormula::Atom(cfg_atom_key(atom)?))
         }
         ast::CfgPredicate::CfgComposite(composite) => {
             let keyword = composite.keyword()?.text().to_owned();
             let parts = composite
                 .cfg_predicates()
-                .map(|part| compile_cfg_expression(&part, atom_indexes))
+                .map(|part| cfg_formula_from_predicate(&part))
                 .collect::<Option<Vec<_>>>()?;
             match keyword.as_str() {
-                "all" => Some(CfgExpression::All(parts)),
-                "any" => Some(CfgExpression::Any(parts)),
-                "not" if parts.len() == 1 => Some(CfgExpression::Not(Box::new(
+                "all" => Some(CfgFormula::all(parts)),
+                "any" => Some(CfgFormula::any(parts)),
+                "not" if parts.len() == 1 => Some(CfgFormula::not(
                     parts.into_iter().next().expect("guarded by parts.len() == 1 above"),
-                ))),
+                )),
                 _ => None,
             }
         }
     }
 }
 
-/// Conservative fallback for predicates with too many distinct atoms or an
-/// unsupported parser shape.
-fn approximate_cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibilities {
-    match predicate {
-        ast::CfgPredicate::CfgAtom(atom) => {
-            if atom.true_token().is_some() {
-                return CfgPossibilities::TRUE;
-            }
-            if atom.false_token().is_some()
-                || (atom.eq_token().is_none()
-                    && atom
-                        .ident_token()
-                        .is_some_and(|token| token.text().trim_start_matches("r#") == "test"))
-            {
-                return CfgPossibilities::FALSE;
-            }
-            CfgPossibilities::EITHER
-        }
-        ast::CfgPredicate::CfgComposite(composite) => {
-            let keyword = composite.keyword().map(|token| token.text().to_owned()).unwrap_or_default();
-            let parts = composite
-                .cfg_predicates()
-                .map(|part| approximate_cfg_possibilities_without_test(&part))
-                .collect::<Vec<_>>();
-            match keyword.as_str() {
-                "all" => CfgPossibilities {
-                    can_be_true: parts.iter().all(|part| part.can_be_true),
-                    can_be_false: parts.iter().any(|part| part.can_be_false),
-                },
-                "any" => CfgPossibilities {
-                    can_be_true: parts.iter().any(|part| part.can_be_true),
-                    can_be_false: parts.iter().all(|part| part.can_be_false),
-                },
-                "not" if parts.len() == 1 => parts[0].not(),
-                _ => CfgPossibilities::EITHER,
+fn cfg_formula_from_predicate_or_unknown(predicate: &ast::CfgPredicate) -> CfgFormula {
+    cfg_formula_from_predicate(predicate).unwrap_or_else(|| CfgFormula::Atom(format!("?{}", predicate.syntax().text())))
+}
+
+fn compile_cfg_expression(formula: &CfgFormula, atom_indexes: &BTreeMap<String, usize>) -> CfgExpression {
+    match formula {
+        CfgFormula::Value(value) => CfgExpression::Value(*value),
+        CfgFormula::Atom(atom) => CfgExpression::Atom(atom_indexes[atom]),
+        CfgFormula::All(parts) => CfgExpression::All(parts.iter().map(|part| compile_cfg_expression(part, atom_indexes)).collect()),
+        CfgFormula::Any(parts) => CfgExpression::Any(parts.iter().map(|part| compile_cfg_expression(part, atom_indexes)).collect()),
+        CfgFormula::Not(part) => CfgExpression::Not(Box::new(compile_cfg_expression(part, atom_indexes))),
+    }
+}
+
+/// Conservative fallback for formulas with too many distinct atoms.
+fn approximate_cfg_possibilities_without_test(formula: &CfgFormula) -> CfgPossibilities {
+    match formula {
+        CfgFormula::Value(true) => CfgPossibilities::TRUE,
+        CfgFormula::Value(false) => CfgPossibilities::FALSE,
+        CfgFormula::Atom(_) => CfgPossibilities::EITHER,
+        CfgFormula::All(parts) => {
+            let parts = parts.iter().map(approximate_cfg_possibilities_without_test).collect::<Vec<_>>();
+            CfgPossibilities {
+                can_be_true: parts.iter().all(|part| part.can_be_true),
+                can_be_false: parts.iter().any(|part| part.can_be_false),
             }
         }
+        CfgFormula::Any(parts) => {
+            let parts = parts.iter().map(approximate_cfg_possibilities_without_test).collect::<Vec<_>>();
+            CfgPossibilities {
+                can_be_true: parts.iter().any(|part| part.can_be_true),
+                can_be_false: parts.iter().all(|part| part.can_be_false),
+            }
+        }
+        CfgFormula::Not(part) => approximate_cfg_possibilities_without_test(part).not(),
     }
 }
 
@@ -801,28 +920,34 @@ fn reject_unsupported_released_includes(
     path: &Path,
     source: &ast::SourceFile,
     surface: Surface,
+    inherited_guard: &CfgFormula,
     test_attributes: &BTreeSet<String>,
 ) -> Result<(), CoverageGateError> {
     if surface == Surface::NonReleased {
         return Ok(());
     }
-    let source_test_only = attributes_mark_test(ast::attrs_including_inner(source), test_attributes);
-    if syntax_contains_released_include(source.syntax(), test_attributes, source_test_only) {
+    let source_guard = CfgFormula::all([
+        inherited_guard.clone(),
+        attributes_guard(ast::attrs_including_inner(source), test_attributes),
+    ]);
+    if syntax_contains_released_include(source.syntax(), test_attributes, &source_guard) {
         return Err(UnsupportedSourceInclusionError::new(diagnostic_path(path)).into());
     }
     Ok(())
 }
 
-fn syntax_contains_released_include(node: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_test_only: bool) -> bool {
+fn syntax_contains_released_include(node: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula) -> bool {
     node.children().any(|child| {
-        let test_only = inherited_test_only
-            || ast::AnyHasAttrs::cast(child.clone())
-                .is_some_and(|owner| attributes_mark_test(ast::attrs_including_inner(&owner), test_attributes));
+        let own_guard = ast::AnyHasAttrs::cast(child.clone()).map_or(CfgFormula::Value(true), |owner| {
+            attributes_guard(ast::attrs_including_inner(&owner), test_attributes)
+        });
+        let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
+        let test_only = !cfg_formula_possibilities_without_test(&guard).can_be_true;
         (!test_only
             && ast::MacroCall::cast(child.clone())
                 .and_then(|macro_call| macro_call.path())
                 .is_some_and(|path| path_is_builtin_include(&path)))
-            || syntax_contains_released_include(&child, test_attributes, test_only)
+            || syntax_contains_released_include(&child, test_attributes, &guard)
     })
 }
 
@@ -852,6 +977,7 @@ fn module_declarations(
     path: &Path,
     source: &ast::SourceFile,
     role: SourceRole,
+    inherited_guard: &CfgFormula,
     test_attributes: &BTreeSet<String>,
     is_file: &mut impl FnMut(&Path) -> Result<bool, CoverageGateError>,
 ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
@@ -862,14 +988,17 @@ fn module_declarations(
         .parent()
         .expect("owned_directory returns Some only after confirming that the declaring path has a parent");
     let mut declarations = Vec::new();
-    let source_test_only = ast::attrs_including_inner(source).any(|attribute| attribute_marks_test(&attribute, test_attributes));
+    let source_guard = CfgFormula::all([
+        inherited_guard.clone(),
+        attributes_guard(ast::attrs_including_inner(source), test_attributes),
+    ]);
     ModuleWalker {
         declaring_file: path,
         test_attributes,
         declarations: &mut declarations,
         is_file,
     }
-    .walk_syntax(source.syntax(), &directory, base, source_test_only)?;
+    .walk_syntax(source.syntax(), &directory, base, &source_guard)?;
     Ok(declarations)
 }
 
@@ -902,12 +1031,13 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
         node: &SyntaxNode,
         directory: &Path,
         base: &Path,
-        inherited_test_only: bool,
+        inherited_guard: &CfgFormula,
     ) -> Result<(), CoverageGateError> {
         for child in node.children() {
-            let test_only = inherited_test_only
-                || ast::AnyHasAttrs::cast(child.clone())
-                    .is_some_and(|owner| attributes_mark_test(ast::attrs_including_inner(&owner), self.test_attributes));
+            let own_guard = ast::AnyHasAttrs::cast(child.clone()).map_or(CfgFormula::Value(true), |owner| {
+                attributes_guard(ast::attrs_including_inner(&owner), self.test_attributes)
+            });
+            let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
             if let Some(macro_call) = ast::MacroCall::cast(child.clone())
                 && macro_call.path().is_some_and(|path| path_is_builtin_include(&path))
                 && let Some(relative) = static_include_path(&macro_call)
@@ -918,20 +1048,20 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
                     .expect("resolved source files always have a parent directory");
                 self.declarations.push(ModuleDeclaration {
                     path: base.join(relative),
-                    test_only,
                     role: SourceRole::IncludedSource,
+                    guard: guard.clone(),
                 });
             }
             if let Some(module) = ast::Module::cast(child.clone()) {
-                self.walk_module(&module, directory, base, test_only)?;
+                self.walk_module(&module, directory, base, &guard)?;
             } else {
-                self.walk_syntax(&child, directory, base, test_only)?;
+                self.walk_syntax(&child, directory, base, &guard)?;
             }
         }
         Ok(())
     }
 
-    fn walk_module(&mut self, module: &ast::Module, directory: &Path, base: &Path, test_only: bool) -> Result<(), CoverageGateError> {
+    fn walk_module(&mut self, module: &ast::Module, directory: &Path, base: &Path, guard: &CfgFormula) -> Result<(), CoverageGateError> {
         let name = module
             .name()
             .expect("a parsed module declaration always has a name")
@@ -942,7 +1072,7 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
 
         if let Some(item_list) = module.item_list() {
             let nested = path_override.map_or_else(|| directory.join(&name), |relative| base.join(relative));
-            self.walk_syntax(item_list.syntax(), &nested, &nested, test_only)?;
+            self.walk_syntax(item_list.syntax(), &nested, &nested, guard)?;
             return Ok(());
         }
 
@@ -971,7 +1101,11 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
             .into());
         }
         if let Some(path) = existing.into_iter().next() {
-            self.declarations.push(ModuleDeclaration { path, test_only, role });
+            self.declarations.push(ModuleDeclaration {
+                path,
+                role,
+                guard: guard.clone(),
+            });
         }
         Ok(())
     }
@@ -1055,7 +1189,7 @@ fn filter_report(report: lcov::Report, sources: &SourceIndex) -> Result<String, 
         Ok(SourceDisposition::Include {
             source_file: source_file.clone(),
             line_count: source.analysis.line_count,
-            test_only_lines: &source.analysis.test_only_lines,
+            test_only_lines: &source.test_only_lines,
         })
     })
 }
@@ -1271,7 +1405,29 @@ mod tests {
         existing: &BTreeSet<PathBuf>,
     ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
         let mut is_file = |candidate: &Path| Ok(existing.contains(&lexical_normalize(candidate)));
-        module_declarations(path, &analysis.syntax, role, &BTreeSet::new(), &mut is_file)
+        module_declarations(
+            path,
+            &analysis.syntax,
+            role,
+            &CfgFormula::Value(true),
+            &BTreeSet::new(),
+            &mut is_file,
+        )
+    }
+
+    fn pending_source(surface: Surface, role: SourceRole, resolution_path: &Path, guard: CfgFormula) -> PendingSource {
+        PendingSource {
+            canonical_path: resolution_path.to_path_buf(),
+            resolution_path: resolution_path.to_path_buf(),
+            edition: Edition::Edition2024,
+            surface,
+            role,
+            guard,
+        }
+    }
+
+    fn declaration_is_test_only(declaration: &ModuleDeclaration) -> bool {
+        !cfg_formula_possibilities_without_test(&declaration.guard).can_be_true
     }
 
     fn parse_lcov(input: &str) -> lcov::Report {
@@ -1420,6 +1576,7 @@ mod tests {
             edition: Edition::Edition2024,
             surface: Surface::Released,
             role: SourceRole::CrateRoot,
+            guard: CfgFormula::Value(true),
         };
         assert_eq!(
             released_source_attributed_path(&member_dirs, &inside).expect("member source is attributable"),
@@ -1432,6 +1589,7 @@ mod tests {
             edition: Edition::Edition2024,
             surface: Surface::Released,
             role: SourceRole::PathModule,
+            guard: CfgFormula::Value(true),
         };
         let error = released_source_attributed_path(&member_dirs, &outside)
             .expect_err("released source outside every member must fail")
@@ -1469,18 +1627,25 @@ mod tests {
                 analysis: analyze(Path::new("fixture.rs"), "pub fn fixture() {}\n"),
                 edition: Edition::Edition2024,
                 released_path: None,
+                test_only_lines: BTreeSet::new(),
                 visit_contexts: BTreeSet::new(),
             };
             let first_context = Path::new("/workspace/first.rs");
-            assert!(!indexed.has_visit(surface, role, first_context));
+            let first = pending_source(surface, role, first_context, CfgFormula::Value(true));
+            assert!(!indexed.has_visit(&first));
             let first_path = (surface == Surface::Released).then(|| PathBuf::from("first.rs"));
-            indexed.add_visit(surface, role, first_context, first_path.clone());
-            assert!(indexed.has_visit(surface, role, first_context));
-            assert!(!indexed.has_visit(surface, role, Path::new("/workspace/second.rs")));
+            indexed.add_visit(&first, first_path.clone());
+            assert!(indexed.has_visit(&first));
+            let second = pending_source(surface, role, Path::new("/workspace/second.rs"), CfgFormula::Value(true));
+            assert!(!indexed.has_visit(&second));
             assert_eq!(indexed.released_path, first_path);
             let second_path = (surface == Surface::Released).then(|| PathBuf::from("second.rs"));
-            indexed.add_visit(surface, role, Path::new("/workspace/second.rs"), second_path);
-            assert!(indexed.has_visit(surface, role, Path::new("/workspace/second.rs")));
+            indexed.add_visit(&second, second_path);
+            assert!(indexed.has_visit(&second));
+            let guarded = pending_source(surface, role, first_context, CfgFormula::Value(false));
+            assert!(!indexed.has_visit(&guarded));
+            indexed.add_visit(&guarded, None);
+            assert!(indexed.has_visit(&guarded));
             assert_eq!(
                 indexed.released_path,
                 (surface == Surface::Released).then(|| PathBuf::from("first.rs"))
@@ -1496,13 +1661,13 @@ mod tests {
         let declarations = vec![
             ModuleDeclaration {
                 path: shared.clone(),
-                test_only: false,
                 role: SourceRole::PlainModule,
+                guard: CfgFormula::Value(true),
             },
             ModuleDeclaration {
                 path: shared,
-                test_only: true,
                 role: SourceRole::PathModule,
+                guard: CfgFormula::Value(false),
             },
         ];
         let mut queue = VecDeque::new();
@@ -1604,7 +1769,9 @@ mod tests {
         }
 
         fn approximate(predicate: &str) -> CfgPossibilities {
-            approximate_cfg_possibilities_without_test(&parsed_predicate(predicate))
+            cfg_formula_from_predicate(&parsed_predicate(predicate)).map_or(CfgPossibilities::EITHER, |formula| {
+                approximate_cfg_possibilities_without_test(&formula)
+            })
         }
 
         assert_eq!(possibilities("true"), CfgPossibilities::TRUE);
@@ -1654,6 +1821,25 @@ mod tests {
         assert_eq!(approximate("any(test, false)"), CfgPossibilities::FALSE);
         assert_eq!(approximate("not(test)"), CfgPossibilities::TRUE);
         assert_eq!(approximate("not(test, unix)"), CfgPossibilities::EITHER);
+
+        let a = CfgFormula::Atom("a".to_owned());
+        let b = CfgFormula::Atom("b".to_owned());
+        assert_eq!(CfgFormula::all([]), CfgFormula::Value(true));
+        assert_eq!(CfgFormula::all([a.clone()]), a);
+        assert_eq!(
+            CfgFormula::all([CfgFormula::Atom("a".to_owned()), b.clone(), CfgFormula::Atom("a".to_owned()),]),
+            CfgFormula::all([b.clone(), CfgFormula::Atom("a".to_owned())])
+        );
+        assert_eq!(CfgFormula::any([]), CfgFormula::Value(false));
+        assert_eq!(CfgFormula::any([b.clone()]), b);
+        assert_eq!(
+            CfgFormula::any([
+                CfgFormula::Atom("a".to_owned()),
+                CfgFormula::Atom("b".to_owned()),
+                CfgFormula::Atom("a".to_owned()),
+            ]),
+            CfgFormula::any([CfgFormula::Atom("b".to_owned()), CfgFormula::Atom("a".to_owned()),])
+        );
     }
 
     #[test]
@@ -1666,7 +1852,8 @@ mod tests {
             "#[cfg_attr(false, test)] fn never() {}\n\
              #[cfg_attr(unix, test)] fn conditional() {}\n\
              #[cfg_attr(true, test)] fn always() {}\n\
-             #[cfg_attr(any(probe, not(probe)), test)] fn correlated() {}\n",
+             #[cfg_attr(any(probe, not(probe)), test)] fn correlated() {}\n\
+             #[cfg_attr(not(test, unix), test)] fn unsupported() {}\n",
             Edition::Edition2024,
         )
         .tree();
@@ -1675,7 +1862,7 @@ mod tests {
                 .items()
                 .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &BTreeSet::new())))
                 .collect::<Vec<_>>(),
-            [false, false, true, true]
+            [false, false, true, true, false]
         );
     }
 
@@ -1713,6 +1900,106 @@ mod tests {
              fn helper() {}\n",
         );
         assert_eq!(stacked.test_only_lines, BTreeSet::from([1, 2, 3]));
+
+        let nested = analyze(
+            Path::new("nested.rs"),
+            "#[cfg(any(test, feature = \"x\"))]\n\
+             fn outer() {\n\
+                 #[cfg(any(test, not(feature = \"x\")))]\n\
+                 fn helper() {}\n\
+             }\n",
+        );
+        assert_eq!(nested.test_only_lines, BTreeSet::from([3, 4]));
+
+        let correlated_cfg_attr = analyze(
+            Path::new("correlated-cfg-attr.rs"),
+            "#[cfg(probe)]\n\
+             #[cfg_attr(probe, cfg(test))]\n\
+             fn helper() {}\n",
+        );
+        assert_eq!(correlated_cfg_attr.test_only_lines, BTreeSet::from([1, 2, 3]));
+
+        let complementary_cfg_attrs = analyze(
+            Path::new("complementary-cfg-attrs.rs"),
+            "#[cfg_attr(probe, cfg(test))]\n\
+             #[cfg_attr(not(probe), cfg(test))]\n\
+             fn helper() {}\n",
+        );
+        assert_eq!(complementary_cfg_attrs.test_only_lines, BTreeSet::from([1, 2, 3]));
+
+        let crate_inner = analyze(
+            Path::new("crate-inner.rs"),
+            "#![cfg(any(test, feature = \"x\"))]\n\
+             #![cfg(any(test, not(feature = \"x\")))]\n\
+             pub fn helper() {}\n",
+        );
+        assert_eq!(crate_inner.test_only_lines, BTreeSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn released_visits_intersect_test_only_lines() {
+        let analysis = analyze(
+            Path::new("shared.rs"),
+            "#[cfg(feature = \"x\")]\n\
+             pub fn helper() {}\n",
+        );
+        let enabled = CfgFormula::Atom("feature=x".to_owned());
+        let disabled = CfgFormula::not(enabled.clone());
+        let enabled_lines = test_only_lines_for_guard(&analysis, &enabled, &BTreeSet::new());
+        let disabled_lines = test_only_lines_for_guard(&analysis, &disabled, &BTreeSet::new());
+        assert!(enabled_lines.is_empty());
+        assert_eq!(disabled_lines, BTreeSet::from([1, 2]));
+
+        for (first, second) in [(enabled_lines.clone(), disabled_lines.clone()), (disabled_lines, enabled_lines)] {
+            let mut indexed = IndexedSource {
+                analysis: analyze(Path::new("shared.rs"), "pub fn helper() {}\n"),
+                edition: Edition::Edition2024,
+                released_path: None,
+                test_only_lines: BTreeSet::from([99]),
+                visit_contexts: BTreeSet::new(),
+            };
+            indexed.merge_released_test_only_lines(first.clone());
+            assert_eq!(indexed.test_only_lines, first);
+            indexed.released_path = Some(PathBuf::from("shared.rs"));
+            indexed.merge_released_test_only_lines(second);
+            assert!(indexed.test_only_lines.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn source_index_keeps_lines_released_by_any_guarded_visit() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/guarded-root.rs").to_string_lossy().into_owned().into();
+
+        let index = SourceIndex::from_metadata(&metadata).expect("guarded source index builds");
+        let shared = fs::canonicalize(root.join("member/src/guarded-shared.rs")).expect("canonical guarded source");
+        let indexed = index.files.get(&shared).expect("guarded shared source indexed");
+        assert_eq!(
+            indexed
+                .visit_contexts
+                .iter()
+                .filter(|(surface, role, _, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
+                .count(),
+            2
+        );
+        assert_eq!(indexed.test_only_lines, BTreeSet::from([7, 8]));
+
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov(
+                "TN:\nSF:member/src/guarded-shared.rs\nDA:4,0\nDA:5,0\nDA:7,0\nDA:8,0\nend_of_record\n",
+            )],
+            &metadata,
+        )
+        .expect("guarded report filters");
+        let report = parse_lcov(&filtered[0]);
+        let (_, section) = report.sections.iter().next().expect("released lines remain");
+        assert_eq!(section.lines.keys().map(|line| line.line).collect::<Vec<_>>(), [4, 5]);
     }
 
     #[test]
@@ -1730,13 +2017,13 @@ mod tests {
             indexed
                 .visit_contexts
                 .iter()
-                .any(|(surface, role, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
+                .any(|(surface, role, _, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
         );
         assert!(
             indexed
                 .visit_contexts
                 .iter()
-                .any(|(surface, role, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
+                .any(|(surface, role, _, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
         );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
         let error = index
@@ -1803,15 +2090,26 @@ mod tests {
         let helper_path = root.join("member/src/helper.rs");
         let helper_resolution = resolve_module_resolution_path(&helper_path).expect("helper resolution path");
         assert_eq!(indexed_helper.released_path.as_deref(), Some(helper_path.as_path()));
-        assert!(indexed_helper.has_visit(Surface::Released, SourceRole::PathModule, &helper_resolution));
-        assert!(indexed_helper.has_visit(Surface::NonReleased, SourceRole::PathModule, &helper_resolution));
+        assert!(indexed_helper.has_visit(&pending_source(
+            Surface::Released,
+            SourceRole::PathModule,
+            &helper_resolution,
+            CfgFormula::Value(true),
+        )));
+        assert!(indexed_helper.has_visit(&pending_source(
+            Surface::NonReleased,
+            SourceRole::PathModule,
+            &helper_resolution,
+            CfgFormula::Value(true),
+        )));
         let indexed_root = index.files.get(&canonical_root).expect("canonical root source indexed");
         let resolution_path = resolve_module_resolution_path(&alias).expect("simulated symlink has a module-resolution path");
-        assert!(
-            indexed_root
-                .visit_contexts
-                .contains(&(Surface::Released, SourceRole::CrateRoot, resolution_path))
-        );
+        assert!(indexed_root.visit_contexts.contains(&(
+            Surface::Released,
+            SourceRole::CrateRoot,
+            resolution_path,
+            CfgFormula::Value(true),
+        )));
     }
 
     #[test]
@@ -1839,6 +2137,7 @@ mod tests {
             Path::new("/workspace/lib.rs"),
             &test_only.syntax,
             Surface::Released,
+            &CfgFormula::Value(true),
             &BTreeSet::new(),
         )
         .expect("test-only include macro is outside the released surface");
@@ -1849,14 +2148,21 @@ mod tests {
                 Path::new("/workspace/lib.rs"),
                 &analysis.syntax,
                 Surface::Released,
+                &CfgFormula::Value(true),
                 &BTreeSet::new(),
             )
             .expect_err("built-in include spelling must be rejected");
         }
 
         let custom = analyze(Path::new("/workspace/lib.rs"), "company::include!(\"helper.rs\");\n");
-        reject_unsupported_released_includes(Path::new("/workspace/lib.rs"), &custom.syntax, Surface::Released, &BTreeSet::new())
-            .expect("arbitrary qualified include macro is not the built-in");
+        reject_unsupported_released_includes(
+            Path::new("/workspace/lib.rs"),
+            &custom.syntax,
+            Surface::Released,
+            &CfgFormula::Value(true),
+            &BTreeSet::new(),
+        )
+        .expect("arbitrary qualified include macro is not the built-in");
 
         let dynamic = analyze(
             Path::new("/workspace/lib.rs"),
@@ -1875,7 +2181,12 @@ mod tests {
         let indexed = index.files.get(&included).expect("included test source indexed");
         assert_eq!(indexed.released_path, None);
         let resolution_path = resolve_module_resolution_path(&included).expect("included source resolution path");
-        assert!(indexed.has_visit(Surface::NonReleased, SourceRole::IncludedSource, &resolution_path));
+        assert!(indexed.has_visit(&pending_source(
+            Surface::NonReleased,
+            SourceRole::IncludedSource,
+            &resolution_path,
+            CfgFormula::Value(false),
+        )));
 
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov("TN:\nSF:member/src/included-test.rs\nDA:4,0\nend_of_record\n")],
@@ -1901,7 +2212,7 @@ mod tests {
             index.files[&lib]
                 .visit_contexts
                 .iter()
-                .filter(|(surface, role, _)| *surface == Surface::Released && *role == SourceRole::CrateRoot)
+                .filter(|(surface, role, _, _)| *surface == Surface::Released && *role == SourceRole::CrateRoot)
                 .count(),
             1
         );
@@ -1996,6 +2307,7 @@ mod tests {
             &root,
             &analysis.syntax,
             SourceRole::CrateRoot,
+            &CfgFormula::Value(true),
             &BTreeSet::new(),
             &mut fail_inspection,
         )
@@ -2048,13 +2360,13 @@ mod tests {
             .expect("crate-root declarations resolve");
         assert_eq!(found.len(), 1);
         assert_eq!(lexical_normalize(&found[0].path), child);
-        assert!(found[0].test_only);
+        assert!(declaration_is_test_only(&found[0]));
         assert_eq!(found[0].role, SourceRole::PlainModule);
 
         let analysis = analyze(&root, "#[cfg(r#test)] mod child;\n");
         let found =
             declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child])).expect("raw test cfg declaration resolves");
-        assert!(found[0].test_only);
+        assert!(declaration_is_test_only(&found[0]));
 
         let nested = PathBuf::from("/workspace/src/outer/nested.rs");
         let analysis = analyze(&root, "mod outer { #![cfg(test)] mod nested; }\n");
@@ -2062,7 +2374,7 @@ mod tests {
             declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([nested.clone()])).expect("inline declarations resolve");
         assert_eq!(found.len(), 1);
         assert_eq!(lexical_normalize(&found[0].path), nested);
-        assert!(found[0].test_only);
+        assert!(declaration_is_test_only(&found[0]));
 
         let child = PathBuf::from("/workspace/src/outer/child.rs");
         let analysis = analyze(
@@ -2072,7 +2384,43 @@ mod tests {
              mod outer { mod child; }\n",
         );
         let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child])).expect("stacked module guards resolve");
-        assert!(found[0].test_only);
+        assert!(declaration_is_test_only(&found[0]));
+
+        let child = PathBuf::from("/workspace/src/stacked_inner.rs");
+        let analysis = analyze(
+            &root,
+            "#![cfg(any(test, feature = \"x\"))]\n\
+             #![cfg(any(test, not(feature = \"x\")))]\n\
+             mod stacked_inner;\n",
+        );
+        let found =
+            declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child])).expect("stacked inner guards propagate");
+        assert!(declaration_is_test_only(&found[0]));
+
+        let child = PathBuf::from("/workspace/src/cfg_attr.rs");
+        let analysis = analyze(
+            &root,
+            "#[cfg(feature = \"x\")]\n\
+             #[cfg_attr(feature = \"x\", cfg(test))]\n\
+             mod cfg_attr;\n",
+        );
+        let found =
+            declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child])).expect("correlated cfg_attr guards propagate");
+        assert!(declaration_is_test_only(&found[0]));
+
+        let child = PathBuf::from("/workspace/src/guarded.rs");
+        let analysis = analyze(&root, "#[cfg(any(test, feature = \"x\"))] mod guarded;\n");
+        let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child.clone()]))
+            .expect("guarded module declaration resolves");
+        let child_analysis = analyze(
+            &child,
+            "#![cfg(any(test, not(feature = \"x\")))]\n\
+             pub fn helper() {}\n",
+        );
+        assert_eq!(
+            test_only_lines_for_guard(&child_analysis, &found[0].guard, &BTreeSet::new()),
+            BTreeSet::from([1, 2])
+        );
     }
 
     #[test]
@@ -2099,7 +2447,10 @@ mod tests {
         assert_eq!(
             found
                 .into_iter()
-                .map(|declaration| (lexical_normalize(&declaration.path), declaration.test_only, declaration.role))
+                .map(|declaration| {
+                    let test_only = declaration_is_test_only(&declaration);
+                    (lexical_normalize(&declaration.path), test_only, declaration.role)
+                })
                 .collect::<Vec<_>>(),
             [(released, false, SourceRole::PathModule), (test_only, true, SourceRole::PathModule),]
         );
@@ -2242,7 +2593,13 @@ mod tests {
         assert_eq!(
             lib_declarations
                 .iter()
-                .map(|declaration| { (lexical_normalize(&declaration.path), declaration.test_only, declaration.role,) })
+                .map(|declaration| {
+                    (
+                        lexical_normalize(&declaration.path),
+                        declaration_is_test_only(declaration),
+                        declaration.role,
+                    )
+                })
                 .collect::<Vec<_>>(),
             [
                 (unit_support.clone(), true, SourceRole::PlainModule),
