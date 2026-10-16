@@ -701,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
     fn public_wrappers_forward_manifest_and_package_selectors_in_process() {
         let manifest = Path::new("/synthetic/workspace/Cargo.toml");
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index/member/src/lib.rs");
