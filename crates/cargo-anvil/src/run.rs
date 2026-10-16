@@ -1513,7 +1513,7 @@ fn infer_recorded_region_syntax(
         );
     }
     let mut checksum_match = None;
-    let mut checksum_matches = 0;
+    let mut checksum_matches = 0usize;
     let mut evidence = None;
     let mut evidence_count = 0;
 
@@ -1529,21 +1529,25 @@ fn infer_recorded_region_syntax(
             }
             Ok(None) | Err(_) => false,
         };
-        // #[gamma::skip(relational.eq_to_ne, reason = "for non-XML syntaxes raw_marker_line_present checks that syntax, and any matching line already makes found non-None; the right disjunct cannot uniquely change the result")]
-        let has_evidence =
-            !matches!(found, Ok(None)) || (syntax == CommentSyntax::Xml && xml_scan_failed && raw_marker_line_present(text, id, syntax));
+        let incomplete_xml_evidence = match syntax {
+            CommentSyntax::Xml => xml_scan_failed && raw_marker_line_present(text, id, syntax),
+            CommentSyntax::Hash | CommentSyntax::SlashSlash => false,
+        };
+        let has_evidence = !matches!(found, Ok(None)) || incomplete_xml_evidence;
         if complete || has_evidence {
             evidence_count += 1;
             evidence = Some(syntax);
         }
     }
 
-    if checksum_matches == 1 {
-        return Ok(checksum_match.expect("one checksum match records its syntax"));
-    }
-    // #[gamma::skip(relational.gt_to_ge, reason = "the preceding checksum_matches == 1 branch returned, so >= 1 and > 1 are equivalent here")]
-    if checksum_matches > 1 {
-        bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum");
+    match checksum_matches {
+        1 => {
+            return Ok(checksum_match.expect("checksum_matches == 1 guarantees one recorded syntax"));
+        }
+        2.. => {
+            bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum");
+        }
+        0 => {}
     }
     if evidence_count == 1 {
         return Ok(evidence.expect("one marker-evidence syntax was recorded"));
@@ -3384,11 +3388,12 @@ mod tests {
         let mut previous = Manifest::default();
         previous.set_region("host.txt", "retired", checksum_str("same body\n"));
         let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::owned_file("generated.txt", "generated\n"))
+            .with_artifact(Artifact::region(campaign_region("other.txt", "unrelated", "generated\n")))
             .build()
             .unwrap();
         let mut hosts = memory_hosts();
         hosts.set("host.txt", host.to_owned());
+        hosts.set("other.txt", String::new());
 
         let plan = build_plan_with_hosts(
             Path::new("in-memory-managed-region-tests"),
@@ -3413,8 +3418,9 @@ mod tests {
         );
         assert!(plan.items().iter().any(|item| {
             item.target
-                == Target::File {
-                    path: "generated.txt".to_owned(),
+                == Target::Region {
+                    host: "other.txt".to_owned(),
+                    id: "unrelated".to_owned(),
                 }
                 && item.decision == Decision::Write
         }));
