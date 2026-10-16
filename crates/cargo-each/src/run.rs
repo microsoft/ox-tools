@@ -21,7 +21,7 @@ use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
 use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
-use crate::filter::Predicate;
+use crate::filter::{Predicate, TargetPredicate};
 use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
@@ -66,7 +66,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     };
 
     let target_kinds = parse_target_kinds(&args.each_targets)?;
-    let target_required_features = args.target_required_feature.iter().cloned().collect();
+    let target_filters = parse_target_predicates(&args.target_filters)?;
     let mode = if args.once {
         Mode::Once
     } else if target_kinds.is_empty() {
@@ -83,7 +83,8 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         chdir: args.chdir,
         packages,
         target_kinds: &target_kinds,
-        target_required_features: &target_required_features,
+        target_filters: &target_filters,
+        require_target_per_package: args.require_target_per_package,
         workspace_rust_version: None,
     };
     if Plan::is_empty(&members, &args.command, build_options).into_app_err(PLAN_BUILD_CONTEXT)? {
@@ -149,7 +150,8 @@ fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
         (!args.filters.is_empty(), "--filter"),
         (args.once, "--once"),
         (!args.each_targets.is_empty(), "--each-target"),
-        (!args.target_required_feature.is_empty(), "--target-required-feature"),
+        (!args.target_filters.is_empty(), "--target-filter"),
+        (args.require_target_per_package, "--require-target-per-package"),
         (args.chdir, "--chdir"),
         (args.manifest_path.is_some(), "--manifest-path"),
     ];
@@ -176,6 +178,13 @@ fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
     specs
         .iter()
         .map(|s| Predicate::parse(s).into_app_err("invalid filter expression"))
+        .collect()
+}
+
+fn parse_target_predicates(specs: &[String]) -> Result<Vec<TargetPredicate>, AppError> {
+    specs
+        .iter()
+        .map(|spec| TargetPredicate::parse(spec).into_app_err("invalid target filter expression"))
         .collect()
 }
 
@@ -1002,7 +1011,7 @@ mod tests {
         add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
         effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
-        record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
+        parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
         run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
         validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
     };
@@ -1019,7 +1028,8 @@ mod tests {
             "--filter",
             "--once",
             "--each-target",
-            "--target-required-feature",
+            "--target-filter",
+            "--require-target-per-package",
             "--chdir",
             "--manifest-path",
         ];
@@ -1035,11 +1045,13 @@ mod tests {
                 "--filter" => args.filters.push("publishable".to_owned()),
                 "--once" => args.once = true,
                 "--each-target" => args.each_targets.push("bin".to_owned()),
-                "--target-required-feature" => args.target_required_feature.push("feature".to_owned()),
+                "--target-filter" => args.target_filters.push("required-feature:feature".to_owned()),
+                "--require-target-per-package" => args.require_target_per_package = true,
                 "--chdir" => args.chdir = true,
                 "--manifest-path" => args.manifest_path = Some("Cargo.toml".into()),
                 _ => unreachable!("options lists only the JSON-mode conflicts"),
             }
+
             let error = validate_json_mode(&args).expect_err("Cargo options conflict with JSON mode");
             assert!(error.to_string().contains(&format!("with `{option}`")), "{error}");
             args.packages.push("highest-priority".to_owned());
@@ -1047,6 +1059,24 @@ mod tests {
             let error = validate_json_mode(&args).expect_err("conflict priority is deterministic");
             assert!(error.to_string().contains("with `--package`"), "{error}");
         }
+    }
+
+    #[test]
+    fn parses_target_predicates_with_filter_error_context() {
+        assert_eq!(
+            parse_target_predicates(&["name:unit-*".to_owned()]).expect("target filter").len(),
+            1
+        );
+        let error = parse_target_predicates(&["unknown".to_owned()]).expect_err("unknown target atom");
+        let rendered = error.to_string();
+        let normalized = rendered
+            .rsplit_once(" (at ")
+            .map(|(message, _location)| message)
+            .expect("AppError context always includes its captured source location");
+        assert_eq!(
+            normalized,
+            "invalid filter expression `unknown`: expected one of: name:<glob>, required-feature:<name>, name-in-metadata:<dotted.key>\n> invalid target filter expression"
+        );
     }
 
     #[test]

@@ -65,11 +65,13 @@ per object.
    to commands that provision or validate a shared toolchain. *JSON-record*
    runs once per input object without loading Cargo metadata and expands
    top-level string fields through `{json:key}`.
-4. **A small, general `--filter` language** with `not`, `and`, `or`, and
+4. **Small, general filter languages** with `not`, `and`, `or`, and
    parentheses over cargo metadata — target kinds, resolved doctest capability,
    publication state, declared features and dependencies, and
-   `metadata:<dotted.key>[=<value>]` — so bespoke `cargo metadata` filtering in
-   recipes collapses to flags.
+   `metadata:<dotted.key>[=<value>]` for package selection, plus target name,
+   required features, and package-owned metadata target lists for per-target
+   selection — so bespoke `cargo metadata` filtering in recipes collapses to
+   flags.
 5. **Bare names for free.** `{name}` yields the un-qualified package name, so
    `@version` stripping disappears from callers even though the input carries it.
 6. **Bounded execution.** Per-package, per-target, and JSON-record commands may
@@ -249,6 +251,43 @@ For example:
 Filtering runs after package selection and before any target selection. If the
 filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 
+`--target-filter <EXPR>` uses the exact same Boolean grammar, parser, precedence,
+quoting rules, nesting limit, and error style, but a target-specific atom set.
+It is repeatable and repeated expressions are AND-combined. Target filtering
+runs after package selection, package filtering, and `--each-target` kind
+selection, but before plan execution:
+
+| Predicate | True when the current target… |
+|-----------|--------------------------------|
+| `name:<glob>` | has a name matching the Unix-style glob (`*` and `?`). |
+| `required-feature:<name>` | declares `<name>` in Cargo `required-features`. |
+| `name-in-metadata:<dotted.key>` | has a name present in the owning package's `package.metadata.<dotted.key>` string array. |
+
+A missing metadata key does not match. A present non-array or an array
+containing a non-string is a usage/configuration error before any child command
+runs.
+
+For example:
+
+```
+--each-target test --target-filter 'required-feature:loom or name:smoke-*'
+--each-target example --target-filter 'not name-in-metadata:cargo-each.skip-targets'
+```
+
+Package and target expressions share the grammar and Boolean AST implementation
+while keeping their atom sets scope-specific. There is no
+`--exclude-target-filter`; use `not`.
+
+`--require-target-per-package` adds a plan-wide invariant after package
+selection, package filtering, target-kind selection, and target filtering:
+every selected package must retain at least one matching target. The complete
+selection is validated before execution, so a later failing package prevents
+commands for earlier matching packages from starting. Every failing package is
+reported in deterministic package order using its canonical `name@version`
+identity. An empty selected package set remains a successful no-op. The flag is
+generic: callers compose package and target predicates rather than relying on
+domain-specific target rules.
+
 ### 4.3 Execution
 
 | Flag | Meaning |
@@ -258,7 +297,8 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--json-lines <JSONL>` | **JSON-record mode**: parse one JSON object per nonempty line in the provided value and run `<COMMAND>` once per record. Repeatable. Mutually exclusive with Cargo package selection, filters, target/once modes, `--chdir`, `--manifest-path`, and workspace Rust-version behavior. |
 | `--json-lines-file <PATH>` | Read JSON records from UTF-8 files instead of command-line values. Repeatable and may be combined with `--json-lines`; inline values are processed first, followed by files in argument order within each source. |
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
-| `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
+| `--target-filter <EXPR>` | In per-target mode, retain targets matching the target Boolean expression. Repeatable; expressions are AND-combined. Requires `--each-target`. |
+| `--require-target-per-package` | In per-target mode, require every selected package to retain at least one target after kind and target filtering. Requires `--each-target`. Reports all failing packages and exits 2 before execution. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
 | `--jobs <N\|auto>` | Run at most the positive integer `N` per-package, per-target, or JSON-record commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
 | `--timeout <DURATION>` | Terminate an invocation's Windows job object or Unix process group when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Unix descendants can escape by starting a new session, so termination is best-effort for those escaped descendants. No timeout by default. |
@@ -311,8 +351,9 @@ placeholder references are validated before any child process is spawned.
 An empty record set is a successful no-op.
 
 Targets run in package-name order and then target-name order. A target matching
-more than one requested kind runs once. No matching targets is a successful
-no-op.
+more than one requested kind runs once. Target filters do not duplicate
+targets. No matching targets is a successful no-op unless
+`--require-target-per-package` is set for a nonempty package selection.
 
 ## 5. Semantics
 
@@ -326,6 +367,12 @@ no-op.
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.
+- **Per-package target requirements are atomic.**
+  `--require-target-per-package` validates the complete post-filter package and
+  target selection before any command starts. It reports every package without
+  a match as `name@version` in package order and exits 2. Execution controls
+  (`--jobs`, `--keep-going`, `--timeout`, and `--chdir`) do not weaken this
+  pre-execution invariant.
 - **An absent workspace Rust version is an empty value.** A nonempty package
   plan using `{workspace-rust-version}` substitutes `""` when the root manifest
   has no declaration. Malformed TOML and invalid or inconsistent metadata still
@@ -457,6 +504,16 @@ cargo each --package-file target/anvil/impact/affected.packages --filter dep:loo
 cargo each --package-file target/anvil/impact/affected.packages \
     --each-target example --timeout 30s -- \
     cargo run --package {spec} --example {target}
+```
+
+Targets can be narrowed with the shared Boolean grammar without adding
+one-off target switches:
+
+```just
+cargo each --package-file target/anvil/impact/affected.packages \
+    --filter feature:loom --each-target test \
+    --target-filter required-feature:loom --require-target-per-package -- \
+    cargo test --package {spec} --test {target} --features loom
 ```
 
 Recipes whose only per-tier logic is the skip/splat preamble become one

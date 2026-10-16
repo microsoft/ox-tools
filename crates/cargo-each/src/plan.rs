@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use cargo_metadata::TargetKind;
 
-use crate::error::{ChdirConflictsWithOnceError, EachError};
+use crate::error::{ChdirConflictsWithOnceError, EachError, MissingTargetPerPackageError};
+use crate::filter::TargetPredicate;
 use crate::json_lines::JsonRecord;
 use crate::substitute::{Placeholders, substitute, substitute_json_prevalidated, validate_json_placeholders, validate_placeholders};
 use crate::workspace::Member;
@@ -71,7 +72,8 @@ pub(crate) struct BuildOptions<'a> {
     pub(crate) chdir: bool,
     pub(crate) packages: PackagesExpansion,
     pub(crate) target_kinds: &'a BTreeSet<TargetKind>,
-    pub(crate) target_required_features: &'a BTreeSet<String>,
+    pub(crate) target_filters: &'a [TargetPredicate],
+    pub(crate) require_target_per_package: bool,
     pub(crate) workspace_rust_version: Option<&'a str>,
 }
 
@@ -107,10 +109,16 @@ impl Plan {
         validate_build(command, options)?;
         Ok(match options.mode {
             Mode::PerPackage | Mode::Once => members.is_empty(),
-            Mode::PerTarget => !members
-                .iter()
-                .flat_map(|member| &member.targets)
-                .any(|target| target_matches(target, options.target_kinds, options.target_required_features)),
+            Mode::PerTarget => {
+                validate_target_filters(members, options.target_kinds, options.target_filters)?;
+                validate_target_requirement(members, options)?;
+                !members.iter().any(|member| {
+                    member
+                        .targets
+                        .iter()
+                        .any(|target| target_matches(member, target, options.target_kinds, options.target_filters))
+                })
+            }
         })
     }
 
@@ -141,8 +149,9 @@ impl Plan {
             chdir,
             packages,
             target_kinds,
-            target_required_features,
+            target_filters,
             workspace_rust_version,
+            ..
         } = options;
 
         // #[gamma::skip(try.propagate_to_unwrap, reason = "is_empty already ran validate_build on this same immutable command and mode; every substitute repeats only that validated placeholder check, so all collected results and direct substitutions are Ok")]
@@ -170,7 +179,7 @@ impl Plan {
                     member
                         .targets
                         .iter()
-                        .filter(|target| target_matches(target, target_kinds, target_required_features))
+                        .filter(|target| target_matches(member, target, target_kinds, target_filters))
                         .map(|target| {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
@@ -216,14 +225,55 @@ fn validate_build(command: &[String], options: BuildOptions<'_>) -> Result<(), E
 }
 
 fn target_matches(
+    member: &Member,
     target: &crate::workspace::MemberTarget,
     target_kinds: &BTreeSet<TargetKind>,
-    target_required_features: &BTreeSet<String>,
+    target_filters: &[TargetPredicate],
 ) -> bool {
-    target.kinds.iter().any(|kind| target_kinds.contains(kind))
-        && target_required_features
+    target.kinds.iter().any(|kind| target_kinds.contains(kind)) && target_filters.iter().all(|filter| filter.matches(member, target))
+}
+
+fn validate_target_filters(
+    members: &[&Member],
+    target_kinds: &BTreeSet<TargetKind>,
+    target_filters: &[TargetPredicate],
+) -> Result<(), EachError> {
+    // Target filtering follows kind selection, so metadata on members without
+    // any requested-kind target cannot affect the plan and is outside this
+    // preflight.
+    for member in members.iter().filter(|member| {
+        member
+            .targets
             .iter()
-            .all(|feature| target.required_features.contains(feature))
+            .any(|target| target.kinds.iter().any(|kind| target_kinds.contains(kind)))
+    }) {
+        for filter in target_filters {
+            filter.validate(member)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_target_requirement(members: &[&Member], options: BuildOptions<'_>) -> Result<(), EachError> {
+    if !options.require_target_per_package || members.is_empty() {
+        return Ok(());
+    }
+
+    let missing = members
+        .iter()
+        .filter(|member| {
+            !member
+                .targets
+                .iter()
+                .any(|target| target_matches(member, target, options.target_kinds, options.target_filters))
+        })
+        .map(|member| member.spec())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(MissingTargetPerPackageError::new(missing.join(", ")).into())
+    }
 }
 
 /// The `{packages}` expansion: `--workspace` for the whole workspace, else an
@@ -271,7 +321,8 @@ mod tests {
                 chdir,
                 packages,
                 target_kinds: &BTreeSet::new(),
-                target_required_features: &BTreeSet::new(),
+                target_filters: &[],
+                require_target_per_package: false,
                 workspace_rust_version: None,
             },
         )
@@ -423,7 +474,7 @@ mod tests {
             },
         ];
         let kinds = std::iter::once(TargetKind::Test).collect();
-        let required = std::iter::once("loom".to_owned()).collect();
+        let required = [TargetPredicate::parse("required-feature:loom").expect("target filter")];
         let plan = Plan::build(
             &[&a],
             &cmd(&["cargo", "test", "-p", "{name}", "--test", "{target}"]),
@@ -432,7 +483,8 @@ mod tests {
                 chdir: false,
                 packages: PackagesExpansion::Explicit,
                 target_kinds: &kinds,
-                target_required_features: &required,
+                target_filters: &required,
+                require_target_per_package: false,
                 workspace_rust_version: None,
             },
         )
@@ -440,6 +492,156 @@ mod tests {
         assert_eq!(plan.invocations.len(), 1);
         assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha::loom"));
         assert_eq!(plan.invocations[0].argv, ["cargo", "test", "-p", "alpha", "--test", "loom"]);
+    }
+
+    #[test]
+    fn per_target_boolean_and_repeated_filters_compose() {
+        let mut a = member("alpha");
+        a.metadata = serde_json::json!({"cargo-each": {"excluded-targets": ["ordinary-test"]}});
+        a.targets = vec![
+            MemberTarget {
+                name: "loom-test".to_owned(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
+                required_features: std::iter::once("loom".to_owned()).collect(),
+            },
+            MemberTarget {
+                name: "ordinary-test".to_owned(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
+                required_features: BTreeSet::new(),
+            },
+            MemberTarget {
+                name: "demo".to_owned(),
+                kinds: std::iter::once(TargetKind::Example).collect(),
+                required_features: BTreeSet::new(),
+            },
+        ];
+        let kinds = [TargetKind::Example, TargetKind::Test].into_iter().collect();
+        let filters = [
+            TargetPredicate::parse("(required-feature:loom and name:loom-*) or name:demo").expect("Boolean target filter"),
+            TargetPredicate::parse("not name-in-metadata:cargo-each.excluded-targets").expect("metadata exclusion filter"),
+        ];
+        let plan = Plan::build(
+            &[&a],
+            &cmd(&["echo", "{name}::{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &filters,
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("build target plan");
+        assert_eq!(
+            plan.invocations
+                .iter()
+                .map(|invocation| invocation.argv.clone())
+                .collect::<Vec<_>>(),
+            [cmd(&["echo", "alpha::loom-test"]), cmd(&["echo", "alpha::demo"])]
+        );
+    }
+
+    #[test]
+    fn missing_target_metadata_matches_under_not_and_empty_results_are_valid() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "demo".to_owned(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let kinds = std::iter::once(TargetKind::Example).collect();
+        let include_missing = [TargetPredicate::parse("not name-in-metadata:cargo-each.excluded-targets").expect("target filter")];
+        let plan = Plan::build(
+            &[&a],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &include_missing,
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("missing metadata does not exclude the target");
+        assert_eq!(plan.invocations[0].argv, ["echo", "demo"]);
+
+        let exclude_all = [TargetPredicate::parse("name:no-such-target").expect("target filter")];
+        assert!(
+            Plan::is_empty(
+                &[&a],
+                &cmd(&["echo", "{target}"]),
+                BuildOptions {
+                    mode: Mode::PerTarget,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &kinds,
+                    target_filters: &exclude_all,
+                    require_target_per_package: false,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("an empty target result is valid")
+        );
+    }
+
+    #[test]
+    fn malformed_target_metadata_fails_preflight_for_relevant_members_only() {
+        let filter = [TargetPredicate::parse("name-in-metadata:cargo-each.excluded-targets").expect("target filter")];
+        let test_kinds = std::iter::once(TargetKind::Test).collect();
+
+        let mut relevant = member("relevant");
+        relevant.metadata = serde_json::json!({"cargo-each": {"excluded-targets": "test"}});
+        relevant.targets.push(MemberTarget {
+            name: "test".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let error = Plan::is_empty(
+            &[&relevant],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &test_kinds,
+                target_filters: &filter,
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect_err("malformed metadata must fail before matching");
+        assert_eq!(
+            error.to_string(),
+            "package `relevant` metadata `cargo-each.excluded-targets` must be an array of strings when used by `name-in-metadata:cargo-each.excluded-targets`"
+        );
+
+        let mut irrelevant = member("irrelevant");
+        irrelevant.metadata = relevant.metadata.clone();
+        irrelevant.targets.push(MemberTarget {
+            name: "example".to_owned(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
+            required_features: BTreeSet::new(),
+        });
+        assert!(
+            Plan::is_empty(
+                &[&irrelevant],
+                &cmd(&["echo", "{target}"]),
+                BuildOptions {
+                    mode: Mode::PerTarget,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &test_kinds,
+                    target_filters: &filter,
+                    require_target_per_package: false,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("members outside kind selection are outside metadata preflight")
+        );
     }
 
     #[test]
@@ -451,7 +653,7 @@ mod tests {
             required_features: BTreeSet::new(),
         });
         let kinds = [TargetKind::Example, TargetKind::Test].into_iter().collect();
-        let required = BTreeSet::new();
+        let required = [];
         let plan = Plan::build(
             &[&a],
             &cmd(&["echo", "{target}"]),
@@ -460,7 +662,8 @@ mod tests {
                 chdir: false,
                 packages: PackagesExpansion::Explicit,
                 target_kinds: &kinds,
-                target_required_features: &required,
+                target_filters: &required,
+                require_target_per_package: false,
                 workspace_rust_version: None,
             },
         )
@@ -484,7 +687,7 @@ mod tests {
             required_features: std::iter::once("loom".to_owned()).collect(),
         });
         let kinds = std::iter::once(TargetKind::Test).collect();
-        let required = std::iter::once("loom".to_owned()).collect();
+        let required = [TargetPredicate::parse("required-feature:loom").expect("target filter")];
         assert!(
             Plan::is_empty(
                 &[&a],
@@ -494,11 +697,100 @@ mod tests {
                     chdir: false,
                     packages: PackagesExpansion::Explicit,
                     target_kinds: &kinds,
-                    target_required_features: &required,
+                    target_filters: &required,
+                    require_target_per_package: false,
                     workspace_rust_version: None,
                 },
             )
             .expect("valid target selection")
+        );
+    }
+
+    #[test]
+    fn target_requirement_accepts_every_member_with_a_match() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "alpha-test".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let mut b = member("beta");
+        b.targets.extend([
+            MemberTarget {
+                name: "beta-first".to_owned(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
+                required_features: BTreeSet::new(),
+            },
+            MemberTarget {
+                name: "beta-second".to_owned(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
+                required_features: BTreeSet::new(),
+            },
+        ]);
+        let kinds = std::iter::once(TargetKind::Test).collect();
+        let plan = Plan::build(
+            &[&a, &b],
+            &cmd(&["echo", "{name}::{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &[],
+                require_target_per_package: true,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("every selected member has at least one matching target");
+        assert_eq!(
+            plan.invocations
+                .iter()
+                .map(|invocation| invocation.argv[1].as_str())
+                .collect::<Vec<_>>(),
+            ["alpha::alpha-test", "beta::beta-first", "beta::beta-second"]
+        );
+    }
+
+    #[test]
+    fn target_requirement_reports_every_missing_member_in_input_order() {
+        let a = member("alpha");
+        let b = member("beta");
+        let kinds = std::iter::once(TargetKind::Test).collect();
+        let error = Plan::is_empty(
+            &[&b, &a],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &[],
+                require_target_per_package: true,
+                workspace_rust_version: None,
+            },
+        )
+        .expect_err("both selected members lack matching targets");
+        assert!(error.to_string().contains("beta@1.2.3, alpha@1.2.3"), "{error}");
+    }
+
+    #[test]
+    fn target_requirement_keeps_an_empty_selection_as_a_noop() {
+        let kinds = std::iter::once(TargetKind::Test).collect();
+        assert!(
+            Plan::is_empty(
+                &[],
+                &cmd(&["echo", "{target}"]),
+                BuildOptions {
+                    mode: Mode::PerTarget,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &kinds,
+                    target_filters: &[],
+                    require_target_per_package: true,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("an empty selected package set remains valid")
         );
     }
 
@@ -524,7 +816,8 @@ mod tests {
                     chdir: false,
                     packages: PackagesExpansion::Explicit,
                     target_kinds: &kinds,
-                    target_required_features: &BTreeSet::new(),
+                    target_filters: &[],
+                    require_target_per_package: false,
                     workspace_rust_version: None,
                 },
             )
@@ -560,7 +853,8 @@ mod tests {
                 chdir: true,
                 packages: PackagesExpansion::Explicit,
                 target_kinds: &kinds,
-                target_required_features: &BTreeSet::new(),
+                target_filters: &[],
+                require_target_per_package: false,
                 workspace_rust_version: None,
             },
         )
@@ -579,7 +873,8 @@ mod tests {
                 chdir: false,
                 packages: PackagesExpansion::Workspace,
                 target_kinds: &BTreeSet::new(),
-                target_required_features: &BTreeSet::new(),
+                target_filters: &[],
+                require_target_per_package: false,
                 workspace_rust_version: Some("1.80"),
             },
         )
