@@ -74,11 +74,25 @@ imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not i
 the user's `Justfile`, so renaming or retargeting the alias is a template update
 with no managed-region churn.
 
-Recipes in the `groups/`, `tiers.just`, and `checks/` files that actually *run* checks
-are annotated with `[group("anvil")]`. The install/validate-prereqs/setup recipes
-in `tools.just` (and the per-check/group/tier setup recipes colocated in the same
-files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
-two clean clusters: one for "run checks", one for "install prereqs".
+`just --list` (also shown by a repository's default listing recipe) exposes only
+the user-facing entry points, organized into three groups:
+
+- **`anvil`**: individual checks, local-development commands (`anvil-build` and
+  `anvil-readme`), check groups, tiers, and `anvil-impact`. The `anvil` alias is
+  listed alongside its target, `anvil-pr`.
+- **`anvil-setup`**: `anvil-setup` to install everything and
+  `anvil-validate-prereqs` to verify the environment without installing anything.
+- **`anvil-container`**: container execution, status, tag, and cleanup commands.
+
+Per-check, per-group, and per-tier `*-setup` / `*-validate-prereqs` recipes and
+atomic tool, toolchain, and component recipes are dependency plumbing, annotated
+with `[private]`. Other internal helpers use `[private]` or an underscore-prefixed
+name. Just omits these recipes from `--list` and `--summary`; they remain callable
+by their existing names, both as dependencies and directly from the command line.
+For example, `just anvil-clippy-setup` still installs only Clippy's prerequisites,
+and the generated cloud workflows still call their group-specific setup recipes.
+`just --show <recipe>` can inspect a hidden recipe. Visibility does not change any
+recipe's arguments or dependency graph.
 
 > **Containerized execution.** `justfiles/anvil/container.just` adds the
 > `anvil-container <command…>` recipe, which runs the given argv inside a pinned
@@ -106,7 +120,7 @@ anvil-clippy: anvil-clippy-validate-prereqs
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-The per-check `*-validate-prereqs` recipe (in the `anvil-setup` group) chains the
+The private per-check `*-validate-prereqs` recipe chains the
 relevant atomic validators -- e.g. `anvil-component-default-clippy-validate-prereqs`
 for clippy, plus `anvil-tool-rustc-validate-prereqs` for the toolchain pin -- each of
 which calls `cargo install --list` / `rustup component list` / `rustc --version` to
