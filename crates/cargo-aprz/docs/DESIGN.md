@@ -39,6 +39,23 @@ clone and repository-level work. Source analysis does not follow filesystem
 links and reads only regular Rust source files whose metadata is within the
 configured per-file size limit.
 
+### crates.io owner identities
+
+User display names come from `users.csv`. Current GitHub logins come from
+`oauth_github.csv`, joined on the crates.io `user_id`, not the GitHub `account_id`.
+These logins take precedence over the stale `users.gh_login` column in historical
+dumps. Dumps predating the OAuth table remain supported through that legacy
+column; current dumps need not contain it.
+
+This changes the source of user identities, not the existing missing-identity
+policy: empty logins remain empty and do not fail collection. Team owners
+continue to use `teams.csv`. CSV parsing uses the existing table conversion
+behavior without additional header or identity validation.
+
+The OAuth table is cached alongside the other binary tables. Caches created by
+older tool versions without that table are refreshed once before use, so stale
+legacy identities do not bypass the new join.
+
 ### Service addresses
 
 Each provider talks to a service at a base address that defaults to the public

@@ -25,7 +25,7 @@ use url::Url;
 use super::table::map_table_file;
 use super::{
     CategoriesTable, CrateDownloadsTable, CrateOwnersTable, CratesCategoriesTable, CratesKeywordsTable, CratesTable, DependenciesTable,
-    KeywordsTable, Table, TeamsTable, UsersTable, VersionDownloadsTable, VersionsTable,
+    KeywordsTable, OauthGithubTable, Table, TeamsTable, UsersTable, VersionDownloadsTable, VersionsTable,
 };
 use crate::facts::progress::Progress;
 use crate::{HashMap, Result};
@@ -254,6 +254,7 @@ define_tables! {
     keywords_table: KeywordsTable,
     teams_table: TeamsTable,
     users_table: UsersTable,
+    oauth_github_table: OauthGithubTable,
     crate_owners_table: CrateOwnersTable,
 }
 
@@ -634,6 +635,13 @@ fn process_download(
                 start.elapsed().as_secs_f64()
             );
         }
+    }
+
+    if !files.contains_key(OauthGithubTable::TABLE_NAME) {
+        // Older dumps have no OAuth table and supply logins through users.csv instead.
+        log::debug!(target: LOG_TARGET, "No oauth_github.csv in dump; using legacy user logins");
+        let file = OauthGithubTable::create_table(tables_root, &b"user_id,login\n"[..], now)?;
+        let _ = files.insert(OauthGithubTable::TABLE_NAME, file);
     }
 
     let table_mgr = TableMgr::open_tables_from_files(files, max_ttl, now, progress)?;

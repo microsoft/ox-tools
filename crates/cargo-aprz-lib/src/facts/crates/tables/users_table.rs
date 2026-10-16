@@ -1,21 +1,41 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::{UserId, define_rows, define_table};
+//! Reads user profiles and optional legacy GitHub logins from the database dump.
+//!
+//! [`UsersTable`] supplies profiles to the crates provider. Current GitHub logins
+//! come from the sibling OAuth table; older dumps store them here.
 
-define_rows! {
-    UserRow<'a> {
-        pub id: UserId,
-        pub gh_login: &'a str,
-        pub name: &'a str,
-    }
+use super::{UserId, define_table};
+
+/// CSV user profile with an optional legacy GitHub login.
+#[derive(Debug, serde::Deserialize)]
+pub struct CsvUserRow<'a> {
+    #[serde(borrow)]
+    id: &'a str,
+    #[serde(borrow)]
+    gh_login: Option<&'a str>,
+    #[serde(borrow)]
+    name: &'a str,
+}
+
+/// Borrowed user profile from the binary table.
+#[derive(Debug, Clone)]
+pub struct UserRow<'a> {
+    /// crates.io user identifier.
+    pub id: UserId,
+    /// GitHub login supplied by older dumps, or empty when absent.
+    pub gh_login: &'a str,
+    /// Display name, which may be empty.
+    pub name: &'a str,
 }
 
 define_table! {
     users {
         fn write_row(csv_row: &CsvUserRow<'a>, writer: &mut RowWriter<impl Write>) -> Result<()> {
             writer.write_str_as_u64(csv_row.id)?;
-            writer.write_str(csv_row.gh_login);
+            // An empty string encodes an absent legacy login without changing the cache layout.
+            writer.write_str(csv_row.gh_login.unwrap_or_default());
             writer.write_str(csv_row.name);
 
             Ok(())

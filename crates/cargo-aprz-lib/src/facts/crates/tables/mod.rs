@@ -57,6 +57,7 @@ mod crates_table;
 mod dependencies_table;
 mod ids;
 mod keywords_table;
+mod oauth_github_table;
 mod row_iter;
 mod row_reader;
 mod row_writer;
@@ -76,6 +77,8 @@ pub use crates_table::{CratesTable, CratesTableIndex};
 pub use dependencies_table::DependenciesTable;
 pub use ids::{CategoryId, CrateId, KeywordId, TeamId, UserId, VersionId};
 pub use keywords_table::{KeywordsTable, KeywordsTableIndex};
+#[doc(inline)]
+pub use oauth_github_table::OauthGithubTable;
 pub use row_iter::RowIter;
 use row_reader::RowReader;
 use row_writer::RowWriter;
