@@ -43,49 +43,23 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
-    $packageNames = [System.Collections.Generic.List[string]]::new()
-    if ($include -and $include -ne '--workspace') {
-        $pkgArgs = @(-split $include)
-        for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
-            if ($pkgArgs[$i] -ne '--package' -or ($i + 1) -ge $pkgArgs.Count) {
-                Write-Error "anvil-bolero: unsupported affected-package arguments: $include"
-                exit 1
-            }
-            # Impact emits version-qualified specs (name@version); cargo-bolero
-            # resolves workspace members by bare package name.
-            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
-        }
-    } else {
-        $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error 'anvil-bolero: cargo metadata failed'
-            exit $LASTEXITCODE
-        }
-        try {
-            $metadata = $metadataJson | ConvertFrom-Json
-            foreach ($package in $metadata.packages) {
-                if ($metadata.workspace_members -contains $package.id) {
-                    $packageNames.Add($package.name)
-                }
-            }
-        } catch {
-            Write-Error "anvil-bolero: could not parse cargo metadata output: $_"
-            exit 1
-        }
-    }
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $packages = @(Get-AnvilPackages $include -Toolchain {{_anvil_stable_toolchain_args}})
 
     # cargo-bolero accepts only one --package, so discover each package
     # separately and combine the emitted JSON target objects.
     $targets = [System.Collections.Generic.List[object]]::new()
-    foreach ($packageName in $packageNames) {
-        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --profile release --package $packageName
+    foreach ($package in $packages) {
+        $packageName = $package.name
+        $packageArgs = @(Get-AnvilPackageArguments @($package) -Adapter manifest)
+        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --profile release @packageArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Error "anvil-bolero: target discovery failed for package '$packageName'"
             exit $LASTEXITCODE
         }
         try {
             foreach ($targetJson in ($targetsJson | Where-Object { $_ -match '^\{' })) {
-                $targets.Add(($targetJson | ConvertFrom-Json))
+                $targets.Add([pscustomobject]@{ package = $package; target = ($targetJson | ConvertFrom-Json) })
             }
         } catch {
             Write-Error "anvil-bolero: could not parse target discovery output for package '$packageName': $_"
@@ -97,15 +71,17 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
         exit 0
     }
     $failed = $false
-    foreach ($t in $targets) {
-        $packageName = if ($t.package) { $t.package } else { $t.package_name }
+    foreach ($entry in $targets) {
+        $t = $entry.target
+        $packageName = $entry.package.name
         $testName = if ($t.test) { $t.test } elseif ($t.test_name) { $t.test_name } else { $t.target }
         if (-not $packageName -or -not $testName) {
             Write-Error "anvil-bolero: target discovery returned an unsupported object: $($t | ConvertTo-Json -Compress)"
             exit 1
         }
         Write-Host "anvil-bolero: ${packageName}::${testName}"
-        & cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package $packageName $testName
+        $packageArgs = @(Get-AnvilPackageArguments @($entry.package) -Adapter manifest)
+        & cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s @packageArgs $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }

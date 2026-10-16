@@ -59,7 +59,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $selected = @(Get-AnvilPackages $include -Toolchain $stableArgs)
     # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
@@ -71,37 +72,13 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # null, `publish = false` as an empty array, and named-registry restrictions
     # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
-    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-semver-check: cargo metadata failed'
-        exit $LASTEXITCODE
-    }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-semver-check: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    foreach ($p in $meta.packages) {
+    foreach ($p in $selected) {
         if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
             -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p
         }
     }
-    if ($pkg -contains '--workspace') {
-        $packages = @($libPkgs.Keys)
-    } else {
-        $packages = @()
-        for ($i = 0; $i -lt $pkg.Count; $i++) {
-            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Impact emits version-qualified specs (name@version);
-                # strip the @version to recover the bare package name.
-                $name = ($pkg[$i + 1] -split '@', 2)[0]
-                if ($libPkgs[$name]) { $packages += $name }
-                $i++
-            }
-        }
-    }
+    $packages = @($libPkgs.Keys)
     if ($packages.Count -eq 0) {
         Write-Host 'anvil-semver-check: no affected publishable library crates; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
@@ -138,7 +115,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         # moved crate with no same-path baseline). Treat it as having no
         # comparable path baseline, so cargo-semver-checks need not run.
         $manifestPath = [System.IO.Path]::GetRelativePath(
-            $meta.workspace_root,
+            $libPkgs[$p].anvil_workspace_root,
             $libPkgs[$p].manifest_path
         ).Replace('\', '/')
         $baselineManifest = '{0}:{1}' -f $base, $manifestPath
@@ -149,7 +126,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
 
         Write-Host "anvil-semver-check: $p (baseline $base)"
-        $outputLines = @(& cargo @stableArgs semver-checks --package $p --baseline-rev $base 2>&1)
+        $packageArgs = @(Get-AnvilPackageArguments @($libPkgs[$p]) -Adapter semver)
+        $outputLines = @(& cargo @stableArgs semver-checks @packageArgs --baseline-rev $base 2>&1)
         $semverExit = $LASTEXITCODE
         $output = ($outputLines | Out-String)
         if ($semverExit -eq 100) {

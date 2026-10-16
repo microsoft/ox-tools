@@ -19,7 +19,8 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-check-all-targets: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}} -Adapter each)
     $configs = @(
         @{ name = 'default';    flags = @() },
         @{ name = 'no-default'; flags = @('--no-default-features') }
@@ -27,7 +28,7 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     foreach ($cfg in $configs) {
         Write-Host "anvil-check-all-targets: checking $($cfg.name) features"
         $featureArgs = $cfg.flags
-        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --package '{spec}' --all-targets @featureArgs --locked
+        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --manifest-path '{manifest}' --package '{spec}' --all-targets @featureArgs --locked
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 

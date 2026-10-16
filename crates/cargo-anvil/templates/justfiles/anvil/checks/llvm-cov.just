@@ -24,8 +24,9 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    $allTestPkg = $pkg
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $selected = @(Get-AnvilPackages $include -Toolchain {{_anvil_stable_toolchain_args}})
+    $allTestPkg = @(Get-AnvilPackageArguments $selected)
     # Separate coverage-opted-out packages from the measured set. A crate that
     # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
     # script-only crate) compiles to a test binary with no __llvm_covmap,
@@ -36,36 +37,14 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # marker cargo-coverage-gate already treats as NO DATA -> OK. Opted-out
     # packages still run through plain nextest; opting out of measurement
     # never opts a changed package out of tests.
-    $testOnlyPkg = [System.Collections.Generic.List[string]]::new()
-    if ($pkg -contains '--package') {
-        $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error 'anvil-llvm-cov: cargo metadata failed'
-            exit $LASTEXITCODE
-        }
-        $optedOut = @(
-            ($metadataJson | ConvertFrom-Json).packages |
-                Where-Object { $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0 } |
-                ForEach-Object { $_.name }
-        )
-        if ($optedOut.Count -gt 0) {
-            $filtered = [System.Collections.Generic.List[string]]::new()
-            for ($i = 0; $i -lt $pkg.Count; $i++) {
-                # Impact emits version-qualified specs (name@version);
-                # compare the bare name against the opt-out set, but keep
-                # the full name@version token in $pkg so the llvm-cov
-                # measurement below resolves unambiguously.
-                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains (($pkg[$i + 1] -split '@', 2)[0])) {
-                    $testOnlyPkg.Add('--package')
-                    $testOnlyPkg.Add($pkg[$i + 1])
-                    $i++
-                    continue
-                }
-                $filtered.Add($pkg[$i])
-            }
-            $pkg = $filtered.ToArray()
-        }
-    }
+    $testOnly = @($selected | Where-Object {
+        $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and
+        [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0
+    })
+    $measured = @($selected | Where-Object { $_.id -cnotin $testOnly.id })
+    $testOnlyPkg = @(Get-AnvilPackageArguments $testOnly)
+    $pkg = @(Get-AnvilPackageArguments $measured -Adapter llvm-cov)
+    $gateArgs = @(Get-AnvilPackageArguments $measured -Adapter names)
     $configs = @(
         @{ name = 'all-features'; flag = '--all-features' },
         @{ name = 'no-default';   flag = '--no-default-features' }
@@ -222,26 +201,9 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # threshold, so coverage regressions fail the PR locally and in cloud
     # workflows -- the Codecov upload stays purely for display, not the gate.
     #
-    # Scope the gate to the same package set we measured. When impact
-    # scoping is active, $pkg holds `--package X@ver ...` (already opt-out
-    # filtered above); pass those through so the gate only gates packages
-    # that were actually instrumented -- otherwise unmeasured members would
-    # report NO DATA and fail the gate. When unscoped, $pkg is `--workspace`
-    # (no gate flag); drop it so the gate defaults to every member.
-    #
-    # cargo-coverage-gate keys on bare package names from cargo metadata, so
-    # strip the @version qualifier the measurement used for disambiguation.
-    $gateArgs = [System.Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $pkg.Count; $i++) {
-        if ($pkg[$i] -eq '--workspace') { continue }
-        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-            $gateArgs.Add('--package')
-            $gateArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
-            $i++
-            continue
-        }
-        $gateArgs.Add($pkg[$i])
-    }
+    # The gate uses workspace names, llvm-cov uses literal metadata IDs, and
+    # plain nextest uses Cargo specs. All three are projections of the same
+    # selected metadata objects; never decode one tool's selector for another.
     & cargo {{_anvil_stable_toolchain_args}} coverage-gate @gateArgs --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

@@ -217,7 +217,7 @@ if ($args -contains 'metadata') {
         [System.IO.Path]::Combine($root, 'Cargo.toml')
     }
     $packageMetadata = [pscustomobject]@{
-        'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
+        'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = $(if ($env:FAKE_COVERAGE_ENABLED) { 100 } else { 0 }) }
     }
     if ($env:FAKE_MIRI_EXCLUDE) {
         $packageMetadata | Add-Member -NotePropertyName anvil -NotePropertyValue (
@@ -481,7 +481,11 @@ fn tools_available() -> bool {
 }
 
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
-    let tmp = TempDir::new().unwrap();
+    let tmp = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    write(
+        &tmp.path().join(".anvil/packages.ps1"),
+        include_str!("../templates/anvil/packages.ps1"),
+    );
     let mut justfile =
         String::from("set unstable\nset allow-duplicate-recipes\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n\n");
     // Focused fixtures need this shared variable, but the real version catalog
@@ -515,7 +519,7 @@ _anvil-impact-include tier:
     write(&tmp.path().join("Justfile"), &justfile);
     write(
         &tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nrust-version = \"1.97\"\n",
+        "[workspace]\n[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nrust-version = \"1.97\"\n",
     );
 
     let bin = tmp.path().join("fake-bin");
@@ -612,6 +616,9 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
         .current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
+    command.env("TEMP", root);
+    command.env("TMP", root);
+    command.env("TMPDIR", root);
     // A fixture is a scratch workspace, so it must not inherit impact scoping
     // or output-backend markers from the process running the test suite. Tests
     // that exercise those contracts pass the relevant values explicitly.
@@ -739,7 +746,7 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
     let tmp = all_targets_fixture();
     let log = tmp.path().join("cargo.log");
 
-    for selection in ["-p first@1.2.3 -p second@4.5.6", "--workspace"] {
+    for selection in ["--package fixture@0.1.0", "--workspace"] {
         seed_include(tmp.path(), "affected", selection);
         let output = run_just(tmp.path(), &["anvil-check-all-targets"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
         assert!(
@@ -749,11 +756,17 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(
-            fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(" each "))
+                .collect::<Vec<_>>(),
             [
-                format!("+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{spec}} --all-targets --locked"),
                 format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{spec}} --all-targets --no-default-features --locked"
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --manifest-path {{manifest}} --package {{spec}} --all-targets --locked"
+                ),
+                format!(
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --manifest-path {{manifest}} --package {{spec}} --all-targets --no-default-features --locked"
                 ),
             ],
             "both configurations must check packages independently, with both Cargo processes selecting stable"
@@ -790,8 +803,8 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
     assert_eq!(
         fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
         [
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {spec} --all-targets --locked",
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {spec} --all-targets --no-default-features --locked",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --manifest-path {manifest} --package {spec} --all-targets --locked",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --manifest-path {manifest} --package {spec} --all-targets --no-default-features --locked",
         ]
     );
 }
@@ -900,13 +913,12 @@ fn all_targets_isolation_exposes_missing_dev_dependency_features() {
 
 fn assert_miri_cargo_calls(cargo_calls: &str) {
     assert!(
-        cargo_calls.contains("+nightly-test metadata --no-deps --format-version 1"),
+        cargo_calls.contains("+nightly-test metadata --locked --no-deps --format-version 1"),
         "metadata and compiler-artifact IDs must use the same pinned nightly Cargo:\n{cargo_calls}"
     );
+    assert_eq!(cargo_calls.lines().filter(|line| line.contains(" metadata ")).count(), 1);
     assert!(
-        cargo_calls.contains(
-            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics --workspace --exclude other-package"
-        ),
+        cargo_calls.contains("miri test --all-features --tests --no-run --message-format=json-render-diagnostics --manifest-path "),
         "workspace Miri compilation must exclude metadata-opted-out packages:\n{cargo_calls}"
     );
 }
@@ -1113,7 +1125,7 @@ fn miri_runner_preserves_impact_filtering() {
         .find(|call| call.contains("miri test"))
         .expect("the profile must compile its selected Miri targets");
     assert!(
-        build_call.contains("--package fixture@0.1.0"),
+        build_call.contains(&format!("--manifest-path {}", tmp.path().join("Cargo.toml").display())),
         "impact-selected included packages must be forwarded:\n{build_call}"
     );
     assert!(
@@ -1386,8 +1398,27 @@ fn msrv_test_propagates_nested_just_failures() {
     );
     assert_failed(&resolver_failure, "failed MSRV resolver");
     assert!(
-        fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
+        fs::read_to_string(&cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after resolver failure"
+    );
+    let selected = run_just(
+        tmp.path(),
+        &["anvil-msrv-test"],
+        &[
+            ("FAKE_IMPACT_HELPER_OUTPUT", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_RESOLVER_OUTPUT", OsStr::new("1.95")),
+            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+        ],
+    );
+    assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
+    let calls = fs::read_to_string(cargo_log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with(&format!("+1.95 test --manifest-path {}", tmp.path().join("Cargo.toml").display())))
+            .count(),
+        2,
+        "both MSRV feature configurations must retain single-manifest selection:\n{calls}"
     );
 }
 
@@ -1988,8 +2019,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    // A whole-workspace affected tier forces the metadata-enumeration branch
-    // (the scoped `--package` branch never calls `cargo metadata`).
+    // A whole-workspace affected tier selects every metadata member.
     seed_include(tmp.path(), "affected", "--workspace");
     let output = run_just(
         tmp.path(),
@@ -2018,11 +2048,17 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         "full-workspace discovery must enumerate members via `cargo metadata`, got:\n{calls}"
     );
     assert!(
-        calls.contains("bolero list --profile release --package fixture"),
+        calls.contains(&format!(
+            "bolero list --profile release --manifest-path {}",
+            tmp.path().join("Cargo.toml").display()
+        )),
         "the first workspace member must be discovered, got:\n{calls}"
     );
     assert!(
-        calls.contains("bolero list --profile release --package other-package"),
+        calls.contains(&format!(
+            "bolero list --profile release --manifest-path {}",
+            tmp.path().join("nested/Cargo.toml").display()
+        )),
         "every workspace member must be discovered, not just the first, got:\n{calls}"
     );
     assert!(
@@ -2067,6 +2103,18 @@ fn semver_exit_code_contract_is_executed() {
     let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.split_whitespace().any(|arg| arg == "metadata"))
+            .count(),
+        1
+    );
+    assert!(calls.contains(&format!(
+        "semver-checks --manifest-path {} --package fixture --baseline-rev base",
+        tmp.path().join("Cargo.toml").display()
+    )));
 
     let renamed = run_just(
         tmp.path(),
@@ -2359,7 +2407,10 @@ fn build_and_doc_options_produce_the_expected_cargo_commands() {
         String::from_utf8_lossy(&build_output.stderr)
     );
     let build_commands = fs::read_to_string(build_log).unwrap();
-    assert!(build_commands.contains("build --package fixture --profile release --all-features --all-targets --locked"));
+    assert!(build_commands.contains(&format!(
+        "build --manifest-path {} --package fixture 0.1.0 --profile release --all-features --all-targets --locked",
+        build.path().join("Cargo.toml").display()
+    )));
 
     let docs = fixture(
         &[("doc-build.just", DOC_BUILD), ("impact.just", IMPACT)],
@@ -2439,14 +2490,13 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     assert!(example_output.status.success());
     let commands = fs::read_to_string(log).unwrap();
     assert!(
-        commands.contains(
-            "+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture@0.1.0"
-        ),
+        commands
+            .contains("+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --manifest-path "),
         "default Miri target selection was not preserved:\n{commands}"
     );
     assert!(
         commands
-            .contains("+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture"),
+            .contains("+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --manifest-path "),
         "explicit package selection was not forwarded:\n{commands}"
     );
     let runner_args = fs::read_to_string(run_log.with_extension("fixture-test.args")).unwrap();
@@ -2456,7 +2506,10 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
         "the libtest filter must be forwarded to the executed Miri artifact"
     );
     assert!(
-        commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"),
+        commands.contains(&format!(
+            "+nightly-test miri run --all-features --locked --manifest-path {} --package fixture 0.1.0 --example basic",
+            tmp.path().join("Cargo.toml").display()
+        )),
         "explicit example selection was not forwarded:\n{commands}"
     );
 }
@@ -2476,7 +2529,8 @@ fn examples_run_honors_default_exclusions_and_explicit_selection() {
     );
     write(
         &tmp.path().join("Cargo.toml"),
-        r#"[package]
+        r#"[workspace]
+[package]
 name = "fixture"
 version = "0.1.0"
 edition = "2024"
@@ -2593,7 +2647,12 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
     let output = run_just(
         tmp.path(),
         &["anvil-doc-test"],
-        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
+        &[
+            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+        ],
     );
     assert!(
         output.status.success(),
@@ -2602,11 +2661,11 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    assert_exact_doc_test_commands(&commands, "--package Foo@0.1.0 --package macro-package@0.1.0");
+    assert_exact_doc_test_commands(&commands, "--package Foo 0.1.0 --package macro-package 0.1.0");
     assert_eq!(
         commands.lines().count(),
-        2,
-        "a consumed impact projection must launch only the two doctest Cargo children and no metadata process:\n{commands}"
+        3,
+        "a consumed impact projection must resolve runner-local IDs before the two doctest children:\n{commands}"
     );
 
     fs::remove_file(&log).unwrap();
@@ -2663,7 +2722,7 @@ fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    assert_exact_doc_test_commands(&commands, "--package Foo@0.1.0 --package macro-package@0.1.0");
+    assert_exact_doc_test_commands(&commands, "--package Foo 0.1.0 --package macro-package 0.1.0");
     assert!(
         !commands.lines().any(|line| line.contains("--package outside@0.1.0")),
         "workspace selection must exclude doctest-capable non-members:\n{commands}"
@@ -2671,8 +2730,11 @@ fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
     let metadata_commands = commands.lines().filter(|line| line.starts_with("metadata ")).collect::<Vec<_>>();
     assert_eq!(
         metadata_commands,
-        ["metadata --locked --no-deps --format-version 1"],
-        "unscoped capability discovery must issue exactly one locked metadata query:\n{commands}"
+        [
+            "metadata --locked --no-deps --format-version 1",
+            "metadata --locked --no-deps --format-version 1"
+        ],
+        "capability and runner-local identity discovery must use locked metadata:\n{commands}"
     );
 }
 
@@ -2697,7 +2759,7 @@ fn doc_test_locked_capability_discovery_rejects_a_stale_lockfile() {
     assert!(lock.status.success(), "failed to create fixture lockfile");
     write(
         &tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nrust-version = \"1.97\"\n",
+        "[workspace]\n[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nrust-version = \"1.97\"\n",
     );
 
     let output = run_just_with_real_cargo_env(tmp.path(), &["anvil-doc-test"], &[("ANVIL_IMPACT", OsStr::new("off"))]);
@@ -2748,7 +2810,7 @@ fn external_types_checks_every_library_including_non_publishable_ones() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(log).unwrap();
-    assert!(commands.contains("metadata --no-deps --format-version 1"));
+    assert!(commands.contains("metadata --locked --no-deps --format-version 1"));
     let expected_manifests = [
         tmp.path().join("Cargo.toml").to_string_lossy().into_owned(),
         tmp.path()
@@ -2835,11 +2897,10 @@ fn semver_includes_libraries_restricted_to_named_registries() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        fs::read_to_string(log)
-            .unwrap()
-            .contains("semver-checks --package named-registry --baseline-rev base")
-    );
+    assert!(fs::read_to_string(log).unwrap().contains(&format!(
+        "semver-checks --manifest-path {} --package named-registry --baseline-rev base",
+        tmp.path().join("nested").join("named-registry").join("Cargo.toml").display()
+    )));
 }
 
 #[test]
@@ -2904,8 +2965,8 @@ fn coverage_reports_use_requested_package_scope() {
     }
 
     for (scope, expected, include_second_package) in [
-        ("--package measured@0.1.0", "llvm-cov report --package measured@0.1.0 --lcov", true),
-        ("--workspace", "llvm-cov report --workspace --lcov", false),
+        ("--package measured@0.1.0", "llvm-cov report --package measured 0.1.0 --lcov", true),
+        ("--workspace", "llvm-cov report --package fixture 0.1.0 --lcov", false),
     ] {
         let tmp = fixture(
             &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
@@ -2926,6 +2987,8 @@ fn coverage_reports_use_requested_package_scope() {
         let mut environment = vec![("FAKE_CARGO_LOG", log.as_os_str())];
         if include_second_package {
             environment.push(("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")));
+        } else {
+            environment.push(("FAKE_COVERAGE_ENABLED", OsStr::new("1")));
         }
         let output = run_just(tmp.path(), &["anvil-llvm-cov"], &environment);
         assert!(
