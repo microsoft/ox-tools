@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use cargo_metadata::{Edition as CargoEdition, Metadata, TargetKind};
 use ra_ap_syntax::ast::{self, HasAttrs, HasName, LiteralKind};
-use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
+use ra_ap_syntax::{AstNode, AstToken, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
 
 use crate::CoverageGateError;
 use crate::error::{
@@ -42,6 +42,7 @@ enum SourceRole {
     CrateRoot,
     PlainModule,
     PathModule,
+    IncludedSource,
 }
 
 #[derive(Debug, Clone)]
@@ -421,11 +422,11 @@ fn analyze_source_text(
     }
     let tree = parse.tree();
     let root = tree.syntax();
-    let test_ranges = root
-        .descendants()
-        .filter_map(ast::Attr::cast)
-        .filter(|attribute| attribute_marks_test(attribute, test_attributes))
-        .map(|attribute| attributed_syntax_range(&attribute))
+    let test_ranges = std::iter::once(root.clone())
+        .chain(root.descendants())
+        .filter_map(ast::AnyHasAttrs::cast)
+        .filter(|owner| attributes_mark_test(ast::attrs_including_inner(owner), test_attributes))
+        .map(|owner| syntax_owner_range(owner.syntax()))
         .collect::<Vec<_>>();
     let test_ranges = merge_text_ranges(test_ranges);
     let mut line_flags = vec![0_u8; line_starts.len()];
@@ -476,21 +477,7 @@ fn merge_text_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
     merged
 }
 
-fn attributed_syntax_range(attribute: &ast::Attr) -> TextRange {
-    let immediate_owner = attribute
-        .syntax()
-        .parent()
-        .expect("every parsed attribute is owned by a syntax node");
-    let owner = if attribute.kind().is_inner() {
-        attribute
-            .syntax()
-            .ancestors()
-            .filter_map(ast::AnyHasAttrs::cast)
-            .find(|candidate| candidate.inner_attributes_node().as_ref() == Some(&immediate_owner))
-            .map_or(immediate_owner, |candidate| candidate.syntax().clone())
-    } else {
-        immediate_owner
-    };
+fn syntax_owner_range(owner: &SyntaxNode) -> TextRange {
     let owner_range = owner.text_range();
     let mut end = owner_range.end();
     let mut next = owner.next_sibling_or_token();
@@ -538,7 +525,20 @@ fn offset_to_line(starts: &[usize], offset: usize) -> usize {
 }
 
 fn attribute_marks_test(attribute: &ast::Attr, test_attributes: &BTreeSet<String>) -> bool {
-    attribute.meta().is_some_and(|meta| meta_marks_test(&meta, test_attributes))
+    attributes_mark_test(std::iter::once(attribute.clone()), test_attributes)
+}
+
+fn attributes_mark_test(attributes: impl IntoIterator<Item = ast::Attr>, test_attributes: &BTreeSet<String>) -> bool {
+    let mut cfg_predicates = Vec::new();
+    for attribute in attributes {
+        let meta = attribute.meta().expect("source parsing succeeds before attributes are classified");
+        if let ast::Meta::CfgMeta(cfg) = &meta {
+            cfg_predicates.push(cfg.cfg_predicate().expect("successfully parsed cfg attributes have a predicate"));
+        } else if meta_marks_test(&meta, test_attributes) {
+            return true;
+        }
+    }
+    !cfg_predicates.is_empty() && !cfg_predicates_possibilities_without_test(&cfg_predicates).can_be_true
 }
 
 fn meta_marks_test(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> bool {
@@ -586,6 +586,27 @@ struct CfgPossibilities {
     can_be_false: bool,
 }
 
+#[derive(Debug)]
+enum CfgExpression {
+    Value(bool),
+    Atom(usize),
+    All(Vec<Self>),
+    Any(Vec<Self>),
+    Not(Box<Self>),
+}
+
+impl CfgExpression {
+    fn evaluate(&self, assignment: &[bool]) -> bool {
+        match self {
+            Self::Value(value) => *value,
+            Self::Atom(index) => assignment[*index],
+            Self::All(parts) => parts.iter().all(|part| part.evaluate(assignment)),
+            Self::Any(parts) => parts.iter().any(|part| part.evaluate(assignment)),
+            Self::Not(part) => !part.evaluate(assignment),
+        }
+    }
+}
+
 impl CfgPossibilities {
     const TRUE: Self = Self {
         can_be_true: true,
@@ -609,16 +630,29 @@ impl CfgPossibilities {
 }
 
 fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibilities {
+    cfg_predicates_possibilities_without_test(std::slice::from_ref(predicate))
+}
+
+fn cfg_predicates_possibilities_without_test(predicates: &[ast::CfgPredicate]) -> CfgPossibilities {
     const MAX_EXACT_CFG_ATOMS: usize = 12;
 
     let mut atom_indexes = BTreeMap::new();
-    collect_cfg_atoms(predicate, &mut atom_indexes);
+    for predicate in predicates {
+        collect_cfg_atoms(predicate, &mut atom_indexes);
+    }
     if atom_indexes.len() > MAX_EXACT_CFG_ATOMS {
-        return approximate_cfg_possibilities_without_test(predicate);
+        return approximate_cfg_predicates_without_test(predicates);
     }
     for (index, atom) in atom_indexes.keys().cloned().collect::<Vec<_>>().into_iter().enumerate() {
         let _ = atom_indexes.insert(atom, index);
     }
+    let Some(expressions) = predicates
+        .iter()
+        .map(|predicate| compile_cfg_expression(predicate, &atom_indexes))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return approximate_cfg_predicates_without_test(predicates);
+    };
 
     let mut possibilities = CfgPossibilities {
         can_be_true: false,
@@ -627,9 +661,7 @@ fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibili
     let mut assignment = vec![false; atom_indexes.len()];
     let assignment_count = 2_usize.pow(u32::try_from(atom_indexes.len()).expect("exact cfg atom limit fits u32"));
     for _ in 0..assignment_count {
-        let Some(value) = evaluate_cfg_predicate(predicate, &atom_indexes, &assignment) else {
-            return approximate_cfg_possibilities_without_test(predicate);
-        };
+        let value = expressions.iter().all(|expression| expression.evaluate(&assignment));
         possibilities.can_be_true |= value;
         possibilities.can_be_false |= !value;
         if possibilities == CfgPossibilities::EITHER {
@@ -638,6 +670,17 @@ fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibili
         advance_cfg_assignment(&mut assignment);
     }
     possibilities
+}
+
+fn approximate_cfg_predicates_without_test(predicates: &[ast::CfgPredicate]) -> CfgPossibilities {
+    let parts = predicates
+        .iter()
+        .map(approximate_cfg_possibilities_without_test)
+        .collect::<Vec<_>>();
+    CfgPossibilities {
+        can_be_true: parts.iter().all(|part| part.can_be_true),
+        can_be_false: parts.iter().any(|part| part.can_be_false),
+    }
 }
 
 fn advance_cfg_assignment(assignment: &mut [bool]) {
@@ -676,35 +719,37 @@ fn cfg_atom_key(atom: &ast::CfgAtom) -> Option<String> {
     }
 }
 
-fn evaluate_cfg_predicate(predicate: &ast::CfgPredicate, atom_indexes: &BTreeMap<String, usize>, assignment: &[bool]) -> Option<bool> {
+fn compile_cfg_expression(predicate: &ast::CfgPredicate, atom_indexes: &BTreeMap<String, usize>) -> Option<CfgExpression> {
     match predicate {
         ast::CfgPredicate::CfgAtom(atom) => {
             if atom.true_token().is_some() {
-                return Some(true);
+                return Some(CfgExpression::Value(true));
             }
             if atom.false_token().is_some() {
-                return Some(false);
+                return Some(CfgExpression::Value(false));
             }
             if atom.eq_token().is_none()
                 && atom
                     .ident_token()
                     .is_some_and(|token| token.text().trim_start_matches("r#") == "test")
             {
-                return Some(false);
+                return Some(CfgExpression::Value(false));
             }
             let index = *atom_indexes.get(&cfg_atom_key(atom)?)?;
-            assignment.get(index).copied()
+            Some(CfgExpression::Atom(index))
         }
         ast::CfgPredicate::CfgComposite(composite) => {
             let keyword = composite.keyword()?.text().to_owned();
             let parts = composite
                 .cfg_predicates()
-                .map(|part| evaluate_cfg_predicate(&part, atom_indexes, assignment))
+                .map(|part| compile_cfg_expression(&part, atom_indexes))
                 .collect::<Option<Vec<_>>>()?;
             match keyword.as_str() {
-                "all" => Some(parts.into_iter().all(|value| value)),
-                "any" => Some(parts.into_iter().any(|value| value)),
-                "not" if parts.len() == 1 => Some(!parts[0]),
+                "all" => Some(CfgExpression::All(parts)),
+                "any" => Some(CfgExpression::Any(parts)),
+                "not" if parts.len() == 1 => Some(CfgExpression::Not(Box::new(
+                    parts.into_iter().next().expect("guarded by parts.len() == 1 above"),
+                ))),
                 _ => None,
             }
         }
@@ -760,7 +805,7 @@ fn reject_unsupported_released_includes(
     if surface == Surface::NonReleased {
         return Ok(());
     }
-    let source_test_only = ast::attrs_including_inner(source).any(|attribute| attribute_marks_test(&attribute, test_attributes));
+    let source_test_only = attributes_mark_test(ast::attrs_including_inner(source), test_attributes);
     if syntax_contains_released_include(source.syntax(), test_attributes, source_test_only) {
         return Err(UnsupportedSourceInclusionError::new(diagnostic_path(path)).into());
     }
@@ -771,7 +816,7 @@ fn syntax_contains_released_include(node: &SyntaxNode, test_attributes: &BTreeSe
     node.children().any(|child| {
         let test_only = inherited_test_only
             || ast::AnyHasAttrs::cast(child.clone())
-                .is_some_and(|owner| ast::attrs_including_inner(&owner).any(|attribute| attribute_marks_test(&attribute, test_attributes)));
+                .is_some_and(|owner| attributes_mark_test(ast::attrs_including_inner(&owner), test_attributes));
         (!test_only
             && ast::MacroCall::cast(child.clone())
                 .and_then(|macro_call| macro_call.path())
@@ -786,6 +831,20 @@ fn path_is_builtin_include(path: &ast::Path) -> bool {
         || normalized.strip_suffix("::include").is_some_and(|qualifier| {
             qualifier == "std" || qualifier.starts_with("std::") || qualifier == "core" || qualifier.starts_with("core::")
         })
+}
+
+fn static_include_path(macro_call: &ast::MacroCall) -> Option<PathBuf> {
+    let token_tree = macro_call.token_tree()?;
+    let mut tokens = token_tree
+        .syntax()
+        .children_with_tokens()
+        .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+        .filter(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) && !matches!(token.text(), "(" | ")"));
+    let string = ast::String::cast(tokens.next()?)?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    string.value().ok().map(|value| PathBuf::from(value.as_ref()))
 }
 
 fn module_declarations(
@@ -825,6 +884,7 @@ fn owned_directory(path: &Path, role: SourceRole) -> Option<PathBuf> {
                 Some(parent.join(&*stem))
             }
         }
+        SourceRole::IncludedSource => None,
     }
 }
 
@@ -845,9 +905,22 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
     ) -> Result<(), CoverageGateError> {
         for child in node.children() {
             let test_only = inherited_test_only
-                || ast::AnyHasAttrs::cast(child.clone()).is_some_and(|owner| {
-                    ast::attrs_including_inner(&owner).any(|attribute| attribute_marks_test(&attribute, self.test_attributes))
+                || ast::AnyHasAttrs::cast(child.clone())
+                    .is_some_and(|owner| attributes_mark_test(ast::attrs_including_inner(&owner), self.test_attributes));
+            if let Some(macro_call) = ast::MacroCall::cast(child.clone())
+                && macro_call.path().is_some_and(|path| path_is_builtin_include(&path))
+                && let Some(relative) = static_include_path(&macro_call)
+            {
+                let base = self
+                    .declaring_file
+                    .parent()
+                    .expect("resolved source files always have a parent directory");
+                self.declarations.push(ModuleDeclaration {
+                    path: base.join(relative),
+                    test_only,
+                    role: SourceRole::IncludedSource,
                 });
+            }
             if let Some(module) = ast::Module::cast(child.clone()) {
                 self.walk_module(&module, directory, base, test_only)?;
             } else {
@@ -1384,9 +1457,11 @@ mod tests {
             (Surface::Released, SourceRole::CrateRoot),
             (Surface::Released, SourceRole::PlainModule),
             (Surface::Released, SourceRole::PathModule),
+            (Surface::Released, SourceRole::IncludedSource),
             (Surface::NonReleased, SourceRole::CrateRoot),
             (Surface::NonReleased, SourceRole::PlainModule),
             (Surface::NonReleased, SourceRole::PathModule),
+            (Surface::NonReleased, SourceRole::IncludedSource),
         ];
         for (surface, role) in cases {
             let mut indexed = IndexedSource {
@@ -1621,6 +1696,14 @@ mod tests {
 
         let inner_function = analyze(Path::new("inner-function.rs"), "fn helper() {\n    #![cfg(test)]\n}\n");
         assert_eq!(inner_function.test_only_lines, BTreeSet::from([1, 2, 3]));
+
+        let stacked = analyze(
+            Path::new("stacked.rs"),
+            "#[cfg(any(test, feature = \"x\"))]\n\
+             #[cfg(any(test, not(feature = \"x\")))]\n\
+             fn helper() {}\n",
+        );
+        assert_eq!(stacked.test_only_lines, BTreeSet::from([1, 2, 3]));
     }
 
     #[test]
@@ -1765,6 +1848,32 @@ mod tests {
         let custom = analyze(Path::new("/workspace/lib.rs"), "company::include!(\"helper.rs\");\n");
         reject_unsupported_released_includes(Path::new("/workspace/lib.rs"), &custom.syntax, Surface::Released, &BTreeSet::new())
             .expect("arbitrary qualified include macro is not the built-in");
+
+        let dynamic = analyze(
+            Path::new("/workspace/lib.rs"),
+            "#[cfg(test)] include!(\"first.rs\", \"second.rs\");\n",
+        );
+        assert!(
+            declarations(Path::new("/workspace/lib.rs"), &dynamic, SourceRole::CrateRoot, &BTreeSet::new(),)
+                .expect("non-literal include is not indexed")
+                .is_empty()
+        );
+
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
+        let index = SourceIndex::from_metadata(&metadata).expect("test-only include is indexed");
+        let included = fs::canonicalize(root.join("member/src/included-test.rs")).expect("canonical included test source");
+        let indexed = index.files.get(&included).expect("included test source indexed");
+        assert_eq!(indexed.released_path, None);
+        let resolution_path = resolve_module_resolution_path(&included).expect("included source resolution path");
+        assert!(indexed.has_visit(Surface::NonReleased, SourceRole::IncludedSource, &resolution_path));
+
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:member/src/included-test.rs\nDA:4,0\nend_of_record\n")],
+            &metadata,
+        )
+        .expect("test-only included source filters");
+        assert_eq!(filtered, [""]);
     }
 
     #[test]
@@ -1881,10 +1990,15 @@ mod tests {
             &BTreeSet::new(),
             &mut fail_inspection,
         )
-        .expect_err("filesystem inspection failures must propagate")
-        .to_string();
-        assert!(error.contains("inspection denied"), "{error}");
-        assert!(error.contains("child.rs"), "{error}");
+        .expect_err("filesystem inspection failures must propagate");
+        let inspection = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(|source| source.downcast_ref::<InspectCoverageSourceError>())
+            .expect("inspection error cause");
+        assert!(inspection.path.contains("child.rs"), "{}", inspection.path);
+        assert_eq!(
+            std::error::Error::source(inspection).expect("inspection I/O cause").to_string(),
+            "inspection denied"
+        );
     }
 
     #[test]
@@ -1939,6 +2053,16 @@ mod tests {
             declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([nested.clone()])).expect("inline declarations resolve");
         assert_eq!(found.len(), 1);
         assert_eq!(lexical_normalize(&found[0].path), nested);
+        assert!(found[0].test_only);
+
+        let child = PathBuf::from("/workspace/src/outer/child.rs");
+        let analysis = analyze(
+            &root,
+            "#[cfg(any(test, feature = \"x\"))]\n\
+             #[cfg(any(test, not(feature = \"x\")))]\n\
+             mod outer { mod child; }\n",
+        );
+        let found = declarations(&root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child])).expect("stacked module guards resolve");
         assert!(found[0].test_only);
     }
 
