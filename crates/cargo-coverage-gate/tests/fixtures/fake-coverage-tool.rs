@@ -265,6 +265,8 @@ fn fake_lcov() -> Result<String, String> {
         }
         writeln!(output, "TN:").map_err(|error| error.to_string())?;
         writeln!(output, "SF:{}", source.display()).map_err(|error| error.to_string())?;
+        // These coordinates match released-and-test-only-source.rs after its
+        // three-line license header: released function, cfg attr, test function.
         writeln!(output, "DA:4,{hits}").map_err(|error| error.to_string())?;
         writeln!(output, "DA:5,1").map_err(|error| error.to_string())?;
         writeln!(output, "DA:6,1").map_err(|error| error.to_string())?;

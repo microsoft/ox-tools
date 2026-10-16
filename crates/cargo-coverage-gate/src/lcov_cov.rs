@@ -342,6 +342,17 @@ end_of_record
     }
 
     #[test]
+    fn checksum_added_by_a_later_report_is_retained_for_conflict_detection() {
+        let without_checksum = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0\nend_of_record\n";
+        let first_checksum = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,1,first\nend_of_record\n";
+        let conflicting = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0,second\nend_of_record\n";
+        let error = CoverageReport::from_strs(&[without_checksum, first_checksum, conflicting])
+            .expect_err("a later checksum must participate in subsequent conflict checks")
+            .to_string();
+        assert!(error.contains("conflicting checksums for line 1"), "{error}");
+    }
+
+    #[test]
     fn from_strs_does_not_overflow_execution_counts() {
         let config_a = "\
 TN:

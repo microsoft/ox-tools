@@ -45,6 +45,11 @@ enum SourceRole {
     IncludedSource,
 }
 
+/// One traversal of a canonical source file through a particular declaration
+/// path and cfg guard.
+///
+/// Canonical paths identify contents and ownership; resolution paths preserve
+/// the declared file location used to resolve child modules.
 #[derive(Debug, Clone)]
 struct PendingSource {
     canonical_path: PathBuf,
@@ -55,6 +60,7 @@ struct PendingSource {
     guard: CfgFormula,
 }
 
+/// A discovered child source together with the guard under which it exists.
 #[derive(Debug, Clone)]
 struct ModuleDeclaration {
     path: PathBuf,
@@ -62,6 +68,10 @@ struct ModuleDeclaration {
     guard: CfgFormula,
 }
 
+/// Parsed source facts shared by every visit to one canonical file.
+///
+/// Test-only included fragments intentionally have no standalone Rust syntax;
+/// a later ordinary module visit promotes them to parsed analysis.
 #[derive(Debug)]
 struct SourceAnalysis {
     syntax: Option<ast::SourceFile>,
@@ -78,6 +88,10 @@ impl SourceAnalysis {
     }
 }
 
+/// Canonical source analysis plus every distinct traversal context.
+///
+/// Test-only line sets from released visits are intersected so a line remains
+/// measured whenever any released visit can enable it.
 #[derive(Debug)]
 struct IndexedSource {
     analysis: SourceAnalysis,
@@ -251,42 +265,9 @@ impl SourceIndex {
         let mut files: BTreeMap<PathBuf, IndexedSource> = BTreeMap::new();
         while let Some(pending) = queue.pop_front() {
             if let Some(indexed) = files.get_mut(&pending.canonical_path) {
-                if indexed.edition != pending.edition {
-                    return Err(ConflictingSourceEditionError::new(
-                        diagnostic_path(&pending.canonical_path),
-                        format!("{:?}", indexed.edition),
-                        format!("{:?}", pending.edition),
-                    )
-                    .into());
-                }
-                if indexed.has_visit(&pending) {
+                let Some(declarations) = Self::revisit_indexed_source(indexed, &pending, &member_dirs, &test_attributes)? else {
                     continue;
-                }
-                if pending.role != SourceRole::IncludedSource && indexed.analysis.syntax.is_none() {
-                    indexed.analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
-                }
-                let released_path = released_source_attributed_path(&member_dirs, &pending)?;
-                if released_path.is_some() {
-                    let current = test_only_lines_for_guard(&indexed.analysis, &pending.guard, &test_attributes);
-                    indexed.merge_released_test_only_lines(current);
-                }
-                indexed.add_visit(&pending, released_path);
-                if pending.role != SourceRole::IncludedSource {
-                    reject_unsupported_released_includes(
-                        &pending.resolution_path,
-                        indexed.analysis.syntax(),
-                        pending.surface,
-                        &pending.guard,
-                        &test_attributes,
-                    )?;
-                }
-                let declarations = source_declarations(
-                    &pending.resolution_path,
-                    &indexed.analysis,
-                    pending.role,
-                    &pending.guard,
-                    &test_attributes,
-                )?;
+                };
                 enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
                 continue;
             }
@@ -325,6 +306,51 @@ impl SourceIndex {
         }
 
         Ok(Self { workspace_root, files })
+    }
+
+    fn revisit_indexed_source(
+        indexed: &mut IndexedSource,
+        pending: &PendingSource,
+        member_dirs: &MemberDirectories,
+        test_attributes: &BTreeSet<String>,
+    ) -> Result<Option<Vec<ModuleDeclaration>>, CoverageGateError> {
+        if indexed.edition != pending.edition {
+            return Err(ConflictingSourceEditionError::new(
+                diagnostic_path(&pending.canonical_path),
+                format!("{:?}", indexed.edition),
+                format!("{:?}", pending.edition),
+            )
+            .into());
+        }
+        if indexed.has_visit(pending) {
+            return Ok(None);
+        }
+        if pending.role != SourceRole::IncludedSource && indexed.analysis.syntax.is_none() {
+            indexed.analysis = analyze_source(&pending.canonical_path, pending.edition, test_attributes)?;
+        }
+        let released_path = released_source_attributed_path(member_dirs, pending)?;
+        if released_path.is_some() {
+            let current = test_only_lines_for_guard(&indexed.analysis, &pending.guard, test_attributes);
+            indexed.merge_released_test_only_lines(current);
+        }
+        indexed.add_visit(pending, released_path);
+        if pending.role != SourceRole::IncludedSource {
+            reject_unsupported_released_includes(
+                &pending.resolution_path,
+                indexed.analysis.syntax(),
+                pending.surface,
+                &pending.guard,
+                test_attributes,
+            )?;
+        }
+        source_declarations(
+            &pending.resolution_path,
+            &indexed.analysis,
+            pending.role,
+            &pending.guard,
+            test_attributes,
+        )
+        .map(Some)
     }
 
     fn source_for_lcov(&self, path: &Path) -> Result<&IndexedSource, CoverageGateError> {
@@ -607,13 +633,14 @@ fn merge_text_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
 
 fn syntax_owner_range(owner: &SyntaxNode) -> TextRange {
     let owner_range = owner.text_range();
-    let mut end = owner_range.end();
-    if let Some(statement) = owner.parent().and_then(ast::ExprStmt::cast)
+    let mut end = if let Some(statement) = owner.parent().and_then(ast::ExprStmt::cast)
         && statement.expr().is_some_and(|expression| expression.syntax() == owner)
         && let Some(semicolon) = statement.semicolon_token()
     {
-        end = semicolon.text_range().end();
-    }
+        semicolon.text_range().end()
+    } else {
+        owner_range.end()
+    };
     let mut next = owner.next_sibling_or_token();
     while let Some(element) = next {
         if matches!(element.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
@@ -723,6 +750,7 @@ struct CfgPossibilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// A cfg condition before non-test atoms are assigned Boolean indexes.
 enum CfgFormula {
     Value(bool),
     Atom(String),
@@ -780,6 +808,7 @@ impl CfgFormula {
 }
 
 #[derive(Debug)]
+/// A compiled cfg formula whose atoms index directly into one assignment.
 enum CfgExpression {
     Value(bool),
     Atom(usize),
@@ -833,8 +862,6 @@ fn extend_cfg_guard(
     let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
     let possibilities = if guard == *inherited_guard {
         inherited_possibilities
-    } else if !inherited_possibilities.can_be_true {
-        CfgPossibilities::FALSE
     } else {
         cfg_formula_possibilities_without_test(&guard)
     };
@@ -1921,7 +1948,10 @@ mod tests {
         assert_eq!(approximate("any(test, false)"), CfgPossibilities::FALSE);
         assert_eq!(approximate("not(test)"), CfgPossibilities::TRUE);
         assert_eq!(approximate("not(test, unix)"), CfgPossibilities::EITHER);
+    }
 
+    #[test]
+    fn cfg_formulas_are_canonical_and_guard_extension_reuses_results() {
         let a = CfgFormula::Atom("a".to_owned());
         let b = CfgFormula::Atom("b".to_owned());
         assert_eq!(CfgFormula::all([]), CfgFormula::Value(true));
@@ -1939,6 +1969,17 @@ mod tests {
                 CfgFormula::Atom("a".to_owned()),
             ]),
             CfgFormula::any([CfgFormula::Atom("b".to_owned()), CfgFormula::Atom("a".to_owned()),])
+        );
+        assert_eq!(
+            CfgFormula::any([
+                CfgFormula::Any(vec![CfgFormula::Atom("a".to_owned()), CfgFormula::Atom("b".to_owned()),]),
+                CfgFormula::Atom("c".to_owned()),
+            ]),
+            CfgFormula::any([
+                CfgFormula::Atom("a".to_owned()),
+                CfgFormula::Atom("b".to_owned()),
+                CfgFormula::Atom("c".to_owned()),
+            ])
         );
 
         let inherited = CfgFormula::Atom("feature=x".to_owned());
@@ -2319,13 +2360,27 @@ mod tests {
             assert_eq!(declarations[0].role, SourceRole::IncludedSource);
             assert!(declaration_is_test_only(&declarations[0]));
         }
+    }
 
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn test_only_included_sources_are_indexed_without_parsing() {
+        let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
         let index = SourceIndex::from_metadata(&metadata).expect("test-only include is indexed");
         let included = fs::canonicalize(root.join("member/src/included-test.rs")).expect("canonical included test source");
         let indexed = index.files.get(&included).expect("included test source indexed");
         assert_eq!(indexed.released_path, None);
+        assert!(indexed.analysis.syntax.is_none());
+        assert_eq!(
+            indexed
+                .visit_contexts
+                .iter()
+                .filter(|(_, role, _, _)| *role == SourceRole::IncludedSource)
+                .count(),
+            3
+        );
         let resolution_path = resolve_module_resolution_path(&included).expect("included source resolution path");
         assert!(indexed.has_visit(&pending_source(
             Surface::NonReleased,
@@ -2339,6 +2394,14 @@ mod tests {
         assert_eq!(indexed_expression.released_path, None);
         assert!(indexed_expression.analysis.syntax.is_none());
         assert_eq!(indexed_expression.analysis.line_count, 4);
+        assert_eq!(
+            indexed_expression
+                .visit_contexts
+                .iter()
+                .filter(|(_, role, _, _)| *role == SourceRole::IncludedSource)
+                .count(),
+            1
+        );
 
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov(concat!(
@@ -2369,6 +2432,24 @@ mod tests {
         assert_eq!(
             indexed.released_path.as_deref(),
             Some(root.join("member/src/included-test.rs").as_path())
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn promoted_included_source_rejects_released_include_macros() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root
+            .join("member/src/promoted-unsupported-root.rs")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+
+        let error = SourceIndex::from_metadata(&metadata).expect_err("released promotion must inspect include macros");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<UnsupportedSourceInclusionError>)
         );
     }
 
@@ -2639,6 +2720,7 @@ mod tests {
     )]
     fn plain_and_path_modules_use_their_distinct_child_directories() {
         let source = PathBuf::from("/workspace/src/lib.rs");
+        assert_eq!(owned_directory(&source, SourceRole::IncludedSource), None);
         let crate_root_child = PathBuf::from("/workspace/src/child.rs");
         let plain_child = PathBuf::from("/workspace/src/lib/child.rs");
         let plain_alternative = PathBuf::from("/workspace/src/lib/child/mod.rs");
@@ -3014,8 +3096,8 @@ mod tests {
     fn normalized_source_sections_merge_without_replacing_counters() {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::new();
-        let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1,checksum\nDA:2,0\nend_of_record\n\
-                     TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,checksum\nDA:2,1\nDA:3,0\nend_of_record\n";
+        let input = "TN:same\nSF:/a/spelling/lib.rs\nDA:1,1,checksum\nDA:2,0\nend_of_record\n\
+                     TN:same\nSF:/z/spelling/lib.rs\nDA:1,2,checksum\nDA:2,1\nDA:3,0\nend_of_record\n";
         let filtered = filter_report_with(parse_lcov(input), |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),

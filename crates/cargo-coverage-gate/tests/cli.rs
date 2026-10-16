@@ -25,6 +25,7 @@ use tempfile::TempDir;
 
 const RELEASED_SOURCE: &str = include_str!("fixtures/released-source.rs");
 const RELEASED_AND_TEST_ONLY_SOURCE: &str = include_str!("fixtures/released-and-test-only-source.rs");
+// Both checked-in source fixtures start executable lines after the license header.
 const RELEASED_SOURCE_LINE_OFFSET: u32 = 3;
 
 /// Write a workspace at `dir` containing the given members. Each

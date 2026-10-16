@@ -18,7 +18,8 @@
 
 .PARAMETER Version
     [Optional] The specific version to set (e.g., "1.2.3"). Can be specified with --version or -v.
-    Passing the crate's current version refreshes its generated changelog and README.
+    Passing the crate's current, untagged version refreshes its generated changelog and README.
+    Use -BackfillVersion for an already tagged release.
     This parameter is mutually exclusive with --bump.
 
 .PARAMETER Bump
@@ -846,6 +847,14 @@ if (-not [string]::IsNullOrEmpty($Version)) {
     if ($versionComparison -lt 0) {
         Write-Error "Specified version '$Version' cannot be lower than current version '$currentVersion'."
         Exit 1
+    }
+    if ($versionComparison -eq 0) {
+        $releaseTag = "$CrateName-v$Version"
+        $existingTag = Invoke-GitCommand -command "tag --list `"$releaseTag`"" -errorMessage "Failed to inspect release tags"
+        if ($existingTag) {
+            Write-Error "Version '$Version' is already tagged as '$releaseTag'. Use -BackfillVersion to regenerate published notes."
+            Exit 1
+        }
     }
 }
 
