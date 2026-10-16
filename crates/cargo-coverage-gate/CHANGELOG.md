@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-10-14
+## [0.7.0] - 2026-10-16
 
 - ✨ Features
 
@@ -11,6 +11,20 @@
 
 - 🐛 Bug Fixes
 
+  - close final filtering gaps
+  - close source traversal gaps
+  - compose cfg guards across sources
+  - normalize cfg string atoms
+  - harden collection diagnostics
+  - compose source guards and includes
+  - label malformed collected reports
+  - recognize qualified include macros
+  - close source ownership gaps
+  - preserve symlink module resolution
+  - close source analysis gaps
+  - harden source discovery contracts
+  - preserve module inspection errors
+  - address PR review findings
   - address self-review findings
   - make test attribute policy explicit
   - harden cfg and module resolution
@@ -18,8 +32,17 @@
   - filter reports to released surfaces
   - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
 
+- ⚡ Performance
+
+  - tighten source classification
+
+- 📚 Documentation
+
+  - scope filtering contracts
+
 - ✔️ Tasks
 
+  - prepare 0.7.0 release
   - defer Anvil rollout until release
 
 - ♻️ Code Refactoring

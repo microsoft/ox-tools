@@ -18,6 +18,7 @@
 
 .PARAMETER Version
     [Optional] The specific version to set (e.g., "1.2.3"). Can be specified with --version or -v.
+    Passing the crate's current version refreshes its generated changelog and README.
     This parameter is mutually exclusive with --bump.
 
 .PARAMETER Bump
@@ -842,8 +843,8 @@ if (-not [string]::IsNullOrEmpty($Version)) {
     }
 
     $versionComparison = Compare-SemanticVersions -version1 $Version -version2 $currentVersion
-    if ($versionComparison -le 0) {
-        Write-Error "Specified version '$Version' must be greater than current version '$currentVersion'. Please specify a higher version number."
+    if ($versionComparison -lt 0) {
+        Write-Error "Specified version '$Version' cannot be lower than current version '$currentVersion'."
         Exit 1
     }
 }
