@@ -18,6 +18,8 @@
 
 .PARAMETER Version
     [Optional] The specific version to set (e.g., "1.2.3"). Can be specified with --version or -v.
+    Passing the crate's current, untagged version refreshes its generated changelog and README.
+    Use -BackfillVersion for an already tagged release.
     This parameter is mutually exclusive with --bump.
 
 .PARAMETER Bump
@@ -638,7 +640,7 @@ function Write-Changelog {
             $initialReleasePattern = '(?s)## \[Unreleased\]\s*-\s*Initial release\.\s*\z'
             $wasInitialRelease = $existingContent -match $initialReleasePattern
 
-            if ($wasInitialRelease -and $previousReleaseCommit) {
+            if ($oldVersion -ne $newVersion -and $wasInitialRelease -and $previousReleaseCommit) {
                 $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
                 $initialSection = "## [$oldVersion] - $initialDate`n`n- Initial release.`n"
                 $existingContent = [regex]::Replace($existingContent, $initialReleasePattern, $initialSection)
@@ -648,7 +650,11 @@ function Write-Changelog {
             $hasInitialVersion = $existingContent -match "(?m)^## \[$escapedOldVersion\]"
             $hasReleasedVersion = $existingContent -match '(?m)^## \[\d+\.\d+\.\d+\]'
             # A gap in an established changelog does not mean the previous version was the initial release.
-            if ($oldVersion -ne "0.0.0" -and -not $hasInitialVersion -and -not $hasReleasedVersion -and $previousReleaseCommit) {
+            if ($oldVersion -ne $newVersion -and
+                $oldVersion -ne "0.0.0" -and
+                -not $hasInitialVersion -and
+                -not $hasReleasedVersion -and
+                $previousReleaseCommit) {
                 $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
                 $existingContent = $existingContent.TrimEnd() + "`n`n## [$oldVersion] - $initialDate`n`n- Initial release.`n"
             }
@@ -842,9 +848,17 @@ if (-not [string]::IsNullOrEmpty($Version)) {
     }
 
     $versionComparison = Compare-SemanticVersions -version1 $Version -version2 $currentVersion
-    if ($versionComparison -le 0) {
-        Write-Error "Specified version '$Version' must be greater than current version '$currentVersion'. Please specify a higher version number."
+    if ($versionComparison -lt 0) {
+        Write-Error "Specified version '$Version' cannot be lower than current version '$currentVersion'."
         Exit 1
+    }
+    if ($versionComparison -eq 0) {
+        $releaseTag = "$CrateName-v$Version"
+        $existingTag = Invoke-GitCommand -command "tag --list `"$releaseTag`"" -errorMessage "Failed to inspect release tags"
+        if ($existingTag) {
+            Write-Error "Version '$Version' is already tagged as '$releaseTag'. Use -BackfillVersion to regenerate published notes."
+            Exit 1
+        }
     }
 }
 

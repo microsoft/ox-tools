@@ -3,9 +3,12 @@
 
 //! lcov tracefile parser.
 //!
-//! Reads an [lcov tracefile][lcov] (the format `cargo llvm-cov --lcov`
-//! emits) and produces a per-file view of line coverage that the rest
-//! of the gate consumes.
+//! Reads an [lcov tracefile][lcov] (derived from the format
+//! `cargo llvm-cov --lcov` emits) and produces a per-file view of line coverage
+//! that the rest of the gate consumes. On the released-surface path,
+//! [`crate::source_filter`] filters raw reports first. The
+//! `evaluate_unfiltered*` entry points parse caller-supplied reports as-is, so
+//! this parser assumes nothing about filtering.
 //!
 //! ## Why lcov, not the JSON
 //!
@@ -14,8 +17,7 @@
 //! UI consuming this data sees:
 //!
 //! - Codecov ingests lcov uploads directly.
-//! - Azure DevOps ingests cobertura XML, which cargo-llvm-cov derives
-//!   from lcov internally — same line set.
+//! - Azure DevOps ingests lcov directly.
 //! - `cargo llvm-cov report --codecov` emits Codecov's custom JSON,
 //!   also derived from lcov.
 //!
@@ -34,7 +36,7 @@ use std::path::PathBuf;
 
 #[cfg(test)]
 use crate::error::ReadLcovError;
-use crate::error::{CoverageGateError, ParseLcovError};
+use crate::error::{CoverageGateError, MergedSourceChecksumError, ParseLcovError};
 
 /// Per-file line-coverage view of a parsed lcov tracefile.
 #[derive(Debug, Clone)]
@@ -58,7 +60,13 @@ pub(crate) struct FileReport {
     pub(crate) uncovered_lines: Vec<u32>,
 }
 
-type LineCoverage = BTreeMap<(String, PathBuf), BTreeMap<u32, bool>>;
+#[derive(Debug)]
+struct MergedLineCoverage {
+    covered: bool,
+    checksum: Option<String>,
+}
+
+type LineCoverage = BTreeMap<PathBuf, BTreeMap<u32, MergedLineCoverage>>;
 
 impl CoverageReport {
     /// Parse an lcov tracefile from a string.
@@ -95,7 +103,7 @@ impl CoverageReport {
         for input in inputs {
             let reader = lcov::Reader::new(input.as_bytes());
             let report = lcov::Report::from_reader(reader).map_err(ParseLcovError::from)?;
-            merge_line_coverage(&mut merged, report);
+            merge_line_coverage(&mut merged, report)?;
         }
         Ok(Self::from_line_coverage(merged))
     }
@@ -111,21 +119,21 @@ impl CoverageReport {
     pub(crate) fn from_path(path: &Path) -> Result<Self, CoverageGateError> {
         let report = lcov::Report::from_file(path).map_err(|e| ReadLcovError::caused_by(path.display().to_string(), e))?;
         let mut merged = LineCoverage::new();
-        merge_line_coverage(&mut merged, report);
+        merge_line_coverage(&mut merged, report)?;
         Ok(Self::from_line_coverage(merged))
     }
 
     fn from_line_coverage(merged: LineCoverage) -> Self {
         let mut files = Vec::with_capacity(merged.len());
-        for ((_, filename), lines) in merged {
+        for (filename, lines) in merged {
             let mut total: u32 = 0;
             let mut covered: u32 = 0;
             let mut coverable_lines = Vec::with_capacity(lines.len());
             let mut uncovered_lines = Vec::new();
-            for (line, is_covered) in lines {
+            for (line, data) in lines {
                 total = total.saturating_add(1);
                 coverable_lines.push(line);
-                if is_covered {
+                if data.covered {
                     covered = covered.saturating_add(1);
                 } else {
                     uncovered_lines.push(line);
@@ -139,22 +147,46 @@ impl CoverageReport {
                 uncovered_lines,
             });
         }
-        files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self { files }
     }
 }
 
-fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) {
+fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) -> Result<(), CoverageGateError> {
     for (section_key, section) in report.sections {
-        let lines = merged.entry((section_key.test_name, section_key.source_file)).or_default();
+        let source_file = section_key.source_file;
+        let lines = merged.entry(source_file.clone()).or_default();
         for (line_key, data) in section.lines {
             let is_covered = data.count > 0;
-            lines
-                .entry(line_key.line)
-                .and_modify(|covered| *covered |= is_covered)
-                .or_insert(is_covered);
+            match lines.entry(line_key.line) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let _ = entry.insert(MergedLineCoverage {
+                        covered: is_covered,
+                        checksum: data.checksum,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    if existing
+                        .checksum
+                        .as_ref()
+                        .zip(data.checksum.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                    {
+                        return Err(MergedSourceChecksumError::new(
+                            crate::package_glob::diagnostic(&source_file.display().to_string()),
+                            line_key.line,
+                        )
+                        .into());
+                    }
+                    if data.checksum.is_some() {
+                        existing.checksum = data.checksum;
+                    }
+                    existing.covered |= is_covered;
+                }
+            }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -257,6 +289,67 @@ end_of_record
         assert_eq!(f.lines_covered, 3, "covered if hit in either config");
         assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
         assert_eq!(f.uncovered_lines, vec![4]);
+    }
+
+    #[test]
+    fn named_test_sections_merge_by_source_path_and_line() {
+        let input = "\
+TN:first
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,1
+DA:2,0
+end_of_record
+TN:second
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,0
+DA:2,1
+end_of_record
+";
+        let report = CoverageReport::from_str(input).expect("named sections parse");
+        assert_eq!(report.files.len(), 1, "test names must not create duplicate source files");
+        let file = &report.files[0];
+        assert_eq!(file.lines_total, 2);
+        assert_eq!(file.lines_covered, 2, "a hit in either named section covers the source line");
+        assert!(file.uncovered_lines.is_empty());
+    }
+
+    #[test]
+    fn named_test_sections_reject_conflicting_checksums() {
+        let input = "\
+TN:first
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,1,first
+end_of_record
+TN:second
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,0,second
+end_of_record
+";
+        let error = CoverageReport::from_str(input)
+            .expect_err("named sections from different source text must not merge")
+            .to_string();
+        assert!(error.contains("conflicting checksums for line 1"), "{error}");
+    }
+
+    #[test]
+    fn separate_reports_reject_conflicting_checksums() {
+        let first = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,1,first\nend_of_record\n";
+        let second = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0,second\nend_of_record\n";
+        let error = CoverageReport::from_strs(&[first, second])
+            .expect_err("reports from different source text must not merge")
+            .to_string();
+        assert!(error.contains("conflicting checksums for line 1"), "{error}");
+    }
+
+    #[test]
+    fn checksum_added_by_a_later_report_is_retained_for_conflict_detection() {
+        let without_checksum = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0\nend_of_record\n";
+        let first_checksum = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,1,first\nend_of_record\n";
+        let conflicting = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0,second\nend_of_record\n";
+        let error = CoverageReport::from_strs(&[without_checksum, first_checksum, conflicting])
+            .expect_err("a later checksum must participate in subsequent conflict checks")
+            .to_string();
+        assert!(error.contains("conflicting checksums for line 1"), "{error}");
     }
 
     #[test]

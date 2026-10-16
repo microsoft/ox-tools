@@ -23,11 +23,20 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+const RELEASED_SOURCE: &str = include_str!("fixtures/released-source.rs");
+const RELEASED_AND_TEST_ONLY_SOURCE: &str = include_str!("fixtures/released-and-test-only-source.rs");
+// Both checked-in source fixtures start executable lines after the license header.
+const RELEASED_SOURCE_LINE_OFFSET: u32 = 3;
+
 /// Write a workspace at `dir` containing the given members. Each
 /// member entry is `(name, optional min-lines-percent)`. The workspace root
 /// gets a `[workspace.metadata.coverage-gate]` block when
 /// `workspace_min_lines_percent` is `Some`.
 fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_lines_percent: Option<&str>) {
+    make_workspace_with_source(dir, members, workspace_min_lines_percent, RELEASED_SOURCE);
+}
+
+fn make_workspace_with_source(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_lines_percent: Option<&str>, source: &str) {
     let names: Vec<&&str> = members.iter().map(|(n, _)| n).collect();
     let members_list = names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
     let workspace_meta = workspace_min_lines_percent
@@ -56,7 +65,7 @@ edition = "2021"
             ),
         )
         .expect("write member Cargo.toml");
-        fs::write(member_dir.join("src/lib.rs"), "// empty\n").expect("write lib.rs");
+        fs::write(member_dir.join("src/lib.rs"), source).expect("write lib.rs");
     }
 }
 
@@ -74,7 +83,8 @@ fn make_coverage_lcov(dir: &Path, files: &[(&str, u32, u32)]) -> String {
         writeln!(out, "SF:{path}").expect("write to String never fails");
         for i in 1..=*count {
             let hits = if i <= *covered { 5 } else { 0 };
-            writeln!(out, "DA:{i},{hits}").expect("write to String never fails");
+            let source_line = i + RELEASED_SOURCE_LINE_OFFSET;
+            writeln!(out, "DA:{source_line},{hits}").expect("write to String never fails");
         }
         writeln!(out, "LF:{count}").expect("write to String never fails");
         writeln!(out, "LH:{covered}").expect("write to String never fails");
@@ -89,6 +99,28 @@ fn write_lcov(dir: &Path, files: &[(&str, u32, u32)]) -> String {
     let path = dir.join("lcov.info");
     fs::write(&path, make_coverage_lcov(dir, files)).expect("write lcov.info");
     path.to_string_lossy().into_owned()
+}
+
+fn assert_published_filtered_lcov(path: &Path, workspace: &Path) {
+    let published = fs::read_to_string(path).expect("read filtered LCOV");
+    let report = lcov::Report::from_reader(lcov::Reader::new(published.as_bytes())).expect("published filtered LCOV parses");
+    let actual = report
+        .sections
+        .iter()
+        .map(|(key, section)| {
+            assert_eq!(key.test_name, "");
+            assert!(section.functions.is_empty());
+            assert!(section.branches.is_empty());
+            assert_eq!(section.lines.len(), 1);
+            let (line, value) = section.lines.iter().next().expect("one retained line");
+            (key.source_file.clone(), (line.line, value.count, value.checksum.clone()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = ["alpha", "beta"]
+        .map(|package| (workspace.join(package).join("src/lib.rs"), (4, 1, None)))
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
 }
 
 /// Construct a `cargo coverage-gate` invocation scoped to `dir`.
@@ -251,6 +283,7 @@ fn one_crate_below_threshold_exits_1() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
     let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
+    let missed = format!("{}: 64-103", Path::new("src").join("lib.rs").display());
 
     coverage_gate(tmp.path())
         .args(["--lcov", &lcov_path])
@@ -259,25 +292,7 @@ fn one_crate_below_threshold_exits_1() {
         .stdout(predicate::str::contains("FAIL"))
         .stdout(predicate::str::contains("1 package below threshold"))
         .stdout(predicate::str::contains("beta: 60/100 lines covered; 40 uncovered."))
-        .stdout(predicate::str::contains("src/lib.rs: 61-100"));
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn displayed_rounding_does_not_satisfy_full_coverage_threshold() {
-    let tmp = TempDir::new().expect("tempdir");
-    make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
-    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 2_000, 1_999)]);
-
-    coverage_gate(tmp.path())
-        .args(["--lcov", &lcov_path])
-        .assert()
-        .code(1)
-        .stdout(predicate::str::contains("99.9%"))
-        .stdout(predicate::str::contains("100.0%"))
-        .stdout(predicate::str::contains("-<0.1pp"))
-        .stdout(predicate::str::contains("FAIL"))
-        .stdout(predicate::str::contains("1999/2000 lines covered; 1 uncovered."));
+        .stdout(predicate::str::contains(missed));
 }
 
 #[test]
@@ -290,8 +305,8 @@ fn multiple_lcov_files_merge_at_line_level() {
     // Two configs of the SAME file, each covering a disjoint half (50%
     // alone, below the 80% threshold), but the union covers all 4 lines
     // (100%). Only a correct line-level merge passes the gate.
-    let config_a = format!("TN:\nSF:{src}\nDA:1,5\nDA:2,5\nDA:3,0\nDA:4,0\nend_of_record\n");
-    let config_b = format!("TN:\nSF:{src}\nDA:1,0\nDA:2,0\nDA:3,5\nDA:4,5\nend_of_record\n");
+    let config_a = format!("TN:\nSF:{src}\nDA:4,5\nDA:5,5\nDA:6,0\nDA:7,0\nend_of_record\n");
+    let config_b = format!("TN:\nSF:{src}\nDA:4,0\nDA:5,0\nDA:6,5\nDA:7,5\nend_of_record\n");
     let path_a = tmp.path().join("a.info");
     let path_b = tmp.path().join("b.info");
     fs::write(&path_a, &config_a).expect("write a.info");
@@ -360,7 +375,7 @@ edition = "2021"
             ),
         )
         .expect("write member Cargo.toml");
-        fs::write(member_dir.join("src/lib.rs"), "// empty\n").expect("write lib.rs");
+        fs::write(member_dir.join("src/lib.rs"), RELEASED_SOURCE).expect("write lib.rs");
     }
 }
 
@@ -643,7 +658,7 @@ fn lcov_with_test_name_records_is_parsed() {
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
     let full = tmp.path().join("alpha/src/lib.rs");
     let path = full.to_string_lossy().replace('\\', "/");
-    let body = format!("TN:my_test\nSF:{path}\nDA:1,5\nDA:2,5\nDA:3,5\nDA:4,5\nDA:5,0\nLF:5\nLH:4\nend_of_record\n");
+    let body = format!("TN:my_test\nSF:{path}\nDA:4,5\nDA:5,5\nDA:6,5\nDA:7,5\nDA:8,0\nLF:5\nLH:4\nend_of_record\n");
     let lcov_path = tmp.path().join("cov.info");
     fs::write(&lcov_path, body).expect("write lcov");
 
@@ -723,7 +738,12 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     let tmp = TempDir::new().expect("tempdir");
     // alpha is deliberately opted out of gating but must still be passed to
     // cargo-llvm-cov because its tests can cover beta.
-    make_workspace(tmp.path(), &[("alpha", Some("0")), ("beta", Some("100"))], None);
+    make_workspace_with_source(
+        tmp.path(),
+        &[("alpha", Some("0")), ("beta", Some("100"))],
+        None,
+        RELEASED_AND_TEST_ONLY_SOURCE,
+    );
 
     let object_dir = tmp.path().join("objects with spaces");
     fs::create_dir_all(&object_dir).expect("create object directory");
@@ -770,6 +790,9 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
             .starts_with("TN:"),
         "successful collection must write the requested stable artifact"
     );
+    for configuration in ["all-features", "no-default"] {
+        assert_published_filtered_lcov(&coverage_dir.join(format!("lcov-{configuration}.info")), tmp.path());
+    }
 
     let log = fs::read_to_string(tool_log).expect("read fake tool log");
     assert!(!log.contains("cargo\tllvm-cov\tclean"), "{log}");

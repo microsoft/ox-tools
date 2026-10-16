@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-16
+
+- ✨ Features
+
+  - resume interrupted campaigns and streamline mutant testing ([#248](https://github.com/microsoft/ox-tools/pull/248))
+  - improve campaign scheduling and UX ([#208](https://github.com/microsoft/ox-tools/pull/208))
+
+- 🐛 Bug Fixes
+
+  - honor target feature contracts
+  - satisfy CI and review contracts
+  - allow same-version metadata refresh
+  - close final filtering gaps
+  - close source traversal gaps
+  - compose cfg guards across sources
+  - normalize cfg string atoms
+  - harden collection diagnostics
+  - compose source guards and includes
+  - label malformed collected reports
+  - recognize qualified include macros
+  - close source ownership gaps
+  - preserve symlink module resolution
+  - close source analysis gaps
+  - harden source discovery contracts
+  - preserve module inspection errors
+  - address PR review findings
+  - address self-review findings
+  - make test attribute policy explicit
+  - harden cfg and module resolution
+  - preserve raw evaluation compatibility
+  - filter reports to released surfaces
+  - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
+
+- ⚡ Performance
+
+  - tighten source classification
+
+- 📚 Documentation
+
+  - scope filtering contracts
+
+- ✔️ Tasks
+
+  - refresh 0.7 release notes
+  - prepare 0.7.0 release
+  - defer Anvil rollout until release
+
+- ♻️ Code Refactoring
+
+  - default to released surfaces
+
+- 🧩 Miscellaneous
+
+  - Address Sander's 'Tsunami of Feedback' ([#221](https://github.com/microsoft/ox-tools/pull/221))
+
 ## [0.6.0] - 2026-09-23
 
 - ✨ Features
