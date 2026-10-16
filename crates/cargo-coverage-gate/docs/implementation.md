@@ -137,20 +137,25 @@ the workspace discovered from the invocation directory.
    Canonical paths identify source contents and workspace ownership, while a
    separate module-resolution path preserves the declaring file name and
    directory semantics used by rustc, including for symlinked source files.
-   Visit deduplication includes that resolution path because one canonical
-   source can expose different child modules through different declarations.
+   Visit deduplication includes that resolution path and the composed `cfg`
+   guard because one canonical source can expose different child modules or
+   released line regions through different declarations.
    A file is retained when at least one released path reaches it; release
-   reachability wins when a test target also shares the file.
+   reachability wins when a test target also shares the file. When multiple
+   released guards reach the same file, a line is test-only only if every
+   released visit proves it unavailable with `test = false`.
    Every released source is validated against workspace-member directories
    during this walk, even when no LCOV section mentions it.
 3. rust-analyzer syntax identifies test-only item ranges. Compiler-owned
    `test`/`bench` attributes are intrinsic; qualified framework attributes are
    matched against the exact workspace `test-attributes` policy. A `cfg` is test-only
-   only when it cannot hold with `test = false`. All `cfg` guards on the same
-   syntax owner are conjoined, and enclosing test-only owners propagate to
-   nested modules. Correlations among at most twelve distinct non-`test` atoms
-   are compiled once and evaluated by bounded assignment enumeration; larger
-   or unsupported shapes use the conservative truth-value approximation.
+   only when it cannot hold with `test = false`. All `cfg` and `cfg_attr`
+   effects on the same syntax owner are conjoined with enclosing owner,
+   declaring-module, and source-file guards. Those composed guards propagate
+   through inline and out-of-line modules. Correlations among at most twelve
+   distinct non-`test` atoms are compiled once and evaluated by bounded
+   assignment enumeration; larger or unsupported shapes use the conservative
+   truth-value approximation.
    Overlapping test-only syntax ranges are merged, then source-ordered tokens
    are classified with a single advancing range cursor. Line records inside
    excluded ranges are removed.

@@ -547,15 +547,18 @@ the released Cargo surface:
 - conditional module paths expressed through `cfg_attr(..., path = "...")`
   are rejected explicitly because selecting the released file requires the
   complete Cargo build configuration;
-- a file reached by both classes remains released;
+- a file reached by both classes remains released. If multiple released
+  `cfg` contexts reach the same file, a line remains released when any one of
+  those contexts can enable it with `test = false`;
 - within a released file, `#[test]`, `#[bench]`, `#[cfg(test)]`, and
   predicates such as `#[cfg(all(test, unix))]` are removed, while
   `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
-  `cfg(not(test))` remain. All applicable `cfg` guards on an item or enclosing
-  owner are conjoined with shared assignments. Correlated occurrences of up to
-  twelve distinct non-`test` cfg atoms are evaluated exactly; larger or
-  unsupported predicate shapes fall back to conservative retention rather than
-  hiding released code.
+  `cfg(not(test))` remain. All applicable `cfg` and `cfg_attr` effects on an
+  item, its enclosing owners, its declaring module, and its source file are
+  conjoined with shared assignments. Correlated occurrences of up to twelve
+  distinct non-`test` cfg atoms are evaluated exactly; larger or unsupported
+  predicate shapes fall back to conservative retention rather than hiding
+  released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted
@@ -649,7 +652,9 @@ Canonical source identity is kept separate from Rust's module-resolution
 location. If a Cargo target or module source is reached through a file symlink,
 child modules resolve from the declared file name in its resolved parent
 directory, rather than from the canonical file target. The canonical file
-remains the identity used for deduplication and workspace ownership.
+remains the identity used for workspace ownership. Visits are deduplicated by
+canonical identity, source role, module-resolution location, and composed
+`cfg` guard so distinct released contexts for the same file are preserved.
 
 For each retained `SF:` path, the tool canonicalizes the source and determines
 which workspace member owns it by **longest-prefix match** against canonical
