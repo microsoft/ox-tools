@@ -59,6 +59,9 @@ pub enum RefusalRemedy {
     /// The region's marker lines do not form a usable pair, so no boundary can
     /// be proven for whatever sits between them.
     MalformedMarkers,
+    /// Retirement cannot uniquely identify which marker syntax owns the
+    /// recorded body, or malformed XML prevents proving marker absence.
+    RetirementInference,
     /// The catalog declares a different marker syntax for an existing region.
     SyntaxChange,
     /// An XML host has no safe complete-line insertion point inside its root.

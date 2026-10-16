@@ -847,6 +847,11 @@ fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
              missing sentinel around the body anvil generated, or delete the stray one together with the \
              body it was meant to enclose."
         }
+        RefusalRemedy::RetirementInference => {
+            "Identify the marker pair whose body matches the recorded generated content and remove only competing \
+             marker lines while preserving their bodies. If XML tokenization failed, repair the repository-owned \
+             XML first so anvil can inspect the complete host, then retry."
+        }
         RefusalRemedy::SyntaxChange => {
             "Restore the catalog's previous comment syntax, or deliberately remove the old marker lines and \
              their generated body before retrying with the new syntax."
@@ -1472,7 +1477,7 @@ fn retirement_syntax_or_refuse(
     match infer_recorded_region_syntax(text.as_deref(), HostScanner::for_path(host), host, id, recorded_checksum) {
         Ok(syntax) => Ok(Some(syntax)),
         Err(reason) => {
-            refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::MalformedMarkers);
+            refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::RetirementInference);
             Ok(None)
         }
     }
@@ -1852,6 +1857,10 @@ mod tests {
             (
                 RefusalRemedy::MalformedMarkers,
                 "Without a matching pair of sentinels the boundary of the generated body cannot be established, so anvil will not write this region rather than risk appending a second copy of it. Restore the missing sentinel around the body anvil generated, or delete the stray one together with the body it was meant to enclose.",
+            ),
+            (
+                RefusalRemedy::RetirementInference,
+                "Identify the marker pair whose body matches the recorded generated content and remove only competing marker lines while preserving their bodies. If XML tokenization failed, repair the repository-owned XML first so anvil can inspect the complete host, then retry.",
             ),
             (
                 RefusalRemedy::SyntaxChange,
@@ -3395,7 +3404,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.refusals().len(), 1);
-        assert!(plan.refusals()[0].contains("multiple marker syntaxes"));
+        assert_eq!(
+            plan.refusals()[0],
+            "Refused to manage host.txt [retired]: managed region 'retired' in 'host.txt' has multiple marker syntaxes whose bodies match the recorded checksum. \
+             This region was left unchanged; other regions in the same file and other artifacts may still be updated. Identify the marker pair whose body matches \
+             the recorded generated content and remove only competing marker lines while preserving their bodies. If XML tokenization failed, repair the \
+             repository-owned XML first so anvil can inspect the complete host, then retry."
+        );
         assert!(plan.items().iter().any(|item| {
             item.target
                 == Target::File {
@@ -3450,6 +3465,34 @@ mod tests {
             "managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
         );
         assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn retirement_inference_refusal_explains_malformed_xml_recovery() {
+        let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
+        let mut previous = Manifest::default();
+        previous.set_region("config.xml", "settings", checksum_str("  <generated />\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("config.xml", host.to_owned());
+        let mut plan = Plan::default();
+
+        plan_removals(
+            Path::new("in-memory-managed-region-tests"),
+            &previous,
+            &mut plan,
+            &mut hosts,
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage config.xml [settings]: managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so \
+               absence cannot be proven. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Identify the marker \
+               pair whose body matches the recorded generated content and remove only competing marker lines while preserving their bodies. If XML tokenization failed, \
+               repair the repository-owned XML first so anvil can inspect the complete host, then retry."
+                .to_owned()]
+        );
     }
 
     #[test]
