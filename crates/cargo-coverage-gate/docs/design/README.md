@@ -639,7 +639,10 @@ test-target edge to the included file must not make released counters look
 test-only. A statically resolvable include reached only through a test-only or
 non-release context is indexed as non-release source so its attributed LCOV can
 be removed without becoming an unowned-source error; nested module discovery
-does not continue through the included file.
+does not continue through the included file. Because `include!` contents may
+be context-dependent token fragments rather than standalone Rust files, these
+non-release leaves are read only for line validation. They are parsed as Rust
+only if an ordinary module or released edge also reaches the same file.
 
 Rust macro expansion is not available to the source walker. A module generated
 by `macro_rules!`, a procedural macro, or a renamed `include!` can therefore be
