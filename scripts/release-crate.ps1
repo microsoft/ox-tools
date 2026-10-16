@@ -640,7 +640,7 @@ function Write-Changelog {
             $initialReleasePattern = '(?s)## \[Unreleased\]\s*-\s*Initial release\.\s*\z'
             $wasInitialRelease = $existingContent -match $initialReleasePattern
 
-            if ($wasInitialRelease -and $previousReleaseCommit) {
+            if ($oldVersion -ne $newVersion -and $wasInitialRelease -and $previousReleaseCommit) {
                 $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
                 $initialSection = "## [$oldVersion] - $initialDate`n`n- Initial release.`n"
                 $existingContent = [regex]::Replace($existingContent, $initialReleasePattern, $initialSection)
@@ -650,7 +650,11 @@ function Write-Changelog {
             $hasInitialVersion = $existingContent -match "(?m)^## \[$escapedOldVersion\]"
             $hasReleasedVersion = $existingContent -match '(?m)^## \[\d+\.\d+\.\d+\]'
             # A gap in an established changelog does not mean the previous version was the initial release.
-            if ($oldVersion -ne "0.0.0" -and -not $hasInitialVersion -and -not $hasReleasedVersion -and $previousReleaseCommit) {
+            if ($oldVersion -ne $newVersion -and
+                $oldVersion -ne "0.0.0" -and
+                -not $hasInitialVersion -and
+                -not $hasReleasedVersion -and
+                $previousReleaseCommit) {
                 $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
                 $existingContent = $existingContent.TrimEnd() + "`n`n## [$oldVersion] - $initialDate`n`n- Initial release.`n"
             }

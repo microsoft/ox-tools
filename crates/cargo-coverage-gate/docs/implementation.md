@@ -155,11 +155,11 @@ the workspace discovered from the invocation directory.
    matched against the exact workspace `test-attributes` policy. A `cfg` is test-only
    only when it cannot hold with `test = false`. All `cfg` and `cfg_attr`
    effects on the same syntax owner are conjoined with enclosing owner,
-   declaring-module, and source-file guards. Those composed guards propagate
-   through inline and out-of-line modules. Correlations among at most twelve
-   distinct non-`test` atoms are compiled once and evaluated by bounded
-   assignment enumeration; larger or unsupported shapes use the conservative
-   truth-value approximation.
+   declaring-module, source-file, and Cargo target `required-features` guards.
+   Those composed guards propagate through inline and out-of-line modules.
+   Correlations among at most twelve distinct non-`test` atoms are compiled
+   once and evaluated by bounded assignment enumeration; larger or unsupported
+   shapes use the conservative truth-value approximation.
    Overlapping test-only syntax ranges are merged, then source-ordered tokens
    are classified with a single advancing range cursor. Line records inside
    excluded ranges are removed.
