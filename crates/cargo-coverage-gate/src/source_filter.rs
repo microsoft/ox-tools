@@ -432,22 +432,16 @@ fn analyze_source_text(
     for range in &test_ranges {
         mark_range_lines(&mut line_flags, &line_starts, *range, LINE_TEST_ONLY);
     }
-    let mut test_range_index = 0;
+    let mut test_range_cursor = test_ranges.iter().peekable();
     for token in root.descendants_with_tokens().filter_map(ra_ap_syntax::NodeOrToken::into_token) {
         if matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
             continue;
         }
         let token_range = token.text_range();
-        while test_ranges
-            .get(test_range_index)
-            .is_some_and(|range| range.end() <= token_range.start())
-        {
-            test_range_index += 1;
+        while test_range_cursor.peek().is_some_and(|range| range.end() <= token_range.start()) {
+            let _ = test_range_cursor.next();
         }
-        if !test_ranges
-            .get(test_range_index)
-            .is_some_and(|range| range.contains_range(token_range))
-        {
+        if !test_range_cursor.peek().is_some_and(|range| range.contains_range(token_range)) {
             mark_range_lines(&mut line_flags, &line_starts, token.text_range(), LINE_RELEASED);
         }
     }
