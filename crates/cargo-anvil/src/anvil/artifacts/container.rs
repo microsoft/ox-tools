@@ -295,6 +295,23 @@ mod tests {
     }
 
     #[test]
+    fn container_launcher_recipe_contract() {
+        let (_, launcher) = RECIPE
+            .split_once("anvil-container *command:\n")
+            .expect("the container template declares the launcher recipe");
+        let body = launcher
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("    "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let snapshot = include_str!("snapshots/cargo_anvil__anvil__artifacts__container__tests__container_launcher_recipe.snap");
+        let (_, expected) = snapshot
+            .split_once("\n---\n")
+            .expect("the checked-in snapshot has a metadata header");
+        assert_eq!(body.trim_end_matches('\n'), expected.trim_end_matches('\n'));
+    }
+
+    #[test]
     fn group_is_two_owned_files_and_five_dockerfile_regions() {
         let all = all();
         let owned: Vec<_> = all
@@ -783,31 +800,6 @@ mod tests {
     }
 
     #[test]
-    fn a_host_token_is_resolved_as_the_recipe_does_and_forwarded_by_name() {
-        // anvil-aprz is in scheduled-advisories, and unauthenticated it does not merely
-        // warn: `cargo aprz deps` sleeps until the hourly quota resets, so a
-        // containerized tier blocks for up to an hour. The driver therefore
-        // resolves a token the same way the recipe does natively -- the
-        // environment first, then the gh CLI -- so both paths authenticate for
-        // the same developers.
-        assert!(RECIPE.contains("gh auth token --hostname github.com"));
-        assert!(RECIPE.contains("$forwardedEnv += 'GITHUB_TOKEN'"));
-        assert!(RECIPE.contains("$runArgs += @('-e', 'GITHUB_TOKEN')"));
-        // By name, never by value: `-e NAME=VALUE` would put the credential on
-        // the host's command line, where endpoint telemetry retains it.
-        assert!(!RECIPE.contains("'-e', \"GITHUB_TOKEN="));
-        // A derived token is set on this process, so it must be registered for
-        // the same cleanup the hook's variables get.
-        assert!(RECIPE.contains("$hookEnv += 'GITHUB_TOKEN'"));
-        // An exported token is left alone rather than re-derived; scoping of
-        // the derived one is asserted in its own test below.
-        assert!(RECIPE.contains("if (-not $env:GITHUB_TOKEN -and (Get-Command gh"));
-        // Forwarding by name only works if the engine can see the name, so a
-        // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
-        assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
-    }
-
-    #[test]
     fn the_whole_recipe_tree_defines_the_image() {
         // `just anvil-setup` reaches the install recipes through the tier,
         // group and check recipes, so the routing decides *whether* a tool is
@@ -891,40 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn a_derived_token_is_scoped_to_a_command_that_reads_it() {
-        // Forwarding an exported GITHUB_TOKEN is exact parity: natively it is
-        // visible to every process the shell spawns too. Minting one from `gh`
-        // is not -- PID 1's environment reaches every build script and proc
-        // macro, where natively the recipe mints it in its own process -- so it
-        // happens only for a command whose plan reads the variable.
-        // Each search covers the whole recipe, so the comparison below is the
-        // thing under test. Bounding a search by an earlier match makes the
-        // ordering true by construction and the assertion vacuous.
-        let derive = RECIPE.find("gh auth token --hostname").expect("the gh fallback must exist");
-        let guard = RECIPE.find("if ($needsToken)").expect("the derive must be guarded");
-        let plan = RECIPE
-            .find("$plan -match 'GITHUB_TOKEN'")
-            .expect("the plan must decide whether a token is needed");
-        let dry_run = RECIPE.find("--dry-run @target").expect("the plan must come from just");
-        assert!(
-            dry_run < plan && plan < guard && guard < derive,
-            "compute the plan, match it, guard on it, then derive"
-        );
-        // Through the launching binary, like every other nested call: a bare
-        // `just` here fails silently when the caller invoked it by absolute
-        // path, and an empty plan reads as "no token needed".
-        assert!(!RECIPE.contains("(just --dry-run"));
-        assert!(RECIPE.contains(r"}}' --dry-run @target"));
-        // The predicate is the variable, not the name of a check, so a catalog
-        // that adds another GitHub-authenticated check is covered for free.
-        assert!(!RECIPE.contains("$plan -match 'aprz'"));
-        // An interactive session has no command to plan, and can run anything.
-        assert!(RECIPE.contains("$needsToken = $argv.Count -eq 0"));
-        // Only `just` can be planned, so nothing else earns a minted credential.
-        assert!(RECIPE.contains("if (-not $needsToken -and $argv[0] -eq 'just')"));
-    }
-
-    #[test]
     fn an_untracked_input_is_framed_from_the_filesystem() {
         // git has no record of an untracked file and `diff --raw` does not
         // report one, so the filesystem is the only thing that can answer for
@@ -940,24 +898,6 @@ mod tests {
         // Tracked files must NOT be read this way: Windows has no executable
         // bit, so two checkouts of one commit would disagree on the tag.
         assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
-    }
-
-    #[test]
-    fn planning_follows_a_recipe_launched_as_a_child_process() {
-        // `just --dry-run` prints the bodies just runs itself. The unscoped tier
-        // wrapper runs its tier as a child process instead, so a plan of
-        // `anvil-scheduled` is the wrapper alone and reveals none of the checks
-        // under it -- including anvil-aprz, whose GITHUB_TOKEN is what stops it
-        // sleeping on the advisory API's unauthenticated rate limit.
-        assert!(
-            RECIPE.contains(r#"[regex]::Matches($step, "'(_anvil-[^'\s]+)'")"#),
-            "the plan must follow each nested target the wrapper names"
-        );
-        // Bounded: a recipe reachable twice is planned once, and a body naming
-        // itself terminates instead of looping.
-        assert!(RECIPE.contains("if (-not $planned.Add(($target -join ' '))) { continue }"));
-        // Every step contributes, so a match anywhere in the tree counts.
-        assert!(RECIPE.contains("$plan = \"$plan`n$step\""));
     }
 
     #[test]
