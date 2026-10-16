@@ -710,7 +710,8 @@ fn collect_cfg_atoms(predicate: &ast::CfgPredicate, atoms: &mut BTreeMap<String,
 fn cfg_atom_key(atom: &ast::CfgAtom) -> Option<String> {
     let ident = atom.ident_token()?.text().trim_start_matches("r#").to_owned();
     if atom.eq_token().is_some() {
-        let value = atom.string_token()?.text().to_owned();
+        let string = ast::String::cast(atom.string_token()?)?;
+        let value = string.value().ok()?;
         Some(format!("{ident}={value}"))
     } else if ident == "test" {
         None
@@ -1626,6 +1627,14 @@ mod tests {
         assert_eq!(
             possibilities("any(feature = \"test-util\", not(feature = \"test-util\"))"),
             CfgPossibilities::TRUE
+        );
+        assert_eq!(
+            possibilities("any(test, all(feature = \"x\", not(feature = r\"x\")))"),
+            CfgPossibilities::FALSE
+        );
+        assert_eq!(
+            possibilities("any(test, all(feature = \"x\", not(feature = \"\\x78\")))"),
+            CfgPossibilities::FALSE
         );
         assert_eq!(
             possibilities("any(a0, not(a0), a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11)"),
