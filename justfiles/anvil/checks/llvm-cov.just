@@ -25,7 +25,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         exit 0
     }
     . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
-    $selected = @(Get-AnvilPackages $include -Toolchain {{_anvil_stable_toolchain_args}})
+    $selected = @(Get-AnvilPackages $include -Toolchain '+{{ rust_nightly }}')
     $allTestPkg = @(Get-AnvilPackageArguments $selected)
     # Separate coverage-opted-out packages from the measured set. A crate that
     # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
