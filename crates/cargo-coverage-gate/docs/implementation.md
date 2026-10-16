@@ -145,7 +145,12 @@ the workspace discovered from the invocation directory.
    matched against the exact workspace `test-attributes` policy. A `cfg` is test-only
    only when it cannot hold with `test = false`: `all(...)` requires just one
    test-only operand, `any(...)` requires every operand, and `not(...)` is
-   retained. Line records inside excluded ranges are removed.
+   retained. Correlations among at most twelve distinct non-`test` atoms are
+   evaluated by bounded assignment enumeration; larger or unsupported shapes
+   use the conservative truth-value approximation. Overlapping test-only
+   syntax ranges are merged, then source-ordered tokens are classified with a
+   single advancing range cursor. Line records inside excluded ranges are
+   removed.
    Unreadable/unparseable sources, paths with no Cargo target owner, stale line
    numbers, ambiguous modules, and unsupported path attributes are operational
    errors rather than reasons to drop counters.

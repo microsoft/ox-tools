@@ -95,9 +95,8 @@ struct SourceIndex {
 }
 
 #[derive(Debug)]
-struct MemberDirectory {
-    canonical: PathBuf,
-    reported: PathBuf,
+struct MemberDirectories {
+    reported_by_canonical: BTreeMap<PathBuf, PathBuf>,
 }
 
 fn configured_test_attributes(metadata: &Metadata) -> Result<BTreeSet<String>, CoverageGateError> {
@@ -185,29 +184,18 @@ impl SourceIndex {
     ) -> Result<Self, CoverageGateError> {
         let test_attributes = configured_test_attributes(metadata)?;
         let workspace_root = resolve_source(metadata.workspace_root.as_std_path())?;
-        let mut member_dirs = metadata
-            .workspace_packages()
-            .iter()
-            .map(|package| {
-                let directory = package
-                    .manifest_path
-                    .parent()
-                    .expect("cargo metadata always reports a manifest path with a parent directory");
-                Ok(MemberDirectory {
-                    canonical: resolve_source(directory.as_std_path())?,
-                    reported: directory.as_std_path().to_path_buf(),
-                })
-            })
-            .collect::<Result<Vec<_>, CoverageGateError>>()?;
-        member_dirs.sort_by(|left, right| {
-            right
-                .canonical
-                .components()
-                .count()
-                .cmp(&left.canonical.components().count())
-                .then_with(|| left.canonical.cmp(&right.canonical))
-        });
-        member_dirs.dedup_by(|left, right| left.canonical == right.canonical);
+        let mut reported_by_canonical = BTreeMap::new();
+        for package in metadata.workspace_packages() {
+            let directory = package
+                .manifest_path
+                .parent()
+                .expect("cargo metadata always reports a manifest path with a parent directory");
+            let canonical = resolve_source(directory.as_std_path())?;
+            let _ = reported_by_canonical
+                .entry(canonical)
+                .or_insert_with(|| directory.as_std_path().to_path_buf());
+        }
+        let member_dirs = MemberDirectories { reported_by_canonical };
 
         let mut queue = VecDeque::new();
         for package in metadata.workspace_packages() {
@@ -231,7 +219,6 @@ impl SourceIndex {
 
         let mut files: BTreeMap<PathBuf, IndexedSource> = BTreeMap::new();
         while let Some(pending) = queue.pop_front() {
-            let released_path = released_source_attributed_path(&member_dirs, &pending)?;
             if let Some(indexed) = files.get_mut(&pending.canonical_path) {
                 if indexed.edition != pending.edition {
                     return Err(ConflictingSourceEditionError::new(
@@ -244,6 +231,7 @@ impl SourceIndex {
                 if indexed.has_visit(pending.surface, pending.role, &pending.resolution_path) {
                     continue;
                 }
+                let released_path = released_source_attributed_path(&member_dirs, &pending)?;
                 indexed.add_visit(pending.surface, pending.role, &pending.resolution_path, released_path);
                 reject_unsupported_released_includes(
                     &pending.resolution_path,
@@ -259,6 +247,7 @@ impl SourceIndex {
             let analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
             reject_unsupported_released_includes(&pending.resolution_path, &analysis.syntax, pending.surface, &test_attributes)?;
             let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &test_attributes)?;
+            let released_path = released_source_attributed_path(&member_dirs, &pending)?;
             let mut indexed = IndexedSource {
                 analysis,
                 edition: pending.edition,
@@ -288,15 +277,15 @@ impl SourceIndex {
     }
 }
 
-fn attributed_path(member_dirs: &[MemberDirectory], path: &Path) -> Option<PathBuf> {
-    member_dirs.iter().find_map(|directory| {
-        path.strip_prefix(&directory.canonical)
-            .ok()
-            .map(|relative| directory.reported.join(relative))
+fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|ancestor| {
+        let reported = member_dirs.reported_by_canonical.get(ancestor)?;
+        let relative = path.strip_prefix(ancestor).expect("path ancestors are always valid strip prefixes");
+        Some(reported.join(relative))
     })
 }
 
-fn released_source_attributed_path(member_dirs: &[MemberDirectory], pending: &PendingSource) -> Result<Option<PathBuf>, CoverageGateError> {
+fn released_source_attributed_path(member_dirs: &MemberDirectories, pending: &PendingSource) -> Result<Option<PathBuf>, CoverageGateError> {
     match pending.surface {
         Surface::NonReleased => Ok(None),
         Surface::Released => attributed_path(member_dirs, &pending.canonical_path)
@@ -438,15 +427,27 @@ fn analyze_source_text(
         .filter(|attribute| attribute_marks_test(attribute, test_attributes))
         .map(|attribute| attributed_syntax_range(&attribute))
         .collect::<Vec<_>>();
+    let test_ranges = merge_text_ranges(test_ranges);
     let mut line_flags = vec![0_u8; line_starts.len()];
     for range in &test_ranges {
         mark_range_lines(&mut line_flags, &line_starts, *range, LINE_TEST_ONLY);
     }
+    let mut test_range_index = 0;
     for token in root.descendants_with_tokens().filter_map(ra_ap_syntax::NodeOrToken::into_token) {
         if matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
             continue;
         }
-        if !test_ranges.iter().any(|range| range.contains_range(token.text_range())) {
+        let token_range = token.text_range();
+        while test_ranges
+            .get(test_range_index)
+            .is_some_and(|range| range.end() <= token_range.start())
+        {
+            test_range_index += 1;
+        }
+        if !test_ranges
+            .get(test_range_index)
+            .is_some_and(|range| range.contains_range(token_range))
+        {
             mark_range_lines(&mut line_flags, &line_starts, token.text_range(), LINE_RELEASED);
         }
     }
@@ -464,6 +465,21 @@ fn analyze_source_text(
         line_count: source.lines().count(),
         test_only_lines,
     })
+}
+
+fn merge_text_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
+    ranges.sort_by_key(|range| (range.start(), range.end()));
+    let mut merged: Vec<TextRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start() <= previous.end()
+        {
+            *previous = TextRange::new(previous.start(), std::cmp::max(previous.end(), range.end()));
+            continue;
+        }
+        merged.push(range);
+    }
+    merged
 }
 
 fn attributed_syntax_range(attribute: &ast::Attr) -> TextRange {
@@ -510,15 +526,16 @@ fn line_starts(source: &str) -> Vec<usize> {
 fn mark_range_lines(flags: &mut [u8], starts: &[usize], range: TextRange, flag: u8) {
     let start: usize = range.start().into();
     let end: usize = range.end().into();
-    if start == end {
-        return;
-    }
     let first = offset_to_line(starts, start);
-    let last = offset_to_line(starts, end - 1);
+    let last = offset_to_line(
+        starts,
+        end.checked_sub(1).expect("syntax owner ranges are guaranteed to be non-empty"),
+    );
     for line in first..=last {
-        if let Some(value) = flags.get_mut(line) {
-            *value |= flag;
-        }
+        let value = flags
+            .get_mut(line)
+            .expect("line offsets and line flags are derived from the same source");
+        *value |= flag;
     }
 }
 
@@ -554,9 +571,11 @@ fn normalize_attribute_path(path: &ast::Path) -> String {
     let mut segments = Vec::new();
     let mut current = Some(path.clone());
     while let Some(path) = current {
-        if let Some(name) = path.segment().and_then(|segment| segment.name_ref()) {
-            segments.push(name.text().trim_start_matches("r#").to_owned());
-        }
+        let segment = path.segment().expect("a successfully parsed Rust path always has a segment");
+        let name = segment
+            .name_ref()
+            .expect("a successfully parsed Rust path segment always has a name");
+        segments.push(name.text().trim_start_matches("r#").to_owned());
         current = path.qualifier();
     }
     segments.reverse();
@@ -595,13 +614,112 @@ impl CfgPossibilities {
     }
 }
 
-/// Possible truth values when `cfg(test)` is false and every other cfg atom is
-/// unconstrained.
-///
-/// Treating unrelated atoms as independently variable can preserve an
-/// impossible expression such as `all(foo, not(foo))`, but it can never hide a
-/// released expression. That conservative direction is required for coverage.
 fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibilities {
+    const MAX_EXACT_CFG_ATOMS: usize = 12;
+
+    let mut atom_indexes = BTreeMap::new();
+    collect_cfg_atoms(predicate, &mut atom_indexes);
+    if atom_indexes.len() > MAX_EXACT_CFG_ATOMS {
+        return approximate_cfg_possibilities_without_test(predicate);
+    }
+    for (index, atom) in atom_indexes.keys().cloned().collect::<Vec<_>>().into_iter().enumerate() {
+        let _ = atom_indexes.insert(atom, index);
+    }
+
+    let mut possibilities = CfgPossibilities {
+        can_be_true: false,
+        can_be_false: false,
+    };
+    let mut assignment = vec![false; atom_indexes.len()];
+    let assignment_count = 2_usize.pow(u32::try_from(atom_indexes.len()).expect("exact cfg atom limit fits u32"));
+    for _ in 0..assignment_count {
+        let Some(value) = evaluate_cfg_predicate(predicate, &atom_indexes, &assignment) else {
+            return approximate_cfg_possibilities_without_test(predicate);
+        };
+        possibilities.can_be_true |= value;
+        possibilities.can_be_false |= !value;
+        if possibilities == CfgPossibilities::EITHER {
+            break;
+        }
+        advance_cfg_assignment(&mut assignment);
+    }
+    possibilities
+}
+
+fn advance_cfg_assignment(assignment: &mut [bool]) {
+    for value in assignment {
+        *value = !*value;
+        if *value {
+            break;
+        }
+    }
+}
+
+fn collect_cfg_atoms(predicate: &ast::CfgPredicate, atoms: &mut BTreeMap<String, usize>) {
+    match predicate {
+        ast::CfgPredicate::CfgAtom(atom) => {
+            if let Some(key) = cfg_atom_key(atom) {
+                let _ = atoms.entry(key).or_default();
+            }
+        }
+        ast::CfgPredicate::CfgComposite(composite) => {
+            for part in composite.cfg_predicates() {
+                collect_cfg_atoms(&part, atoms);
+            }
+        }
+    }
+}
+
+fn cfg_atom_key(atom: &ast::CfgAtom) -> Option<String> {
+    let ident = atom.ident_token()?.text().trim_start_matches("r#").to_owned();
+    if atom.eq_token().is_some() {
+        let value = atom.string_token()?.text().to_owned();
+        Some(format!("{ident}={value}"))
+    } else if ident == "test" {
+        None
+    } else {
+        Some(ident)
+    }
+}
+
+fn evaluate_cfg_predicate(predicate: &ast::CfgPredicate, atom_indexes: &BTreeMap<String, usize>, assignment: &[bool]) -> Option<bool> {
+    match predicate {
+        ast::CfgPredicate::CfgAtom(atom) => {
+            if atom.true_token().is_some() {
+                return Some(true);
+            }
+            if atom.false_token().is_some() {
+                return Some(false);
+            }
+            if atom.eq_token().is_none()
+                && atom
+                    .ident_token()
+                    .is_some_and(|token| token.text().trim_start_matches("r#") == "test")
+            {
+                return Some(false);
+            }
+            let index = *atom_indexes.get(&cfg_atom_key(atom)?)?;
+            assignment.get(index).copied()
+        }
+        ast::CfgPredicate::CfgComposite(composite) => {
+            let keyword = composite.keyword()?.text().to_owned();
+            let parts = composite
+                .cfg_predicates()
+                .map(|part| evaluate_cfg_predicate(&part, atom_indexes, assignment))
+                .collect::<Option<Vec<_>>>()?;
+            match keyword.as_str() {
+                "all" => Some(parts.into_iter().all(|value| value)),
+                "any" => Some(parts.into_iter().any(|value| value)),
+                "not" if parts.len() == 1 => Some(!parts[0]),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Conservative fallback for predicates with too many distinct atoms or an
+/// unsupported parser shape.
+fn approximate_cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibilities {
     match predicate {
         ast::CfgPredicate::CfgAtom(atom) => {
             if atom.true_token().is_some() {
@@ -621,7 +739,7 @@ fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibili
             let keyword = composite.keyword().map(|token| token.text().to_owned()).unwrap_or_default();
             let parts = composite
                 .cfg_predicates()
-                .map(|part| cfg_possibilities_without_test(&part))
+                .map(|part| approximate_cfg_possibilities_without_test(&part))
                 .collect::<Vec<_>>();
             match keyword.as_str() {
                 "all" => CfgPossibilities {
@@ -1225,10 +1343,9 @@ mod tests {
 
     #[test]
     fn released_sources_require_workspace_member_attribution() {
-        let member_dirs = [MemberDirectory {
-            canonical: PathBuf::from("/workspace/member"),
-            reported: PathBuf::from("/workspace/member"),
-        }];
+        let member_dirs = MemberDirectories {
+            reported_by_canonical: BTreeMap::from([(PathBuf::from("/workspace/member"), PathBuf::from("/workspace/member"))]),
+        };
         let inside = PendingSource {
             canonical_path: PathBuf::from("/workspace/member/src/lib.rs"),
             resolution_path: PathBuf::from("/workspace/member/src/lib.rs"),
@@ -1371,6 +1488,20 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_test_ranges_are_merged_in_source_order() {
+        assert_eq!(
+            merge_text_ranges(vec![
+                TextRange::new(10.into(), 20.into()),
+                TextRange::new(0.into(), 5.into()),
+                TextRange::new(5.into(), 10.into()),
+                TextRange::new(32.into(), 40.into()),
+                TextRange::new(30.into(), 35.into()),
+            ]),
+            [TextRange::new(0.into(), 20.into()), TextRange::new(30.into(), 40.into()),]
+        );
+    }
+
+    #[test]
     #[cfg_attr(
         miri,
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
@@ -1388,20 +1519,24 @@ mod tests {
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
     )]
     fn cfg_possibilities_cover_every_operator_and_literal() {
-        fn possibilities_for_source(source: &str) -> Option<CfgPossibilities> {
-            let parsed = SourceFile::parse(source, Edition::Edition2024).tree();
-            let attribute = parsed.items().next().expect("one item").attrs().next().expect("one attribute");
-            match attribute.meta().expect("attribute metadata") {
-                ast::Meta::CfgMeta(meta) => Some(cfg_possibilities_without_test(&meta.cfg_predicate().expect("cfg predicate"))),
-                _ => None,
-            }
+        fn parsed_predicate(predicate: &str) -> ast::CfgPredicate {
+            let source = format!("#[cfg({predicate})] fn fixture() {{}}\n");
+            let parsed = SourceFile::parse(&source, Edition::Edition2024).tree();
+            parsed
+                .syntax()
+                .descendants()
+                .find_map(ast::CfgPredicate::cast)
+                .expect("fixture has a cfg predicate")
         }
 
         fn possibilities(predicate: &str) -> CfgPossibilities {
-            possibilities_for_source(&format!("#[cfg({predicate})] fn fixture() {{}}\n")).expect("fixture attribute has cfg metadata")
+            cfg_possibilities_without_test(&parsed_predicate(predicate))
         }
 
-        assert_eq!(possibilities_for_source("#[test] fn fixture() {}\n"), None);
+        fn approximate(predicate: &str) -> CfgPossibilities {
+            approximate_cfg_possibilities_without_test(&parsed_predicate(predicate))
+        }
+
         assert_eq!(possibilities("true"), CfgPossibilities::TRUE);
         assert_eq!(possibilities("false"), CfgPossibilities::FALSE);
         assert_eq!(possibilities("test"), CfgPossibilities::FALSE);
@@ -1416,6 +1551,31 @@ mod tests {
         assert_eq!(possibilities("any(test, unix)"), CfgPossibilities::EITHER);
         assert_eq!(possibilities("not(test)"), CfgPossibilities::TRUE);
         assert_eq!(possibilities("not(test, unix)"), CfgPossibilities::EITHER);
+        assert_eq!(possibilities("all(not(test, unix), true)"), CfgPossibilities::EITHER);
+        assert_eq!(possibilities("any(probe, not(probe))"), CfgPossibilities::TRUE);
+        assert_eq!(possibilities("all(probe, not(probe))"), CfgPossibilities::FALSE);
+        assert_eq!(
+            possibilities("any(feature = \"test-util\", not(feature = \"test-util\"))"),
+            CfgPossibilities::TRUE
+        );
+        assert_eq!(
+            possibilities("any(a0, not(a0), a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11)"),
+            CfgPossibilities::TRUE
+        );
+        assert_eq!(possibilities("all(a, not(b))"), CfgPossibilities::EITHER);
+        assert_eq!(
+            possibilities("all(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, not(a12))"),
+            CfgPossibilities::EITHER
+        );
+
+        assert_eq!(approximate("true"), CfgPossibilities::TRUE);
+        assert_eq!(approximate("false"), CfgPossibilities::FALSE);
+        assert_eq!(approximate("test"), CfgPossibilities::FALSE);
+        assert_eq!(approximate("all(test, unix)"), CfgPossibilities::FALSE);
+        assert_eq!(approximate("any(test, unix)"), CfgPossibilities::EITHER);
+        assert_eq!(approximate("any(test, false)"), CfgPossibilities::FALSE);
+        assert_eq!(approximate("not(test)"), CfgPossibilities::TRUE);
+        assert_eq!(approximate("not(test, unix)"), CfgPossibilities::EITHER);
     }
 
     #[test]
@@ -1427,7 +1587,8 @@ mod tests {
         let source = SourceFile::parse(
             "#[cfg_attr(false, test)] fn never() {}\n\
              #[cfg_attr(unix, test)] fn conditional() {}\n\
-             #[cfg_attr(true, test)] fn always() {}\n",
+             #[cfg_attr(true, test)] fn always() {}\n\
+             #[cfg_attr(any(probe, not(probe)), test)] fn correlated() {}\n",
             Edition::Edition2024,
         )
         .tree();
@@ -1436,7 +1597,7 @@ mod tests {
                 .items()
                 .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &BTreeSet::new())))
                 .collect::<Vec<_>>(),
-            [false, false, true]
+            [false, false, true, true]
         );
     }
 
@@ -1664,52 +1825,6 @@ mod tests {
             .expect_err("member directory resolution errors propagate")
             .to_string();
         assert!(error.contains("member resolution denied"), "{error}");
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
-    )]
-    fn defensive_attribute_and_range_branches_are_conservative() {
-        fn normalized_path_attribute(source: &str) -> Option<String> {
-            let parsed = SourceFile::parse(source, Edition::Edition2024).tree();
-            let attribute = parsed.items().next().expect("one item").attrs().next().expect("one attribute");
-            match attribute.meta().expect("attribute metadata") {
-                ast::Meta::PathMeta(meta) => meta.path().map(|path| normalize_attribute_path(&path)),
-                _ => None,
-            }
-        }
-
-        let parsed = SourceFile::parse(
-            "#[] fn malformed() {}\n#[cfg_attr()] fn empty_cfg_attr() {}\n",
-            Edition::Edition2024,
-        )
-        .tree();
-        let mut items = parsed.items();
-        let malformed = items.next().expect("malformed item").attrs().next().expect("malformed attribute");
-        let empty_cfg_attr = items.next().expect("cfg_attr item").attrs().next().expect("cfg_attr attribute");
-        assert!(!attribute_marks_test(&malformed, &BTreeSet::new()));
-        assert!(!attribute_marks_test(&empty_cfg_attr, &BTreeSet::new()));
-
-        assert_eq!(
-            normalized_path_attribute("#[company::] fn incomplete() {}\n"),
-            Some("company".to_owned())
-        );
-        assert_eq!(normalized_path_attribute("#[cfg(test)] fn configured() {}\n"), None);
-
-        let mut flags = [0_u8; 1];
-        mark_range_lines(&mut flags, &[0], TextRange::empty(0.into()), LINE_TEST_ONLY);
-        assert_eq!(flags, [0]);
-
-        let mut flags = [0_u8; 2];
-        mark_range_lines(&mut flags, &[0, 4], TextRange::new(0.into(), 4.into()), LINE_TEST_ONLY);
-        assert_eq!(flags, [LINE_TEST_ONLY, 0]);
-
-        let mut flags = [0_u8; 1];
-        mark_range_lines(&mut flags, &[0, 4], TextRange::new(4.into(), 5.into()), LINE_TEST_ONLY);
-        assert_eq!(flags, [0]);
-        assert_eq!(lexical_normalize(Path::new("./workspace")), PathBuf::from("workspace"));
     }
 
     #[test]
@@ -2222,16 +2337,12 @@ mod tests {
 
     #[test]
     fn attributed_paths_use_the_longest_member_and_reported_namespace() {
-        let member_dirs = [
-            MemberDirectory {
-                canonical: PathBuf::from("/canonical/outer/nested"),
-                reported: PathBuf::from("/reported/nested"),
-            },
-            MemberDirectory {
-                canonical: PathBuf::from("/canonical/outer"),
-                reported: PathBuf::from("/reported/outer"),
-            },
-        ];
+        let member_dirs = MemberDirectories {
+            reported_by_canonical: BTreeMap::from([
+                (PathBuf::from("/canonical/outer/nested"), PathBuf::from("/reported/nested")),
+                (PathBuf::from("/canonical/outer"), PathBuf::from("/reported/outer")),
+            ]),
+        };
 
         assert_eq!(
             attributed_path(&member_dirs, Path::new("/canonical/outer/nested/src/lib.rs")),

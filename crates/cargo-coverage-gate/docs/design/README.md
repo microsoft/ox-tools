@@ -551,7 +551,9 @@ the released Cargo surface:
 - within a released file, `#[test]`, `#[bench]`, `#[cfg(test)]`, and
   predicates such as `#[cfg(all(test, unix))]` are removed, while
   `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
-  `cfg(not(test))` remain.
+  `cfg(not(test))` remain. Correlated occurrences of up to twelve distinct
+  non-`test` cfg atoms are evaluated exactly; larger or unsupported predicate
+  shapes fall back to conservative retention rather than hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted
@@ -578,6 +580,8 @@ independently, then parses and merges them at the line level **before** computin
 aggregates: the `DA:` line set is the union across inputs, and a line is
 `covered` if it was hit in *any* input. Execution-count magnitudes are not
 combined because the gate consumes only the covered/uncovered predicate.
+When `run` collects multiple configurations, malformed raw LCOV diagnostics
+identify the feature configuration and scratch path that failed validation.
 This produces the same line-coverage result as the merge `cargo-llvm-cov`
 performs internally on its `.profraw` set, so passing the `--all-features` and
 `--no-default-features` exports here yields the same per-package line
