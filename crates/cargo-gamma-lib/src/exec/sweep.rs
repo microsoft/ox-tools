@@ -2078,6 +2078,7 @@ fn probe_reserved(
     kind: ProbeKind,
 ) -> (Option<Killer>, Option<bool>, Duration) {
     let request = MemoryRequest {
+        calibrating: false,
         meter: sweep.meter,
         limit: binary.memory,
     };
@@ -2128,6 +2129,7 @@ fn negative_reach_hint_is_final(binary: &TestBinary, timeout_multiplier: Option<
 
 fn whole_probe_attempt(binary: &TestBinary, timeout_multiplier: Option<f64>, sweep: Sweep<'_>) -> Attempt<'static> {
     let request = MemoryRequest {
+        calibrating: false,
         meter: sweep.meter,
         limit: binary.memory,
     };
@@ -2214,6 +2216,7 @@ fn probe_cases(
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
         stall: sweep.stall,
         request: MemoryRequest {
+            calibrating: false,
             meter: sweep.meter,
             limit: binary.memory,
         },
@@ -2458,6 +2461,7 @@ fn judge_ranked(
 
                     let started = Instant::now();
                     let request = MemoryRequest {
+                        calibrating: false,
                         meter: sweep.meter,
                         limit: binary.memory,
                     };
@@ -2609,6 +2613,7 @@ fn judge_ranked(
         ran = true;
 
         let request = MemoryRequest {
+            calibrating: false,
             meter: sweep.meter,
             limit: binary.memory,
         };
@@ -3375,7 +3380,7 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::once;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::fs;
 
     use camino::Utf8PathBuf;
@@ -4711,8 +4716,10 @@ mod tests {
     /// The suite's own harness never noticed anything wrong; only the kernel's accounting did, and
     /// a reader who was told the mutant merely "survived" would go looking for a missing assertion
     /// that was never the actual gap.
+    /// This workload relies on Linux's memory-backed `/dev/shm`; macOS breach detection is covered
+    /// by the sampler tests in `cargo-gamma-process`.
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_outgrows_its_ceiling_convicts_the_mutant_of_using_too_much_memory() {
         if crate::testing::without_memory_support("a sweep asserting a ceiling is enforced") {

@@ -1303,8 +1303,10 @@ mod tests {
     /// The baseline has no mutant to blame, so if this path were not wired up a runaway baseline
     /// would either hang the whole run past the timeout or, worse, get judged as if it were an
     /// ordinary passing suite while quietly starving the machine of memory.
+    /// This workload relies on Linux's memory-backed `/dev/shm`; macOS breach detection is covered
+    /// by the sampler tests in `cargo-gamma-process`.
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_baseline_binary_that_outgrows_its_ceiling_is_reported_as_such() {
         if crate::testing::without_memory_support("a baseline measuring the suite's memory") {
@@ -1314,6 +1316,7 @@ mod tests {
         let fill = format!("/dev/shm/gamma-baseline.{}", std::process::id());
         let (_directory, work, mut binaries) = harness(&format!("dd if=/dev/zero of={fill} bs=1M count=512 2>/dev/null"));
         let request = MemoryRequest {
+            calibrating: true,
             meter: true,
             limit: Some(32 * 1024 * 1024),
         };
@@ -1344,7 +1347,11 @@ mod tests {
         }
 
         let (_directory, work, mut binaries) = harness("exit 0");
-        let request = MemoryRequest { meter: true, limit: None };
+        let request = MemoryRequest {
+            calibrating: true,
+            meter: true,
+            limit: None,
+        };
 
         let failure = measure_within(&work, &mut binaries, Duration::from_secs(30), request, 1)
             .expect_err("a host that cannot meter memory must not measure a baseline unprotected");
@@ -1366,7 +1373,11 @@ mod tests {
         }
 
         let (_directory, work, mut binaries) = harness("dd if=/dev/zero of=/dev/null bs=1M count=32 2>/dev/null\nexit 0");
-        let request = MemoryRequest { meter: true, limit: None };
+        let request = MemoryRequest {
+            calibrating: true,
+            meter: true,
+            limit: None,
+        };
         let baseline = measure_within(&work, &mut binaries, Duration::from_secs(30), request, 1).expect("the baseline must pass");
 
         // A ceiling is derived per binary, so the per-binary figure has to be written back and not
@@ -1552,6 +1563,7 @@ mod tests {
             &mut binaries,
             Duration::from_secs(17),
             MemoryRequest {
+                calibrating: true,
                 meter: true,
                 limit: Some(999),
             },

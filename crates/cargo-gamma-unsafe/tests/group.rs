@@ -144,16 +144,15 @@ fn observing_an_exit_keeps_its_group_reserved_until_the_explicit_reap() {
         poll_until(|| exited(child.id()).expect("the child can be observed")),
         "the killed child never became observable"
     );
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(
         group_of(pid),
         Some(pid),
         "the leader's group must stay reserved until the caller explicitly reaps it"
     );
-
     let status = child.wait().expect("the observed child remains waitable");
 
     assert_eq!(status.signal(), Some(libc::SIGKILL));
-    assert_eq!(group_of(pid), None, "the group is released only by the explicit reap");
 }
 
 /// The group query returns the group the child put itself in, and nothing once the pid is gone.

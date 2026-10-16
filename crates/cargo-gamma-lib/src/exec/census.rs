@@ -1291,7 +1291,11 @@ fn sample(work: &Workspace, binary: &TestBinary, names: &[&str], path: &Utf8Path
             .budget
             .map(|budget| binary.baseline.saturating_mul(CENSUS_FACTOR).max(budget)),
         stall,
-        request: MemoryRequest { meter: false, limit: None },
+        request: MemoryRequest {
+            calibrating: false,
+            meter: false,
+            limit: None,
+        },
         only: Only::These(names),
         census: Some(path),
     };

@@ -814,6 +814,15 @@ genuinely allowed to allocate this much can be taken out of the run for good wit
 `cargo gamma suppress --apply`, which treats `outofmem` as eligible by default alongside
 `timeout`.
 
+On Linux and Windows the kernel enforces the ceiling for the whole process tree. macOS has no
+equivalent, so there cargo-gamma samples the test process group’s memory every 10 ms and stops it
+once it passes the ceiling. That bound is soft. A mutant growing very fast can overshoot by roughly
+its growth rate times 10 ms. A process that leaves the test’s process group is not counted. The run
+says so once at the start. With `--nextest` on macOS, each test runs in a process group of its own,
+outside what this sampling can see, so memory control is unavailable. When it was only the default,
+it is switched off with a note. When you asked for it, the run stops and tells you to drop `--nextest`
+or pass `--memory off`.
+
 ##### Telling a detection from a flaky test
 
 Nothing about a red test says the mutant made it red. A test that fails now and then would otherwise

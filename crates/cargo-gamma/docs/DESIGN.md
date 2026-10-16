@@ -79,6 +79,9 @@ The design therefore optimizes each component of campaign cost:
 
 The architecture separates responsibilities into the following domains.
 
+The CLI builds on macOS with the system allocator. Linux and Windows use the
+`rallocator` integration; that dependency is available only on those hosts.
+
 ```mermaid
 flowchart TB
     User[CLI and configuration] --> Coordinator[Campaign coordinator]
@@ -932,7 +935,9 @@ Platform containment uses the strongest suitable primitive:
 - Unix process groups provide descendant-directed signaling;
 - Linux cgroup v2 provides a boundary a descendant cannot leave, plus process-tree memory
   accounting and enforcement;
-- Windows job objects provide descendant lifetime and memory control.
+- Windows job objects provide descendant lifetime and memory control;
+- on macOS, which has no process-tree memory boundary, memory is accounted and enforced by sampling
+  the process group's physical footprint.
 
 A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
 it, and every later signal to the group misses that descendant. Containment is therefore not
@@ -992,6 +997,14 @@ Exceeding the ceiling is distinct from a test failure or timeout because the rem
 
 When the host cannot provide trustworthy process-tree enforcement, inherited defaults degrade
 explicitly, while a user-requested guarantee fails rather than pretending to be active.
+
+Enforcement is either kernel-enforced (a Linux cgroup or a Windows job) or sampled (macOS). A time
+budget cannot stand in for either. A mutant that breaks a loop's termination while the loop
+allocates can grow by gigabytes per second and exhaust a workstation long before any reasonable
+timeout. Sampled enforcement on macOS checks the process group's footprint every 10 ms and stops
+the group past its ceiling. It reports the same `outofmem` outcome, and the run says once that its
+bound is soft. The incident that motivated it and the measured overshoot are recorded in the
+[macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
 
 ### Flakiness
 

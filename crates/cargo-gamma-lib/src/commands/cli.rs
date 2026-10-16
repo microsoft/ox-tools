@@ -426,9 +426,11 @@ pub struct MeasureArgs {
     /// mutant. `enforce` also holds each mutant to a ceiling derived from that measurement, and
     /// reports a mutant that breaches it as killed, shown as `OUTOFMEM`.
     ///
-    /// Needs a delegated cgroup v2 on Linux, or a job object on Windows. A run that asked for this
-    /// explicitly says so and stops where the host cannot provide it, rather than pretend to be
-    /// protected; a run that merely inherited the default drops to `off` and says so.
+    /// Needs a delegated cgroup v2 on Linux, or a job object on Windows. On macOS the test process
+    /// group's memory is sampled every 10 ms instead, which is a soft bound and is unavailable with
+    /// `--nextest`. A run that asked for this explicitly says so and stops where the host cannot
+    /// provide it, rather than pretend to be protected; a run that merely inherited the default drops
+    /// to `off` and says so.
     #[arg(long, value_name = "MODE", help_heading = "Memory")]
     pub memory: Option<crate::exec::MemoryControl>,
 

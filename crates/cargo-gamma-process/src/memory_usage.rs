@@ -7,6 +7,6 @@ pub struct MemoryUsage {
     /// The highest aggregate memory the process tree reached, when the host could measure it.
     pub peak: Option<u64>,
 
-    /// Whether the kernel reported stopping the workload for passing its ceiling.
+    /// Whether the memory boundary stopped the workload for passing its ceiling.
     pub exhausted: bool,
 }

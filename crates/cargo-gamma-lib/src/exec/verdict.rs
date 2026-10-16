@@ -2061,7 +2061,11 @@ mod tests {
         ));
         assert!(!reach_hint_is_final(
             Attempt {
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None
+                },
                 ..base
             },
             false
@@ -2266,6 +2270,7 @@ mod tests {
                 budget: Some(Duration::from_secs(3)),
             },
             request: MemoryRequest {
+                calibrating: false,
                 meter: true,
                 limit: Some(100),
             },
@@ -2766,7 +2771,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
                 census: None,
             },
@@ -2801,7 +2810,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
                 only: Only::All,
                 census: None,
             },
@@ -2904,7 +2917,11 @@ mod tests {
             active: None,
             timeout: Some(Duration::from_secs(30)),
             stall: Stall::NONE,
-            request: MemoryRequest { meter: false, limit: None },
+            request: MemoryRequest {
+                calibrating: false,
+                meter: false,
+                limit: None,
+            },
             only: Only::All,
             census: None,
         }
@@ -2933,7 +2950,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
                 only: Only::All,
                 census: None,
             },
@@ -3172,7 +3193,11 @@ mod tests {
                 active: Some(1),
                 timeout: Some(Duration::from_millis(50)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
                 census: None,
             },
@@ -3594,6 +3619,7 @@ mod tests {
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall::NONE,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -3640,6 +3666,7 @@ mod tests {
                     budget: Some(Duration::from_secs(10)),
                 },
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -3676,6 +3703,7 @@ mod tests {
                     timeout: Some(Duration::from_secs(30)),
                     stall: Stall::NONE,
                     request: MemoryRequest {
+                        calibrating: false,
                         meter: true,
                         limit: Some(512 * 1024 * 1024)
                     },
@@ -3832,6 +3860,7 @@ mod tests {
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall::NONE,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -4375,7 +4404,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall { budget: None },
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
                 census: None,
             },

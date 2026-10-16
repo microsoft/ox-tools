@@ -22,26 +22,31 @@ use std::io;
 /// `ECHILD` means another waiter has already consumed the child, so callers must not assume its
 /// numeric process-group id is still theirs.
 pub fn exited(pid: u32) -> io::Result<bool> {
+    exited_with_waitid(pid, |pid| {
+        let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+
+        // SAFETY: `info` points to writable storage for exactly one `siginfo_t`; `P_PID` and
+        // `pid` ask only about the caller's child; and these flags observe an exit without
+        // consuming it.
+        let waited = unsafe { libc::waitid(libc::P_PID, pid, info.as_mut_ptr(), libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+
+        if waited == -1 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: a successful `waitid` initializes the supplied `siginfo_t`. POSIX specifies a
+        // zero `si_pid` when `WNOHANG` found no state change, which is the only field read here.
+        let info = unsafe { info.assume_init() };
+        // SAFETY: `info` was initialized by the successful `waitid` above, so its returned pid
+        // can be read through libc's accessor.
+        Ok(unsafe { info.si_pid() })
+    })
+}
+
+fn exited_with_waitid(pid: u32, waitid: impl FnOnce(libc::id_t) -> io::Result<libc::pid_t>) -> io::Result<bool> {
     let pid =
         libc::id_t::try_from(pid).map_err(|_out_of_range| io::Error::new(io::ErrorKind::InvalidInput, "child pid does not fit waitid"))?;
-    let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
-
-    // SAFETY: `info` points to writable storage for exactly one `siginfo_t`; `P_PID` and `pid`
-    // ask only about the caller's child; and these flags observe an exit without consuming it.
-    let waited = unsafe { libc::waitid(libc::P_PID, pid, info.as_mut_ptr(), libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
-
-    if waited == -1 {
-        return Err(io::Error::last_os_error());
-    }
-
-    // SAFETY: a successful `waitid` initializes the supplied `siginfo_t`. POSIX specifies a zero
-    // `si_pid` when `WNOHANG` found no state change, which is the only field read here.
-    let info = unsafe { info.assume_init() };
-    // SAFETY: `info` was initialized by the successful `waitid` above, so its returned pid can be
-    // read through libc's accessor.
-    let reported = unsafe { info.si_pid() };
-
-    Ok(reported != 0)
+    Ok(waitid(pid)? != 0)
 }
 
 /// Whether an observation failed because the caller has no matching child it can wait for.
@@ -85,6 +90,76 @@ pub fn kill(group: i32) -> io::Result<()> {
     }
 
     map_killpg_error(io::Error::last_os_error())
+}
+
+/// Kills a group after its leader has been observed exiting without being reaped.
+///
+/// macOS can return `EPERM` when the group contains only a zombie leader: its `killpg` path
+/// excludes zombies and reports no live members as a permission error. The same error can
+/// mean an inaccessible live member. Only a group listing containing exactly the observed,
+/// unreaped leader proves the former case; every other result preserves the permission error.
+/// The unreaped leader keeps the numeric group id tied to this subtree while it is inspected.
+///
+/// # Errors
+///
+/// Returns errors from [`kill`], including macOS `EPERM` unless the leader is the group's only
+/// remaining member.
+pub fn kill_after_exit(group: i32) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        kill_after_exit_with(group, kill, only_group_leader_is_listed)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        kill(group)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn kill_after_exit_with(
+    group: i32,
+    kill_group: impl FnOnce(i32) -> io::Result<()>,
+    only_exited_leader: impl FnOnce(i32) -> bool,
+) -> io::Result<()> {
+    let killed = kill_group(group);
+
+    if killed.as_ref().is_err_and(|cause| cause.raw_os_error() == Some(libc::EPERM)) && only_exited_leader(group) {
+        Ok(())
+    } else {
+        killed
+    }
+}
+
+/// Whether a macOS process group lists exactly its own leader as its sole member.
+///
+/// A two-entry snapshot suffices: a second member, or a sole member with another pid, is rejected.
+/// A failed or incomplete query also returns `false`. This says nothing about whether the leader
+/// has exited; callers accepting `EPERM` must first observe that exit without reaping the leader.
+#[cfg(target_os = "macos")]
+#[must_use]
+fn only_group_leader_is_listed(group: i32) -> bool {
+    only_group_leader_is_listed_with(group, |group, members| {
+        let bytes = libc::c_int::try_from(core::mem::size_of_val(members))
+            .expect("two pid_t values always fit in the proc_listpgrppids byte count");
+
+        // SAFETY: `members` is writable storage for two pid_t values, and `bytes` is its exact
+        // byte length. The kernel writes no more than this length and returns the number of pids
+        // written.
+        let listed = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), bytes) };
+
+        if listed < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(usize::try_from(listed).expect("the preceding branch rejected negative counts and macOS usize holds every c_int"))
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn only_group_leader_is_listed_with(group: i32, list_members: impl FnOnce(i32, &mut [libc::pid_t; 2]) -> io::Result<usize>) -> bool {
+    let mut members = [0; 2];
+    matches!(list_members(group, &mut members), Ok(1)) && members[0] == group
 }
 
 /// Treats an already-absent group as gone while preserving every other operating-system error.
@@ -228,6 +303,108 @@ mod tests {
     #[test]
     fn a_killpg_permission_failure_is_preserved() {
         let error = map_killpg_error(io::Error::from_raw_os_error(libc::EPERM)).expect_err("a permission failure is not an absent group");
+
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn a_pending_waitid_result_is_not_an_exit() {
+        let exited = exited_with_waitid(42, |pid| {
+            assert_eq!(pid, 42);
+            Ok(0)
+        })
+        .expect("the scripted waitid succeeds");
+
+        assert!(!exited);
+    }
+
+    #[test]
+    fn a_reported_waitid_pid_is_an_exit() {
+        let exited = exited_with_waitid(42, |pid| {
+            assert_eq!(pid, 42);
+            Ok(42)
+        })
+        .expect("the scripted waitid succeeds");
+
+        assert!(exited);
+    }
+
+    #[test]
+    fn a_waitid_error_is_preserved() {
+        let error = exited_with_waitid(42, |_pid| Err(io::Error::from_raw_os_error(libc::ECHILD)))
+            .expect_err("the scripted waitid reports an externally reaped child");
+
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_single_matching_member_proves_a_zombie_only_group() {
+        let only_leader = only_group_leader_is_listed_with(42, |group, members| {
+            assert_eq!(group, 42);
+            *members = [42, 0];
+            Ok(1)
+        });
+        let another_member = only_group_leader_is_listed_with(42, |_group, members| {
+            *members = [42, 43];
+            Ok(2)
+        });
+        let different_member = only_group_leader_is_listed_with(42, |_group, members| {
+            *members = [43, 0];
+            Ok(1)
+        });
+
+        assert!(only_leader);
+        assert!(!another_member);
+        assert!(!different_member);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_group_listing_does_not_hide_permission_denial() {
+        let error = kill_after_exit_with(
+            42,
+            |_group| Err(io::Error::from_raw_os_error(libc::EPERM)),
+            |group| only_group_leader_is_listed_with(group, |_group, _members| Err(io::Error::from_raw_os_error(libc::EIO))),
+        )
+        .expect_err("an inconclusive membership query must preserve EPERM");
+
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_zombie_only_group_accepts_killpg_permission_denial() {
+        kill_after_exit_with(
+            42,
+            |group| {
+                assert_eq!(group, 42);
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            },
+            |group| {
+                only_group_leader_is_listed_with(group, |_group, members| {
+                    *members = [42, 0];
+                    Ok(1)
+                })
+            },
+        )
+        .expect("only the exited group leader remains");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_group_with_a_live_member_preserves_killpg_permission_denial() {
+        let error = kill_after_exit_with(
+            42,
+            |_group| Err(io::Error::from_raw_os_error(libc::EPERM)),
+            |group| {
+                only_group_leader_is_listed_with(group, |_group, members| {
+                    *members = [42, 43];
+                    Ok(2)
+                })
+            },
+        )
+        .expect_err("another group member means EPERM cannot be dismissed");
 
         assert_eq!(error.raw_os_error(), Some(libc::EPERM));
     }

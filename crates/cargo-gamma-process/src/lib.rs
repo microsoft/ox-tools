@@ -34,7 +34,8 @@
 //! tree rather than only its leader. A [`MemoryRequest`] passed to [`prepare`] asks for measurement,
 //! a ceiling, or neither; [`ProcessTree::usage`] answers once the process tree is gone. On Windows
 //! requested accounting requires a dedicated job carrying the limit and accounting; on Linux a
-//! cgroup leaf supplied by `cargo-gamma-unsafe` serves both purposes.
+//! cgroup leaf supplied by `cargo-gamma-unsafe` serves both purposes. On macOS, a measuring launch
+//! samples its process group's physical footprint every 10 ms and sweeps it past the ceiling.
 //!
 //! Containment itself is not conditional on that request. A Unix process group is escapable — a
 //! descendant that calls `setsid` leaves it, and every later signal to the group misses it — so
@@ -45,11 +46,13 @@
 //! before repository-controlled code executes, and [`ProcessTree::sealed`] reports the resulting
 //! state for one launch.
 //!
-//! The boundary is in force from the child's first instruction. On Linux the child moves itself
+//! Kernel boundaries are in force from the child's first instruction. On Linux the child moves itself
 //! into the cgroup between fork and exec; on Windows it normally starts suspended, enters the
 //! dedicated job, and only then runs. A child that cannot enter a job already created for it is
 //! rejected because an inherited job cannot be opened later to terminate its descendants. A peak
 //! that reached the limit is therefore enforced by the kernel rather than inferred after the fact.
+//! macOS enforcement is sampled and soft: allocation can overshoot between readings, and a
+//! descendant that leaves the group escapes both accounting and termination.
 //!
 //! Because the Linux boundary is installed as a pre-exec step naming one particular leaf, and a
 //! [`Command`](std::process::Command) accumulates every such step it is given, a command can only
@@ -72,6 +75,11 @@
 //! installs explicit interruption handling through `cargo-gamma-unsafe`.
 
 pub use cargo_gamma_unsafe::{PlatformError, Situation, support};
+
+/// The fixed interval between macOS process-group memory samples.
+#[cfg(target_os = "macos")]
+pub const SAMPLE_INTERVAL: core::time::Duration = core::time::Duration::from_millis(10);
+
 #[doc(inline)]
 pub use memory_request::MemoryRequest;
 #[doc(inline)]
@@ -82,6 +90,8 @@ pub use process_tree::{OutputError, PreparedCommand, ProcessTree, SpawnFailure, 
 mod memory_request;
 mod memory_usage;
 mod process_tree;
+#[cfg(target_os = "macos")]
+mod sampled_memory;
 
 #[cfg(any(test, feature = "fault-injection"))]
 #[cfg_attr(coverage_nightly, coverage(off))]

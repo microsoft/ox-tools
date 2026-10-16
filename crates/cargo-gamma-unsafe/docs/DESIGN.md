@@ -20,8 +20,25 @@ crate's dependency graph and must remain dependency-free.
 
 - Unix process groups and Windows job objects provide process-tree control.
   Unix group identifiers less than or equal to one are rejected because
-  `killpg` reserves them for special or undefined behavior.
+  `killpg` reserves them for special or undefined behavior. On macOS, a group
+  sweep after a non-reaping observation of the leader's exit accepts `EPERM`
+  only when a process-group query finds that leader as its sole remaining member:
+  the kernel also returns it for this zombie-only group. A live or uninspectable
+  member preserves the error. The private implementation predicate
+  `only_group_leader_is_listed` returns false on query failure and does not
+  itself establish that the leader has exited. Darwin's `getpgid` cannot query
+  a zombie leader even while this listing still contains it. A sweep of a
+  running leader still reports `EPERM`;
+  group containment remains best-effort
+  where descendants can change credentials or leave the group.
 - Linux cgroups and Windows job objects provide process-tree memory limits.
+  macOS has no such boundary. This crate exposes only the readings a
+  supervisor needs to sample one: the members of a process group
+  (`proc_listpids`) and each member's physical footprint
+  (`proc_pid_rusage`). A member that exits between the two calls is reported
+  as gone, not as an error. The sampling policy lives in
+  `cargo-gamma-process`; see its
+  [macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
 - On Linux, terminal interrupts kill both the process group and the cgroup, so
   descendants that create a new session cannot escape cleanup.
 - Cgroup registration is owned by the `Cgroup` it watches and discharged by that
