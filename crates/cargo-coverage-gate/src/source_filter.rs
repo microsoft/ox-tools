@@ -521,30 +521,37 @@ fn classify_test_only_lines(
 }
 
 fn collect_test_ranges(root: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula) -> Vec<TextRange> {
-    fn collect(node: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula, ranges: &mut Vec<TextRange>) {
+    fn collect(
+        node: &SyntaxNode,
+        test_attributes: &BTreeSet<String>,
+        inherited_guard: &CfgFormula,
+        inherited_possibilities: CfgPossibilities,
+        ranges: &mut Vec<TextRange>,
+    ) {
         let owner = ast::AnyHasAttrs::cast(node.clone());
-        let guard = owner.as_ref().map_or_else(
-            || inherited_guard.clone(),
-            |owner| {
-                CfgFormula::all([
-                    inherited_guard.clone(),
-                    attributes_guard(ast::attrs_including_inner(owner), test_attributes),
-                ])
-            },
-        );
+        let own_guard = owner.as_ref().map_or(CfgFormula::Value(true), |owner| {
+            attributes_guard(ast::attrs_including_inner(owner), test_attributes)
+        });
+        let (guard, possibilities) = extend_cfg_guard(inherited_guard, inherited_possibilities, own_guard);
         if let Some(owner) = owner
-            && !cfg_formula_possibilities_without_test(&guard).can_be_true
+            && !possibilities.can_be_true
         {
             ranges.push(syntax_owner_range(owner.syntax()));
             return;
         }
         for child in node.children() {
-            collect(&child, test_attributes, &guard, ranges);
+            collect(&child, test_attributes, &guard, possibilities, ranges);
         }
     }
 
     let mut ranges = Vec::new();
-    collect(root, test_attributes, inherited_guard, &mut ranges);
+    collect(
+        root,
+        test_attributes,
+        inherited_guard,
+        cfg_formula_possibilities_without_test(inherited_guard),
+        &mut ranges,
+    );
     ranges
 }
 
@@ -769,6 +776,25 @@ impl CfgPossibilities {
     }
 }
 
+fn extend_cfg_guard(
+    inherited_guard: &CfgFormula,
+    inherited_possibilities: CfgPossibilities,
+    own_guard: CfgFormula,
+) -> (CfgFormula, CfgPossibilities) {
+    if own_guard == CfgFormula::Value(true) {
+        return (inherited_guard.clone(), inherited_possibilities);
+    }
+    let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
+    let possibilities = if guard == *inherited_guard {
+        inherited_possibilities
+    } else if !inherited_possibilities.can_be_true {
+        CfgPossibilities::FALSE
+    } else {
+        cfg_formula_possibilities_without_test(&guard)
+    };
+    (guard, possibilities)
+}
+
 #[cfg(test)]
 fn cfg_possibilities_without_test(predicate: &ast::CfgPredicate) -> CfgPossibilities {
     cfg_formula_from_predicate(predicate).map_or(CfgPossibilities::EITHER, |formula| cfg_formula_possibilities_without_test(&formula))
@@ -926,28 +952,34 @@ fn reject_unsupported_released_includes(
     if surface == Surface::NonReleased {
         return Ok(());
     }
-    let source_guard = CfgFormula::all([
-        inherited_guard.clone(),
+    let (source_guard, source_possibilities) = extend_cfg_guard(
+        inherited_guard,
+        cfg_formula_possibilities_without_test(inherited_guard),
         attributes_guard(ast::attrs_including_inner(source), test_attributes),
-    ]);
-    if syntax_contains_released_include(source.syntax(), test_attributes, &source_guard) {
+    );
+    if syntax_contains_released_include(source.syntax(), test_attributes, &source_guard, source_possibilities) {
         return Err(UnsupportedSourceInclusionError::new(diagnostic_path(path)).into());
     }
     Ok(())
 }
 
-fn syntax_contains_released_include(node: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula) -> bool {
+fn syntax_contains_released_include(
+    node: &SyntaxNode,
+    test_attributes: &BTreeSet<String>,
+    inherited_guard: &CfgFormula,
+    inherited_possibilities: CfgPossibilities,
+) -> bool {
     node.children().any(|child| {
         let own_guard = ast::AnyHasAttrs::cast(child.clone()).map_or(CfgFormula::Value(true), |owner| {
             attributes_guard(ast::attrs_including_inner(&owner), test_attributes)
         });
-        let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
-        let test_only = !cfg_formula_possibilities_without_test(&guard).can_be_true;
+        let (guard, possibilities) = extend_cfg_guard(inherited_guard, inherited_possibilities, own_guard);
+        let test_only = !possibilities.can_be_true;
         (!test_only
             && ast::MacroCall::cast(child.clone())
                 .and_then(|macro_call| macro_call.path())
                 .is_some_and(|path| path_is_builtin_include(&path)))
-            || syntax_contains_released_include(&child, test_attributes, &guard)
+            || syntax_contains_released_include(&child, test_attributes, &guard, possibilities)
     })
 }
 
@@ -965,7 +997,10 @@ fn static_include_path(macro_call: &ast::MacroCall) -> Option<PathBuf> {
         .syntax()
         .children_with_tokens()
         .filter_map(ra_ap_syntax::NodeOrToken::into_token)
-        .filter(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) && !matches!(token.text(), "(" | ")"));
+        .filter(|token| {
+            !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT)
+                && !matches!(token.text(), "(" | ")" | "{" | "}" | "[" | "]")
+        });
     let string = ast::String::cast(tokens.next()?)?;
     if tokens.next().is_some() {
         return None;
@@ -1840,6 +1875,17 @@ mod tests {
             ]),
             CfgFormula::any([CfgFormula::Atom("b".to_owned()), CfgFormula::Atom("a".to_owned()),])
         );
+
+        let inherited = CfgFormula::Atom("feature=x".to_owned());
+        let inherited_possibilities = cfg_formula_possibilities_without_test(&inherited);
+        assert_eq!(
+            extend_cfg_guard(&inherited, inherited_possibilities, CfgFormula::Value(true),),
+            (inherited.clone(), inherited_possibilities)
+        );
+        assert_eq!(
+            extend_cfg_guard(&inherited, inherited_possibilities, inherited.clone(),),
+            (inherited, inherited_possibilities)
+        );
     }
 
     #[test]
@@ -2173,6 +2219,24 @@ mod tests {
                 .expect("non-literal include is not indexed")
                 .is_empty()
         );
+
+        for invocation in [
+            "#[cfg(test)] include!(\"included-test.rs\");\n",
+            "#[cfg(test)] include! { \"included-test.rs\" }\n",
+            "#[cfg(test)] include![\"included-test.rs\"];\n",
+        ] {
+            let analysis = analyze(Path::new("/workspace/lib.rs"), invocation);
+            let declarations = declarations(Path::new("/workspace/lib.rs"), &analysis, SourceRole::CrateRoot, &BTreeSet::new())
+                .expect("static test-only include is indexed");
+            assert_eq!(declarations.len(), 1, "{invocation}");
+            assert_eq!(
+                lexical_normalize(&declarations[0].path),
+                PathBuf::from("/workspace/included-test.rs"),
+                "{invocation}"
+            );
+            assert_eq!(declarations[0].role, SourceRole::IncludedSource);
+            assert!(declaration_is_test_only(&declarations[0]));
+        }
 
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
