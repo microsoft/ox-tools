@@ -25,6 +25,14 @@ const WINDOWS_DIAGNOSTIC_UTF8_CONTEXT: &str = "cargo-llvm-cov's Windows command-
 #[cfg(any(windows, test))]
 const RUSTC_TARGET_LIBDIR_PARENT_ERROR: &str = "rustc target-libdir output had no parent directory";
 
+fn diagnostic_path(path: &Path) -> String {
+    crate::package_glob::diagnostic(&path.display().to_string())
+}
+
+fn missing_lcov_parent_error(path: &Path) -> AppError {
+    AppError::new(format!("LCOV path `{}` has no parent directory", diagnostic_path(path)))
+}
+
 pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Result<ExitCode, AppError> {
     if !args.lcov.is_empty() {
         return Err(AppError::new(
@@ -585,14 +593,15 @@ fn filter_and_publish_reports_with(
     let raw = collected
         .iter()
         .map(|report| {
-            fs::read_to_string(&report.raw_path).into_app_err(format!("failed to read raw LCOV report `{}`", report.raw_path.display()))
+            fs::read_to_string(&report.raw_path)
+                .into_app_err(format!("failed to read raw LCOV report `{}`", diagnostic_path(&report.raw_path)))
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     for (report, contents) in collected.iter().zip(&raw) {
         lcov::Report::from_reader(lcov::Reader::new(contents.as_bytes())).into_app_err(format!(
-            "raw LCOV report for configuration `{}` at `{}` is not well-formed",
+            "raw LCOV report for feature configuration `{}` at `{}` is not well-formed",
             report.configuration.artifact_name(),
-            report.raw_path.display()
+            diagnostic_path(&report.raw_path)
         ))?;
     }
     let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
@@ -606,7 +615,7 @@ fn filter_and_publish_reports_with(
         let directory = report
             .stable_path
             .parent()
-            .ok_or_else(|| AppError::new(format!("LCOV path `{}` has no parent directory", report.stable_path.display())))?;
+            .ok_or_else(|| missing_lcov_parent_error(&report.stable_path))?;
         let temporary = TemporaryPath::write(
             directory,
             &format!("{}-filtered.info", report.configuration.artifact_name()),
@@ -1298,6 +1307,16 @@ mod tests {
         AppError::new(message)
     }
 
+    #[test]
+    fn coverage_paths_encode_terminal_controls() {
+        let rendered = diagnostic_path(Path::new("bad\n\r\u{1b}[2J.info"));
+        assert_eq!(rendered, r"bad\n\r\u{1b}[2J.info");
+        assert_eq!(
+            missing_lcov_parent_error(Path::new("lcov.info")).to_string(),
+            "LCOV path `lcov.info` has no parent directory"
+        );
+    }
+
     fn process_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
         #[cfg(unix)]
         let status = ExitStatus::from_raw(if success { 0 } else { 1 << 8 });
@@ -1535,12 +1554,23 @@ mod tests {
         }];
         fs::write(&collected[0].stable_path, "old").expect("write old");
 
+        let error = filter_and_publish_reports_with(&execution, &collected, |_, _| panic!("missing LCOV must fail before filtering"))
+            .expect_err("missing raw LCOV must identify its path");
+        assert!(
+            error.to_string().contains(&format!(
+                "failed to read raw LCOV report `{}`",
+                diagnostic_path(&collected[0].raw_path)
+            )),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
+
         fs::write(&collected[0].raw_path, "not lcov").expect("write malformed raw");
         let error = filter_and_publish_reports_with(&execution, &collected, |_, _| panic!("malformed LCOV must fail before filtering"))
             .expect_err("malformed raw LCOV must identify its configuration");
         let expected = format!(
-            "raw LCOV report for configuration `all-features` at `{}` is not well-formed",
-            collected[0].raw_path.display()
+            "raw LCOV report for feature configuration `all-features` at `{}` is not well-formed",
+            diagnostic_path(&collected[0].raw_path)
         );
         let rendered = error.to_string();
         let context = rendered
@@ -1555,6 +1585,21 @@ mod tests {
             .expect_err("filter failure must propagate");
         assert_eq!(error.to_string(), "filter failed");
         assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
+
+        let parentless = [CollectedReport {
+            raw_path: collected[0].raw_path.clone(),
+            stable_path: PathBuf::from(std::path::MAIN_SEPARATOR.to_string()),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with(&execution, &parentless, |_, _| Ok(vec!["filtered".to_owned()]))
+            .expect_err("parentless stable LCOV path must fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "LCOV path `{}` has no parent directory",
+                diagnostic_path(&parentless[0].stable_path)
+            )
+        );
     }
 
     #[test]
