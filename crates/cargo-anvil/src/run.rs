@@ -28,7 +28,8 @@ use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
 use crate::region::{
-    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, remove_region,
+    CommentSyntax, HostScanner, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement,
+    raw_marker_line_present, remove_region, xml_comment_scan_failed, xml_document_root,
 };
 use crate::workspace::{self, Workspace};
 
@@ -233,14 +234,17 @@ fn build_plan_with_hosts(
     // Extra complete pairs retain their bodies as unmanaged settings.
     //
     // Only regions on their way out are repaired here. A live one is repaired
-    // by `push_region_at` when it plans the region, with that region's own
-    // comment syntax rather than the `Hash` assumed below.
-    for key in manifest.regions.keys() {
+    // by `push_region_at` when it plans the region, with that region's declared
+    // comment syntax.
+    for (key, recorded_checksum) in &manifest.regions {
         let host = (hosts.resolve)(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, CommentSyntax::Hash)?;
+            let Some(syntax) = retirement_syntax_or_refuse(repo_root, &mut plan, hosts, &host, &key.id, recorded_checksum)? else {
+                continue;
+            };
+            let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, syntax)?;
         }
     }
 
@@ -528,6 +532,10 @@ fn push_region_at(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = (hosts.resolve)(repo_root, host)?;
+    let current = hosts.get_or_read(repo_root, &host)?;
+    if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref()) {
+        return Ok(());
+    }
     if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
         return Ok(());
     }
@@ -555,11 +563,14 @@ fn push_region_at(
             spec.id.as_str()
         );
     }
-    let placement = composed_host.map_or_else(
-        || region_placement(spec.id.as_str(), current.as_deref()),
-        |declared| composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current.as_deref()),
-    );
-    let body = match delta_region_body(current.as_deref(), spec) {
+    let Some(placement) = region_placement_or_refuse(plan, &host, spec, composed_host, current.as_deref()) else {
+        return Ok(());
+    };
+    let body = match if spec.syntax == CommentSyntax::Hash {
+        delta_region_body(current.as_deref(), spec)
+    } else {
+        DeltaRegionBody::Managed
+    } {
         DeltaRegionBody::Managed => spec.body.as_str(),
         DeltaRegionBody::PreserveRepositoryKey => {
             plan.note(
@@ -628,6 +639,78 @@ fn push_region_at(
     }
     plan.push(item);
     Ok(())
+}
+
+fn region_placement_or_refuse(
+    plan: &mut Plan,
+    host: &str,
+    spec: &RegionSpec,
+    composed_host: Option<ComposedHost>,
+    current: Option<&str>,
+) -> Option<RegionPlacement> {
+    if let Some(declared) = composed_host {
+        return Some(composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current));
+    }
+    match region_placement(spec.id.as_str(), spec.syntax, current) {
+        Ok(placement) => Some(placement),
+        Err(reason) => {
+            refuse_region(plan, host.to_owned(), spec.id.as_str(), &reason, RefusalRemedy::XmlPlacement);
+            None
+        }
+    }
+}
+
+fn refuse_region_syntax_change(plan: &mut Plan, manifest: &Manifest, host: &str, spec: &RegionSpec, current: Option<&str>) -> bool {
+    let Some(text) = current else {
+        return false;
+    };
+    let current_checksum = checksum_str(&spec.body);
+    let recorded_checksum = manifest.region_checksum(host, spec.id.as_str()).unwrap_or(&current_checksum);
+    let scanner = HostScanner::for_path(host);
+    let other_syntaxes = match spec.syntax {
+        CommentSyntax::Hash => [CommentSyntax::SlashSlash, CommentSyntax::Xml],
+        CommentSyntax::SlashSlash => [CommentSyntax::Hash, CommentSyntax::Xml],
+        CommentSyntax::Xml => [CommentSyntax::Hash, CommentSyntax::SlashSlash],
+    };
+    let has_conflicting_evidence = other_syntaxes.into_iter().any(|syntax| {
+        !matches!(scanner.find(text, spec.id.as_str(), syntax), Ok(None))
+            || (syntax == CommentSyntax::Xml
+                && scanner == HostScanner::Lines
+                && xml_comment_scan_failed(text)
+                && raw_marker_line_present(text, spec.id.as_str(), syntax))
+    });
+    if !has_conflicting_evidence {
+        return false;
+    }
+    let existing = match infer_recorded_region_syntax(Some(text), scanner, host, spec.id.as_str(), recorded_checksum) {
+        Ok(existing) => existing,
+        Err(reason) => {
+            refuse_region(
+                plan,
+                host.to_owned(),
+                spec.id.as_str(),
+                &reason.to_string(),
+                RefusalRemedy::SyntaxChange,
+            );
+            return true;
+        }
+    };
+    if existing == spec.syntax {
+        return false;
+    }
+    let name = |syntax| match syntax {
+        CommentSyntax::Hash => "hash",
+        CommentSyntax::SlashSlash => "slash-slash",
+        CommentSyntax::Xml => "XML",
+    };
+    let reason = format!(
+        "existing marker lines use {} comments, but the catalog now declares {} comments. \
+         Changing marker syntax in place is not supported because the manifest does not record the previous syntax",
+        name(existing),
+        name(spec.syntax)
+    );
+    refuse_region(plan, host.to_owned(), spec.id.as_str(), &reason, RefusalRemedy::SyntaxChange);
+    true
 }
 
 /// Repair markers and classify a composed host once, before updating its bodies.
@@ -770,6 +853,19 @@ fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
              so anvil will not write this region rather than risk appending a second copy of it. Restore the \
              missing sentinel around the body anvil generated, or delete the stray one together with the \
              body it was meant to enclose."
+        }
+        RefusalRemedy::RetirementInference => {
+            "Identify the marker pair whose body matches the recorded generated content and remove only competing \
+             marker lines while preserving their bodies. If XML tokenization failed, repair the repository-owned \
+             XML first so anvil can inspect the complete host, then retry."
+        }
+        RefusalRemedy::SyntaxChange => {
+            "Restore the catalog's previous comment syntax, or deliberately remove the old marker lines and \
+             their generated body before retrying with the new syntax."
+        }
+        RefusalRemedy::XmlPlacement => {
+            "Create or restore a well-formed XML host with its closing document-root element on its own line \
+             so anvil can insert the managed region inside the root, then retry."
         }
     }
 }
@@ -926,23 +1022,48 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     RegionPlacement::At(if carries_directive { first_line.len() } else { 0 })
 }
 
-fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
-    if matches!(region_id, DELTA_REGION_ID | "anvil-spellcheck-root") {
-        return RegionPlacement::Start;
+fn region_placement(region_id: &str, syntax: CommentSyntax, current: Option<&str>) -> Result<RegionPlacement, String> {
+    if syntax == CommentSyntax::Hash && matches!(region_id, DELTA_REGION_ID | "anvil-spellcheck-root") {
+        return Ok(RegionPlacement::Start);
     }
-    if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
+    if syntax == CommentSyntax::Hash
+        && matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
         && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
         && crate::region::ends_in_toml_table(old.body_str(), &["Hunspell", "quirks"])
     {
         // Install the replacement tables before retiring the combined block:
         // its trailing user settings must still follow Hunspell.quirks. An
         // empty block establishes no table context; append replacements instead.
-        return RegionPlacement::At(old.start_line.start);
+        return Ok(RegionPlacement::At(old.start_line.start));
     }
-    if let Some(placement) = lint_region_placement(region_id, current) {
-        return placement;
+    if syntax == CommentSyntax::Hash
+        && let Some(placement) = lint_region_placement(region_id, current)
+    {
+        return Ok(placement);
     }
-    RegionPlacement::End
+    if syntax == CommentSyntax::Xml {
+        let text = current.ok_or_else(|| {
+            "the XML host does not exist, so its document root and a safe insertion point cannot be established".to_owned()
+        })?;
+        let root = xml_document_root(text)?;
+        if let Some(region) = find_region(text, region_id, syntax).ok().flatten() {
+            let root = root.ok_or_else(|| "the XML document element is self-closing, so it cannot contain a managed region".to_owned())?;
+            if !region_is_inside_xml_root(region.start_line.start, region.end_line.end, root) {
+                return Err("the existing XML managed region is outside the document root".to_owned());
+            }
+            return Ok(RegionPlacement::End);
+        }
+        let root = root.ok_or_else(|| "the XML document element is self-closing, so it cannot contain a managed region".to_owned())?;
+        let offset = root.closing_line_start.ok_or_else(|| {
+            "the XML host has no complete-line closing root element, so a safe insertion point cannot be established".to_owned()
+        })?;
+        return Ok(RegionPlacement::At(offset));
+    }
+    Ok(RegionPlacement::End)
+}
+
+fn region_is_inside_xml_root(start: usize, end: usize, root: crate::region::XmlRootBounds) -> bool {
+    start >= root.opening_end && end <= root.closing_start
 }
 
 /// The composed-host declaration for a host, when it has one.
@@ -1274,16 +1395,15 @@ fn plan_removals(
             }));
             continue;
         }
-        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, CommentSyntax::Hash, true)? {
+        let Some(syntax) = retirement_syntax_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, last)? else {
+            continue;
+        };
+        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true)? {
             // The lock entry survives with the region, so the next run still
             // knows it is anvil's to retire once the boundary is repaired.
             continue;
         }
         if let Some(host_text) = hosts.cached(&resolved_host) {
-            // CommentSyntax is currently always Hash for managed regions.
-            // When that assumption changes, the manifest will need to
-            // record the syntax used.
-            let syntax = CommentSyntax::Hash;
             let region = HostScanner::for_path(&resolved_host)
                 .find(&host_text, &key.id, syntax)
                 .expect("repair_or_refuse above established that this host has well-formed region markers");
@@ -1308,6 +1428,7 @@ fn plan_removals(
                     hosts.set(&resolved_host, spliced.clone());
                     plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
                 }
+
                 RemovalDecision::OrphanedKept => {
                     // Named by the spelling on disk, not the one the lock
                     // recorded: this refusal says a file was left alone, so it has
@@ -1342,6 +1463,107 @@ fn plan_removals(
     }
 
     Ok(())
+}
+
+/// Infer the marker syntax of a retired region from current host evidence.
+///
+/// Manifest schema 1 records the body checksum but not marker syntax. A unique
+/// checksum match proves ownership; otherwise all complete and malformed marker
+/// evidence must identify one syntax. Ambiguous or incomplete XML scans refuse
+/// rather than being treated as historical fact or proof that the region is
+/// absent.
+fn retirement_syntax_or_refuse(
+    repo_root: &Path,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    recorded_checksum: &str,
+) -> Result<Option<CommentSyntax>, AppError> {
+    let text = hosts.get_or_read(repo_root, host)?;
+    match infer_recorded_region_syntax(text.as_deref(), HostScanner::for_path(host), host, id, recorded_checksum) {
+        Ok(syntax) => Ok(Some(syntax)),
+        Err(reason) => {
+            refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::RetirementInference);
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+fn recorded_region_syntax(
+    repo_root: &Path,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    recorded_checksum: &str,
+) -> Result<CommentSyntax, AppError> {
+    let text = hosts.get_or_read(repo_root, host)?;
+    infer_recorded_region_syntax(text.as_deref(), HostScanner::for_path(host), host, id, recorded_checksum)
+}
+
+fn infer_recorded_region_syntax(
+    text: Option<&str>,
+    scanner: HostScanner,
+    host: &str,
+    id: &str,
+    recorded_checksum: &str,
+) -> Result<CommentSyntax, AppError> {
+    let Some(text) = text else {
+        return Ok(CommentSyntax::Hash);
+    };
+    let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
+    let xml_scan_failed = scanner == HostScanner::Lines && xml_comment_scan_failed(text);
+    if xml_scan_failed && raw_marker_line_present(text, id, CommentSyntax::Xml) {
+        bail!(
+            "managed region '{id}' in '{host}' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
+        );
+    }
+    let mut checksum_match = None;
+    let mut checksum_matches = 0usize;
+    let mut evidence = None;
+    let mut evidence_count = 0;
+
+    for syntax in syntaxes {
+        let found = scanner.find(text, id, syntax);
+        let complete = match &found {
+            Ok(Some(region)) => {
+                if checksum_str(region.body_str()) == recorded_checksum {
+                    checksum_matches += 1;
+                    checksum_match = Some(syntax);
+                }
+                true
+            }
+            Ok(None) | Err(_) => false,
+        };
+        let incomplete_xml_evidence = match syntax {
+            CommentSyntax::Xml => xml_scan_failed && raw_marker_line_present(text, id, syntax),
+            CommentSyntax::Hash | CommentSyntax::SlashSlash => false,
+        };
+        let has_evidence = !matches!(found, Ok(None)) || incomplete_xml_evidence;
+        if complete || has_evidence {
+            evidence_count += 1;
+            evidence = Some(syntax);
+        }
+    }
+
+    match checksum_matches {
+        1 => {
+            return Ok(checksum_match.expect("checksum_matches == 1 guarantees one recorded syntax"));
+        }
+        2.. => {
+            bail!("managed region '{id}' in '{host}' has multiple marker syntaxes whose bodies match the recorded checksum");
+        }
+        0 => {}
+    }
+    if evidence_count == 1 {
+        return Ok(evidence.expect("one marker-evidence syntax was recorded"));
+    }
+    if evidence_count == 0 {
+        Ok(CommentSyntax::Hash)
+    } else {
+        bail!("managed region '{id}' in '{host}' has ambiguous marker lines in multiple comment syntaxes")
+    }
 }
 
 fn live_files(plan: &Plan) -> BTreeSet<String> {
@@ -1410,6 +1632,27 @@ mod tests {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
             ..HostTextCache::default()
         }
+    }
+
+    fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache) {
+        let HostSelector::Path(host) = &spec.host else {
+            panic!("the managed-region test helper requires HostSelector::Path");
+        };
+        let mut hosts = memory_hosts();
+        hosts.texts.insert(host.clone(), text.map(str::to_owned));
+        hosts.newlines.insert(host.clone(), crate::region::text_newline(text.unwrap_or("")));
+        let mut plan = Plan::default();
+        push_region_at(
+            Path::new("in-memory-managed-region-tests"),
+            manifest,
+            &mut plan,
+            &mut hosts,
+            &mut ComposedHosts::default(),
+            host,
+            spec,
+        )
+        .unwrap();
+        (plan, hosts)
     }
 
     #[test]
@@ -1625,6 +1868,18 @@ mod tests {
             (
                 RefusalRemedy::MalformedMarkers,
                 "Without a matching pair of sentinels the boundary of the generated body cannot be established, so anvil will not write this region rather than risk appending a second copy of it. Restore the missing sentinel around the body anvil generated, or delete the stray one together with the body it was meant to enclose.",
+            ),
+            (
+                RefusalRemedy::RetirementInference,
+                "Identify the marker pair whose body matches the recorded generated content and remove only competing marker lines while preserving their bodies. If XML tokenization failed, repair the repository-owned XML first so anvil can inspect the complete host, then retry.",
+            ),
+            (
+                RefusalRemedy::SyntaxChange,
+                "Restore the catalog's previous comment syntax, or deliberately remove the old marker lines and their generated body before retrying with the new syntax.",
+            ),
+            (
+                RefusalRemedy::XmlPlacement,
+                "Create or restore a well-formed XML host with its closing document-root element on its own line so anvil can insert the managed region inside the root, then retry.",
             ),
             (
                 RefusalRemedy::EditedRegion,
@@ -2098,6 +2353,13 @@ mod tests {
                 !markers.contains("Reconcile the hand-written table"),
                 "a marker fault has nothing to do with a table: {markers}"
             );
+
+            let syntax = remedy_for(RefusalRemedy::SyntaxChange);
+            assert!(syntax.contains("previous comment syntax"), "{syntax}");
+            assert!(!syntax.contains("missing sentinel"), "{syntax}");
+
+            let xml = remedy_for(RefusalRemedy::XmlPlacement);
+            assert!(xml.contains("inside the root"), "{xml}");
         }
 
         #[test]
@@ -2605,11 +2867,30 @@ mod tests {
     /// entirely -- see `unpaired_markers_are_refused_rather_than_unmanaged`.
     #[cfg_attr(miri, ignore = "uses filesystem")]
     #[test]
-    fn marker_recovery_preserves_content_and_settles_for_both_syntaxes() {
-        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
-            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
-            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
-            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+    fn marker_recovery_preserves_content_and_settles_for_all_syntaxes() {
+        for (syntax, prefix, open, close, suffix) in [
+            (
+                CommentSyntax::Hash,
+                "",
+                "# >>> anvil-managed: repair\r\n",
+                "# <<< anvil-managed: repair\r\n",
+                "",
+            ),
+            (
+                CommentSyntax::SlashSlash,
+                "",
+                "// >>> anvil-managed: repair\r\n",
+                "// <<< anvil-managed: repair\r\n",
+                "",
+            ),
+            (
+                CommentSyntax::Xml,
+                "<root>\r\n",
+                "<!-- >>> anvil-managed: repair -->\r\n",
+                "<!-- <<< anvil-managed: repair -->\r\n",
+                "</root>\r\n",
+            ),
+        ] {
             let catalog = Catalog::builder(CliMeta::new("anvil"))
                 .with_artifact(Artifact::region(RegionSpec {
                     host: HostSelector::Path("host.txt".to_owned()),
@@ -2620,8 +2901,8 @@ mod tests {
                 .build()
                 .unwrap();
             for input in [
-                format!("{open}{open}generated\r\n{close}user\r\n"),
-                format!("{open}generated\r\n{close}user\r\n{close}"),
+                format!("{prefix}{open}{open}generated\r\n{close}user\r\n{suffix}"),
+                format!("{prefix}{open}generated\r\n{close}user\r\n{close}{suffix}"),
             ] {
                 let tmp = empty_workspace();
                 let path = tmp.path().join("host.txt");
@@ -2632,13 +2913,341 @@ mod tests {
                 let region = find_region(&output, "repair", syntax).unwrap().unwrap();
                 assert_eq!(region.body_str(), "generated\r\n");
                 assert!(remove_region(&output, "repair", syntax).unwrap().contains("user"));
-                assert_eq!(output.matches(&open).count(), 1);
-                assert_eq!(output.matches(&close).count(), 1);
+                assert_eq!(output.matches(open).count(), 1);
+                assert_eq!(output.matches(close).count(), 1);
                 assert!(!output.replace("\r\n", "").contains('\n'));
                 assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
                 assert_eq!(fs::read_to_string(&path).unwrap(), output);
             }
         }
+    }
+
+    #[test]
+    fn absent_xml_region_is_inserted_inside_the_project_root() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("projects"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, _) = managed_region_plan(
+            Some("<Project>\n  <Import Project=\"repository.props\" />\n</Project>\n"),
+            &Manifest::default(),
+            &spec,
+        );
+
+        assert!(plan.refusals().is_empty());
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some(concat!(
+                "<Project>\n",
+                "  <Import Project=\"repository.props\" />\n",
+                "\n",
+                "<!-- >>> anvil-managed: projects -->\n",
+                "  <Project Include=\"generated.proj\" />\n",
+                "<!-- <<< anvil-managed: projects -->\n",
+                "\n",
+                "</Project>\n",
+            ))
+        );
+    }
+
+    #[test]
+    fn absent_xml_region_is_inserted_inside_an_arbitrary_document_root() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "  <setting name=\"generated\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, _) = managed_region_plan(
+            Some("<configuration>\n  <setting name=\"user\" />\n</configuration>\n"),
+            &Manifest::default(),
+            &spec,
+        );
+
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some(concat!(
+                "<configuration>\n",
+                "  <setting name=\"user\" />\n",
+                "\n",
+                "<!-- >>> anvil-managed: settings -->\n",
+                "  <setting name=\"generated\" />\n",
+                "<!-- <<< anvil-managed: settings -->\n",
+                "\n",
+                "</configuration>\n",
+            ))
+        );
+    }
+
+    #[test]
+    fn changing_a_live_region_syntax_refuses_without_duplicating_the_region() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: RegionId::new("projects"),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let complete = "# >>> anvil-managed: projects\ngenerated\n# <<< anvil-managed: projects\n";
+        let malformed = "# >>> anvil-managed: projects\ngenerated\n";
+        for host in [complete, malformed] {
+            let mut manifest = Manifest::default();
+            manifest.set_region("host.txt", "projects", checksum_str("generated\n"));
+            let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+            assert_eq!(
+                plan.refusals(),
+                &["Refused to manage host.txt [projects]: existing marker lines use hash comments, but the catalog now declares XML comments. \
+                   Changing marker syntax in place is not supported because the manifest does not record the previous syntax. This region was left unchanged; \
+                   other regions in the same file and other artifacts may still be updated. Restore the catalog's previous comment syntax, or deliberately \
+                   remove the old marker lines and their generated body before retrying with the new syntax."
+                    .to_owned()]
+            );
+            assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
+            assert_eq!(host.matches("generated").count(), 1);
+        }
+    }
+
+    #[test]
+    fn untracked_region_in_another_syntax_is_refused_without_duplication() {
+        let host = "# >>> anvil-managed: projects\ngenerated\n# <<< anvil-managed: projects\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: RegionId::new("projects"),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+
+        let (plan, hosts) = managed_region_plan(Some(host), &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage host.txt [projects]: existing marker lines use hash comments, but the catalog now declares slash-slash comments. \
+               Changing marker syntax in place is not supported because the manifest does not record the previous syntax. This region was left unchanged; \
+               other regions in the same file and other artifacts may still be updated. Restore the catalog's previous comment syntax, or deliberately \
+               remove the old marker lines and their generated body before retrying with the new syntax."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
+        assert_eq!(host.matches("generated").count(), 1);
+    }
+
+    #[test]
+    fn empty_declared_syntax_pair_does_not_mask_the_tracked_region() {
+        let host = "# >>> anvil-managed: projects\ngenerated\n# <<< anvil-managed: projects\n\
+                    // >>> anvil-managed: projects\n// <<< anvil-managed: projects\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: RegionId::new("projects"),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("host.txt", "projects", checksum_str("generated\n"));
+        let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage host.txt [projects]: existing marker lines use hash comments, but the catalog now declares slash-slash comments. \
+               Changing marker syntax in place is not supported because the manifest does not record the previous syntax. This region was left unchanged; \
+               other regions in the same file and other artifacts may still be updated. Restore the catalog's previous comment syntax, or deliberately \
+               remove the old marker lines and their generated body before retrying with the new syntax."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn live_syntax_change_refuses_when_xml_failure_hides_the_tracked_pair() {
+        let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "setting = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.xml", "settings", checksum_str("  <generated />\n"));
+        let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage config.xml [settings]: managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so \
+               absence cannot be proven. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Restore the catalog's \
+               previous comment syntax, or deliberately remove the old marker lines and their generated body before retrying with the new syntax."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn deleted_live_region_markers_allow_regeneration_in_the_declared_syntax() {
+        for (host, syntax, path) in [
+            ("<root>\n</root>\n", CommentSyntax::Xml, "config.xml"),
+            ("user content\n", CommentSyntax::SlashSlash, "config.txt"),
+        ] {
+            let spec = RegionSpec {
+                host: HostSelector::Path(path.to_owned()),
+                id: RegionId::new("settings"),
+                body: "generated\n".to_owned(),
+                syntax,
+            };
+            let mut manifest = Manifest::default();
+            manifest.set_region(path, "settings", checksum_str("old generated\n"));
+            let (plan, _) = managed_region_plan(Some(host), &manifest, &spec);
+
+            assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+            assert_eq!(plan.items()[0].decision, Decision::Write);
+            assert!(plan.items()[0].spliced_host.as_deref().unwrap().contains("anvil-managed: settings"));
+        }
+    }
+
+    #[test]
+    fn existing_xml_region_outside_the_document_root_is_refused() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new("settings"),
+            body: "  <setting name=\"generated\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.xml", "settings", checksum_str(""));
+        for host in [
+            "<!-- >>> anvil-managed: settings -->\n<!-- <<< anvil-managed: settings -->\n<configuration>\n</configuration>\n",
+            "<configuration>\n</configuration>\n<!-- >>> anvil-managed: settings -->\n<!-- <<< anvil-managed: settings -->\n",
+        ] {
+            let (plan, hosts) = managed_region_plan(Some(host), &manifest, &spec);
+
+            assert_eq!(
+                plan.refusals(),
+                &["Refused to manage config.xml [settings]: the existing XML managed region is outside the document root. This region was left unchanged; other regions \
+                   in the same file and other artifacts may still be updated. Create or restore a well-formed XML host with its closing document-root element on its own \
+                   line so anvil can insert the managed region inside the root, then retry."
+                    .to_owned()]
+            );
+            assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
+        }
+    }
+
+    #[test]
+    fn existing_xml_region_may_touch_the_document_root_boundaries() {
+        let host = "<configuration>\n<!-- >>> anvil-managed: settings -->\n\
+                    <!-- <<< anvil-managed: settings -->\n</configuration>\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new("settings"),
+            body: String::new(),
+            syntax: CommentSyntax::Xml,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.xml", "settings", checksum_str(""));
+        let (plan, _) = managed_region_plan(Some(host), &manifest, &spec);
+
+        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.items()[0].decision, Decision::InSync);
+    }
+
+    #[test]
+    fn xml_region_containment_includes_exact_root_boundaries() {
+        let root = crate::region::XmlRootBounds {
+            opening_end: 10,
+            closing_start: 20,
+            closing_line_start: Some(20),
+        };
+        assert!(region_is_inside_xml_root(10, 20, root));
+        assert!(region_is_inside_xml_root(11, 19, root));
+        assert!(!region_is_inside_xml_root(9, 20, root));
+        assert!(!region_is_inside_xml_root(10, 21, root));
+    }
+
+    #[test]
+    fn compact_xml_root_refuses_region_introduction() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("projects"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let host = "<Project></Project>\n";
+        let (plan, hosts) = managed_region_plan(Some(host), &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage dirs.proj [projects]: the XML host has no complete-line closing root element, so a safe insertion point cannot be established. \
+               This region was left unchanged; other regions in the same file and other artifacts may still be updated. Create or restore a well-formed XML host \
+               with its closing document-root element on its own line so anvil can insert the managed region inside the root, then retry."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("dirs.proj").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn missing_xml_host_refuses_region_introduction() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("projects"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, hosts) = managed_region_plan(None, &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage dirs.proj [projects]: the XML host does not exist, so its document root and a safe insertion point cannot be established. This region \
+               was left unchanged; other regions in the same file and other artifacts may still be updated. Create or restore a well-formed XML host with its closing \
+               document-root element on its own line so anvil can insert the managed region inside the root, then retry."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("dirs.proj"), None);
+    }
+
+    #[test]
+    fn xml_insertion_ignores_project_close_text_inside_trailing_comment() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("projects"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let host = "<Project>\n</Project>\n<!--\n</Project>\n-->\n";
+        let (plan, _) = managed_region_plan(Some(host), &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some(
+                "<Project>\n\n<!-- >>> anvil-managed: projects -->\n  <Project Include=\"generated.proj\" />\n<!-- <<< anvil-managed: projects -->\n\n</Project>\n<!--\n</Project>\n-->\n"
+            )
+        );
+    }
+
+    #[test]
+    fn xml_region_ids_that_match_toml_special_cases_still_insert_inside_root() {
+        for id in ["anvil-rust-lints", "anvil-delta", "anvil-spellcheck-root"] {
+            assert_eq!(
+                region_placement(id, CommentSyntax::Xml, Some("<Project>\n</Project>\n")),
+                Ok(RegionPlacement::At("<Project>\n".len()))
+            );
+        }
+        let spec = RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("anvil-rust-lints"),
+            body: "  <Project Include=\"generated.proj\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, _) = managed_region_plan(Some("<Project>\n</Project>\n"), &Manifest::default(), &spec);
+        let spliced = plan.items()[0].spliced_host.as_deref().unwrap();
+        assert!(spliced.find("anvil-managed").unwrap() < spliced.find("</Project>").unwrap());
+
+        let delta_spec = RegionSpec {
+            host: HostSelector::Path("config.xml".to_owned()),
+            id: RegionId::new(DELTA_REGION_ID),
+            body: "  <generated />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        };
+        let (plan, _) = managed_region_plan(Some("<root>\n</root>\n"), &Manifest::default(), &delta_spec);
+        assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+        assert!(plan.items()[0].spliced_host.as_deref().unwrap().contains("<generated />"));
     }
 
     /// A region that has lost one of its sentinels still holds a body anvil
@@ -2653,10 +3262,23 @@ mod tests {
     #[test]
     fn unpaired_markers_are_refused_rather_than_unmanaged() {
         use crate::catalog::{CliMeta, RegionId};
-        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
-            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
-            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
-            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+        for (syntax, open, close) in [
+            (
+                CommentSyntax::Hash,
+                "# >>> anvil-managed: repair\r\n",
+                "# <<< anvil-managed: repair\r\n",
+            ),
+            (
+                CommentSyntax::SlashSlash,
+                "// >>> anvil-managed: repair\r\n",
+                "// <<< anvil-managed: repair\r\n",
+            ),
+            (
+                CommentSyntax::Xml,
+                "<!-- >>> anvil-managed: repair -->\r\n",
+                "<!-- <<< anvil-managed: repair -->\r\n",
+            ),
+        ] {
             let catalog = Catalog::builder(CliMeta::new("anvil"))
                 .with_artifact(Artifact::region(RegionSpec {
                     host: HostSelector::Path("host.txt".to_owned()),
@@ -2710,6 +3332,224 @@ mod tests {
                 assert_eq!(fs::read_to_string(&path).unwrap(), input);
             }
         }
+    }
+
+    #[test]
+    fn retired_xml_region_is_removed_with_surrounding_content_preserved() {
+        let host = "<Project>\n<!-- >>> anvil-managed: projects -->\n  <Project Include=\"generated.proj\" />\n<!-- <<< anvil-managed: projects -->\n  <Target Name=\"User\" />\n</Project>\n";
+        let mut previous = Manifest::default();
+        previous.set_region("dirs.proj", "projects", checksum_str("  <Project Include=\"generated.proj\" />\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("dirs.proj", host.to_owned());
+        hosts.newlines.insert("dirs.proj".to_owned(), crate::region::text_newline(host));
+        let mut plan = Plan::default();
+        plan_removals(
+            Path::new("in-memory-managed-region-tests"),
+            &previous,
+            &mut plan,
+            &mut hosts,
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.items()[0].decision, Decision::Remove);
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some("<Project>\n  <Target Name=\"User\" />\n</Project>\n")
+        );
+    }
+
+    #[test]
+    fn retirement_uses_recorded_checksum_to_disambiguate_marker_syntax() {
+        let host = "# >>> anvil-managed: retired\nhash body\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nslash body\n// <<< anvil-managed: retired\n";
+        let mut previous = Manifest::default();
+        previous.set_region("host.txt", "retired", checksum_str("slash body\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", host.to_owned());
+        hosts.newlines.insert("host.txt".to_owned(), crate::region::text_newline(host));
+        let mut plan = Plan::default();
+
+        plan_removals(
+            Path::new("in-memory-managed-region-tests"),
+            &previous,
+            &mut plan,
+            &mut hosts,
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.items()[0].decision, Decision::Remove);
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some("# >>> anvil-managed: retired\nhash body\n# <<< anvil-managed: retired\n")
+        );
+    }
+
+    #[test]
+    fn retirement_refuses_complete_and_malformed_evidence_in_different_syntaxes() {
+        for malformed in [
+            "// >>> anvil-managed: retired\n// >>> anvil-managed: retired\nowned body\n// <<< anvil-managed: retired\n",
+            "// >>> anvil-managed: retired\nowned body\n",
+        ] {
+            let host = format!("# >>> anvil-managed: retired\n# <<< anvil-managed: retired\n{malformed}");
+            let mut hosts = memory_hosts();
+            hosts.set("host.txt", host);
+
+            assert_eq!(
+                recorded_region_syntax(
+                    Path::new("in-memory-managed-region-tests"),
+                    &mut hosts,
+                    "host.txt",
+                    "retired",
+                    &checksum_str("owned body\n"),
+                )
+                .unwrap_err()
+                .to_string(),
+                "managed region 'retired' in 'host.txt' has ambiguous marker lines in multiple comment syntaxes"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_retirement_refuses_only_that_region_and_plans_unrelated_artifacts() {
+        let host = "# >>> anvil-managed: retired\nsame body\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nsame body\n// <<< anvil-managed: retired\n";
+        let mut previous = Manifest::default();
+        previous.set_region("host.txt", "retired", checksum_str("same body\n"));
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(campaign_region("other.txt", "unrelated", "generated\n")))
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", host.to_owned());
+        hosts.set("other.txt", String::new());
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-managed-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &previous,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+
+        assert_eq!(plan.refusals().len(), 1);
+        assert_eq!(
+            plan.refusals()[0],
+            "Refused to manage host.txt [retired]: managed region 'retired' in 'host.txt' has multiple marker syntaxes whose bodies match the recorded checksum. \
+             This region was left unchanged; other regions in the same file and other artifacts may still be updated. Identify the marker pair whose body matches \
+             the recorded generated content and remove only competing marker lines while preserving their bodies. If XML tokenization failed, repair the \
+             repository-owned XML first so anvil can inspect the complete host, then retry."
+        );
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::Region {
+                    host: "other.txt".to_owned(),
+                    id: "unrelated".to_owned(),
+                }
+                && item.decision == Decision::Write
+        }));
+        let recorded = checksum_str("same body\n");
+        assert_eq!(
+            plan.projected_manifest(&previous).region_checksum("host.txt", "retired"),
+            Some(recorded.as_str())
+        );
+    }
+
+    #[test]
+    fn retirement_refuses_multiple_checksum_matching_syntaxes() {
+        let host = "# >>> anvil-managed: retired\nsame body\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nsame body\n// <<< anvil-managed: retired\n";
+        let mut hosts = memory_hosts();
+        hosts.set("host.txt", host.to_owned());
+
+        assert_eq!(
+            recorded_region_syntax(
+                Path::new("in-memory-managed-region-tests"),
+                &mut hosts,
+                "host.txt",
+                "retired",
+                &checksum_str("same body\n"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "managed region 'retired' in 'host.txt' has multiple marker syntaxes whose bodies match the recorded checksum"
+        );
+    }
+
+    #[test]
+    fn retirement_refuses_when_xml_tokenization_hides_marker_lines() {
+        let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
+        let mut hosts = memory_hosts();
+        hosts.set("config.xml", host.to_owned());
+
+        assert_eq!(
+            recorded_region_syntax(
+                Path::new("in-memory-managed-region-tests"),
+                &mut hosts,
+                "config.xml",
+                "settings",
+                &checksum_str("  <generated />\n"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so absence cannot be proven"
+        );
+        assert_eq!(hosts.cached("config.xml").as_deref(), Some(host));
+    }
+
+    #[test]
+    fn retirement_inference_refusal_explains_malformed_xml_recovery() {
+        let host = "<root>\n<broken attr=>\n<!-- >>> anvil-managed: settings -->\n  <generated />\n<!-- <<< anvil-managed: settings -->\n</root>\n";
+        let mut previous = Manifest::default();
+        previous.set_region("config.xml", "settings", checksum_str("  <generated />\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("config.xml", host.to_owned());
+        let mut plan = Plan::default();
+
+        plan_removals(
+            Path::new("in-memory-managed-region-tests"),
+            &previous,
+            &mut plan,
+            &mut hosts,
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage config.xml [settings]: managed region 'settings' in 'config.xml' has XML marker-shaped lines after an XML tokenization failure, so \
+               absence cannot be proven. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Identify the marker \
+               pair whose body matches the recorded generated content and remove only competing marker lines while preserving their bodies. If XML tokenization failed, \
+               repair the repository-owned XML first so anvil can inspect the complete host, then retry."
+                .to_owned()]
+        );
+    }
+
+    #[test]
+    fn retirement_ignores_xml_marker_shaped_text_inside_toml_strings() {
+        let host = "# >>> anvil-managed: settings\nowned = true\n# <<< anvil-managed: settings\n\
+                    text = '''\n<!-- >>> anvil-managed: settings -->\nuser text\n<!-- <<< anvil-managed: settings -->\n'''\n";
+        let mut hosts = memory_hosts();
+        hosts.set("config.toml", host.to_owned());
+
+        assert_eq!(
+            recorded_region_syntax(
+                Path::new("in-memory-managed-region-tests"),
+                &mut hosts,
+                "config.toml",
+                "settings",
+                &checksum_str("owned = true\n"),
+            )
+            .unwrap(),
+            CommentSyntax::Hash
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem")]
