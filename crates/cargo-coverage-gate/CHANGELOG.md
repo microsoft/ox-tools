@@ -11,6 +11,8 @@
 
 - 🐛 Bug Fixes
 
+  - satisfy CI and review contracts
+  - allow same-version metadata refresh
   - close final filtering gaps
   - close source traversal gaps
   - compose cfg guards across sources
