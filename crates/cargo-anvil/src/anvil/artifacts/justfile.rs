@@ -311,6 +311,44 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
     }
 
+    #[test]
+    fn powershell_nested_just_invocations_escape_the_executable_path() {
+        const UNSAFE_INVOCATION: &str = r#"&"{{just_executable()}}""#;
+        let contains_unsafe_invocation = |body: &str| {
+            body.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .contains(UNSAFE_INVOCATION)
+        };
+        for whitespace_variant in [
+            r#"& "{{ just_executable() }}""#,
+            r#"&"{{just_executable()}}""#,
+            "& \t\"{{\njust_executable ( )\n}}\"",
+        ] {
+            assert!(contains_unsafe_invocation(whitespace_variant));
+        }
+
+        let top_level_files = [
+            (MOD_JUST_PATH, MOD_JUST),
+            (VERSIONS_JUST_PATH, VERSIONS_JUST),
+            (TOOLS_JUST_PATH, TOOLS_JUST),
+            (HELPERS_JUST_PATH, HELPERS_JUST),
+            (IMPACT_JUST_PATH, IMPACT_JUST),
+            (TIERS_JUST_PATH, TIERS_JUST),
+        ];
+        for (path, body) in top_level_files
+            .into_iter()
+            .chain(DEV_FILES.iter().copied())
+            .chain(CHECK_FILES.iter().copied())
+            .chain(GROUP_FILES.iter().copied())
+        {
+            assert!(
+                !contains_unsafe_invocation(body),
+                "{path} must single-quote and escape just_executable() for PowerShell"
+            );
+        }
+    }
+
     /// All `checks/*.just` bodies concatenated, for content assertions.
     fn all_check_bodies() -> String {
         CHECK_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
@@ -420,7 +458,7 @@ mod tests {
 
     #[test]
     fn impact_scoped_checks_propagate_scope_resolution_failures() {
-        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
+        const CALL: &str = "$include = (& '{{ replace(just_executable(), \"'\", \"''\") }}' _anvil-impact-include";
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
             let lines: Vec<&str> = body.lines().collect();
@@ -577,7 +615,7 @@ mod tests {
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                        execution_body.contains("$include = (& '{{ replace(just_executable(), \"'\", \"''\") }}' _anvil-impact-include"),
                         "{path} must capture _anvil-impact-include into a local $include variable"
                     );
                 }
@@ -833,12 +871,24 @@ mod tests {
             "every shared Cargo-tool installation must provision stable first"
         );
         assert!(
-            TOOLS_JUST.contains("& just _install-tool-core cargo-bolero"),
-            "platform-gated installers must use the already-provisioned core helper"
+            TOOLS_JUST.contains(
+                "& '{{ replace(just_executable(), \"'\", \"''\") }}' _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}"
+            ),
+            "the bolero installer must invoke the generated just executable for its core helper"
         );
         assert!(
-            TOOLS_JUST.contains("& just _install-tool-core cargo-mutants"),
-            "platform-gated installers must use the already-provisioned core helper"
+            TOOLS_JUST.contains(
+                "& '{{ replace(just_executable(), \"'\", \"''\") }}' _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}"
+            ),
+            "the mutants installer must invoke the generated just executable for its core helper"
+        );
+        assert!(
+            TOOLS_JUST.contains("& '{{ replace(just_executable(), \"'\", \"''\") }}' _check-tool cargo-bolero {{cargo_bolero_version}}"),
+            "the bolero prerequisite check must invoke the generated just executable"
+        );
+        assert!(
+            TOOLS_JUST.contains("& '{{ replace(just_executable(), \"'\", \"''\") }}' _check-tool cargo-mutants {{cargo_mutants_version}}"),
+            "the mutants prerequisite check must invoke the generated just executable"
         );
         for component in ["clippy", "rustfmt"] {
             let expected = format!("anvil-component-default-{component}-install: anvil-toolchain-stable-install");

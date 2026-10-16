@@ -89,7 +89,7 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         exit 2
     }
 
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') {
