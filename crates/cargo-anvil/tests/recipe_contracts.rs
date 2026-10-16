@@ -10,7 +10,7 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
@@ -576,80 +576,82 @@ exit 0
     tmp
 }
 
-fn generated_recipe_fixture() -> TempDir {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
-    write(
-        &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.90\"\n",
-    );
-    write(
-        &root.join("crates/alpha/Cargo.toml"),
-        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    );
-    write(&root.join("crates/alpha/src/lib.rs"), "");
-    write(
-        &root.join("Justfile"),
-        "set windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n\n_default:\n    @just --list\n",
-    );
-    run_update(
-        &cargo_anvil::Catalog::anvil(),
-        &Cli {
-            backends: vec![],
-            no_backends: true,
-            dry_run: false,
-            force: false,
-        },
-        root,
-    )
-    .unwrap();
-    tmp
+struct RecipeDeclaration<'a> {
+    visibility: Vec<&'a str>,
+    signature: String,
+}
+
+fn declared_anvil_recipes(catalog: &cargo_anvil::Catalog) -> BTreeMap<&str, RecipeDeclaration<'_>> {
+    let mut recipes = BTreeMap::new();
+    for artifact in catalog.artifacts() {
+        let cargo_anvil::Artifact::OwnedFile(spec) = artifact else {
+            continue;
+        };
+        if !spec.path.starts_with("justfiles/anvil/") {
+            continue;
+        }
+        let lines: Vec<_> = spec.body.lines().collect();
+        for (index, line) in lines.iter().enumerate().filter(|(_, line)| line.starts_with("anvil-")) {
+            let name = line.split([' ', ':']).next().unwrap();
+            let visibility = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|line| line.starts_with('['))
+                .copied()
+                .filter(|line| *line == "[private]" || line.starts_with("[group("))
+                .collect();
+            let mut end = index;
+            while lines[end].ends_with('\\') {
+                end += 1;
+            }
+            let signature = lines[index..=end].join("\n");
+            assert!(
+                recipes.insert(name, RecipeDeclaration { visibility, signature }).is_none(),
+                "duplicate recipe declaration: {name}"
+            );
+        }
+    }
+    recipes
 }
 
 #[test]
-fn generated_recipe_listing_exposes_only_grouped_public_entry_points() {
-    if !tools_available() {
-        eprintln!("skipping recipe listing test: just and pwsh are required");
-        return;
+fn generated_recipe_visibility_exposes_only_grouped_public_entry_points() {
+    let catalog = cargo_anvil::Catalog::anvil();
+    let recipes = declared_anvil_recipes(&catalog);
+    let mut groups = BTreeMap::<_, Vec<_>>::new();
+    for (name, recipe) in &recipes {
+        if !recipe.visibility.contains(&"[private]") {
+            groups.entry(&recipe.visibility).or_default().push(*name);
+        }
     }
-    let tmp = generated_recipe_fixture();
-    let root = tmp.path();
-    let output = run_just(root, &["--list", "--no-aliases", "--list-heading", ""], &[]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let listing = String::from_utf8(output.stdout).unwrap();
-    // Keep recipe names and group headings, without version-dependent alignment,
-    // descriptions, or argument rendering.
-    let entries: Vec<_> = listing
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|entry| *entry != "#")
+    let surface = groups
+        .iter()
+        .map(|(attributes, names)| format!("{}\n{}", attributes.join("\n"), names.join("\n")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        surface.lines().collect::<Vec<_>>(),
+        include_str!("fixtures/recipe-public-surface.txt").lines().collect::<Vec<_>>()
+    );
+
+    let aliases: Vec<_> = catalog
+        .artifacts()
+        .iter()
+        .filter_map(|artifact| match artifact {
+            cargo_anvil::Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/anvil/") => Some(&spec.body),
+            _ => None,
+        })
+        .flat_map(|body| body.lines().filter(|line| line.starts_with("alias ")))
         .collect();
-    insta::assert_snapshot!("public_recipe_listing", entries.join("\n"));
-
-    let output = run_just(root, &["--summary"], &[]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let summary = String::from_utf8(output.stdout).unwrap();
-    let expected: HashSet<_> = entries.iter().copied().filter(|entry| !entry.starts_with('[')).collect();
-    assert_eq!(summary.split_whitespace().collect::<HashSet<_>>(), expected);
-
-    let listed = run_just(root, &["--list"], &[]);
-    let default = run_just(root, &[], &[]);
-    assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
-    assert!(default.status.success(), "{}", String::from_utf8_lossy(&default.stderr));
-    assert_eq!(default.stdout, listed.stdout, "bare just must show the same public surface");
-
-    let alias = run_just(root, &["--show", "anvil"], &[]);
-    assert!(alias.status.success(), "{}", String::from_utf8_lossy(&alias.stderr));
-    assert!(String::from_utf8(alias.stdout).unwrap().contains("anvil-pr:"));
+    assert_eq!(aliases, ["alias anvil := anvil-pr"]);
+    assert_eq!(recipes["anvil-pr"].visibility, ["[group(\"anvil\")]"]);
 }
 
 #[test]
-fn private_prerequisite_recipes_remain_directly_callable() {
-    if !tools_available() {
-        eprintln!("skipping private recipe test: just and pwsh are required");
-        return;
-    }
-    let tmp = generated_recipe_fixture();
+fn private_prerequisite_recipes_preserve_their_definitions() {
+    let catalog = cargo_anvil::Catalog::anvil();
+    let recipes = declared_anvil_recipes(&catalog);
+    let mut signatures = Vec::new();
     for recipe in [
         "anvil-build-setup",
         "anvil-clippy-setup",
@@ -663,14 +665,14 @@ fn private_prerequisite_recipes_remain_directly_callable() {
         "anvil-pr-validate-prereqs",
         "anvil-tool-cargo-audit-validate-prereqs",
     ] {
-        let output = run_just(tmp.path(), &["--dry-run", recipe], &[]);
-        assert!(
-            output.status.success(),
-            "{recipe} must still resolve and plan its dependencies:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!output.stderr.is_empty(), "{recipe} must plan prerequisite work");
+        let declaration = &recipes[recipe];
+        assert_eq!(declaration.visibility, ["[private]"], "{recipe}");
+        signatures.push(declaration.signature.as_str());
     }
+    assert_eq!(
+        signatures.join("\n\n").lines().collect::<Vec<_>>(),
+        include_str!("fixtures/recipe-private-definitions.txt").lines().collect::<Vec<_>>()
+    );
 }
 
 /// `anvil-container-tag` resolves the declared root MSRV through
@@ -1766,8 +1768,29 @@ fn setup_never_reaches_workspace_msrv_validation() {
     if !tools_available() {
         return;
     }
-    let tmp = generated_recipe_fixture();
+    let tmp = TempDir::new().unwrap();
     let root = tmp.path();
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.90\"\n",
+    );
+    write(
+        &root.join("crates/alpha/Cargo.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("crates/alpha/src/lib.rs"), "");
+    run_update(
+        &cargo_anvil::Catalog::anvil(),
+        &Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        },
+        root,
+    )
+    .unwrap();
+    write(&root.join("Justfile"), "import 'justfiles/anvil/mod.just'\n");
 
     let output = run_just(root, &["--dry-run", "anvil-setup", "binstall"], &[]);
     assert!(

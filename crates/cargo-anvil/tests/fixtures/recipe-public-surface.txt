@@ -1,8 +1,4 @@
----
-source: crates/cargo-anvil/tests/recipe_contracts.rs
-expression: "entries.join(\"\\n\")"
----
-[anvil]
+[group("anvil")]
 anvil-aprz
 anvil-audit
 anvil-bench
@@ -51,11 +47,11 @@ anvil-scheduled-test
 anvil-semver-check
 anvil-spellcheck
 anvil-udeps
-[anvil-container]
+[group("anvil-container")]
 anvil-container
 anvil-container-down
 anvil-container-status
 anvil-container-tag
-[anvil-setup]
+[group("anvil-setup")]
 anvil-setup
 anvil-validate-prereqs
