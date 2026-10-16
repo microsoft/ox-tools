@@ -274,14 +274,8 @@ detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` l
 cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.
 
-These cached keys are not Cargo selectors: a published dependency can share both
-the name and version of a workspace member. `.anvil/packages.ps1` resolves the
-keys against the consuming runner's workspace-member metadata and constructs
-each tool's arguments centrally. Single-package commands use manifest paths,
-with an explicit package selector for workspace-root manifests; multi-package
-Cargo commands use source-qualified specs. Semver-checks uses a manifest path
-and bare package name, llvm-cov uses literal metadata IDs, and cargo-each/hack
-filter workspace keys. Absolute checkout IDs never enter the portable cache.
+Consumer-side resolution and tool adapters are defined in
+[check scoping](./design/checks.md#5-impact-scoping-check--include-mapping).
 
 ### Mode routing before dependency evaluation
 
