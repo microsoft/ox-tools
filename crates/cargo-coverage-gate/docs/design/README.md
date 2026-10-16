@@ -551,9 +551,11 @@ the released Cargo surface:
 - within a released file, `#[test]`, `#[bench]`, `#[cfg(test)]`, and
   predicates such as `#[cfg(all(test, unix))]` are removed, while
   `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
-  `cfg(not(test))` remain. Correlated occurrences of up to twelve distinct
-  non-`test` cfg atoms are evaluated exactly; larger or unsupported predicate
-  shapes fall back to conservative retention rather than hiding released code.
+  `cfg(not(test))` remain. All applicable `cfg` guards on an item or enclosing
+  owner are conjoined with shared assignments. Correlated occurrences of up to
+  twelve distinct non-`test` cfg atoms are evaluated exactly; larger or
+  unsupported predicate shapes fall back to conservative retention rather than
+  hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted
@@ -631,7 +633,10 @@ fails with the offending source path rather than hiding its counters.
 Additionally, a statically recognizable non-test built-in `include!`
 encountered while walking a released source fails immediately: a separate
 test-target edge to the included file must not make released counters look
-test-only.
+test-only. A statically resolvable include reached only through a test-only or
+non-release context is indexed as non-release source so its attributed LCOV can
+be removed without becoming an unowned-source error; nested module discovery
+does not continue through the included file.
 
 Rust macro expansion is not available to the source walker. A module generated
 by `macro_rules!`, a procedural macro, or a renamed `include!` can therefore be
