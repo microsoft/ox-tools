@@ -257,7 +257,12 @@ impl SourceIndex {
                         Surface::NonReleased
                     },
                     role: SourceRole::CrateRoot,
-                    guard: CfgFormula::Value(true),
+                    guard: CfgFormula::all(
+                        target
+                            .required_features
+                            .iter()
+                            .map(|feature| CfgFormula::Atom(format!("feature={feature}"))),
+                    ),
                 });
             }
         }
@@ -1074,7 +1079,9 @@ fn static_include_path(macro_call: &ast::MacroCall) -> Option<PathBuf> {
                 && !matches!(token.text(), "(" | ")" | "{" | "}" | "[" | "]")
         });
     let string = ast::String::cast(tokens.next()?)?;
-    if tokens.next().is_some() {
+    if let Some(token) = tokens.next()
+        && (token.text() != "," || tokens.next().is_some())
+    {
         return None;
     }
     string.value().ok().map(|value| PathBuf::from(value.as_ref()))
@@ -2172,6 +2179,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn target_required_features_participate_in_root_guard_classification() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root
+            .join("member/src/required-feature-root.rs")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        metadata.packages[0].targets[0].required_features = vec!["x".to_owned()];
+
+        let index = SourceIndex::from_metadata(&metadata).expect("required-feature source index builds");
+        let source = fs::canonicalize(root.join("member/src/required-feature-root.rs")).expect("canonical required-feature source");
+        assert_eq!(index.files[&source].test_only_lines, BTreeSet::from([6, 7]));
+
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov(
+                "TN:\nSF:member/src/required-feature-root.rs\nDA:6,0\nDA:7,0\nend_of_record\n",
+            )],
+            &metadata,
+        )
+        .expect("required-feature report filters");
+        assert_eq!(filtered, [""]);
+    }
+
+    #[test]
     #[cfg_attr(
         miri,
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
@@ -2345,6 +2378,7 @@ mod tests {
 
         for invocation in [
             "#[cfg(test)] include!(\"included-test.rs\");\n",
+            "#[cfg(test)] include!(\"included-test.rs\",);\n",
             "#[cfg(test)] include! { \"included-test.rs\" }\n",
             "#[cfg(test)] include![\"included-test.rs\"];\n",
         ] {

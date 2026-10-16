@@ -555,7 +555,9 @@ the released Cargo surface:
   `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
   `cfg(not(test))` remain. All applicable `cfg` and `cfg_attr` effects on an
   item, its enclosing owners, its declaring module, and its source file are
-  conjoined with shared assignments. Correlated occurrences of up to twelve
+  conjoined with shared assignments. A Cargo target's `required-features` are
+  also true at its root, so code that can exist only when a required feature
+  is absent is not counted as released. Correlated occurrences of up to twelve
   distinct non-`test` cfg atoms are evaluated exactly; larger or unsupported
   predicate shapes fall back to conservative retention rather than hiding
   released code.
