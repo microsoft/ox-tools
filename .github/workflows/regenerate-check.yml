@@ -29,24 +29,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  package-identity:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Check package identity in PowerShell
-        shell: pwsh
-        run: ./crates/cargo-anvil/system-tests/package-identity.ps1
-
   regenerate-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
+      - name: Check package identity in PowerShell
+        shell: pwsh
+        run: ./crates/cargo-anvil/system-tests/package-identity.ps1
       - name: Build cargo-anvil
         run: cargo build --locked -p cargo-anvil
       - name: Verify in-tree state matches templates

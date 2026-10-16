@@ -76,19 +76,12 @@ on tool availability. These checks protect the emitted artifact contract, not
 runtime PowerShell semantics; recipe execution is validated by the provisioned
 self-hosting pipeline described above.
 
-The dedicated `package-identity` jobs in `regenerate-check.yml` run
-`pwsh -NoProfile -File crates/cargo-anvil/system-tests/package-identity.ps1`
-on Linux and Windows. This system test exercises the shipped PowerShell helper,
-not a Rust reimplementation. Its only prerequisite is the runner-provided
-PowerShell interpreter; Cargo is an in-process function that rejects unexpected
-arguments and returns fixed metadata. Fixtures are in memory: no registry cache,
-network, Just, optional Cargo plugins, or fixture writes are used. Each job owns
-its interpreter state and has a five-minute budget. The test covers a
-same-name/version registry collision, portable paths, every selector adapter,
-root-package isolation, deduplication, missing members, and toolchain forwarding.
-It does not prove third-party CLI parsing; that remains the self-hosting checks'
-responsibility. The ordinary Rust test checks the emitted coverage-toolchain
-contract without spawning a process.
+The existing Linux `regenerate-check` job also runs
+`crates/cargo-anvil/system-tests/package-identity.ps1` with PowerShell.
+It exercises the shipped helper with strict in-memory Cargo mocks, including
+Linux and Windows path inputs, package collisions, selector adapters, and
+toolchain forwarding. It needs no registry cache, network, Just, or Cargo plugins.
+Actual cross-platform CLI execution remains covered by self-hosting.
 
 ### 2.3 Fixture-based integration tests
 
