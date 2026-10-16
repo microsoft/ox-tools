@@ -12,7 +12,10 @@ unmaintained = "all"
 # Advisories we have consciously accepted. Each entry needs a reason and,
 # where the fix is out of our hands, the upstream we are waiting on.
 ignore = [
-    { crate = "zip@8.6.0", reason = "Temporarily allow the locked yanked release; remove after upgrading zip to a non-yanked version." },
+    # cargo-aprz-lib -> rust_xlsxwriter -> zip. Even rust_xlsxwriter 0.99.1 requires
+    # zip ^8.3, which excludes the non-yanked 9.x releases:
+    # https://crates.io/api/v1/crates/rust_xlsxwriter/0.99.1/dependencies
+    { crate = "zip@8.6.0", reason = "Temporarily allow the locked yanked release while rust_xlsxwriter requires zip ^8.3; remove after upgrading rust_xlsxwriter to support a non-yanked zip release and updating Cargo.lock." },
 ]
 
 # >>> anvil-managed: anvil-deny-bans
