@@ -2068,7 +2068,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
 }
 
 #[test]
-fn semver_exit_code_contract_is_executed() {
+fn semver_breaking_changes_are_advisory_and_use_workspace_identity() {
     if !tools_available() {
         return;
     }
@@ -2115,6 +2115,26 @@ fn semver_exit_code_contract_is_executed() {
         "semver-checks --manifest-path {} --package fixture --baseline-rev base",
         tmp.path().join("Cargo.toml").display()
     )));
+}
+
+#[test]
+fn semver_exit_code_contract_is_executed() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-cargo-semver-checks-validate-prereqs",
+            "anvil-tool-cargo-semver-checks-install installer",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    let comment = tmp.path().join("target/anvil/comments/semver.md");
+    write(&comment, "stale breaking change");
+    let log = tmp.path().join("cargo.log");
+    let common = [("BASE_REF", OsStr::new("base")), ("FAKE_CARGO_LOG", log.as_os_str())];
 
     let renamed = run_just(
         tmp.path(),

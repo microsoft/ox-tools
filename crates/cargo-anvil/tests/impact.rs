@@ -1099,35 +1099,32 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     );
 }
 
-/// Write a fake `cargo` into `dir` that appends its argv (one invocation per
-/// line) to `log` and exits 0, so a check recipe's tool invocation can be
-/// observed without running real cargo. `dir` is meant to be prepended to
-/// PATH via [`path_with_prefix`].
-fn fake_cargo(dir: &Path, log: &Path) {
-    fs::create_dir_all(dir).unwrap();
-    #[cfg(windows)]
-    {
-        // Script shims receive the inline argument-array expression as one
-        // nested array, whereas native Cargo flattens it. Normalize the shim
-        // input before recording the native-process argv contract.
-        let script = format!(
-            "$effectiveArgs = @()\n\
-             foreach ($argument in $args) {{\n\
-             \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
-             }}\n\
-             Add-Content -LiteralPath '{}' -Value ($effectiveArgs -join ' ')\n\
-             exit 0\n",
-            log.display()
-        );
-        fs::write(dir.join("cargo.ps1"), script).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n", log.display());
-        let path = dir.join("cargo");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+fn workspace_metadata(root: &Path, names: &[&str]) -> serde_json::Value {
+    let packages: Vec<_> = names
+        .iter()
+        .map(|name| {
+            serde_json::json!({
+                "id": format!("path+file:///consumer/crates/{name}#0.1.0"),
+                "name": name,
+                "version": "0.1.0",
+                "manifest_path": root.join(format!("crates/{name}/Cargo.toml")),
+                "features": {},
+                "dependencies": [],
+                "targets": [],
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "workspace_root": root,
+        "workspace_members": packages.iter().map(|package| &package["id"]).collect::<Vec<_>>(),
+        "packages": packages,
+    })
+}
+
+fn fake_cargo(root: &Path, dir: &Path, log: &Path) {
+    let metadata = root.join("metadata.json");
+    fs::write(&metadata, workspace_metadata(root, &["alpha", "beta"]).to_string()).unwrap();
+    fake_cargo_with_metadata(dir, log, &metadata);
 }
 
 /// The process `PATH` with `dir` prepended, so an executable in `dir` shadows
@@ -1148,8 +1145,8 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     }
     // End-to-end proof of the shared check contract that the 25 rewritten
     // checks all use: a scoped check resolves its tier from the downloaded
-    // target/anvil/impact cache, splits the `--package name@version` list, and
-    // passes it to its cargo tool -- and short-circuits (never invoking the
+    // target/anvil/impact cache, resolves the `--package name@version` list to
+    // runner-local manifests -- and short-circuits (never invoking the
     // tool) on the `--skip` sentinel. `anvil-examples` stands in for the
     // family; a fake `cargo` on PATH captures the argv the recipe builds. This
     // guards the PowerShell capture/splitting/short-circuit path that static
@@ -1169,12 +1166,11 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
-    fake_cargo(&bin, &log);
+    fake_cargo(root, &bin, &log);
     let path = path_with_prefix(&bin);
 
     // consume mode: anvil-impact no-ops (no snapshot / cargo-delta), so the
-    // ONLY cargo invocation is the recipe's own `cargo build` -- captured by
-    // the shim.
+    // only cargo invocations are package identity discovery and `cargo build`.
     let out = just_cmd(root, &["anvil-examples"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
@@ -1183,10 +1179,13 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
+    let manifest = root.join("crates/alpha/Cargo.toml");
     assert!(
-        argv.contains("build") && argv.contains(&affected) && argv.contains("--examples"),
-        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: build ... {affected} ... --examples"
+        argv.contains(&format!("build --manifest-path {}", manifest.display())) && argv.contains("--examples"),
+        "the cached scope must resolve to alpha's runner-local manifest; captured argv:\n{argv}"
     );
+    assert!(!argv.contains("crates/beta") && !argv.contains("crates\\beta"));
+    assert_eq!(argv.lines().filter(|line| line.contains("metadata")).count(), 1);
 
     // The `--skip` sentinel must short-circuit: the tool is never invoked.
     fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
@@ -1204,8 +1203,8 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
     let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        !argv_skip.contains("build"),
-        "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
+        argv_skip.is_empty(),
+        "the --skip sentinel must skip both metadata and build; captured argv:\n{argv_skip}"
     );
 }
 
@@ -1218,11 +1217,11 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     let root = tmp.path();
     // Inject the checked-in cache directly; neither copy it nor compute impact.
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/msrv-impact-cache");
-    let affected = "--package alpha@0.1.0";
+    let affected = format!("--manifest-path {}", root.join("crates/alpha/Cargo.toml").display());
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
-    fake_cargo(&bin, &log);
+    fake_cargo(root, &bin, &log);
     let path = path_with_prefix(&bin);
     let run_msrv = || {
         just_cmd(root, &["anvil-msrv-test"])
@@ -1248,6 +1247,7 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     ];
     let test_invocations: Vec<_> = argv.lines().filter(|line| line.starts_with("+1.97 test ")).collect();
     assert_eq!(test_invocations, expected, "unexpected MSRV test invocations:\n{argv}");
+    assert_eq!(argv.lines().filter(|line| line.contains("metadata")).count(), 1);
     // The MSRV check must not build or execute bench targets: `--all-targets`
     // expands to include `--benches`, and a `harness = false` bench then runs
     // through a driver binary the msrv setup chain never installs.
@@ -1282,8 +1282,8 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
 }
 
 /// Write a fake `cargo` into `dir` that answers `cargo metadata …` by printing
-/// the contents of `metadata_json` and captures every other invocation's argv
-/// (one per line) to `log`, exiting 0. Lets `anvil-loom` be driven with a
+/// the contents of `metadata_json` and captures every invocation's argv
+/// (one per line) to `log`, exiting 0. Lets scoped checks be driven with a
 /// synthetic workspace shape without a real loom crate.
 fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     fs::create_dir_all(dir).unwrap();
@@ -1294,8 +1294,8 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
              foreach ($argument in $args) {{\n\
              \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
              }}\n\
-             if ($effectiveArgs -contains 'metadata') {{ Get-Content -Raw -LiteralPath '{meta}'; exit 0 }}\n\
              Add-Content -LiteralPath '{log}' -Value ($effectiveArgs -join ' ')\n\
+             if ($effectiveArgs -contains 'metadata') {{ Get-Content -Raw -LiteralPath '{meta}'; exit 0 }}\n\
              exit 0\n",
             meta = metadata_json.display(),
             log = log.display()
@@ -1305,7 +1305,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
@@ -1328,18 +1328,17 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     // test can't catch this bespoke parsing. Here a fake `cargo metadata`
     // reports a crate with a `required-features = ["loom"]` test target; run
     // under ANVIL_IMPACT=off (so the tier resolves to --workspace), loom must
-    // detect that target and invoke `cargo test -p <pkg> --test <target>`.
+    // detect that target and invoke `cargo test --manifest-path <manifest> --test <target>`.
     let tmp = workspace_at_base();
     let root = tmp.path();
 
     // A synthetic single-crate workspace whose only test target requires the
     // `loom` feature -- the shape `anvil-loom` looks for.
     let metadata = root.join("metadata.json");
-    fs::write(
-        &metadata,
-        r#"{"packages":[{"name":"gamma","version":"0.1.0","features":{"loom":[]},"dependencies":[],"targets":[{"kind":["test"],"name":"loomtest","required-features":["loom"]}]}]}"#,
-    )
-    .unwrap();
+    let mut workspace = workspace_metadata(root, &["gamma"]);
+    workspace["packages"][0]["features"] = serde_json::json!({"loom": []});
+    workspace["packages"][0]["targets"] = serde_json::json!([{"kind": ["test"], "name": "loomtest", "required-features": ["loom"]}]);
+    fs::write(&metadata, workspace.to_string()).unwrap();
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
@@ -1358,7 +1357,8 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     assert!(out.status.success(), "anvil-loom (full-workspace) run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("test") && argv.contains("-p gamma") && argv.contains("--test loomtest"),
+        argv.contains(&format!("test --manifest-path {}", root.join("crates/gamma/Cargo.toml").display()))
+            && argv.contains("--test loomtest"),
         "loom must run the declared loom target in full-workspace mode; captured argv:\n{argv}"
     );
 }
