@@ -100,6 +100,28 @@ fn write_lcov(dir: &Path, files: &[(&str, u32, u32)]) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn assert_published_filtered_lcov(path: &Path, workspace: &Path) {
+    let published = fs::read_to_string(path).expect("read filtered LCOV");
+    let report = lcov::Report::from_reader(lcov::Reader::new(published.as_bytes())).expect("published filtered LCOV parses");
+    let actual = report
+        .sections
+        .iter()
+        .map(|(key, section)| {
+            assert_eq!(key.test_name, "");
+            assert!(section.functions.is_empty());
+            assert!(section.branches.is_empty());
+            assert_eq!(section.lines.len(), 1);
+            let (line, value) = section.lines.iter().next().expect("one retained line");
+            (key.source_file.clone(), (line.line, value.count, value.checksum.clone()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = ["alpha", "beta"]
+        .map(|package| (workspace.join(package).join("src/lib.rs"), (4, 1, None)))
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
+}
+
 /// Construct a `cargo coverage-gate` invocation scoped to `dir`.
 fn coverage_gate(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("cargo-coverage-gate").expect("binary present");
@@ -768,11 +790,7 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
         "successful collection must write the requested stable artifact"
     );
     for configuration in ["all-features", "no-default"] {
-        let published = fs::read_to_string(coverage_dir.join(format!("lcov-{configuration}.info"))).expect("read filtered LCOV");
-        assert!(published.contains("DA:4,1"), "{published}");
-        assert!(!published.contains("DA:5,"), "{published}");
-        assert!(!published.contains("DA:6,"), "{published}");
-        assert!(published.contains("LF:1"), "{published}");
+        assert_published_filtered_lcov(&coverage_dir.join(format!("lcov-{configuration}.info")), tmp.path());
     }
 
     let log = fs::read_to_string(tool_log).expect("read fake tool log");

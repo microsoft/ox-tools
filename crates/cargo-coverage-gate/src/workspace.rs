@@ -78,16 +78,7 @@ impl Member {
 }
 
 impl Workspace {
-    /// Load workspace metadata for the workspace enclosing
-    /// `manifest_path` (or `CWD` if `None`), capturing each member's
-    /// threshold-related metadata.
-    ///
-    /// Runs `cargo metadata --no-deps`, which does not fetch or build
-    /// dependencies and is therefore fast and side-effect-free.
-    pub(crate) fn load(manifest_path: Option<&Path>, target: Option<&str>) -> Result<Self, CoverageGateError> {
-        Self::load_with_target_resolver(manifest_path, || TargetContext::resolve(target))
-    }
-
+    #[cfg(test)]
     fn load_with_target_resolver(
         manifest_path: Option<&Path>,
         resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
