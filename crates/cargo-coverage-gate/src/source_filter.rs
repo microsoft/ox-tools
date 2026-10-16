@@ -64,10 +64,18 @@ struct ModuleDeclaration {
 
 #[derive(Debug)]
 struct SourceAnalysis {
-    syntax: ast::SourceFile,
+    syntax: Option<ast::SourceFile>,
     line_count: usize,
     line_starts: Vec<usize>,
     test_only_lines: BTreeSet<u32>,
+}
+
+impl SourceAnalysis {
+    fn syntax(&self) -> &ast::SourceFile {
+        self.syntax
+            .as_ref()
+            .expect("only ordinary Rust source analysis requires syntax; included-source leaves return before traversal")
+    }
 }
 
 #[derive(Debug)]
@@ -254,19 +262,24 @@ impl SourceIndex {
                 if indexed.has_visit(&pending) {
                     continue;
                 }
+                if pending.role != SourceRole::IncludedSource && indexed.analysis.syntax.is_none() {
+                    indexed.analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
+                }
                 let released_path = released_source_attributed_path(&member_dirs, &pending)?;
                 if released_path.is_some() {
                     let current = test_only_lines_for_guard(&indexed.analysis, &pending.guard, &test_attributes);
                     indexed.merge_released_test_only_lines(current);
                 }
                 indexed.add_visit(&pending, released_path);
-                reject_unsupported_released_includes(
-                    &pending.resolution_path,
-                    &indexed.analysis.syntax,
-                    pending.surface,
-                    &pending.guard,
-                    &test_attributes,
-                )?;
+                if pending.role != SourceRole::IncludedSource {
+                    reject_unsupported_released_includes(
+                        &pending.resolution_path,
+                        indexed.analysis.syntax(),
+                        pending.surface,
+                        &pending.guard,
+                        &test_attributes,
+                    )?;
+                }
                 let declarations = source_declarations(
                     &pending.resolution_path,
                     &indexed.analysis,
@@ -278,14 +291,20 @@ impl SourceIndex {
                 continue;
             }
 
-            let analysis = analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?;
-            reject_unsupported_released_includes(
-                &pending.resolution_path,
-                &analysis.syntax,
-                pending.surface,
-                &pending.guard,
-                &test_attributes,
-            )?;
+            let analysis = if pending.role == SourceRole::IncludedSource {
+                analyze_included_source(&pending.canonical_path)?
+            } else {
+                analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?
+            };
+            if pending.role != SourceRole::IncludedSource {
+                reject_unsupported_released_includes(
+                    &pending.resolution_path,
+                    analysis.syntax(),
+                    pending.surface,
+                    &pending.guard,
+                    &test_attributes,
+                )?;
+            }
             let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &pending.guard, &test_attributes)?;
             let released_path = released_source_attributed_path(&member_dirs, &pending)?;
             let test_only_lines = if released_path.is_some() {
@@ -384,8 +403,11 @@ fn source_declarations(
     guard: &CfgFormula,
     test_attributes: &BTreeSet<String>,
 ) -> Result<Vec<ModuleDeclaration>, CoverageGateError> {
+    if role == SourceRole::IncludedSource {
+        return Ok(Vec::new());
+    }
     let mut is_file = source_path_is_file;
-    module_declarations(path, &analysis.syntax, role, guard, test_attributes, &mut is_file)
+    module_declarations(path, analysis.syntax(), role, guard, test_attributes, &mut is_file)
 }
 
 fn source_path_is_file(path: &Path) -> Result<bool, CoverageGateError> {
@@ -416,6 +438,9 @@ fn target_is_released(kinds: &[TargetKind]) -> bool {
         })
 }
 
+// cargo_metadata::Edition is non-exhaustive, while every currently
+// constructible variant is covered by direct unit tests.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn syntax_edition(edition: CargoEdition, path: &Path) -> Result<Edition, CoverageGateError> {
     match edition {
         CargoEdition::E2015 => Ok(Edition::Edition2015),
@@ -437,6 +462,16 @@ fn resolve_source_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
 fn analyze_source(path: &Path, edition: Edition, test_attributes: &BTreeSet<String>) -> Result<SourceAnalysis, CoverageGateError> {
     let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
     analyze_source_text(path, &source, edition, test_attributes)
+}
+
+fn analyze_included_source(path: &Path) -> Result<SourceAnalysis, CoverageGateError> {
+    let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
+    Ok(SourceAnalysis {
+        syntax: None,
+        line_count: source.lines().count(),
+        line_starts: line_starts(&source),
+        test_only_lines: BTreeSet::new(),
+    })
 }
 
 fn analyze_source_text(
@@ -470,7 +505,7 @@ fn analyze_source_text(
     let tree = parse.tree();
     let test_only_lines = classify_test_only_lines(tree.syntax(), &line_starts, test_attributes, &CfgFormula::Value(true));
     Ok(SourceAnalysis {
-        syntax: tree,
+        syntax: Some(tree),
         line_count: source.lines().count(),
         line_starts,
         test_only_lines,
@@ -481,7 +516,7 @@ fn test_only_lines_for_guard(analysis: &SourceAnalysis, guard: &CfgFormula, test
     if *guard == CfgFormula::Value(true) {
         return analysis.test_only_lines.clone();
     }
-    classify_test_only_lines(analysis.syntax.syntax(), &analysis.line_starts, test_attributes, guard)
+    classify_test_only_lines(analysis.syntax().syntax(), &analysis.line_starts, test_attributes, guard)
 }
 
 fn classify_test_only_lines(
@@ -573,6 +608,12 @@ fn merge_text_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
 fn syntax_owner_range(owner: &SyntaxNode) -> TextRange {
     let owner_range = owner.text_range();
     let mut end = owner_range.end();
+    if let Some(statement) = owner.parent().and_then(ast::ExprStmt::cast)
+        && statement.expr().is_some_and(|expression| expression.syntax() == owner)
+        && let Some(semicolon) = statement.semicolon_token()
+    {
+        end = semicolon.text_range().end();
+    }
     let mut next = owner.next_sibling_or_token();
     while let Some(element) = next {
         if matches!(element.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
@@ -631,18 +672,21 @@ fn attributes_guard(attributes: impl IntoIterator<Item = ast::Attr>, test_attrib
 
 fn meta_guard(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> CfgFormula {
     match meta {
-        ast::Meta::CfgMeta(cfg) => cfg.cfg_predicate().map_or(CfgFormula::Value(true), |predicate| {
+        ast::Meta::CfgMeta(cfg) => {
+            let predicate = cfg
+                .cfg_predicate()
+                .expect("source parsing succeeds before cfg attributes are classified");
             cfg_formula_from_predicate_or_unknown(&predicate)
-        }),
+        }
         ast::Meta::PathMeta(path_meta) => CfgFormula::Value(!path_meta.path().is_some_and(|path| path_marks_test(&path, test_attributes))),
         ast::Meta::TokenTreeMeta(token_tree) => {
             CfgFormula::Value(!token_tree.path().is_some_and(|path| path_marks_test(&path, test_attributes)))
         }
         ast::Meta::CfgAttrMeta(cfg_attr) => {
-            let predicate = cfg_attr.cfg_predicate().map_or_else(
-                || CfgFormula::Atom(format!("?{}", cfg_attr.syntax().text())),
-                |predicate| cfg_formula_from_predicate_or_unknown(&predicate),
-            );
+            let predicate = cfg_attr
+                .cfg_predicate()
+                .expect("source parsing succeeds before cfg_attr attributes are classified");
+            let predicate = cfg_formula_from_predicate_or_unknown(&predicate);
             let inner = CfgFormula::all(cfg_attr.metas().map(|inner| meta_guard(&inner, test_attributes)));
             CfgFormula::any([CfgFormula::not(predicate), inner])
         }
@@ -656,6 +700,7 @@ fn path_marks_test(path: &ast::Path, test_attributes: &BTreeSet<String>) -> bool
 }
 
 fn normalize_attribute_path(path: &ast::Path) -> String {
+    let rooted = path.syntax().first_token().is_some_and(|token| token.text() == "::");
     let mut segments = Vec::new();
     let mut current = Some(path.clone());
     while let Some(path) = current {
@@ -667,7 +712,8 @@ fn normalize_attribute_path(path: &ast::Path) -> String {
         current = path.qualifier();
     }
     segments.reverse();
-    segments.join("::")
+    let normalized = segments.join("::");
+    if rooted { format!("::{normalized}") } else { normalized }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,8 +907,6 @@ fn cfg_atom_key(atom: &ast::CfgAtom) -> Option<String> {
         let string = ast::String::cast(atom.string_token()?)?;
         let value = string.value().ok()?;
         Some(format!("{ident}={value}"))
-    } else if ident == "test" {
-        None
     } else {
         Some(ident)
     }
@@ -985,6 +1029,7 @@ fn syntax_contains_released_include(
 
 fn path_is_builtin_include(path: &ast::Path) -> bool {
     let normalized = normalize_attribute_path(path);
+    let normalized = normalized.strip_prefix("::").unwrap_or(&normalized);
     normalized == "include"
         || normalized.strip_suffix("::include").is_some_and(|qualifier| {
             qualifier == "std" || qualifier.starts_with("std::") || qualifier == "core" || qualifier.starts_with("core::")
@@ -1326,6 +1371,7 @@ fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fmt::Write as _;
 
@@ -1442,7 +1488,7 @@ mod tests {
         let mut is_file = |candidate: &Path| Ok(existing.contains(&lexical_normalize(candidate)));
         module_declarations(
             path,
-            &analysis.syntax,
+            analysis.syntax(),
             role,
             &CfgFormula::Value(true),
             &BTreeSet::new(),
@@ -1519,7 +1565,7 @@ mod tests {
         assert!(parse_configured_test_attributes(None).expect("absent policy is valid").is_empty());
         assert_eq!(
             parse_configured_test_attributes(Some(&json!(["tokio::test", "::company::async_test"]))).expect("valid paths parse"),
-            BTreeSet::from(["company::async_test".to_owned(), "tokio::test".to_owned()])
+            BTreeSet::from(["::company::async_test".to_owned(), "tokio::test".to_owned()])
         );
 
         for invalid in [
@@ -1597,6 +1643,21 @@ mod tests {
                 .expect("one item")
                 .attrs()
                 .any(|attribute| attribute_marks_test(&attribute, &configured))
+        );
+
+        let rooted = SourceFile::parse(
+            "#[::company::async_test] fn rooted() {}\n\
+             #[company::async_test] fn relative() {}\n",
+            Edition::Edition2024,
+        )
+        .tree();
+        let configured = BTreeSet::from(["::company::async_test".to_owned()]);
+        assert_eq!(
+            rooted
+                .items()
+                .map(|item| item.attrs().any(|attribute| attribute_marks_test(&attribute, &configured)))
+                .collect::<Vec<_>>(),
+            [true, false]
         );
     }
 
@@ -1847,6 +1908,10 @@ mod tests {
             possibilities("all(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, not(a12))"),
             CfgPossibilities::EITHER
         );
+        assert_eq!(
+            possibilities("any(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12)"),
+            CfgPossibilities::EITHER
+        );
 
         assert_eq!(approximate("true"), CfgPossibilities::TRUE);
         assert_eq!(approximate("false"), CfgPossibilities::FALSE);
@@ -1885,6 +1950,14 @@ mod tests {
         assert_eq!(
             extend_cfg_guard(&inherited, inherited_possibilities, inherited.clone(),),
             (inherited, inherited_possibilities)
+        );
+        assert_eq!(
+            extend_cfg_guard(
+                &CfgFormula::Value(false),
+                CfgPossibilities::FALSE,
+                CfgFormula::Atom("feature=y".to_owned()),
+            ),
+            (CfgFormula::Value(false), CfgPossibilities::FALSE)
         );
     }
 
@@ -1938,6 +2011,15 @@ mod tests {
 
         let inner_function = analyze(Path::new("inner-function.rs"), "fn helper() {\n    #![cfg(test)]\n}\n");
         assert_eq!(inner_function.test_only_lines, BTreeSet::from([1, 2, 3]));
+
+        let statement = analyze(
+            Path::new("statement.rs"),
+            "fn released() {\n\
+                 #[cfg(test)] test_helper();\n\
+                 released_helper();\n\
+             }\n",
+        );
+        assert_eq!(statement.test_only_lines, BTreeSet::from([2]));
 
         let stacked = analyze(
             Path::new("stacked.rs"),
@@ -2181,7 +2263,7 @@ mod tests {
         );
         reject_unsupported_released_includes(
             Path::new("/workspace/lib.rs"),
-            &test_only.syntax,
+            test_only.syntax(),
             Surface::Released,
             &CfgFormula::Value(true),
             &BTreeSet::new(),
@@ -2192,7 +2274,7 @@ mod tests {
             let analysis = analyze(Path::new("/workspace/lib.rs"), &format!("{path}!(\"helper.rs\");\n"));
             reject_unsupported_released_includes(
                 Path::new("/workspace/lib.rs"),
-                &analysis.syntax,
+                analysis.syntax(),
                 Surface::Released,
                 &CfgFormula::Value(true),
                 &BTreeSet::new(),
@@ -2203,7 +2285,7 @@ mod tests {
         let custom = analyze(Path::new("/workspace/lib.rs"), "company::include!(\"helper.rs\");\n");
         reject_unsupported_released_includes(
             Path::new("/workspace/lib.rs"),
-            &custom.syntax,
+            custom.syntax(),
             Surface::Released,
             &CfgFormula::Value(true),
             &BTreeSet::new(),
@@ -2252,12 +2334,42 @@ mod tests {
             CfgFormula::Value(false),
         )));
 
+        let expression = fs::canonicalize(root.join("member/src/included-expression.rs")).expect("canonical included expression source");
+        let indexed_expression = index.files.get(&expression).expect("included expression source indexed");
+        assert_eq!(indexed_expression.released_path, None);
+        assert!(indexed_expression.analysis.syntax.is_none());
+        assert_eq!(indexed_expression.analysis.line_count, 4);
+
         let filtered = filter_reports_with_metadata(
-            vec![parse_lcov("TN:\nSF:member/src/included-test.rs\nDA:4,0\nend_of_record\n")],
+            vec![parse_lcov(concat!(
+                "TN:\nSF:member/src/included-test.rs\nDA:4,0\nend_of_record\n",
+                "TN:\nSF:member/src/included-expression.rs\nDA:4,0\nend_of_record\n",
+            ))],
             &metadata,
         )
         .expect("test-only included source filters");
         assert_eq!(filtered, [""]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn included_source_is_parsed_when_a_released_module_also_reaches_it() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root
+            .join("member/src/promoted-include-root.rs")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+
+        let index = SourceIndex::from_metadata(&metadata).expect("included source is promoted to released module analysis");
+        let included = fs::canonicalize(root.join("member/src/included-test.rs")).expect("canonical included source");
+        let indexed = index.files.get(&included).expect("included source indexed");
+        assert!(indexed.analysis.syntax.is_some());
+        assert_eq!(
+            indexed.released_path.as_deref(),
+            Some(root.join("member/src/included-test.rs").as_path())
+        );
     }
 
     #[test]
@@ -2369,7 +2481,7 @@ mod tests {
         };
         let error = module_declarations(
             &root,
-            &analysis.syntax,
+            analysis.syntax(),
             SourceRole::CrateRoot,
             &CfgFormula::Value(true),
             &BTreeSet::new(),

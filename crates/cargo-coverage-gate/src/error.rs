@@ -64,6 +64,7 @@ use serde_json::Value;
     UnownedCoverageSourceError,
     UnattributableReleasedSourceError,
     NormalizedSourceChecksumError,
+    MergedSourceChecksumError,
     CoverageLineOutOfRangeError,
     InvalidPackageSelectorError,
     UnknownPackageSelectorError
@@ -401,6 +402,18 @@ pub(crate) struct UnattributableReleasedSourceError {
 )]
 pub(crate) struct NormalizedSourceChecksumError {
     pub test_name: String,
+    pub path: String,
+    pub line: u32,
+}
+
+/// LCOV sections that are merged for evaluation disagree on one source line's
+/// checksum, so their counters may describe different source text.
+#[ohno::error]
+#[display(
+    "LCOV reports for source `{path}` carry conflicting checksums for line {line}; \
+     regenerate coverage from one consistent source tree"
+)]
+pub(crate) struct MergedSourceChecksumError {
     pub path: String,
     pub line: u32,
 }
