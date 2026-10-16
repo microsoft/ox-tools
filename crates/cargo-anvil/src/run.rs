@@ -661,18 +661,25 @@ fn region_placement_or_refuse(
 }
 
 fn refuse_region_syntax_change(plan: &mut Plan, manifest: &Manifest, host: &str, spec: &RegionSpec, current: Option<&str>) -> bool {
-    let (Some(text), Some(recorded_checksum)) = (current, manifest.region_checksum(host, spec.id.as_str())) else {
+    let Some(text) = current else {
         return false;
     };
+    let current_checksum = checksum_str(&spec.body);
+    let recorded_checksum = manifest.region_checksum(host, spec.id.as_str()).unwrap_or(&current_checksum);
     let scanner = HostScanner::for_path(host);
-    let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
-    let has_evidence = syntaxes
-        .into_iter()
-        .any(|syntax| !matches!(scanner.find(text, spec.id.as_str(), syntax), Ok(None)));
-    let hidden_xml_evidence = scanner == HostScanner::Lines
-        && xml_comment_scan_failed(text)
-        && raw_marker_line_present(text, spec.id.as_str(), CommentSyntax::Xml);
-    if !has_evidence && !hidden_xml_evidence {
+    let other_syntaxes = match spec.syntax {
+        CommentSyntax::Hash => [CommentSyntax::SlashSlash, CommentSyntax::Xml],
+        CommentSyntax::SlashSlash => [CommentSyntax::Hash, CommentSyntax::Xml],
+        CommentSyntax::Xml => [CommentSyntax::Hash, CommentSyntax::SlashSlash],
+    };
+    let has_conflicting_evidence = other_syntaxes.into_iter().any(|syntax| {
+        !matches!(scanner.find(text, spec.id.as_str(), syntax), Ok(None))
+            || (syntax == CommentSyntax::Xml
+                && scanner == HostScanner::Lines
+                && xml_comment_scan_failed(text)
+                && raw_marker_line_present(text, spec.id.as_str(), syntax))
+    });
+    if !has_conflicting_evidence {
         return false;
     }
     let existing = match infer_recorded_region_syntax(Some(text), scanner, host, spec.id.as_str(), recorded_checksum) {
@@ -3000,6 +3007,30 @@ mod tests {
             assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
             assert_eq!(host.matches("generated").count(), 1);
         }
+    }
+
+    #[test]
+    fn untracked_region_in_another_syntax_is_refused_without_duplication() {
+        let host = "# >>> anvil-managed: projects\ngenerated\n# <<< anvil-managed: projects\n";
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: RegionId::new("projects"),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+
+        let (plan, hosts) = managed_region_plan(Some(host), &Manifest::default(), &spec);
+
+        assert_eq!(
+            plan.refusals(),
+            &["Refused to manage host.txt [projects]: existing marker lines use hash comments, but the catalog now declares slash-slash comments. \
+               Changing marker syntax in place is not supported because the manifest does not record the previous syntax. This region was left unchanged; \
+               other regions in the same file and other artifacts may still be updated. Restore the catalog's previous comment syntax, or deliberately \
+               remove the old marker lines and their generated body before retrying with the new syntax."
+                .to_owned()]
+        );
+        assert_eq!(hosts.cached("host.txt").as_deref(), Some(host));
+        assert_eq!(host.matches("generated").count(), 1);
     }
 
     #[test]

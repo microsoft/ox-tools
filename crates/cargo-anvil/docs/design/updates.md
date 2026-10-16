@@ -128,8 +128,11 @@ Changing the declared syntax of
 an existing `(host, id)` is refused whenever marker lines in the previous
 syntax remain, including an unpaired marker; the manifest does not record the
 old syntax, so treating those markers as absent could duplicate an unbounded
-generated body. Recovery requires restoring the previous catalog syntax or
-deliberately removing the old markers and body before retrying.
+generated body. This protection also applies when the manifest is missing the
+region: Anvil uses the current rendered-body checksum to identify existing
+marker evidence rather than treating the region as new. Recovery requires
+restoring the previous catalog syntax or deliberately removing the old markers
+and body before retrying.
 
 ### Strict ownership
 
