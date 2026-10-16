@@ -674,6 +674,71 @@ fn session_on_with(mut host: Sink, root: &Path, args: &[&str], whole_test_binari
 }
 
 #[test]
+fn regex_selects_one_function_in_a_real_session() {
+    step_aside_if_nested!();
+    let dir = TempDir::new().unwrap_or_else(|error| panic!("could not create the regex fixture directory: {error}"));
+    write_project(
+        dir.path(),
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"regex-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            (
+                "src/lib.rs",
+                "pub fn accepts(value: i32) -> bool { value >= 1 }\n\
+                 pub fn rejects(value: i32) -> bool { value <= 0 }\n\
+                 #[cfg(test)] mod tests {\n\
+                     #[test] fn boundary() {\n\
+                         assert!(!super::accepts(0));\n\
+                         assert!(super::accepts(1));\n\
+                         assert!(super::rejects(0));\n\
+                         assert!(!super::rejects(1));\n\
+                     }\n\
+                 }\n",
+            ),
+        ],
+    );
+
+    let (code, output) = session(
+        &dir,
+        &[
+            "--mutators",
+            "relational",
+            "--re",
+            "^src/lib\\.rs:[0-9]+:[0-9]+: accepts:",
+            "--incremental",
+            "no",
+        ],
+    );
+
+    assert_eq!(code, EXIT_OK, "{output}");
+    let report = fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json"))
+        .unwrap_or_else(|error| panic!("could not read the regex fixture's report: {error}"));
+    let report: serde_json::Value =
+        serde_json::from_str(&report).unwrap_or_else(|error| panic!("the regex fixture's report is invalid JSON: {error}"));
+    let files = report["files"].as_object().expect("a completed report has a files object");
+    let mutants = files["src/lib.rs"]["mutants"]
+        .as_array()
+        .expect("the selected accepts function has mutants");
+
+    assert_eq!(files.len(), 1, "the regex included another file: {files:?}");
+    // These are the relational replacements of the selected function's sole `>=` site.
+    assert_eq!(
+        mutants.len(),
+        2,
+        "the regex included another function or omitted a variant: {mutants:?}"
+    );
+    for mutant in mutants {
+        assert_eq!(mutant["location"]["start"]["line"], 1, "the mutant must belong to accepts");
+    }
+    assert!(
+        mutants.iter().all(|mutant| mutant["status"] == "Killed"),
+        "the library tests did not judge both selected mutants: {mutants:?}"
+    );
+}
+
+#[test]
 fn a_binary_only_crate_converges_and_runs_its_unit_tests() {
     step_aside_if_nested!();
     let dir = TempDir::new().unwrap_or_else(|error| panic!("could not create the binary fixture directory: {error}"));

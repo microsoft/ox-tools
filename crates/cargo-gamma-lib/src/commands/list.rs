@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -172,21 +172,39 @@ fn list_files<H: Host>(
 
     crate::report::skipped(host, &plan, styler)?;
 
+    let files = selected_files(&plan, !select.name_patterns.is_empty());
+
     let mut stream = host.results();
 
     if json {
-        let paths: Vec<&Utf8PathBuf> = plan.files.iter().map(|file| &file.path).collect();
+        let paths: Vec<&Utf8PathBuf> = files.map(|file| &file.path).collect();
 
         write_pretty_json(&mut stream, &paths, "the file list")?;
 
         return Ok(EXIT_OK);
     }
 
-    for file in &plan.files {
+    for file in files {
         writeln!(stream, "{}", encode_controls(file.path.as_str()))?;
     }
 
     Ok(EXIT_OK)
+}
+
+/// Projects a file listing from the selected mutant population.
+fn selected_files(plan: &crate::discover::Plan, name_filtered: bool) -> impl Iterator<Item = &crate::discover::TargetFile> {
+    // A name filter selects mutants, so a file listing under that filter names only files that
+    // actually contain one of the selected mutants.
+    let selected_paths = name_filtered.then(|| {
+        plan.mutants
+            .iter()
+            .map(|mutant| mutant.file.as_ref())
+            .collect::<std::collections::HashSet<&Utf8Path>>()
+    });
+
+    plan.files
+        .iter()
+        .filter(move |file| selected_paths.as_ref().is_none_or(|paths| paths.contains(file.path.as_path())))
 }
 
 /// Lists the mutants that would be generated.
@@ -205,7 +223,7 @@ fn list_mutants<H: Host>(
     crate::report::skipped(host, &plan, styler)?;
 
     if let Some(path) = json_report {
-        write_population(host, &plan, shard, path)?;
+        write_population(host, &plan, shard, !select.name_patterns.is_empty(), path)?;
     }
 
     let mut stream = host.results();
@@ -217,7 +235,7 @@ fn list_mutants<H: Host>(
     }
 
     for mutant in &plan.mutants {
-        writeln!(stream, "{}", encode_controls(&describe_for_listing(mutant)))?;
+        writeln!(stream, "{}", encode_controls(&mutant.selection_name()))?;
     }
 
     let suppressed = plan
@@ -234,38 +252,23 @@ fn list_mutants<H: Host>(
     Ok(EXIT_OK)
 }
 
-/// Describes one mutant for the plain listing, marking the ones a run will not test.
-///
-/// A suppressed mutant stays in the population so reports can show what was skipped and why, so
-/// without the mark the listing would read as a promise to test every line it prints.
-fn describe_for_listing(mutant: &crate::model::Mutant) -> String {
-    let Some(channel) = mutant
-        .suppression
-        .as_ref()
-        .filter(|_| mutant.outcome == crate::model::Outcome::Ignored)
-        .map(|suppression| suppression.channel.as_str())
-    else {
-        return mutant.describe();
-    };
-
-    format!("{} [suppressed: {channel}]", mutant.describe())
-}
-
 /// Writes the listing as a report document.
 ///
-/// `merge` withdraws a mutant only when a newer unsharded input states the whole population of its
-/// file, and producing that from a run means paying for a run. Listing is the cheap way to say what
-/// exists now, so it is the one a nightly rotation can afford beside its shard.
+/// `merge` withdraws a mutant only when a newer unsharded, unfiltered input states the whole
+/// population of its file, and producing that from a run means paying for a run. Listing is the
+/// cheap way to say what exists now, so it is the one a nightly rotation can afford beside its shard.
 fn write_population<H: Host>(
     host: &mut H,
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
+    name_filtered: bool,
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
     let info = crate::elements::RunInfo {
         started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
+        name_filtered,
         shard: shard.map(|(count, index)| crate::elements::ShardInfo { index, count }),
         tests: None,
         // Filled in by `build` from the plan it is given, so that it cannot disagree with the
@@ -638,6 +641,15 @@ mod tests {
             String::from_utf8(host.err).expect("utf-8").contains("Wrote"),
             "the path was not echoed"
         );
+
+        let ListCommand::Mutants(args) = &mut listing.command else {
+            panic!("expected mutant listing");
+        };
+        args.select.name_patterns.push(": less: ".to_owned());
+        list(&mut Sink::default(), &listing, Styler::new(false)).expect("write a filtered population");
+        let filtered: crate::elements::Report =
+            serde_json::from_str(&fs::read_to_string(&path).expect("filtered report")).expect("filtered JSON");
+        assert!(filtered.config.as_ref().is_some_and(|run| run.name_filtered));
     }
 
     #[test]
@@ -665,5 +677,49 @@ mod tests {
 
         assert_eq!(code, EXIT_OK);
         assert_eq!((shard.index, shard.count), (2, 4));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod name_filter_tests {
+    use super::selected_files;
+    use crate::discover::{Plan, TargetFile};
+
+    #[test]
+    fn listed_name_and_selected_files_follow_the_filtered_population() {
+        let mutant = crate::model::Mutant {
+            item_path: "less".to_owned().into(),
+            ..crate::fixtures::mutant()
+        };
+        let name = mutant.selection_name();
+        assert!(name.contains(": less: "), "{name}");
+
+        let files = ["src/lib.rs", "src/other.rs"].map(|path| TargetFile {
+            path: path.into(),
+            absolute: format!("/fixture/{path}").into(),
+            package: "subject".to_owned(),
+            source: None,
+        });
+        let mut plan = Plan {
+            root: "/fixture".into(),
+            files: files.into(),
+            mutants: vec![mutant],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            digests: crate::HashMap::default(),
+            skipped: Vec::new(),
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        };
+
+        let selected: Vec<_> = selected_files(&plan, true).map(|file| file.path.as_str()).collect();
+        assert_eq!(selected, ["src/lib.rs"]);
+        assert_eq!(selected_files(&plan, false).count(), 2);
+
+        plan.mutants.clear();
+        assert!(selected_files(&plan, true).next().is_none());
     }
 }

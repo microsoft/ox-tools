@@ -96,6 +96,36 @@ configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
 
+`--re` compiles one or more Rust regular expressions into a single alternative match. Discovery
+matches them against the same full name printed by `list mutants`, including the workspace-relative
+file and location, qualified item path, mutation summary, and any suppression marker. A malformed pattern is a usage error.
+The filter runs after source and diff discovery but before exact-ID selection, sharding, and ordinal
+assignment. `list files` under this filter shows only files with selected mutants. `unsuppress`
+rejects `--re`, since a partial mutant population cannot establish that a directive is idle.
+Reports produced with `--re` record `config.nameFiltered` so merge can combine their verdicts
+without treating mutants outside the regex as withdrawn. When a filtered report has newer source
+text, merge retains an available unfiltered source presentation so unmatched historical verdicts
+remain renderable and counted; a current unfiltered listing supplies current presentations.
+If a filtered source introduces a mutant absent from that selected presentation, merge reports an
+error and produces no staged document until a complete listing for the current source is included.
+Otherwise staging would discard that mutant's verdict permanently.
+Staged merges retain this per-file source property in merge provenance, so a second merge cannot
+mistake a filtered source for a complete presentation, and retain whether each verdict came from a
+name-filtered source. They also retain each mutant's latest source sighting separately from its
+verdict and the rendered file source. A complete population
+can withdraw that mutant only when it is at least as recent as the sighting. Merged outputs carry
+sightings, but not the withdrawal authority of the complete populations they absorbed: merged
+inputs never act as complete populations. Staged and direct merges make the same withdrawal
+decision only when the complete populations remain among the final merge inputs. Otherwise, a
+later filtered input can be refused or kept rather than withdrawn.
+The merged report timestamp includes the latest sighting even if it contributed only a pending
+listing, preserving its generation when a later merge chooses report metadata.
+The completed campaign record also treats a name-filtered run as partial: for unchanged files it
+retains valid earlier outcomes and killer hints outside the selected mutant IDs. The latest
+campaign population remains the filtered set for hint promotion.
+Older reports without the field retain
+their existing interpretation.
+
 ### Progress and dashboard
 
 The ordinary live display uses one active phase line at a time. Workspace

@@ -62,9 +62,9 @@ impl Killers {
         // both name a mutant: a probe is checked either way, but the fresher guess is likelier to
         // convict, and paying for the stale one first would be paying for a test twice.
         entries.extend(record.probes().iter().map(|(id, killer)| (id.clone(), killer.clone())));
-        Self::merge_generalized(&mut generalized, record.generalized());
+        generalized.merge_from(record.generalized());
         entries.extend(incomplete.probes().iter().map(|(id, killer)| (id.clone(), killer.clone())));
-        Self::merge_generalized(&mut generalized, incomplete.generalized());
+        generalized.merge_from(incomplete.generalized());
 
         Self { entries, generalized }
     }
@@ -97,7 +97,7 @@ impl Killers {
     }
 
     pub(super) fn absorb_generalized(&mut self, record: &RunRecord) {
-        Self::merge_generalized(&mut self.generalized, record.generalized());
+        self.generalized.merge_from(record.generalized());
     }
 
     #[cfg(test)]
@@ -133,61 +133,6 @@ impl Killers {
             .filter(|(id, _killer)| current.contains(id))
             .map(|(id, killer)| (id.clone(), killer.clone()))
             .collect()
-    }
-
-    fn merge_generalized(target: &mut GeneralizedHints, newer: GeneralizedHints) {
-        if newer.supported().is_none() {
-            return;
-        }
-        if target.supported().is_none() {
-            *target = GeneralizedHints::empty_supported();
-        }
-        let items: HashMap<_, _> = newer
-            .items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| ((item.file.as_path(), item.item.as_str()), index))
-            .collect();
-        target
-            .items
-            .retain(|item| !items.contains_key(&(item.file.as_path(), item.item.as_str())));
-        let keep = newer
-            .items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| items.get(&(item.file.as_path(), item.item.as_str())) == Some(&index))
-            .collect::<Vec<_>>();
-        drop(items);
-        target
-            .items
-            .extend(newer.items.into_iter().zip(keep).filter(|(_, keep)| *keep).map(|(item, _)| item));
-        let binaries: HashMap<_, _> = newer
-            .binaries
-            .iter()
-            .enumerate()
-            .map(|(index, binary)| (binary.file.as_path(), index))
-            .collect();
-        target.binaries.retain(|binary| !binaries.contains_key(binary.file.as_path()));
-        let keep = newer
-            .binaries
-            .iter()
-            .enumerate()
-            .map(|(index, binary)| binaries.get(binary.file.as_path()) == Some(&index))
-            .collect::<Vec<_>>();
-        drop(binaries);
-        target.binaries.extend(
-            newer
-                .binaries
-                .into_iter()
-                .zip(keep)
-                .filter(|(_, keep)| *keep)
-                .map(|(binary, _)| binary),
-        );
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-        if !newer.reach.is_empty() {
-            target.test_sets = newer.test_sets;
-            target.reach = newer.reach;
-        }
     }
 
     /// How many mutants this map has a killer for.
@@ -409,7 +354,7 @@ mod tests {
             }],
         };
 
-        Killers::merge_generalized(&mut target, newer.clone());
+        target.merge_from(newer.clone());
 
         assert_eq!(target.items.len(), 2);
         assert_eq!(target.items[0].file, Utf8Path::new("src/keep.rs"));
@@ -439,7 +384,7 @@ mod tests {
         let mut newer = GeneralizedHints::empty_supported();
         newer.items = vec![item("replace", "first"), item("other", "other"), item("replace", "last")];
         newer.binaries = vec![binary("src/a.rs", "first"), binary("src/b.rs", "other"), binary("src/a.rs", "last")];
-        Killers::merge_generalized(&mut target, newer);
+        target.merge_from(newer);
         assert_eq!(
             target.items,
             vec![item("keep", "keep"), item("other", "other"), item("replace", "last")]
@@ -464,18 +409,15 @@ mod tests {
         });
         let original = target.clone();
 
-        Killers::merge_generalized(
-            &mut target,
-            GeneralizedHints {
-                version: GENERALIZED_HINTS_VERSION + 1,
-                items: vec![ItemHints {
-                    file: "src/new.rs".into(),
-                    item: "new".to_owned(),
-                    candidates: vec![ranked(killer("tests::new"))],
-                }],
-                ..GeneralizedHints::default()
-            },
-        );
+        target.merge_from(GeneralizedHints {
+            version: GENERALIZED_HINTS_VERSION + 1,
+            items: vec![ItemHints {
+                file: "src/new.rs".into(),
+                item: "new".to_owned(),
+                candidates: vec![ranked(killer("tests::new"))],
+            }],
+            ..GeneralizedHints::default()
+        });
 
         assert_eq!(target, original);
     }

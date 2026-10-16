@@ -302,7 +302,16 @@ cargo gamma run --test-package ledger      # let this package's tests judge a mu
 cargo gamma run --exclude-test conformance # keep a test target out of the oracle
 cargo gamma run --test-workspace           # let every package's tests judge a mutant
 cargo gamma run --test-lib                 # use only library unit-test harnesses
+cargo gamma list mutants --re one_line    # preview mutants in this function
+cargo gamma run --re one_line             # test only matching mutants
 ```
+
+`--re` matches the full name shown by `cargo gamma list mutants`: workspace-relative file,
+line and column, qualified function path, change description, and any suppression marker. It uses a Rust regular
+expression, matches substrings by default, and may be repeated to include matches from any
+pattern. Control characters use the visible escapes printed by the listing; a regular expression
+needs `\\` to match a displayed backslash. Use `list mutants --re ...` to preview the exact
+population before a run.
 
 By default, each mutant is judged by tests from its own package. That applies both to a run inside
 `ledger-core` and to a whole-workspace run containing it: crates that depend on `ledger-core` are
@@ -1706,10 +1715,15 @@ predecessor earned — it reappears as never tested, which is also how it stays 
 denominator.
 
 Removing the *old* identity needs one more thing, because a union by itself never drops anything: at
-least one input has to be an unsharded run or listing, which states the complete population of every
-file it covers. An identity absent from the newest such input has been withdrawn, and the summary
-counts it under `Withdrawn`. A sharded report describes only its own slice, so it never withdraws
-anything — merge a full `list mutants --json` alongside the rotation to keep the denominator honest:
+least one input has to be an unsharded, unfiltered run or listing, which states the complete
+population of every file it covers. An identity absent from the newest complete input has been
+withdrawn, and the summary counts it under `Withdrawn`.
+
+A report narrowed by `--re` is partial even without sharding, so it cannot establish a withdrawal.
+If its source text changed, an available unfiltered source stays the presentation for unmatched
+historical mutants; include a current unfiltered listing for current presentations. A sharded
+report describes only its own slice, so it never withdraws anything — merge a full
+`list mutants --json` alongside the rotation to keep the denominator honest:
 
 ```bash
 cargo gamma list mutants --json-report reports/current.json

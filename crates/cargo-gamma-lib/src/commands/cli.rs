@@ -267,6 +267,23 @@ pub struct SelectArgs {
     #[arg(long = "exclude-file", value_name = "GLOB")]
     pub exclude_files: Vec<String>,
 
+    /// Only select mutants whose listed name matches this regular expression. Repeat to match any.
+    ///
+    /// REGEX uses Rust regex syntax. A bare word matches any substring, e.g. `--re accepts`.
+    ///
+    /// To select the top-level `accepts` function in one file:
+    ///
+    /// `--re '^app/src/main\.rs:[0-9]+:[0-9]+: accepts:'`
+    ///
+    /// Here `^` anchors the start, `\.` is a literal dot, and `[0-9]+` matches a number. The
+    /// input is each line of `list mutants`, such as
+    /// `app/src/main.rs:1:34: accepts: replace ... [relational.ge_to_gt]`.
+    /// A suppressed line includes its `[suppressed: channel]` marker in the matched text.
+    /// Control characters are encoded as visible escapes in both the list and matched name;
+    /// use `\\` in REGEX to match a displayed backslash.
+    #[arg(long = "re", value_name = "REGEX")]
+    pub name_patterns: Vec<String>,
+
     /// Unqualified Rust identifiers forming the final written trait-path segment, excluded through
     /// `gamma.toml`.
     #[arg(skip)]
@@ -906,6 +923,7 @@ impl Default for SelectArgs {
             mutators: None,
             files: Vec::new(),
             exclude_files: Vec::new(),
+            name_patterns: Vec::new(),
             exclude_trait_impls: Vec::new(),
             shard_count: None,
             shard_index: None,
@@ -1235,6 +1253,25 @@ mod tests {
 
         assert_eq!(args.select.shard_count, Some(4));
         assert!(args.select.shard().unwrap_err().is_usage());
+    }
+
+    #[test]
+    fn name_patterns_parse_for_run_and_list_mutants() {
+        let run = Cli::try_parse_from(["cargo-gamma", "run", "--re", "add", "--re", "src/lib.rs"])
+            .expect("repeated name patterns parse for a run");
+        let Command::Run(run) = run.command else {
+            panic!("expected run");
+        };
+        assert_eq!(run.select.name_patterns, ["add", "src/lib.rs"]);
+
+        let list = Cli::try_parse_from(["cargo-gamma", "list", "mutants", "--re", "add"]).expect("name patterns parse for mutant listing");
+        let Command::List(list) = list.command else {
+            panic!("expected list");
+        };
+        let ListCommand::Mutants(list) = list.command else {
+            panic!("expected mutant listing");
+        };
+        assert_eq!(list.select.name_patterns, ["add"]);
     }
 
     #[test]

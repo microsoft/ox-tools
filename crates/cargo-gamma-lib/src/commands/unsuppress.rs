@@ -44,6 +44,12 @@ pub(super) fn unsuppress_with_cargo<H: Host>(
     styler: Styler,
     cargo: &CargoOptions,
 ) -> crate::Result<i32> {
+    if !args.select.name_patterns.is_empty() {
+        return Err(
+            error!("`--re` cannot narrow `unsuppress`: it checks whether directives suppress any mutant in their source file").usage(),
+        );
+    }
+
     let selection = args.select.selection()?;
     let before = crate::discover::plan_for_build(&args.select, &selection, args.select.shard()?, cargo, &mut |_| {})?;
 
@@ -377,6 +383,19 @@ mod tests {
             apply,
             allow_dirty: false,
         }
+    }
+
+    #[test]
+    fn a_name_filter_is_rejected_for_unsuppress() {
+        let root = Utf8PathBuf::from("a-workspace-that-need-not-exist");
+        let mut args = args(&root, false);
+        args.select.name_patterns.push(": less: ".to_owned());
+
+        let error = unsuppress_with_cargo(&mut Sink::default(), &args, Styler::new(false), &CargoOptions::default())
+            .expect_err("a name filter must not silently change directive cleanup");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("--re"), "{error}");
     }
 
     /// The default has to be the preview, because deleting a directive that was in fact

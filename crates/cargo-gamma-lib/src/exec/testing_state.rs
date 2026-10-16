@@ -31,6 +31,11 @@ pub(crate) struct RecordPreparation {
     pub(crate) context: ContextDigest,
     pub(crate) inputs: WorkspaceSnapshot,
     pub(crate) killers: crate::discover::Killers,
+    /// Whether `--re` narrowed the population, so publication must retain unselected evidence.
+    ///
+    /// Absent from state written before name filtering existed, which was never filtered.
+    #[serde(default)]
+    pub(crate) name_filtered: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -769,6 +774,7 @@ mod tests {
             }))
             .unwrap(),
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
             base: "state".into(),
         };
         let journal_killer = Killer {
@@ -930,6 +936,7 @@ mod tests {
                 context: ContextDigest::default(),
                 inputs: RunRecord::snapshot_with_external(&root, &base, &[], false),
                 killers: crate::discover::Killers::default(),
+                name_filtered: false,
                 base,
             },
             stuck: Vec::new(),

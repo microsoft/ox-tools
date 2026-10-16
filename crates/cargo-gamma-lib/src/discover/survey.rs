@@ -15,6 +15,7 @@ use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Target, TargetKind};
+use regex::RegexSet;
 use syn::visit::{self, Visit};
 use walkdir::WalkDir;
 
@@ -199,6 +200,7 @@ pub struct Survey {
     untracked_build_script_inputs: bool,
 
     diff: Option<Diff>,
+    name_patterns: Option<RegexSet>,
     shard: Option<(u32, u32)>,
     only_mutants: Option<HashSet<MutantId>>,
     settled: HashMap<MutantId, super::Settled>,
@@ -301,6 +303,12 @@ impl Survey {
         cache_inputs: bool,
     ) -> Result<Self> {
         cargo.validate()?;
+
+        let name_patterns = if args.name_patterns.is_empty() {
+            None
+        } else {
+            Some(RegexSet::new(&args.name_patterns).map_err(|error| error!("invalid --re pattern: {error}").usage())?)
+        };
 
         let features = features::from_extra(&args.features, &cargo.extra);
         let metadata = load_metadata(&args.dir, &features)?;
@@ -481,6 +489,7 @@ impl Survey {
             specs,
             cfgs,
             diff,
+            name_patterns,
             shard,
             only_mutants: None,
             settled: HashMap::default(),
@@ -643,7 +652,6 @@ impl Survey {
         );
         let Scan {
             mut mutants,
-            suppressed,
             idle,
             skipped,
             digests,
@@ -663,9 +671,17 @@ impl Survey {
             });
         }
 
+        if let Some(patterns) = self.name_patterns.as_ref() {
+            retain_name_matches(&mut mutants, patterns);
+        }
+
         if let Some(only) = self.only_mutants.as_ref() {
             mutants.retain(|mutant| only.contains(&mutant.id));
         }
+
+        // Suppression is applied during scanning. Count only the suppressed mutants that remain
+        // after the diff, name, and ID filters narrow this run's population.
+        let suppressed = suppressed_count(&mutants);
 
         // A mutant an earlier run already settled takes the verdict that run gave it and stops
         // being work: no ordinal, no shard slot, nothing built for it. It stays in the population,
@@ -757,6 +773,24 @@ impl Survey {
     }
 }
 
+/// Matches the name as it appears in the plain mutant listing.
+fn matches_displayed_name(patterns: &RegexSet, name: &str) -> bool {
+    patterns.is_match(&crate::report::encode_controls(name))
+}
+
+fn retain_name_matches(mutants: &mut Vec<Mutant>, patterns: &RegexSet) {
+    let mut name = String::new();
+    mutants.retain(|mutant| {
+        name.clear();
+        mutant.write_selection_name(&mut name);
+        matches_displayed_name(patterns, &name)
+    });
+}
+
+fn suppressed_count(mutants: &[Mutant]) -> usize {
+    mutants.iter().filter(|mutant| mutant.outcome == Outcome::Ignored).count()
+}
+
 fn unmatched_exclusion(index: usize, exclusion: &str) -> Error {
     error!(
         "exclude-trait-impls entry {} (`{}`) matched no trait implementations; check the unqualified Rust identifier forming the final written trait-path segment",
@@ -830,7 +864,7 @@ fn mutate(
         .into_iter()
         .unzip();
     let directives = suppress::directives_for(source, cfg)?;
-    let mut suppressed = suppress::suppress(&mut found, &directives);
+    suppress::suppress(&mut found, &directives);
 
     for (mutant, trait_impl) in found.iter_mut().zip(trait_impls) {
         let Some(trait_name) = trait_impl
@@ -842,7 +876,7 @@ fn mutate(
 
         // Source suppression already made an overlapping mutant visible and accounted for it.
         // Configuration changes only otherwise-live matches so the population keeps one ignored
-        // entry and one suppression count per mutant.
+        // entry per mutant.
         if mutant.outcome == Outcome::Pending {
             mutant.outcome = Outcome::Ignored;
             mutant.suppression = Some(Suppression {
@@ -851,7 +885,6 @@ fn mutate(
                 tag: None,
                 line: None,
             });
-            suppressed = suppressed.saturating_add(1);
         }
     }
 
@@ -863,7 +896,6 @@ fn mutate(
 
     Ok(Parsed {
         mutants: found,
-        suppressed,
         idle,
         declared,
         digest: crate::discover::digest(source.text().as_bytes()),
@@ -971,7 +1003,7 @@ fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
     }
 }
 
-/// Reads, parses and mutates every file, returning the population and how much of it was suppressed.
+/// Reads, parses and mutates every file, returning the population before run-specific filters.
 ///
 /// Parsing is what discovery actually spends its time on, so the files are divided across the
 /// available cores. Work is claimed one file at a time rather than in fixed blocks, since files
@@ -1085,7 +1117,6 @@ fn scan(
     let mut mutants = Vec::with_capacity(total);
     let mut digests: HashMap<Utf8PathBuf, String> = HashMap::default();
     let mut sources: HashMap<Utf8PathBuf, String> = HashMap::default();
-    let mut suppressed = 0;
     let mut idle = Vec::new();
 
     for (index, parsed) in collected {
@@ -1098,7 +1129,6 @@ fn scan(
             let _replaced = sources.insert(file.path.clone(), parsed.source);
         }
         mutants.extend(parsed.mutants);
-        suppressed += parsed.suppressed;
         idle.extend(parsed.idle);
     }
 
@@ -1123,7 +1153,6 @@ fn scan(
 
     Ok(Scan {
         mutants,
-        suppressed,
         idle,
         skipped: unanalyzable.into_iter().map(|(_path, message)| message).collect(),
         digests,
@@ -1270,10 +1299,9 @@ fn parse_declarations_of(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOut
     }
 }
 
-/// What parsing and mutating a set of files produced.
+/// What parsing and mutating a set of files produced before population filters.
 struct Scan {
     mutants: Vec<Mutant>,
-    suppressed: usize,
     idle: Vec<suppress::Idle>,
     skipped: Vec<String>,
     digests: HashMap<Utf8PathBuf, String>,
@@ -1452,7 +1480,6 @@ fn work(
 
 struct Parsed {
     mutants: Vec<Mutant>,
-    suppressed: usize,
     idle: Vec<suppress::Idle>,
     declared: Vec<modules::Declaration>,
 
@@ -4815,6 +4842,89 @@ mod tests {
             "{:?}",
             scanned.mutants
         );
+    }
+
+    #[test]
+    fn name_patterns_match_the_control_encoded_listing() {
+        let name = "src/line\n\t\u{1b}.rs:1:1: add: replace + with - [arith.add_to_sub]";
+        let encoded = crate::report::encode_controls(name);
+        assert!(encoded.contains(r"\n\t\e"), "{encoded}");
+
+        let visible_escapes = RegexSet::new([r"\\n\\t\\e"]).expect("visible control escapes form a valid regex");
+        assert!(matches_displayed_name(&visible_escapes, name));
+
+        let raw_controls = RegexSet::new(["\n\t\u{1b}"]).expect("raw control characters form a valid regex");
+        assert!(!matches_displayed_name(&raw_controls, name));
+    }
+
+    #[test]
+    fn a_name_pattern_selects_only_mutants_in_the_matching_function() {
+        let add = Mutant {
+            item_path: "add".to_owned().into(),
+            outcome: Outcome::Pending,
+            ..crate::fixtures::mutant()
+        };
+        let quiet = Mutant {
+            item_path: "quiet".to_owned().into(),
+            outcome: Outcome::Ignored,
+            suppression: Some(Suppression {
+                channel: Channel::Attribute,
+                reason: None,
+                tag: None,
+                line: None,
+            }),
+            ..crate::fixtures::mutant()
+        };
+        let mut suppressed = vec![quiet.clone()];
+        let marker = RegexSet::new([r"\[suppressed: attribute\]$"]).expect("the listing marker is a valid regex");
+        retain_name_matches(&mut suppressed, &marker);
+        assert_eq!(suppressed.len(), 1);
+        assert!(suppressed[0].selection_name().ends_with(" [suppressed: attribute]"));
+
+        let mut mutants = vec![add, quiet];
+        let patterns = RegexSet::new([": add: "]).expect("function name is a valid regex");
+
+        retain_name_matches(&mut mutants, &patterns);
+
+        assert_eq!(mutants.len(), 1);
+        assert_eq!(mutants[0].item_path.as_ref(), "add");
+        assert_eq!(suppressed_count(&mutants), 0);
+    }
+
+    #[test]
+    fn repeated_name_patterns_match_either_pattern() {
+        let mut mutants = vec![
+            Mutant {
+                item_path: "add".to_owned().into(),
+                ..crate::fixtures::mutant()
+            },
+            Mutant {
+                item_path: "main".to_owned().into(),
+                ..crate::fixtures::mutant()
+            },
+        ];
+        let patterns = RegexSet::new(["does_not_match", ": main: "]).expect("both patterns are valid");
+
+        retain_name_matches(&mut mutants, &patterns);
+
+        assert_eq!(mutants.len(), 1);
+        assert_eq!(mutants[0].item_path.as_ref(), "main");
+    }
+
+    #[test]
+    fn invalid_name_pattern_is_a_usage_error() {
+        let error = Survey::new(
+            &SelectArgs {
+                dir: Utf8PathBuf::from("unused-with-invalid-regex"),
+                name_patterns: vec!["[".to_owned()],
+                ..SelectArgs::default()
+            },
+            None,
+        )
+        .expect_err("an invalid regex must fail before scanning");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("invalid --re pattern"), "{error}");
     }
 
     #[test]

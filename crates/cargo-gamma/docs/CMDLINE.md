@@ -73,6 +73,14 @@ is a run over the whole workspace; `cargo gamma list` is the `list` subcommand a
 | `mutators` | List registered mutators and their selection state. |
 | `presets` | List named mutator presets. |
 
+`--re` selects mutants for `run` and `list`; `list files` shows files containing a selected mutant.
+`unsuppress` rejects `--re`, because a name filter cannot establish that a skip directive is idle
+across its full source file.
+
+An unsharded report generated with `--re` contains only matching mutants. `merge` retains older
+verdicts for other mutants in the same file; use an unfiltered run or `list mutants --json-report`
+to establish the current complete population and withdraw retired mutants.
+
 ## Resuming interrupted testing
 
 After CTRL+C during the mutant-testing phase, continue that same campaign with:
@@ -269,6 +277,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--mutators` | `<SELECTORS>` | Mutators to apply, as a comma-separated selector list. |
 | `--file` | `<GLOB>` | Only mutate files matching these glob patterns. |
 | `--exclude-file` | `<GLOB>` | Skip files matching these glob patterns. |
+| `--re` | `<REGEX>` | Only select mutants whose listed name matches this regular expression. Repeat to match any. |
 | `--shard-count` | `<COUNT>` | Number of shards to divide the mutants into. |
 | `--shard-index` | `<INDEX>` | Which shard to run, from 0. |
 | `-D`, `--in-diff` | `<PATH>` | Only mutate lines added or changed by this unified diff, or `-` for standard input. |
@@ -381,6 +390,7 @@ cargo gamma list mutants [OPTIONS]
 | `--mutators` | `<SELECTORS>` | Mutators to apply, as a comma-separated selector list. |
 | `--file` | `<GLOB>` | Only mutate files matching these glob patterns. |
 | `--exclude-file` | `<GLOB>` | Skip files matching these glob patterns. |
+| `--re` | `<REGEX>` | Only select mutants whose listed name matches this regular expression. Repeat to match any. |
 | `--shard-count` | `<COUNT>` | Number of shards to divide the mutants into. |
 | `--shard-index` | `<INDEX>` | Which shard to run, from 0. |
 | `-D`, `--in-diff` | `<PATH>` | Only mutate lines added or changed by this unified diff, or `-` for standard input. |
@@ -426,6 +436,7 @@ cargo gamma list files [OPTIONS]
 | `--mutators` | `<SELECTORS>` | Mutators to apply, as a comma-separated selector list. |
 | `--file` | `<GLOB>` | Only mutate files matching these glob patterns. |
 | `--exclude-file` | `<GLOB>` | Skip files matching these glob patterns. |
+| `--re` | `<REGEX>` | Only select mutants whose listed name matches this regular expression. Repeat to match any. |
 | `--shard-count` | `<COUNT>` | Number of shards to divide the mutants into. |
 | `--shard-index` | `<INDEX>` | Which shard to run, from 0. |
 | `-D`, `--in-diff` | `<PATH>` | Only mutate lines added or changed by this unified diff, or `-` for standard input. |
@@ -592,6 +603,7 @@ cargo gamma unsuppress [OPTIONS]
 | `--mutators` | `<SELECTORS>` | Mutators to apply, as a comma-separated selector list. |
 | `--file` | `<GLOB>` | Only mutate files matching these glob patterns. |
 | `--exclude-file` | `<GLOB>` | Skip files matching these glob patterns. |
+| `--re` | `<REGEX>` | Only select mutants whose listed name matches this regular expression. Repeat to match any. |
 | `--shard-count` | `<COUNT>` | Number of shards to divide the mutants into. |
 | `--shard-index` | `<INDEX>` | Which shard to run, from 0. |
 | `-D`, `--in-diff` | `<PATH>` | Only mutate lines added or changed by this unified diff, or `-` for standard input. |

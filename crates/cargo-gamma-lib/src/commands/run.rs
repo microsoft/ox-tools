@@ -117,6 +117,7 @@ fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::
         started_at: seconds_since_epoch(SystemTime::now()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
+        name_filtered: !args.select.name_patterns.is_empty(),
         shard: args
             .select
             .shard_count
@@ -147,6 +148,7 @@ fn resumed_report_info(retained: Option<&crate::elements::RunInfo>) -> crate::el
         started_at: 0,
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: true,
+        name_filtered: false,
         shard: None,
         tests: None,
         not_built: None,
@@ -375,7 +377,7 @@ fn broken_expectations(mutants: &[Mutant]) -> Vec<(&Mutant, &'static str)> {
 /// Fails a run whose gate never got a population to judge.
 ///
 /// A gate that cannot fail is worse than no gate. Every route to an empty population — an exclude
-/// pattern that matched everything, a shard that held nothing but suppressions, a diff that named
+/// pattern or name regex that matched nothing, a shard that held nothing but suppressions, a diff that named
 /// no code, an incremental run that had already settled the lot — would otherwise end in a
 /// summary that said nothing was tested and an exit code that said everything was fine. A job that
 /// asked for `--min-score 100` or `--max-flaky 0` would then pass on the strength of having tested
@@ -403,7 +405,7 @@ fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, flaky_outcome
     let _ = writeln!(
         host.error(),
         "{} no mutant counted toward {gate}, so it was never evaluated; \
-         check that the selection — `--in-diff`, `--exclude-file`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test",
+         check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test",
         styler.error("error:")
     );
 
@@ -754,6 +756,7 @@ impl RecordPreparation {
             context,
             inputs,
             killers: survey.killers(),
+            name_filtered: !args.select.name_patterns.is_empty(),
         }
     }
 }
@@ -810,7 +813,11 @@ fn publish_completed_record(
         learning.stage(&mut record, &plan.mutants);
     }
 
-    let stored = record.store_completed(&prepared.base)?;
+    let stored = if prepared.name_filtered {
+        record.store_completed_partial(&prepared.base)?
+    } else {
+        record.store_completed(&prepared.base)?
+    };
     exec::finish_testing_record(&prepared.base)?;
     Ok((prepared.base, stored))
 }
@@ -2050,6 +2057,21 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_name_filter_is_named_in_the_unevaluated_gate_hint() {
+        let args = RunArgs {
+            // Any valid threshold enables the gate; its value is illustrative.
+            min_score: Some(80.0),
+            ..RunArgs::default()
+        };
+        let mut host = Sink::default();
+
+        let code = ungraded(&mut host, &args, Styler::new(false), false, false);
+
+        assert_eq!(code, EXIT_GATE_FAILED);
+        assert!(host.err().contains("`--re`"), "{}", host.err());
+    }
+
+    #[test]
     fn disabled_incremental_mode_suppresses_missing_hints_advice() {
         let dir = workdir("run-missing-hints-");
         let root = Utf8Path::from_path(dir.path()).expect("UTF-8 work directory");
@@ -2095,6 +2117,7 @@ mod tests {
             context: record_context,
             inputs,
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
         };
         let killer = crate::discover::Killer {
             package: "subject".to_owned(),
@@ -2130,6 +2153,7 @@ mod tests {
             })
             .expect("record context"),
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
         };
         let failed = exec::FailedMeasurement {
             plan: Some(plan),
@@ -2167,6 +2191,7 @@ mod tests {
             })
             .expect("record context"),
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
         };
 
         store_completed_record(prepared, &plan, Some(&crate::exec::Killers::default())).expect("completed campaign publication");
@@ -2199,6 +2224,7 @@ mod tests {
             base: base.clone(),
             context: crate::discover::ContextDigest::default(),
             killers: crate::discover::Killers::scan(&[plan.files[0].absolute.clone()]),
+            name_filtered: false,
         };
 
         store_completed_record(prepared, &plan, None).expect("completed campaign publication");
@@ -2232,6 +2258,7 @@ mod tests {
             context: crate::discover::ContextDigest::default(),
             inputs,
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
         };
         let probes = core::iter::once((
             plan.mutants[0].id.clone(),
@@ -2272,6 +2299,7 @@ mod tests {
             base,
             context: crate::discover::ContextDigest::default(),
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
         };
         let changed = "pub fn changed() -> bool { true }\n";
         fs::write(&plan.files[0].absolute, changed).expect("changed source");
@@ -2520,9 +2548,14 @@ mod tests {
         assert_eq!(info.tests, Some(17));
         assert_eq!(info.mutant_id_version, Some(crate::model::MUTANT_ID_VERSION));
         assert!(!info.merged);
+        assert!(!info.name_filtered);
         assert!(info.not_built.is_none());
         assert_eq!(info.dropped_test_packages, ["unavailable"]);
         assert!(info.merge_provenance.is_none());
+
+        let mut filtered = RunArgs::default();
+        filtered.select.name_patterns.push(": accepts: ".to_owned());
+        assert!(run_info(&filtered, None, &[]).name_filtered);
     }
 
     #[test]

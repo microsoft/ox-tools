@@ -120,6 +120,7 @@ fn sample() -> Report {
             started_at: 1_700_000_000,
             mutant_id_version: Some(cargo_gamma_lib::internals::model::MUTANT_ID_VERSION),
             merged: false,
+            name_filtered: false,
             shard: Some(ShardInfo { index: 1, count: 4 }),
             tests: Some(37),
             not_built: Some(2),
