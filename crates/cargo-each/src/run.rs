@@ -84,6 +84,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         packages,
         target_kinds: &target_kinds,
         target_filters: &target_filters,
+        require_target_per_package: args.require_target_per_package,
         workspace_rust_version: None,
     };
     if Plan::is_empty(&members, &args.command, build_options).into_app_err(PLAN_BUILD_CONTEXT)? {
@@ -150,6 +151,7 @@ fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
         (args.once, "--once"),
         (!args.each_targets.is_empty(), "--each-target"),
         (!args.target_filters.is_empty(), "--target-filter"),
+        (args.require_target_per_package, "--require-target-per-package"),
         (args.chdir, "--chdir"),
         (args.manifest_path.is_some(), "--manifest-path"),
     ];
@@ -1027,6 +1029,7 @@ mod tests {
             "--once",
             "--each-target",
             "--target-filter",
+            "--require-target-per-package",
             "--chdir",
             "--manifest-path",
         ];
@@ -1043,6 +1046,7 @@ mod tests {
                 "--once" => args.once = true,
                 "--each-target" => args.each_targets.push("bin".to_owned()),
                 "--target-filter" => args.target_filters.push("required-feature:feature".to_owned()),
+                "--require-target-per-package" => args.require_target_per_package = true,
                 "--chdir" => args.chdir = true,
                 "--manifest-path" => args.manifest_path = Some("Cargo.toml".into()),
                 _ => unreachable!("options lists only the JSON-mode conflicts"),

@@ -278,6 +278,16 @@ Package and target expressions share the grammar and Boolean AST implementation
 while keeping their atom sets scope-specific. There is no
 `--exclude-target-filter`; use `not`.
 
+`--require-target-per-package` adds a plan-wide invariant after package
+selection, package filtering, target-kind selection, and target filtering:
+every selected package must retain at least one matching target. The complete
+selection is validated before execution, so a later failing package prevents
+commands for earlier matching packages from starting. Every failing package is
+reported in deterministic package order using its canonical `name@version`
+identity. An empty selected package set remains a successful no-op. The flag is
+generic: callers compose package and target predicates rather than relying on
+domain-specific target rules.
+
 ### 4.3 Execution
 
 | Flag | Meaning |
@@ -288,6 +298,7 @@ while keeping their atom sets scope-specific. There is no
 | `--json-lines-file <PATH>` | Read JSON records from UTF-8 files instead of command-line values. Repeatable and may be combined with `--json-lines`; inline values are processed first, followed by files in argument order within each source. |
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-filter <EXPR>` | In per-target mode, retain targets matching the target Boolean expression. Repeatable; expressions are AND-combined. Requires `--each-target`. |
+| `--require-target-per-package` | In per-target mode, require every selected package to retain at least one target after kind and target filtering. Requires `--each-target`. Reports all failing packages and exits 2 before execution. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
 | `--jobs <N\|auto>` | Run at most the positive integer `N` per-package, per-target, or JSON-record commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
 | `--timeout <DURATION>` | Terminate an invocation's Windows job object or Unix process group when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Unix descendants can escape by starting a new session, so termination is best-effort for those escaped descendants. No timeout by default. |
@@ -341,7 +352,8 @@ An empty record set is a successful no-op.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. Target filters do not duplicate
-targets. No matching targets is a successful no-op.
+targets. No matching targets is a successful no-op unless
+`--require-target-per-package` is set for a nonempty package selection.
 
 ## 5. Semantics
 
@@ -355,6 +367,12 @@ targets. No matching targets is a successful no-op.
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.
+- **Per-package target requirements are atomic.**
+  `--require-target-per-package` validates the complete post-filter package and
+  target selection before any command starts. It reports every package without
+  a match as `name@version` in package order and exits 2. Execution controls
+  (`--jobs`, `--keep-going`, `--timeout`, and `--chdir`) do not weaken this
+  pre-execution invariant.
 - **An absent workspace Rust version is an empty value.** A nonempty package
   plan using `{workspace-rust-version}` substitutes `""` when the root manifest
   has no declaration. Malformed TOML and invalid or inconsistent metadata still
@@ -493,7 +511,8 @@ one-off target switches:
 
 ```just
 cargo each --package-file target/anvil/impact/affected.packages \
-    --each-target test --target-filter required-feature:loom -- \
+    --filter feature:loom --each-target test \
+    --target-filter required-feature:loom --require-target-per-package -- \
     cargo test --package {spec} --test {target} --features loom
 ```
 
