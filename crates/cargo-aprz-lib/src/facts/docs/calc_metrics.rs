@@ -896,6 +896,17 @@ mod tests {
     }
 
     #[test]
+    fn a_backtick_quoted_method_key_with_parentheses_resolves_without_a_plain_key() {
+        let resolved = links(&["`call_method()`"]);
+
+        assert_eq!(
+            count_broken_links::<u32>("See [`call_method()`] and [`missing_method()`].", &resolved),
+            1
+        );
+        assert_eq!(count_broken_links::<u32>("See [`call_method`].", &resolved), 1);
+    }
+
+    #[test]
     fn inline_links_are_skipped() {
         let broken = count_broken_links::<u32>("See [`docs`](https://example.com) here.", &links(&[]));
         assert_eq!(broken, 0);

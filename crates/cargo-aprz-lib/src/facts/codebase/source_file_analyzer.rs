@@ -753,6 +753,15 @@ mod tests {
     }
 
     #[test]
+    fn inner_test_attributes_allow_whitespace_after_the_exclamation_mark() {
+        for attribute in ["#! [cfg(test)]", "#!\t[cfg(all(test, unix))]", "# ! \n[cfg(test)]"] {
+            assert!(attribute_marks_test(attribute), "{attribute:?}");
+        }
+        assert!(!attribute_marks_test("#! [cfg(any(test, unix))]"));
+        assert!(!attribute_marks_test("#! [cfg(not(test))]"));
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "Miri detects UB in external rowan crate")]
     fn test_cfg_not_test_is_production_code() {
         let source = "

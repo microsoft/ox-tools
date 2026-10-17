@@ -221,18 +221,41 @@ fn deduplicate_crate_refs(crate_refs: &[CrateRef]) -> Vec<CrateRef> {
 
 /// Create a cache directory by joining a base path with a name
 fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Result<PathBuf> {
-    let name_str = name.as_ref();
-    let cache_path = base_path.as_ref().join(name_str);
+    create_cache_dir_with(
+        base_path.as_ref(),
+        name.as_ref(),
+        |path| {
+            #[cfg(windows)]
+            {
+                path.exists()
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = path;
+                false
+            }
+        },
+        |path| fs::create_dir_all(path),
+        |path, name, needs_creation| {
+            #[cfg(windows)]
+            configure_windows_cache_directory(path, name, needs_creation);
+            #[cfg(not(windows))]
+            let _ = (path, name, needs_creation);
+        },
+    )
+}
 
-    #[cfg(windows)]
-    // #[gamma::skip(bool_expr.negate, reason = "whether NTFS compression is attempted is an opportunistic Windows filesystem optimization whose outcome depends on the host volume and privileges")]
-    let needs_creation = !cache_path.exists();
-
-    fs::create_dir_all(&cache_path).into_app_err_with(|| format!("creating `{name_str}` cache directory"))?;
-
-    #[cfg(windows)]
-    // #[gamma::skip(bool_expr.negate, stmt.delete_call, reason = "NTFS compression is an opportunistic Windows filesystem optimization whose success depends on the host volume and privileges")]
-    configure_windows_cache_directory(&cache_path, name_str, needs_creation);
+fn create_cache_dir_with(
+    base_path: &Path,
+    name: &str,
+    exists: impl FnOnce(&Path) -> bool,
+    create: impl FnOnce(&Path) -> std::io::Result<()>,
+    configure: impl FnOnce(&Path, &str, bool),
+) -> Result<PathBuf> {
+    let cache_path = base_path.join(name);
+    let needs_creation = !exists(&cache_path);
+    create(&cache_path).into_app_err_with(|| format!("creating `{name}` cache directory"))?;
+    configure(&cache_path, name, needs_creation);
 
     Ok(cache_path)
 }
@@ -242,12 +265,17 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
 // #[gamma::skip(all, reason = "NTFS compression is an opportunistic Windows filesystem optimization whose success depends on the host volume and privileges")]
 fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creation: bool) {
+    configure_cache_compression(cache_path, name, needs_creation, |path| disable_directory_compression(path));
+}
+
+#[cfg(any(windows, test))]
+fn configure_cache_compression(cache_path: &Path, name: &str, needs_creation: bool, disable: impl FnOnce(&Path) -> bool) {
     if should_disable_cache_compression(name, needs_creation) {
-        let _ = disable_directory_compression(cache_path);
+        let _ = disable(cache_path);
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn should_disable_cache_compression(name: &str, needs_creation: bool) -> bool {
     needs_creation && name == "crates"
 }
@@ -441,8 +469,74 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod pure_tests {
-    use super::deduplicate_crate_refs;
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    use super::{configure_cache_compression, create_cache_dir_with, deduplicate_crate_refs};
     use crate::facts::CrateRef;
+
+    #[test]
+    fn cache_creation_disables_compression_only_for_a_new_crates_directory() {
+        for (name, exists, disabled) in [
+            ("crates", false, true),
+            ("crates", true, false),
+            ("hosting", false, false),
+            ("hosting", true, false),
+        ] {
+            for compression_succeeds in [false, true] {
+                let calls = RefCell::new(Vec::new());
+                let expected_path = Path::new("cache").join(name);
+                let path = create_cache_dir_with(
+                    Path::new("cache"),
+                    name,
+                    |path| {
+                        assert_eq!(path, expected_path);
+                        calls.borrow_mut().push("exists");
+                        exists
+                    },
+                    |path| {
+                        assert_eq!(path, expected_path);
+                        calls.borrow_mut().push("create");
+                        Ok(())
+                    },
+                    |path, name, needs_creation| {
+                        configure_cache_compression(path, name, needs_creation, |path| {
+                            assert_eq!(path, expected_path);
+                            calls.borrow_mut().push("disable");
+                            compression_succeeds
+                        });
+                    },
+                )
+                .unwrap();
+                assert_eq!(path, expected_path);
+                assert_eq!(
+                    *calls.borrow(),
+                    if disabled {
+                        vec!["exists", "create", "disable"]
+                    } else {
+                        vec!["exists", "create"]
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_cache_creation_does_not_attempt_compression() {
+        let error = create_cache_dir_with(
+            Path::new("cache"),
+            "crates",
+            |_| false,
+            |_| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "creation denied")),
+            |_, _, _| panic!("compression must not run after failed creation"),
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "creation denied");
+        assert_eq!(
+            error.find_source::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
 
     #[test]
     fn crate_references_are_deduplicated_in_insertion_order() {

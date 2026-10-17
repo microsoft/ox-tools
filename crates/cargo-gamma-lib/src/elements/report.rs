@@ -1104,6 +1104,81 @@ mod tests {
         }
     }
 
+    /// An empty earlier-file sentinel must not hide the later retained source, digest and mutant.
+    /// Callers can independently replace live/snapshot bytes without changing that retained generation.
+    fn survivor_retained_report_plan(root: &Utf8Path) -> Plan {
+        let text = "fn a() { x(a < b); }";
+        Plan {
+            skipped: Vec::new(),
+            digests: std::iter::once((Utf8PathBuf::from("z-kept.rs"), crate::discover::digest(text.as_bytes()))).collect(),
+            root: root.to_owned(),
+            files: vec![
+                TargetFile {
+                    path: "a-empty.rs".into(),
+                    absolute: root.join("a-empty.rs"),
+                    package: "subject".to_owned(),
+                    source: None,
+                },
+                TargetFile {
+                    path: "z-kept.rs".into(),
+                    absolute: root.join("z-kept.rs"),
+                    package: "subject".to_owned(),
+                    source: Some(text.to_owned()),
+                },
+            ],
+            mutants: vec![Mutant {
+                file: Utf8PathBuf::from("z-kept.rs").into(),
+                ..mutant(Outcome::Killed, 11..16)
+            }],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        }
+    }
+
+    #[test]
+    fn survivor_report_builder_keeps_later_mutated_files_requested_thresholds_and_current_identity_version() {
+        let root = Utf8Path::new("synthetic-report-root");
+        let plan = survivor_retained_report_plan(root);
+        let mut run = fixtures::report_with(None, 0, Vec::new())
+            .config
+            .expect("fixture carries run metadata");
+        run.mutant_id_version = Some(MUTANT_ID_VERSION + 97);
+        let report = build_from(&plan, None, Thresholds { high: 94, low: 61 }, Some(run))
+            .expect("a retained parsed source builds despite an earlier selected file with no mutants");
+        assert_eq!((report.thresholds.high, report.thresholds.low), (94, 61));
+        assert_eq!(report.files.keys().map(String::as_str).collect::<Vec<_>>(), ["z-kept.rs"]);
+        assert_eq!(report.files["z-kept.rs"].source, "fn a() { x(a < b); }");
+        assert_eq!(report.files["z-kept.rs"].mutants.len(), 1);
+        assert_eq!(
+            report.config.expect("requested run metadata is present").mutant_id_version,
+            Some(MUTANT_ID_VERSION)
+        );
+    }
+
+    #[test]
+    fn survivor_report_builder_returns_missing_campaign_live_source_and_edited_syntax_errors_without_panicking() {
+        let directory = crate::testing::workdir("report-builder-source-errors-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture root is UTF-8");
+        let mut plan = survivor_retained_report_plan(root);
+        fs::write(root.join("z-kept.rs"), plan.files[1].source.as_ref().unwrap()).expect("fixture source is writable");
+        let snapshot = root.join("snapshot");
+        fs::create_dir(&snapshot).expect("snapshot fixture directory can be created");
+        let error = build_from(&plan, Some(&snapshot), Thresholds::default(), None)
+            .expect_err("a supplied snapshot must not fall back to retained source when its file is absent");
+        assert!(error.to_string().contains("could not read campaign source"), "{error}");
+        plan.files[1].source = None;
+        fs::remove_file(root.join("z-kept.rs")).expect("fixture source can disappear after discovery");
+        let error = build_from(&plan, None, Thresholds::default(), None).expect_err("missing live source is a returned read error");
+        assert!(error.to_string().contains("could not read"), "{error}");
+        fs::write(root.join("z-kept.rs"), "fn edited(").expect("an editor can leave source invalid after discovery");
+        let error = build_from(&plan, None, Thresholds::default(), None).expect_err("invalid edited Rust is a returned parse error");
+        assert!(error.to_string().contains("z-kept.rs"), "{error}");
+    }
+
     #[test]
     fn every_verdict_maps_onto_the_closed_enum() {
         // The schema's status list is closed, so a verdict we invent a name for would fail
@@ -1259,6 +1334,258 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn survivor_missing_fields_and_wrong_containers_return_path_errors_instead_of_panics() {
+        let valid = complete_schema_document();
+        for (pointer, field, expected) in [
+            ("", "thresholds", "report"),
+            ("", "files", "report"),
+            ("/files/src~1lib.rs", "language", "report.files[\"src/lib.rs\"]"),
+            ("/files/src~1lib.rs", "mutants", "report.files[\"src/lib.rs\"]"),
+            (
+                "/files/src~1lib.rs/mutants/0",
+                "mutatorName",
+                "report.files[\"src/lib.rs\"].mutants[0]",
+            ),
+            ("/files/src~1lib.rs/mutants/0", "status", "report.files[\"src/lib.rs\"].mutants[0]"),
+            (
+                "/files/src~1lib.rs/mutants/0/location",
+                "start",
+                "report.files[\"src/lib.rs\"].mutants[0].location",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/location",
+                "end",
+                "report.files[\"src/lib.rs\"].mutants[0].location",
+            ),
+            ("/testFiles/tests~1unit.rs", "tests", "report.testFiles[\"tests/unit.rs\"]"),
+            (
+                "/testFiles/tests~1unit.rs/tests/0",
+                "id",
+                "report.testFiles[\"tests/unit.rs\"].tests[0]",
+            ),
+            (
+                "/testFiles/tests~1unit.rs/tests/0",
+                "name",
+                "report.testFiles[\"tests/unit.rs\"].tests[0]",
+            ),
+            ("/framework/branding", "homepageUrl", "report.framework.branding"),
+            ("/system", "ci", "report.system"),
+            ("/system/os", "platform", "report.system.os"),
+            ("/system/ram", "total", "report.system.ram"),
+        ] {
+            let mut document = valid.clone();
+            document
+                .pointer_mut(pointer)
+                .expect("fixture pointer")
+                .as_object_mut()
+                .expect("fixture object")
+                .remove(field);
+            assert_eq!(
+                validate_schema(&document),
+                Err(format!("{expected} is missing required field `{field}`")),
+                "{pointer}/{field}"
+            );
+        }
+        for (pointer, expected) in [
+            ("/files", "report.files must be an object"),
+            (
+                "/files/src~1lib.rs/mutants/0",
+                "report.files[\"src/lib.rs\"].mutants[0] must be an object",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/location",
+                "report.files[\"src/lib.rs\"].mutants[0].location must be an object",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/location/start",
+                "report.files[\"src/lib.rs\"].mutants[0].location.start must be an object",
+            ),
+            ("/testFiles", "report.testFiles must be an object"),
+            ("/testFiles/tests~1unit.rs", "report.testFiles[\"tests/unit.rs\"] must be an object"),
+            (
+                "/testFiles/tests~1unit.rs/tests",
+                "report.testFiles[\"tests/unit.rs\"].tests must be an array",
+            ),
+            (
+                "/testFiles/tests~1unit.rs/tests/0",
+                "report.testFiles[\"tests/unit.rs\"].tests[0] must be an object",
+            ),
+            ("/framework", "report.framework must be an object"),
+            ("/framework/branding", "report.framework.branding must be an object"),
+            ("/framework/dependencies", "report.framework.dependencies must be an object"),
+            ("/performance", "report.performance must be an object"),
+            ("/system", "report.system must be an object"),
+            ("/system/os", "report.system.os must be an object"),
+            ("/system/cpu", "report.system.cpu must be an object"),
+            ("/system/ram", "report.system.ram must be an object"),
+        ] {
+            let mut document = valid.clone();
+            *document.pointer_mut(pointer).expect("fixture pointer") = Value::Null;
+            assert_eq!(validate_schema(&document), Err(expected.to_owned()), "{pointer}");
+        }
+    }
+
+    #[test]
+    fn survivor_validation_order_and_optional_endpoints_are_observable() {
+        let mut document = complete_schema_document();
+        document["thresholds"] = serde_json::json!({"high": 100, "low": 100});
+        assert_eq!(validate_schema(&document), Ok(()));
+        document["thresholds"] = serde_json::json!({"high": 101, "low": 102});
+        assert_eq!(
+            validate_schema(&document),
+            Err("report.thresholds.high must be at most 100".to_owned())
+        );
+        for (pointer, value, expected) in [
+            (
+                "/schemaVersion",
+                serde_json::json!("3"),
+                "schema version `3` at report.schemaVersion must match the supported pattern",
+            ),
+            ("/schemaVersion", Value::Null, "report.schemaVersion must be a string"),
+            (
+                "/files/src~1lib.rs/mutants/0",
+                serde_json::json!({
+                    "id":"abc", "mutatorName":"m", "location":{"start":{"line":1,"column":1}, "end":{"line":1,"column":2}},
+                    "status":"Unknown"
+                }),
+                "report.files[\"src/lib.rs\"].mutants[0] mutant `abc` has unknown schema status `Unknown`",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/location/start",
+                serde_json::json!({"line":0,"column":0}),
+                "report.files[\"src/lib.rs\"].mutants[0].location.start.line must be at least 1",
+            ),
+            (
+                "/testFiles/tests~1unit.rs/tests/0/location",
+                serde_json::json!({"start":{"line":1,"column":1},"end":{"line":0,"column":1}}),
+                "report.testFiles[\"tests/unit.rs\"].tests[0].location.end.line must be at least 1",
+            ),
+            (
+                "/performance",
+                serde_json::json!({}),
+                "report.performance is missing required field `setup`",
+            ),
+        ] {
+            let mut document = complete_schema_document();
+            *document.pointer_mut(pointer).expect("fixture pointer") = value;
+            assert_eq!(validate_schema(&document), Err(expected.to_owned()), "{pointer}");
+        }
+        let mut document = complete_schema_document();
+        let mutant = document["files"]["src/lib.rs"]["mutants"][0].clone();
+        document["files"]["src/lib.rs"]["mutants"]
+            .as_array_mut()
+            .expect("mutants")
+            .push(mutant);
+        assert_eq!(
+            validate_schema(&document),
+            Err("report.files[\"src/lib.rs\"].mutants[1] duplicates another mutant".to_owned())
+        );
+    }
+
+    #[test]
+    fn survivor_uri_first_byte_escapes_and_control_bytes_are_checked() {
+        for uri in ["https://x/%g0", "https://x/\n", "https://x/\u{7f}", "https://x/\0", "https://x/%0g"] {
+            assert!(!is_uri(uri), "{uri:?}");
+        }
+        assert!(is_uri("x:"));
+        assert!(is_uri("x:%aF"));
+        for status in ["Survived", "Killed", "Ignored"] {
+            assert_eq!(is_flaky_status(status, Some("flaky: test")), status == "Ignored");
+            assert!(!is_flaky_status(status, Some("not flaky")));
+            assert!(!is_flaky_status(status, None));
+        }
+    }
+
+    #[test]
+    fn survivor_optional_schema_values_keep_types_names_and_declared_validation_order() {
+        for (pointer, value, expected) in [
+            (
+                "/files/src~1lib.rs/mutants/0/replacement",
+                Value::Bool(true),
+                "report.files[\"src/lib.rs\"].mutants[0].replacement must be a string",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/statusReason",
+                Value::Bool(true),
+                "report.files[\"src/lib.rs\"].mutants[0].statusReason must be a string",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/testsCompleted",
+                Value::Bool(true),
+                "report.files[\"src/lib.rs\"].mutants[0].testsCompleted must be a number",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/killedBy",
+                Value::Bool(true),
+                "report.files[\"src/lib.rs\"].mutants[0].killedBy must be an array",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/location/start",
+                serde_json::json!({}),
+                "report.files[\"src/lib.rs\"].mutants[0].location.start is missing required field `line`",
+            ),
+            (
+                "/files/src~1lib.rs/mutants/0/location/start",
+                serde_json::json!({"line":false,"column":1}),
+                "report.files[\"src/lib.rs\"].mutants[0].location.start.line must be a non-negative integer",
+            ),
+        ] {
+            let mut document = complete_schema_document();
+            *document.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(validate_schema(&document), Err(expected.to_owned()));
+        }
+        let mut document = complete_schema_document();
+        let mutant = &mut document["files"]["src/lib.rs"]["mutants"][0];
+        for key in ["description", "replacement", "statusReason"] {
+            mutant[key] = Value::Bool(true);
+        }
+        assert_eq!(
+            validate_schema(&document).unwrap_err(),
+            "report.files[\"src/lib.rs\"].mutants[0].description must be a string"
+        );
+        let mut document = complete_schema_document();
+        let mutant = &mut document["files"]["src/lib.rs"]["mutants"][0];
+        for key in ["duration", "testsCompleted"] {
+            mutant[key] = Value::Bool(true);
+        }
+        assert_eq!(
+            validate_schema(&document).unwrap_err(),
+            "report.files[\"src/lib.rs\"].mutants[0].duration must be a number"
+        );
+        let mut document = complete_schema_document();
+        let mutant = &mut document["files"]["src/lib.rs"]["mutants"][0];
+        for key in ["coveredBy", "killedBy"] {
+            mutant[key] = Value::Bool(true);
+        }
+        assert_eq!(
+            validate_schema(&document).unwrap_err(),
+            "report.files[\"src/lib.rs\"].mutants[0].coveredBy must be an array"
+        );
+        let mut document = complete_schema_document();
+        for key in ["description", "version"] {
+            document["system"]["os"][key] = Value::Bool(true);
+        }
+        assert_eq!(
+            validate_schema(&document).unwrap_err(),
+            "report.system.os.description must be a string"
+        );
+        let mut document = complete_schema_document();
+        document["testFiles"]["tests/unit.rs"]["tests"][0]["location"] = serde_json::json!({"start":{"line":1,"column":1}});
+        assert_eq!(validate_schema(&document), Ok(()));
+        let mut report = fixtures::report_with(None, 0, vec![fixtures::mutant_result()]);
+        report.thresholds = Thresholds { high: 101, low: 102 };
+        assert_eq!(validate_report(&report).unwrap_err(), "report.thresholds.high must be at most 100");
+        report.thresholds = Thresholds::default();
+        let mutant = &mut report.files.get_mut("src/lib.rs").unwrap().mutants[0];
+        mutant.location.start = Position { line: 0, column: 0 };
+        mutant.location.end = Position { line: 0, column: 0 };
+        assert_eq!(
+            validate_report(&report).unwrap_err(),
+            "report.files[\"src/lib.rs\"].mutants[0].location.start.line must be at least 1"
+        );
     }
 
     #[test]

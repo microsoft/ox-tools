@@ -313,6 +313,191 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fused_recursive_children_and_method_receiver_evidence_are_independent() {
+        let file = SourceFile::parse(
+            "fixture.rs",
+            "type Bytes = [u8; alias_left - alias_right]; \
+             unsafe extern \"C\" { \
+                 fn foreign(value: [u8; argument_left - argument_right]); \
+                 static FOREIGN: [u8; static_left - static_right]; \
+             } \
+             fn f() { let _ = values[index_left - index_right]; \
+                 value.abs(); receiver.method(method_left - method_right); }"
+                .into(),
+        )
+        .unwrap();
+        let cfg = CfgSet::unconditional();
+        let found = run(&file, &Selection::everything(), &cfg).unwrap();
+        for name in [
+            "alias_left",
+            "alias_right",
+            "argument_left",
+            "argument_right",
+            "static_left",
+            "static_right",
+            "index_left",
+            "index_right",
+            "value",
+            "method_left",
+            "method_right",
+        ] {
+            assert!(found.numeric_uses.names.contains(name), "{name}");
+        }
+        assert!(!found.numeric_uses.names.contains("receiver"));
+        assert!(!found.numeric_uses.names.contains("values"));
+    }
+
+    #[test]
+    fn fused_and_standalone_prepasses_have_independent_declaration_and_effect_oracles() {
+        let text = r"
+            use std::time as clock;
+            use clock::Duration;
+            use clock::Duration;
+            use dependency::*;
+            extern crate external as imported;
+            fn imported() {}
+            fn constant() {}
+            fn static_value() {}
+            fn foreign_function() {}
+            fn foreign_static() {}
+            fn Record() {}
+            fn shadowed() {}
+            const constant: u8 = 7;
+            static static_value: u16 = 8;
+            unsafe extern 'C' {
+                fn foreign_function();
+                static foreign_static: u32;
+            }
+            struct Record { #[cfg(any())] absent: u32, kept: u8 }
+            struct Conflict { kept: bool }
+            struct Again { kept: u16 }
+            type Alias<T> = Option<T>;
+            impl Record {
+                const ASSOCIATED: usize = 2;
+                #[cfg(any())] const HIDDEN_IMPL: usize = 2;
+                fn method(value: u64) -> u32 { let _ = impl_left - impl_right; value as u32 }
+            }
+            trait Behavior {
+                #[cfg(any())] const HIDDEN_TRAIT: usize = 2;
+                fn method_body(value: u16) -> u8 { let _ = trait_left - trait_right; value as u8 }
+            }
+            fn walk(values: &[u8], index: usize) {
+                let outer @ shadowed = value;
+                let _ = values[index - lower..upper.abs()];
+                let _ = #[cfg(any())] (skipped - 1);
+            }
+            mod nested { fn inside() {} }
+            fn after() {}
+        "
+        .replace("'C'", "\"C\"");
+        let file = SourceFile::parse("fixture.rs", text).unwrap();
+        let cfg = CfgSet::parse("");
+        let selection = Selection::everything();
+        let fused = run(&file, &selection, &cfg).unwrap();
+        assert_eq!(fused.returns.get("method"), Some(&Some(syn::parse_quote!(u32))));
+        assert_eq!(fused.parameters.get("method"), Some(&Some(vec![syn::parse_quote!(u64)])));
+        assert_eq!(fused.returns.get("method_body"), Some(&Some(syn::parse_quote!(u8))));
+        assert_eq!(fused.parameters.get("method_body"), Some(&Some(vec![syn::parse_quote!(u16)])));
+        for indexes in [fused, super::super::indexes::indexes_in(&file.ast, &selection, &cfg)] {
+            assert_eq!(
+                indexes.root_imports.get("Duration"),
+                Some(&Some(vec!["std".into(), "time".into(), "Duration".into()]))
+            );
+            assert_eq!(indexes.root_imports.get("*"), Some(&None));
+            assert_eq!(indexes.root_imports.get("imported"), Some(&Some(vec!["external".into()])));
+            assert_eq!(indexes.fields.get("kept"), Some(&false));
+            assert!(!indexes.fields.contains_key("absent"));
+            assert_eq!(indexes.constants.get("ASSOCIATED"), Some(&true));
+            assert!(!indexes.constants.contains_key("HIDDEN_IMPL"));
+            assert!(!indexes.constants.contains_key("HIDDEN_TRAIT"));
+            assert!(indexes.aliases.contains_key("Alias"));
+            for name in ["index", "lower", "upper", "impl_left", "impl_right", "trait_left", "trait_right"] {
+                assert!(indexes.numeric_uses.names.contains(name), "{name}");
+            }
+            assert!(!indexes.numeric_uses.names.contains("skipped"));
+            let empty_imports = crate::HashMap::default();
+            for name in [
+                "imported",
+                "constant",
+                "static_value",
+                "foreign_function",
+                "foreign_static",
+                "Record",
+                "shadowed",
+            ] {
+                assert!(
+                    !indexes
+                        .local_calls
+                        .returns_unit(&syn::parse_str(name).unwrap(), &Vec::new(), &empty_imports),
+                    "{name}"
+                );
+            }
+            assert!(
+                indexes
+                    .local_calls
+                    .returns_unit(&syn::parse_quote!(after), &Vec::new(), &empty_imports)
+            );
+        }
+    }
+
+    #[test]
+    fn prepasses_mark_only_the_lexical_macro_or_transforming_attribute_scope_opaque() {
+        for statement in [
+            "opaque!();",
+            "#[transform] let value = 1;",
+            "#[transform] struct Local;",
+            "#[transform] { 1 };",
+        ] {
+            let file = SourceFile::parse(
+                "fixture.rs",
+                format!("fn unit() {{}} fn affected() {{ {statement} }} fn clean() {{ unit(); }}"),
+            )
+            .unwrap();
+            let Item::Fn(affected) = &file.ast.items[1] else {
+                panic!("fixture function")
+            };
+            let Item::Fn(clean) = &file.ast.items[2] else {
+                panic!("fixture function")
+            };
+            let affected_scope = vec![super::super::indexes::block_id(&affected.block)];
+            let clean_scope = vec![super::super::indexes::block_id(&clean.block)];
+            let cfg = CfgSet::unconditional();
+            let selection = Selection::everything();
+            for indexes in [
+                run(&file, &selection, &cfg).unwrap(),
+                super::super::indexes::indexes_in(&file.ast, &selection, &cfg),
+            ] {
+                assert!(!indexes.local_calls.scope_is_transparent(&affected_scope), "{statement}");
+                assert!(indexes.local_calls.scope_is_transparent(&clean_scope), "{statement}");
+                assert!(
+                    !indexes
+                        .local_calls
+                        .returns_unit(&syn::parse_quote!(unit), &affected_scope, &crate::HashMap::default())
+                );
+                assert!(
+                    indexes
+                        .local_calls
+                        .returns_unit(&syn::parse_quote!(unit), &clean_scope, &crate::HashMap::default())
+                );
+            }
+        }
+        let mut file = SourceFile::parse("fixture.rs", "fn f() {} fn clean() {}".into()).unwrap();
+        let Item::Fn(function) = &mut file.ast.items[0] else {
+            panic!("fixture function")
+        };
+        function.block.stmts.push(Stmt::Expr(syn::parse_quote!(opaque!()), None));
+        let scope = vec![super::super::indexes::block_id(&function.block)];
+        let cfg = CfgSet::unconditional();
+        let selection = Selection::everything();
+        for indexes in [
+            run(&file, &selection, &cfg).unwrap(),
+            super::super::indexes::indexes_in(&file.ast, &selection, &cfg),
+        ] {
+            assert!(!indexes.local_calls.scope_is_transparent(&scope));
+        }
+    }
+
+    #[test]
     fn fused_and_standalone_indexes_agree_across_gates_and_lexical_scopes() {
         let source = r"
             use std::{time::Duration, vec::Vec};

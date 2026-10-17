@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::fs;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read as _, Result as IoResult};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,10 +76,26 @@ pub(crate) struct ReadReport {
 /// report. The per-report ceiling remains in force even when the collector has more room.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
-    let mut input = open(path).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
-    let metadata = input
-        .metadata()
-        .map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+    read_limited_with_clock(path, limit, || {
+        SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|since| since.as_secs())
+    })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn read_limited_with_clock(path: &Utf8Path, limit: u64, now: impl FnOnce() -> Option<u64>) -> Result<ReadReport> {
+    read_limited_with_io(path, limit, now, File::metadata, open)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn read_limited_with_io(
+    path: &Utf8Path,
+    limit: u64,
+    now: impl FnOnce() -> Option<u64>,
+    metadata: impl FnOnce(&File) -> IoResult<Metadata>,
+    open_input: impl FnOnce(&Utf8Path) -> IoResult<File>,
+) -> Result<ReadReport> {
+    let mut input = open_input(path).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+    let metadata = metadata(&input).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
 
     #[expect(
         clippy::filetype_is_file,
@@ -178,7 +194,7 @@ pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
     if let Some(config) = report.config.as_ref()
         // A clock this machine cannot read is not evidence about the input's, so a system time
         // before the epoch skips the comparison rather than refusing every report on the disk.
-        && let Some(now) = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|since| since.as_secs())
+        && let Some(now) = now()
         && config.started_at > now.saturating_add(MAX_SKEW)
     {
         return Err(error!(
@@ -215,8 +231,8 @@ fn too_large(path: &Utf8Path, size: u64, limit: u64) -> crate::error::Error {
     .usage()
 }
 
-/// Reads one already checked handle without ever allocating more than the caller's cap.
-fn read_contents(input: &mut File, path: &Utf8Path, limit: u64) -> Result<(String, u64)> {
+/// Reads one stream without retaining more than the caller's cap plus one overflow byte.
+fn read_contents(input: &mut impl std::io::Read, path: &Utf8Path, limit: u64) -> Result<(String, u64)> {
     let mut bytes = Vec::new();
     let mut capped = input.by_ref().take(limit.saturating_add(1));
 
@@ -236,13 +252,168 @@ fn read_contents(input: &mut File, path: &Utf8Path, limit: u64) -> Result<(Strin
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn survivor_bounded_reads_accept_exact_bytes_reject_one_extra_and_preserve_utf8_errors() {
+        let path = Utf8Path::new("synthetic/report.json");
+        for limit in [0, 3] {
+            let error = read_contents(&mut &b"abcd"[..], path, limit).unwrap_err();
+            assert!(error.is_usage());
+            assert_eq!(error.to_string(), too_large(path, limit + 1, limit).to_string());
+        }
+        for limit in [4, 5] {
+            assert_eq!(read_contents(&mut &b"abcd"[..], path, limit).unwrap(), ("abcd".to_owned(), 4));
+        }
+        let error = read_contents(&mut &b"\xff"[..], path, 1).unwrap_err();
+        assert!(!error.is_usage());
+        assert_eq!(
+            error.to_string(),
+            "could not read `synthetic/report.json`: invalid utf-8 sequence of 1 bytes from index 0"
+        );
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
+
     use camino::Utf8PathBuf;
 
     use super::*;
     use crate::testing::workdir;
+
+    #[test]
+    fn report_metadata_failures_after_open_are_returned_with_the_input_path() {
+        let (_directory, path) = written(COMPLETE);
+        let error = read_limited_with_io(
+            &path,
+            16_384,
+            || panic!("metadata failure must precede report decoding and clock validation"),
+            |input| {
+                assert_eq!(input.metadata().unwrap().len(), u64::try_from(COMPLETE.len()).unwrap());
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected report metadata failure",
+                ))
+            },
+            open,
+        )
+        .err()
+        .unwrap();
+        assert!(!error.is_usage());
+        assert!(error.to_string().contains(&format!("could not read `{path}`")), "{error}");
+        assert!(error.to_string().contains("injected report metadata failure"), "{error}");
+    }
+
+    #[test]
+    fn native_directory_handles_are_rejected_as_usage_errors_before_reading() {
+        let (directory, _path) = written(COMPLETE);
+        let path = Utf8Path::from_path(directory.path()).unwrap();
+        let error = read_limited_with_io(
+            path,
+            16_384,
+            || panic!("a nonregular file must be rejected before consulting the clock"),
+            File::metadata,
+            |path| {
+                let mut options = OpenOptions::new();
+                let _read = options.read(true);
+                #[cfg(windows)]
+                {
+                    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+                    let _flags = options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+                }
+                options.open(path)
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(error.is_usage());
+        assert_eq!(
+            error.to_string(),
+            format!("{path} is not a regular file, so it cannot be a merge report")
+        );
+    }
+
+    #[test]
+    fn report_clock_skew_accepts_the_exact_hour_boundary_and_rejects_the_next_second() {
+        for (started_at, now, accepted) in [
+            (3_699, Some(100), true),
+            (3_700, Some(100), true),
+            (3_701, Some(100), false),
+            (u64::MAX, Some(u64::MAX - 1), true),
+            (u64::MAX, None, true),
+        ] {
+            let mut document: Value = serde_json::from_str(COMPLETE).unwrap();
+            document["config"]["startedAt"] = started_at.into();
+            let (_directory, path) = written(&document.to_string());
+            let result = read_limited_with_clock(&path, 16_384, || now);
+            if accepted {
+                assert_eq!(result.unwrap().report.config.unwrap().started_at, started_at);
+            } else {
+                let error = result.err().expect("the report exceeds the allowed clock skew");
+                assert!(error.is_usage());
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "{path} says its run started at 3701, 3601 seconds ahead of this machine's clock and beyond the 3600 a merge allows"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn report_size_errors_distinguish_metadata_size_from_the_bounded_overread() {
+        let (_directory, path) = written("abcdefgh");
+        assert_eq!(
+            read_limited(&path, 3).err().unwrap().to_string(),
+            too_large(&path, 8, 3).to_string()
+        );
+        assert_eq!(
+            read_contents(&mut File::open(&path).unwrap(), &path, 3).unwrap_err().to_string(),
+            too_large(&path, 4, 3).to_string()
+        );
+
+        fs::write(&path, [0xff]).unwrap();
+        let error = read_limited(&path, 3)
+            .err()
+            .expect("invalid UTF-8 must be returned rather than panicking");
+        assert!(!error.is_usage());
+        assert!(error.to_string().contains(&format!("could not read `{path}`")));
+    }
+
+    #[test]
+    fn the_per_report_byte_ceiling_remains_exact_when_the_aggregate_budget_is_larger() {
+        let (_directory, path) = written("");
+        File::options().write(true).open(&path).unwrap().set_len(MAX_BYTES + 2).unwrap();
+        assert_eq!(
+            read_limited(&path, MAX_BYTES + 2).err().unwrap().to_string(),
+            too_large(&path, MAX_BYTES + 2, MAX_BYTES).to_string()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn survivor_native_read_handles_preserve_read_errors_and_report_byte_limits() {
+        let directory = workdir("merge-read-survivors-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let path = root.join("report.json");
+        let mut write_only = File::create(&path).unwrap();
+        read_contents(&mut write_only, &path, 1).expect_err("a write-only handle must return a read error");
+        drop(write_only);
+        let document = crate::elements::to_json(&crate::fixtures::report()).unwrap();
+        fs::write(&path, &document).unwrap();
+        let length = u64::try_from(document.len()).unwrap();
+        assert_eq!(read_limited(&path, length).unwrap().bytes, length);
+        assert!(read_limited(&path, length - 1).is_err());
+        assert!(read_limited(root, 100).is_err());
+    }
 
     /// A whole document, with every optional field present, as this tool writes one.
     const COMPLETE: &str = r#"{

@@ -355,13 +355,22 @@ fn workspace_manifest_of(manifest_path: &Path) -> Result<PathBuf> {
     workspace_manifest_with(manifest_path, members_of)
 }
 
-fn workspace_manifest_with(manifest_path: &Path, mut members: impl FnMut(&Path) -> Result<Vec<PathBuf>>) -> Result<PathBuf> {
-    let manifest = detect::read_manifest(manifest_path)?;
+fn workspace_manifest_with(manifest_path: &Path, members: impl FnMut(&Path) -> Result<Vec<PathBuf>>) -> Result<PathBuf> {
+    workspace_manifest_resolved_with(manifest_path, members, Path::canonicalize, detect::read_manifest)
+}
+
+fn workspace_manifest_resolved_with(
+    manifest_path: &Path,
+    mut members: impl FnMut(&Path) -> Result<Vec<PathBuf>>,
+    canonicalize: impl FnOnce(&Path) -> std::io::Result<PathBuf>,
+    mut read_manifest: impl FnMut(&Path) -> Result<toml_edit::DocumentMut>,
+) -> Result<PathBuf> {
+    let manifest = read_manifest(manifest_path)?;
     if matches!(detect::catalog(&manifest)?, Catalog::Workspace(_)) {
         return Ok(manifest_path.to_path_buf());
     }
 
-    let supplied = canonical_manifest(manifest_path, manifest_path.canonicalize())?;
+    let supplied = canonical_manifest(manifest_path, canonicalize(manifest_path))?;
     let package_dir = supplied
         .parent()
         .expect("a canonical manifest file path always has a parent directory");
@@ -371,7 +380,7 @@ fn workspace_manifest_with(manifest_path: &Path, mut members: impl FnMut(&Path) 
         if !candidate.is_file() {
             continue;
         }
-        let document = detect::read_manifest(&candidate)?;
+        let document = read_manifest(&candidate)?;
         if !matches!(detect::catalog(&document)?, Catalog::Workspace(_)) {
             continue;
         }
@@ -1115,6 +1124,41 @@ mod source_campaign_tests {
     }
 
     #[test]
+    fn workspace_resolution_returns_canonicalization_errors_after_reading_a_valid_package() {
+        let manifest = Path::new("fixture/Cargo.toml");
+        let read = std::cell::Cell::new(false);
+        let error = workspace_manifest_resolved_with(
+            manifest,
+            |_| panic!("failed canonicalization must stop before workspace membership queries"),
+            |path| {
+                assert_eq!(path, manifest);
+                assert!(read.get(), "the valid package must be read before canonicalization");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected canonicalization failure",
+                ))
+            },
+            |path| {
+                assert_eq!(path, manifest);
+                assert!(!read.replace(true), "the supplied manifest is read exactly once");
+                detect::parse_manifest("[package]\nname='fixture'\nversion='0.1.0'\n", path)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "injected canonicalization failure");
+        assert!(
+            error.to_string().contains(&format!("failed to resolve {}", manifest.display())),
+            "{error}"
+        );
+        let cause = error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("the injected canonicalization error is preserved");
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "injected canonicalization failure");
+    }
+
+    #[test]
     fn ancestor_resolution_skips_missing_and_nonworkspace_manifests_and_propagates_errors() {
         let directory = tempfile::tempdir().expect("fixture directory exists");
         let root = directory.path().canonicalize().expect("fixture directory is canonical");
@@ -1141,6 +1185,26 @@ mod source_campaign_tests {
         workspace_manifest_with(&member, |_| panic!("invalid ancestor stops enumeration")).expect_err("invalid ancestor propagates");
         workspace_manifest_with(&root.join("absent.toml"), |_| panic!("missing input stops enumeration"))
             .expect_err("missing input propagates");
+    }
+
+    #[test]
+    fn a_supplied_workspace_wins_over_an_enclosing_workspace() {
+        let inner = Path::new("outer/nested/Cargo.toml");
+        let mut reads = Vec::new();
+        let resolved = workspace_manifest_resolved_with(
+            inner,
+            |_| panic!("a supplied workspace must not enumerate an enclosing workspace"),
+            |_| panic!("a supplied workspace must resolve before canonicalization"),
+            |path| {
+                assert_eq!(path, inner, "an enclosing workspace must not be read");
+                reads.push(path.to_path_buf());
+                detect::parse_manifest("[workspace]\n", path)
+            },
+        )
+        .expect("the supplied workspace resolves directly");
+
+        assert_eq!(resolved, inner);
+        assert_eq!(reads, [inner]);
     }
 
     #[test]

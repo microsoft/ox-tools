@@ -28,7 +28,7 @@ use core::cell::RefCell;
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::process::{Command, Stdio};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -81,15 +81,22 @@ impl HintContext {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-            .map_err(|cause| error!("could not resolve `HEAD` for hints provenance").caused_by(cause))?;
+            .map(|output| (output.status.success(), output.stdout))
+            .map_err(|cause| error!("could not resolve `HEAD` for hints provenance").caused_by(cause));
 
-        if !output.status.success() {
+        Self::capture_from(output, || SimpleClock::new_system().system_time().display_iso_8601().to_string())
+    }
+
+    fn capture_from(head: Result<(bool, Vec<u8>)>, date: impl FnOnce() -> String) -> Result<Self> {
+        let (success, stdout) = head?;
+
+        if !success {
             return Err(error!(
                 "could not resolve `HEAD` for hints provenance; `cargo gamma hints` requires a repository with a committed HEAD"
             ));
         }
 
-        let repo_sha = core::str::from_utf8(&output.stdout)
+        let repo_sha = core::str::from_utf8(&stdout)
             .ok()
             .map(str::trim)
             .filter(|sha| matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -98,10 +105,7 @@ impl HintContext {
 
         Ok(Self {
             repo_sha,
-            generated_on: SimpleClock::new_system()
-                .system_time()
-                .display_iso_8601()
-                .to_string()
+            generated_on: date()
                 .get(..10)
                 .ok_or_else(|| error!("the system clock could not be formatted as an ISO 8601 calendar date"))?
                 .to_owned(),
@@ -337,8 +341,11 @@ impl Hints {
 
     /// Reads and validates the artifact at `path`, or nothing when it cannot be trusted.
     fn read(path: &Utf8Path) -> Option<Self> {
-        let text = input::text(File::open(path.as_std_path()).ok()?).ok()??;
+        Self::read_with(path, |path| input::text(File::open(path.as_std_path())?))
+    }
 
+    fn read_with(path: &Utf8Path, read: impl FnOnce(&Utf8Path) -> io::Result<Option<String>>) -> Option<Self> {
+        let text = read(path).ok()??;
         Self::parse(&text)
     }
 
@@ -465,12 +472,22 @@ impl Hints {
     /// generalized-hints version, or when changed knowledge needs provenance but `HEAD` cannot be
     /// resolved to a valid commit ID.
     pub(crate) fn merged(existing: &Self, promoted: Self, replacement: impl Into<Replacement>, root: &Utf8Path) -> Result<Self> {
-        let replace = matches!(replacement.into(), Replacement::WholeArtifact);
+        Self::merged_with(existing, promoted, replacement.into(), root, HintContext::capture)
+    }
+
+    fn merged_with(
+        existing: &Self,
+        promoted: Self,
+        replacement: Replacement,
+        root: &Utf8Path,
+        capture: impl FnOnce(&Utf8Path) -> Result<HintContext>,
+    ) -> Result<Self> {
+        let replace = matches!(replacement, Replacement::WholeArtifact);
         let mut merged = Self::merged_knowledge(existing, promoted, replace)?;
         let knowledge_changed = !merged.same_knowledge(existing);
 
         if knowledge_changed || replace {
-            merged.context = HintContext::capture(root)?;
+            merged.context = capture(root)?;
             merged.version = VERSION;
             merged.tool = format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION"));
         } else {
@@ -483,6 +500,16 @@ impl Hints {
     /// Merges a campaign promotion, replacing exact knowledge for every mutant that campaign
     /// selected while retaining entries outside its population.
     pub(crate) fn merged_record(existing: &Self, promoted: Self, record: &RunRecord, root: &Utf8Path) -> Result<Self> {
+        Self::merged_record_with(existing, promoted, record, root, HintContext::capture)
+    }
+
+    fn merged_record_with(
+        existing: &Self,
+        promoted: Self,
+        record: &RunRecord,
+        root: &Utf8Path,
+        capture: impl FnOnce(&Utf8Path) -> Result<HintContext>,
+    ) -> Result<Self> {
         let mut retained = existing.clone();
         let selected: HashSet<(Utf8PathBuf, MutantId)> = record
             .promotion_entries()
@@ -498,7 +525,7 @@ impl Hints {
         let knowledge_changed = !merged.same_knowledge(existing);
 
         if knowledge_changed {
-            merged.context = HintContext::capture(root)?;
+            merged.context = capture(root)?;
             merged.version = VERSION;
             merged.tool = format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION"));
         } else {
@@ -848,12 +875,7 @@ impl Hints {
         let text = self.rendered()?;
         let workspace = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
-        if u64::try_from(text.len()).unwrap_or(u64::MAX) > input::MAX_BYTES {
-            return Err(error!(
-                "the promoted hints are larger than the {} bytes cargo-gamma will retain",
-                input::MAX_BYTES
-            ));
-        }
+        check_retained_size(&text, input::MAX_BYTES)?;
 
         if before == Some(text.as_str()) {
             return Ok(self.promotion(false));
@@ -921,6 +943,15 @@ impl Hints {
             changed,
         }
     }
+}
+
+fn check_retained_size(text: &str, limit: u64) -> Result<()> {
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > limit {
+        return Err(error!(
+            "the promoted hints are larger than the {limit} bytes cargo-gamma will retain"
+        ));
+    }
+    Ok(())
 }
 
 fn replaces_exact_hint(outcome: Outcome) -> bool {
@@ -1266,7 +1297,11 @@ mod tests {
         }
     }
 
-    /// A workspace holding one source file, and a record base pointing at the same directory.
+    /// Native artifact acceptance owns one source tree, record base and hint generation per case.
+    /// These private-adapter cases observe actual opens, locking, generation comparison and rollback,
+    /// not Cargo/build execution. They require writable local storage and nonblocking file locks,
+    /// use no external tools or services, and target under one second per case after compilation.
+    /// Policy-only tests use supplied read outcomes and in-memory records instead.
     fn workspace(prefix: &str) -> (tempfile::TempDir, Utf8PathBuf) {
         let dir = workdir(prefix);
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("the work directory should be UTF-8");
@@ -1304,12 +1339,683 @@ mod tests {
         RunRecord::load(root)
     }
 
+    fn survivor_hints() -> Hints {
+        Hints {
+            version: VERSION,
+            tool: format!("{TOOL_PREFIX}fixture"),
+            context: hint_context(),
+            mutants: vec![Hint {
+                file: "src/lib.rs".into(),
+                id: "deadbeefcafe".into(),
+                killer: Some(killer("tests::caught")),
+                unviable: false,
+            }],
+            generalized: GeneralizedHints::empty_supported(),
+        }
+    }
+
+    // Builds persisted promotion inputs without capturing a native workspace snapshot.
+    fn promotion_record(entries: &[(&str, &str, Outcome)]) -> RunRecord {
+        let mut wire = serde_json::to_value(RunRecord::default()).unwrap();
+        wire["files"] = serde_json::Value::Array(
+            entries
+                .iter()
+                .map(|(file, id, outcome)| {
+                    serde_json::json!({
+                        "path": file, "digest": "controlled", "size": 0,
+                        "mutants": [{"id": id, "outcome": outcome}]
+                    })
+                })
+                .collect(),
+        );
+        serde_json::from_value(wire).unwrap()
+    }
+
+    #[test]
+    fn survivor_provenance_checks_process_errors_exit_status_and_both_commit_hash_formats() {
+        let failure = HintContext::capture_from(Err(error!("head process unavailable")), || {
+            panic!("failed HEAD must not read the clock")
+        })
+        .unwrap_err();
+        assert_eq!(failure.message(), "head process unavailable");
+        let failure = HintContext::capture_from(Ok((false, b"0123456789abcdef0123456789abcdef01234567".to_vec())), || {
+            panic!("nonzero git exit must not read the clock")
+        })
+        .unwrap_err();
+        assert!(failure.message().contains("requires a repository with a committed HEAD"));
+        for bytes in [
+            vec![0xff],
+            b"abcd".to_vec(),
+            b"".to_vec(),
+            vec![b'g'; 40],
+            [b"a".as_slice(), &[b'g'; 39]].concat(),
+            vec![b'0'; 41],
+        ] {
+            let failure = HintContext::capture_from(Ok((true, bytes)), || panic!("invalid HEAD must not read the clock")).unwrap_err();
+            assert!(failure.message().contains("invalid commit ID"));
+        }
+        for sha in ["0123456789abcdef0123456789abcdef01234567".to_owned(), "A".repeat(64)] {
+            let context =
+                HintContext::capture_from(Ok((true, format!(" {sha}\r\n").into_bytes())), || "2026-10-14T15:30:00Z".into()).unwrap();
+            assert_eq!(context.repo_sha, sha);
+            assert_eq!(context.generated_on, "2026-10-14");
+        }
+    }
+
+    #[test]
+    fn survivor_hint_reads_distinguish_missing_unreadable_oversized_and_supported_generations() {
+        let file = Utf8Path::new("synthetic/gamma-hints.yaml");
+        let expected = survivor_hints();
+        let text = expected.rendered().unwrap();
+        assert_eq!(
+            Hints::read_with(file, |requested| {
+                assert_eq!(requested, file);
+                Err(io::Error::from(ErrorKind::NotFound))
+            }),
+            None
+        );
+        assert_eq!(Hints::read_with(file, |_| Err(io::Error::from(ErrorKind::PermissionDenied))), None);
+        assert_eq!(
+            Hints::read_with(file, |_| input::text_with_limit(
+                io::Cursor::new(text.as_bytes()),
+                u64::try_from(text.len()).unwrap()
+            )),
+            Some(expected)
+        );
+        assert_eq!(
+            Hints::read_with(file, |_| input::text_with_limit(io::Cursor::new(text.as_bytes()), 1)),
+            None
+        );
+        assert_eq!(Hints::read_with(file, |_| input::text(io::Cursor::new([0xff]))), None);
+    }
+
+    #[test]
+    fn native_hint_artifact_reads_preserve_existing_text_and_refuse_invalid_or_directory_generations() {
+        let (_directory, root) = workspace("hints-read-boundaries-");
+        let file = path(&root);
+        assert_eq!(existing_text(&file).unwrap(), None);
+        let expected = survivor_hints();
+        let text = expected.rendered().unwrap();
+        fs::write(&file, &text).unwrap();
+        assert_eq!(Hints::read(&file), Some(expected));
+        assert_eq!(existing_text(&file).unwrap(), Some(text));
+        fs::write(&file, [0xff]).unwrap();
+        assert_eq!(Hints::read(&file), None);
+        let failure = existing_text(&file).unwrap_err();
+        assert!(failure.message().contains("already there and could not be read"));
+        Hints::load_for_promotion(&root, false).expect_err("invalid UTF8 must be a promotion error, not an absent artifact");
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        let failure = existing_text(&file).unwrap_err();
+        assert!(failure.message().contains("must not be replaced"));
+        assert_eq!(Hints::read(&file), None);
+    }
+
+    #[test]
+    fn survivor_yaml_wire_validation_rejects_foreign_versions_anchors_and_bad_killer_indices() {
+        let expected = survivor_hints();
+        let text = expected.rendered().unwrap();
+        assert_eq!(Hints::parse(&text), Some(expected));
+        for invalid in [
+            text.replacen("version: 4", "version: 99", 1),
+            text.replacen("cargo-gamma fixture", "foreign-producer", 1),
+            text.replacen("repo_sha: ", "repo_sha: &revision ", 1),
+        ] {
+            assert_ne!(invalid, text);
+            assert!(Hints::parse(&invalid).is_none(), "{invalid}");
+        }
+        assert!(yaml_requires_rejection("value: &anchor normal\n"));
+        assert!(yaml_requires_rejection("value: &anchor [one]\n"));
+        assert!(yaml_requires_rejection("value: &anchor {one: two}\n"));
+        assert!(yaml_requires_rejection("value: *missing\n"));
+        let bad_index = text.replace("killer: 0", "killer: 1");
+        assert_ne!(bad_index, text);
+        assert!(Hints::parse(&bad_index).is_none());
+        let mut grouped = GroupedHints::from(&survivor_hints());
+        let first = grouped.files[0].mutants[0].id.clone();
+        grouped.files[0].mutants.push(GroupedHint {
+            id: first,
+            killer: Some(0),
+            unviable: false,
+        });
+        grouped.files.push(FileHints {
+            path: "a.rs".into(),
+            killers: Vec::new(),
+            mutants: vec![GroupedHint {
+                id: "abcdefabcdef".into(),
+                killer: None,
+                unviable: true,
+            }],
+        });
+        let decoded = Hints::parse(&yaml_serde::to_string(&grouped).unwrap()).unwrap();
+        assert_eq!(
+            decoded
+                .mutants
+                .iter()
+                .map(|hint| (hint.file.as_str(), hint.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("a.rs", "abcdefabcdef"), ("src/lib.rs", "deadbeefcafe")]
+        );
+    }
+
+    #[test]
+    fn survivor_hint_size_guard_uses_exact_inclusive_utf8_byte_limits() {
+        check_retained_size("", 0).unwrap();
+        check_retained_size("four", 4).unwrap();
+        check_retained_size("four", 5).unwrap();
+        check_retained_size("é", 2).unwrap();
+        for (text, limit) in [("x", 0), ("four", 3), ("é", 1)] {
+            assert_eq!(
+                check_retained_size(text, limit).unwrap_err().message(),
+                format!("the promoted hints are larger than the {limit} bytes cargo-gamma will retain")
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_merge_refreshes_only_changed_or_explicitly_replaced_provenance_and_propagates_capture_errors() {
+        let root = Utf8Path::new("unused-fixture-root");
+        let existing = survivor_hints();
+        let same = Hints::merged_with(&existing, existing.clone(), Replacement::Incremental, root, |_| {
+            panic!("unchanged knowledge must retain provenance")
+        })
+        .unwrap();
+        assert_eq!(same, existing);
+        for replacement in [Replacement::Incremental, Replacement::WholeArtifact] {
+            let fresh = HintContext {
+                repo_sha: "a".repeat(40),
+                generated_on: "2026-10-14".into(),
+            };
+            let merged = Hints::merged_with(&Hints::default(), existing.clone(), replacement, root, |_| Ok(fresh.clone())).unwrap();
+            assert_eq!(merged.context, fresh);
+            assert_eq!(merged.version, VERSION);
+            assert_eq!(merged.tool, format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")));
+            assert_eq!(merged.mutants, existing.mutants);
+            let failure = Hints::merged_with(&Hints::default(), existing.clone(), replacement, root, |_| {
+                Err(error!("provenance unavailable"))
+            })
+            .unwrap_err();
+            assert_eq!(failure.message(), "provenance unavailable");
+        }
+        let refreshed = HintContext {
+            repo_sha: "b".repeat(64),
+            generated_on: "2026-10-15".into(),
+        };
+        let replaced = Hints::merged_with(&existing, existing.clone(), Replacement::WholeArtifact, root, |_| {
+            Ok(refreshed.clone())
+        })
+        .unwrap();
+        assert_eq!(replaced.context, refreshed);
+    }
+
+    #[test]
+    fn survivor_selected_record_promotion_removes_stale_exact_hints_but_preserves_unselected_entries() {
+        let root = Utf8Path::new("synthetic/hints-selected-promotion");
+        let mut record = promotion_record(&[
+            ("src/lib.rs", "a-ignored", Outcome::Ignored),
+            ("src/lib.rs", "z-unviable", Outcome::CompileError),
+        ]);
+        record.replace_knowledge(
+            core::iter::once(("orphan".into(), killer("orphan_test"))).collect(),
+            GeneralizedHints::empty_supported(),
+        );
+        let (promoted, omitted) = Hints::promoted_record(&record);
+        assert_eq!(omitted, 1);
+        assert_eq!(promoted.ordering(), ["z-unviable"]);
+        assert_eq!(promoted.mutants.len(), 1);
+        let mut existing = survivor_hints();
+        existing.mutants.push(Hint {
+            file: "src/lib.rs".into(),
+            id: "z-unviable".into(),
+            killer: Some(killer("old_test")),
+            unviable: false,
+        });
+        existing.normalize();
+        let fresh = HintContext {
+            repo_sha: "b".repeat(40),
+            generated_on: "2026-10-15".into(),
+        };
+        let merged = Hints::merged_record_with(&existing, promoted, &record, root, |_| Ok(fresh.clone())).unwrap();
+        assert_eq!(merged.context, fresh);
+        assert_eq!(merged.mutants.len(), 2);
+        assert_eq!(merged.probes().len(), 1);
+        assert_eq!(merged.probes()[&MutantId::from("deadbeefcafe")], killer("tests::caught"));
+        assert_eq!(merged.ordering(), ["z-unviable"]);
+        Hints::merged_record_with(&existing, Hints::promoted_record(&record).0, &record, root, |_| {
+            Err(error!("capture failed"))
+        })
+        .expect_err("changed record knowledge must propagate provenance failure");
+        let mut unsupported = existing;
+        unsupported.generalized.version = 99;
+        Hints::merged_record_with(&unsupported, Hints::promoted_record(&record).0, &record, root, |_| {
+            panic!("merge must fail first")
+        })
+        .expect_err("unsupported generalized knowledge must fail before provenance");
+    }
+
+    #[test]
+    fn survivor_probes_and_generalized_only_knowledge_change_the_empty_and_same_knowledge_decisions() {
+        let mut exact = survivor_hints();
+        let mut different_context = exact.clone();
+        different_context.context.generated_on = "2026-10-15".into();
+        assert!(exact.same_knowledge(&different_context));
+        let entry = record::FileBinaryHints {
+            file: "src/lib.rs".into(),
+            candidates: Vec::new(),
+        };
+        different_context.generalized.binaries.push(entry.clone());
+        assert!(!exact.same_knowledge(&different_context));
+        exact.mutants.clear();
+        assert!(exact.is_empty());
+        exact.generalized.binaries.push(entry);
+        assert!(!exact.is_empty());
+        let mut duplicate = mutant("deadbeefcafe", "src/lib.rs");
+        duplicate.outcome = Outcome::CompileError;
+        let record = RunRecord::default();
+        let promoted = Hints::promoted(&record, &[duplicate.clone(), duplicate]);
+        assert!(promoted.is_empty(), "a population verdict alone is not recorded ordering knowledge");
+    }
+
+    #[test]
+    fn survivor_overlapping_populations_deduplicate_only_recorded_promotable_mutants() {
+        let mut unviable = mutant("deadbeefcafe", "src/lib.rs");
+        unviable.outcome = Outcome::CompileError;
+        let record = promotion_record(&[("src/lib.rs", "deadbeefcafe", Outcome::CompileError)]);
+        let promoted = Hints::promoted(&record, &[unviable.clone(), unviable]);
+        assert_eq!(promoted.mutants.len(), 1);
+        assert_eq!(promoted.ordering(), ["deadbeefcafe"]);
+    }
+
+    #[test]
+    fn native_record_promotion_usefulness_distinguishes_unreadable_stale_and_unselected_knowledge() {
+        let (_directory, root) = workspace("hints-usefulness-");
+        let mut selected = mutant("selected", "src/lib.rs");
+        selected.outcome = Outcome::CompileError;
+        let record = RunRecord::from_run(&root, &[selected.clone()], &context_of(), &[root.join("src")]);
+        assert!(Hints::record_promotion_is_useful(&root, &record));
+        let (mut existing, omitted) = Hints::promoted_record(&record);
+        assert_eq!(omitted, 0);
+        existing.context = hint_context();
+        existing.mutants.push(survivor_hints().mutants.remove(0));
+        existing.normalize();
+        fs::write(path(&root), existing.rendered().unwrap()).unwrap();
+        assert!(!Hints::record_promotion_is_useful(&root, &record));
+        selected.outcome = Outcome::Survived;
+        let without_ordering = RunRecord::from_run(&root, &[selected], &context_of(), &[root.join("src")]);
+        assert!(Hints::record_promotion_is_useful(&root, &without_ordering));
+        fs::write(path(&root), "{").unwrap();
+        assert!(!Hints::record_promotion_is_useful(&root, &record));
+        fs::remove_file(path(&root)).unwrap();
+        fs::create_dir(path(&root)).unwrap();
+        assert!(!Hints::record_promotion_is_useful(&root, &record));
+    }
+
+    #[test]
+    fn survivor_schema_valid_out_of_order_ledgers_are_sorted_and_deduplicated_per_file_during_promotion() {
+        let record = promotion_record(&[
+            ("src/lib.rs", "deadbeefcafe", Outcome::CompileError),
+            ("src/z.rs", "abcdefabcdef", Outcome::CompileError),
+        ]);
+        let mut record = serde_json::to_value(record).unwrap();
+        record.as_object_mut().unwrap().remove("population");
+        let files = record["files"].as_array_mut().unwrap();
+        files.reverse();
+        for file in files {
+            file["mutants"][0]["id"] = serde_json::json!("deadbeefcafe");
+            let duplicate = file["mutants"][0].clone();
+            file["mutants"].as_array_mut().unwrap().push(duplicate);
+        }
+        let loaded: RunRecord = serde_json::from_value(record).unwrap();
+        assert_eq!(
+            loaded.promotion_entries().len(),
+            4,
+            "the record schema accepts unsorted duplicate observations"
+        );
+        let (promoted, omitted) = Hints::promoted_record(&loaded);
+        assert_eq!(omitted, 0);
+        assert_eq!(
+            promoted
+                .mutants
+                .iter()
+                .map(|hint| (hint.file.as_str(), hint.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("src/lib.rs", "deadbeefcafe"), ("src/z.rs", "deadbeefcafe")]
+        );
+    }
+
+    #[test]
+    fn native_locked_hint_publication_does_not_reacquire_the_already_claimed_workspace_lock() {
+        let (_directory, root) = workspace("hints-lock-mode-");
+        let _lock = crate::exec::claim_workspace(&root).unwrap();
+        let hints = survivor_hints();
+        let path = path(&root);
+        assert!(hints.write_from_with_lock(&path, None, true).unwrap().changed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), hints.rendered().unwrap());
+        fs::remove_file(&path).unwrap();
+        hints
+            .write_from_with_lock(&path, None, false)
+            .expect_err("unlocked publication must fail its nonblocking claim when the workspace is already claimed");
+        assert!(!path.exists(), "an unclaimed writer must not publish");
+    }
+
+    #[test]
+    fn native_hint_rollback_obeys_the_lock_mode_and_exact_published_generation() {
+        let (_directory, root) = workspace("hints-rollback-lock-mode-");
+        let _lock = crate::exec::claim_workspace(&root).unwrap();
+        let path = path(&root);
+        let published = survivor_hints().rendered().unwrap();
+        for locked in [true, false] {
+            for before in [None, Some("previous exact generation\n")] {
+                fs::write(&path, &published).unwrap();
+                let failure = restored(&root, &path, before, &published, error!("verification failed"), locked);
+                if locked {
+                    assert_eq!(failure.message(), "verification failed");
+                    assert_eq!(fs::read_to_string(&path).ok().as_deref(), before);
+                } else {
+                    assert!(failure.message().contains("could not be put back"));
+                    assert_eq!(
+                        fs::read_to_string(&path).unwrap(),
+                        published,
+                        "failed nonblocking lock acquisition must leave published bytes untouched"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_generalized_population_filter_sorts_every_tier_and_reinterns_reach_indices() {
+        let population = [mutant("a", "a.rs"), mutant("z", "z.rs")];
+        let first = record::SiteIdentity::from_mutant(&population[0]);
+        let last = record::SiteIdentity::from_mutant(&population[1]);
+        let mut source = GeneralizedHints::empty_supported();
+        for mutant in population.iter().rev() {
+            source.items.push(record::ItemHints {
+                file: mutant.file.to_path_buf(),
+                item: mutant.item_path.to_string(),
+                candidates: Vec::new(),
+            });
+            source.binaries.push(record::FileBinaryHints {
+                file: mutant.file.to_path_buf(),
+                candidates: Vec::new(),
+            });
+        }
+        source.binaries.push(record::FileBinaryHints {
+            file: "outside.rs".into(),
+            candidates: Vec::new(),
+        });
+        source.test_sets = vec![vec![killer("z_test")], vec![killer("a_test")]];
+        source.reach = vec![
+            record::ReachCluster { site: last, test_set: 1 },
+            record::ReachCluster { site: first, test_set: 0 },
+        ];
+        let source: GeneralizedHints = serde_json::from_value(serde_json::to_value(source).unwrap()).unwrap();
+        let selected = Hints::generalized_for(&source, &population);
+        assert_eq!(
+            selected.items.iter().map(|hint| hint.file.as_str()).collect::<Vec<_>>(),
+            ["a.rs", "z.rs"]
+        );
+        assert_eq!(
+            selected.binaries.iter().map(|hint| hint.file.as_str()).collect::<Vec<_>>(),
+            ["a.rs", "z.rs"]
+        );
+        assert_eq!(selected.test_sets, [vec![killer("a_test")], vec![killer("z_test")]]);
+        assert_eq!(
+            selected
+                .reach
+                .iter()
+                .map(|cluster| (cluster.site.file.as_str(), cluster.test_set))
+                .collect::<Vec<_>>(),
+            [("a.rs", 1), ("z.rs", 0)]
+        );
+    }
+
+    #[test]
+    fn survivor_equal_supported_duplicate_generalized_entries_preserve_their_exact_accounting() {
+        let mut hints = survivor_hints();
+        let repeated = record::FileBinaryHints {
+            file: "src/lib.rs".into(),
+            candidates: Vec::new(),
+        };
+        hints.generalized.binaries = vec![repeated.clone(), repeated];
+        let parsed = Hints::parse(&hints.rendered().unwrap()).unwrap();
+        assert_eq!(
+            parsed.generalized.binaries.len(),
+            2,
+            "the supported on-disk schema does not prohibit duplicate binary hints"
+        );
+        let changes = parsed.changes_from(&parsed);
+        assert_eq!((changes.added, changes.updated, changes.removed, changes.preserved), (0, 0, 0, 3));
+        assert_eq!(
+            merge_generalized(&parsed.generalized, &parsed.generalized).unwrap(),
+            parsed.generalized,
+            "an identical supported generation must remain unchanged, including its serialized occurrences"
+        );
+    }
+
     #[test]
     fn a_missing_artifact_is_no_hints_at_all() {
         let (_dir, root) = workspace("hints-absent-");
 
         assert!(Hints::load(&root).is_empty());
         assert!(Hints::is_missing(&root));
+    }
+
+    #[test]
+    fn survivor_generalized_merge_rejects_unknown_versions_even_when_they_have_no_entries() {
+        let supported = GeneralizedHints::empty_supported();
+        let absent = GeneralizedHints::default();
+        assert_eq!(merge_generalized(&absent, &absent).unwrap(), supported);
+        assert_eq!(merge_generalized(&supported, &absent).unwrap(), supported);
+        assert_eq!(merge_generalized(&absent, &supported).unwrap(), supported);
+        for version in [0, 1, record::GENERALIZED_HINTS_VERSION + 1] {
+            for nonempty in [false, true] {
+                if version == 0 && !nonempty {
+                    continue;
+                }
+                let mut unknown = GeneralizedHints {
+                    version,
+                    ..GeneralizedHints::default()
+                };
+                if nonempty {
+                    unknown.binaries.push(record::FileBinaryHints {
+                        file: "a.rs".into(),
+                        candidates: Vec::new(),
+                    });
+                }
+                assert_eq!(
+                    merge_generalized(&unknown, &supported).unwrap_err().message(),
+                    "the existing generalized hints version cannot be merged"
+                );
+                assert_eq!(
+                    merge_generalized(&supported, &unknown).unwrap_err().message(),
+                    "the promoted generalized hints version cannot be merged"
+                );
+                let existing = Hints {
+                    generalized: unknown,
+                    ..Hints::default()
+                };
+                Hints::merged_knowledge(&existing, Hints::default(), false)
+                    .expect_err("unsupported existing generalized version must prevent a knowledge merge");
+                assert!(Hints::merged_knowledge(&existing, Hints::default(), true).unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_binary_hint_merge_upserts_by_file_sorts_and_preserves_other_files() {
+        let mut existing = GeneralizedHints::empty_supported();
+        existing.binaries = vec![
+            record::FileBinaryHints {
+                file: "z.rs".into(),
+                candidates: Vec::new(),
+            },
+            record::FileBinaryHints {
+                file: "b.rs".into(),
+                candidates: Vec::new(),
+            },
+        ];
+        let mut incoming = GeneralizedHints::empty_supported();
+        incoming.binaries = vec![
+            record::FileBinaryHints {
+                file: "b.rs".into(),
+                candidates: Vec::new(),
+            },
+            record::FileBinaryHints {
+                file: "a.rs".into(),
+                candidates: Vec::new(),
+            },
+        ];
+        let merged = merge_generalized(&existing, &incoming).unwrap();
+        assert_eq!(
+            merged.binaries.iter().map(|entry| entry.file.as_str()).collect::<Vec<_>>(),
+            ["a.rs", "b.rs", "z.rs"]
+        );
+        assert_eq!(merged.binaries.len(), 3);
+        let hints = Hints {
+            generalized: merged,
+            ..Hints::default()
+        };
+        assert!(!hints.is_empty());
+        assert!(!hints.same_knowledge(&Hints::default()));
+    }
+
+    #[test]
+    fn survivor_grouped_hints_normalize_duplicates_and_intern_killers_in_identity_order() {
+        let hint = |id: &str, test: &str| Hint {
+            file: "a.rs".into(),
+            id: id.into(),
+            killer: Some(killer(test)),
+            unviable: false,
+        };
+        let mut hints = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".to_owned(),
+            context: hint_context(),
+            mutants: vec![hint("z", "zeta"), hint("b", "alpha"), hint("b", "alpha")],
+            generalized: GeneralizedHints::empty_supported(),
+        };
+        hints.normalize();
+        assert_eq!(hints.mutants.len(), 2);
+        let grouped = GroupedHints::from(&hints);
+        assert_eq!(grouped.files[0].killers, [killer("alpha"), killer("zeta")]);
+        assert_eq!(
+            grouped.files[0]
+                .mutants
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.killer))
+                .collect::<Vec<_>>(),
+            [("b", Some(0)), ("z", Some(1))]
+        );
+        let rendered = hints.rendered().unwrap();
+        assert!(rendered.ends_with('\n'));
+        assert!(!rendered.ends_with("\n\n"));
+        assert_eq!(Hints::parse(&rendered).unwrap(), hints);
+        let counts = hints.counts();
+        assert_eq!(
+            (counts.mutants, counts.probes, counts.ordering, counts.generalized, counts.changed),
+            (2, 2, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn native_conditional_hint_publication_reports_changed_counts_conflicts_and_io_errors() {
+        let (_directory, root) = workspace("hint-write-survivors-");
+        let path = root.join("hints.yaml");
+        let hints = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".into(),
+            context: hint_context(),
+            mutants: vec![Hint {
+                file: "src/lib.rs".into(),
+                id: "killed".into(),
+                killer: Some(killer("tests::caught")),
+                unviable: true,
+            }],
+            generalized: GeneralizedHints::empty_supported(),
+        };
+        let promoted = hints.write_from_with_lock(&path, None, true).unwrap();
+        assert_eq!(
+            (
+                promoted.mutants,
+                promoted.probes,
+                promoted.ordering,
+                promoted.generalized,
+                promoted.changed
+            ),
+            (1, 1, 1, 0, true)
+        );
+        let bytes = hints.rendered().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        assert_eq!(Hints::read(&path).unwrap(), hints);
+        assert!(!hints.write_from_with_lock(&path, Some(&bytes), true).unwrap().changed);
+        assert!(
+            hints
+                .write_from_with_lock(&path, None, true)
+                .unwrap_err()
+                .to_string()
+                .contains("changed while")
+        );
+        let invalid = root.join("bad\0name");
+        hints
+            .write_from_with_lock(&invalid, None, true)
+            .expect_err("NUL in a hint destination must prevent publication");
+        let other = Hints {
+            tool: "cargo-gamma other".into(),
+            ..hints.clone()
+        };
+        assert!(Hints::verified(&path, &other).unwrap_err().to_string().contains("does not hold"));
+        std::fs::write(&path, "{").unwrap();
+        assert!(
+            Hints::verified(&path, &hints)
+                .unwrap_err()
+                .to_string()
+                .contains("could not be read back")
+        );
+    }
+
+    #[test]
+    fn native_hint_verification_failure_restores_the_exact_prior_generation_or_absence() {
+        let (_directory, root) = workspace("hint-rollback-survivors-");
+        let path = root.join("hints.yaml");
+        let hints = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".into(),
+            context: hint_context(),
+            generalized: GeneralizedHints::empty_supported(),
+            ..Hints::default()
+        };
+        let published = hints.rendered().unwrap();
+        for before in [None, Some("previous exact bytes\n")] {
+            std::fs::write(&path, &published).unwrap();
+            let failure = restored(&root, &path, before, &published, error!("verification failed"), true);
+            assert_eq!(failure.message(), "verification failed");
+            assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), before);
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        after_next_publication(|destination| std::fs::write(destination, "{").unwrap());
+        let failure = hints.write_from_with_lock(&path, None, true).unwrap_err();
+        assert!(failure.to_string().contains("later generation was left alone"));
+        assert!(failure.to_string().contains("could not be read back"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
+    }
+
+    #[test]
+    fn survivor_generalized_serialization_errors_keep_their_explanation_and_parse_is_best_effort() {
+        for section in [GeneralizedSection::Missing, GeneralizedSection::Unsupported] {
+            let cause = serde_json::to_string(&section).unwrap_err();
+            assert!(cause.to_string().contains("only supported generalized hints can be serialized"));
+        }
+        for text in ["{", "version: 4\n", "null", "[]"] {
+            assert!(Hints::parse(text).is_none(), "{text}");
+        }
+        let supported = GeneralizedSection::Supported(GeneralizedHints::empty_supported());
+        let serialized = serde_json::to_string(&supported).unwrap();
+        let restored: GeneralizedSection = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(restored, GeneralizedSection::Supported(_)));
+        serde_json::from_str::<GeneralizedSection>("{").expect_err("malformed generalized JSON must return a decoding error");
     }
 
     #[test]

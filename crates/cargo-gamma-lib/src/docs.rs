@@ -358,6 +358,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_reference_groups_omit_real_help_version_and_hidden_arguments() {
+        let mut command = clap::Command::new("probe")
+            .version("1.0")
+            .disable_help_flag(true)
+            .disable_version_flag(true)
+            .arg(clap::Arg::new("help").long("help").action(clap::ArgAction::Help))
+            .arg(clap::Arg::new("version").long("version").action(clap::ArgAction::Version))
+            .arg(clap::Arg::new("hidden").long("hidden").hide(true))
+            .arg(clap::Arg::new("visible").long("visible"));
+        command.build();
+        let groups = grouped(&command);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Options");
+        assert_eq!(
+            groups[0].1.iter().map(|argument| argument.get_id().as_str()).collect::<Vec<_>>(),
+            ["visible"]
+        );
+    }
+
+    #[test]
     fn every_registered_mutator_appears_in_the_mutator_table() {
         // The table is the tool's published vocabulary. A name missing from it is a feature the
         // user cannot discover, and a name in it that the registry does not have is worse: it
@@ -429,5 +449,24 @@ mod tests {
 
         assert!(rendered.contains("### `gamma one two three`"), "{rendered}");
         assert!(rendered.contains("`--deep`"), "{rendered}");
+    }
+}
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn survivor_help_punctuation_newlines_and_multiple_defaults_are_exact() {
+    for (text, expected) in [
+        ("", ""),
+        ("First\nsecond", "First second."),
+        ("Done.", "Done."),
+        ("Stop!", "Stop!"),
+        ("Ready?", "Ready?"),
+        ("Trailing x", "Trailing x."),
+    ] {
+        let argument = clap::Arg::new("choice").help(text);
+        assert_eq!(help_of(&argument), expected);
+        assert_eq!(
+            help_of(&argument.default_values(["first", "second"])),
+            format!("{expected} Defaults to `first, second`.")
+        );
     }
 }

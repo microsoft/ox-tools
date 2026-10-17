@@ -199,6 +199,26 @@ pub trait Events {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    struct Minimal;
+
+    impl Events for Minimal {
+        fn phase(&mut self, _verb: &str, _detail: &str) {}
+        fn mutant(&mut self, _mutant: &Mutant) {}
+    }
+
+    #[test]
+    fn a_minimal_reporter_does_not_request_any_expensive_build_evidence() {
+        assert!(!Minimal.wants_build_output());
+        assert!(!Minimal.wants_convergence_evidence());
+        assert!(!Minimal.wants_isolation_evidence());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
 

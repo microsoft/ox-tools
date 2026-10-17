@@ -232,7 +232,7 @@ fn write_phases(text: &mut String, session: &Session) {
     if let Some(sweep) = &phases.sweep {
         let _ = writeln!(
             text,
-            "          sweep {}, {} launches, {} probes, {} saved ({} from reach; exact {}/{}, generalized {}/{}, {} rejected)",
+            "          sweep {}, {} launches, {} probes, {} saved ({} from reach; exact {}/{}, inferred tests {}/{}, {} rejected)",
             human(sweep.elapsed),
             sweep.launches,
             sweep.probes,
@@ -240,9 +240,9 @@ fn write_phases(text: &mut String, session: &Session) {
             sweep.reach_launches_saved,
             sweep.exact_hits,
             sweep.exact_probes,
-            sweep.generalized_hits,
-            sweep.generalized_probes,
-            sweep.generalized_rejected,
+            sweep.inferred_hits,
+            sweep.inferred_probes,
+            sweep.inferred_rejected,
         );
         let _ = writeln!(
             text,
@@ -682,6 +682,178 @@ mod tests {
     }
 
     #[test]
+    fn survivor_throughput_distribution_filters_zeroes_and_rounds_rank_boundaries() {
+        let mutants = [
+            mutant("a.rs", "m", Outcome::Killed, 0),
+            mutant("a.rs", "m", Outcome::Killed, 900),
+            mutant("a.rs", "m", Outcome::Survived, 100),
+            mutant("a.rs", "m", Outcome::Timeout, 300),
+            mutant("a.rs", "m", Outcome::Killed, 200),
+        ];
+        let mut text = String::new();
+        write_throughput(&mut text, &mutants, None, 7, Duration::from_millis(500));
+        assert_eq!(
+            text,
+            "mutants   4 evaluated, 1.5s cpu, 3.0 effective jobs of 7\n          min 100ms, p50 300ms, p90 900ms, p99 900ms, max 900ms\n"
+        );
+        for (fraction, expected) in [(0.0, 100), (0.49, 200), (0.5, 300), (0.9, 900), (1.0, 900)] {
+            assert_eq!(
+                percentile(&[100, 200, 300, 900].map(Duration::from_millis), fraction),
+                Duration::from_millis(expected)
+            );
+        }
+        let mut text = String::new();
+        write_throughput(&mut text, &mutants[..1], None, 7, Duration::ZERO);
+        assert_eq!(text, "mutants   nothing was run\n");
+    }
+
+    #[test]
+    fn survivor_ranked_tables_keep_ten_rows_in_cost_order_and_report_the_total_population() {
+        let mutants: Vec<_> = (1..=11)
+            .map(|index| mutant(&format!("f{index:02}.rs"), "m", Outcome::Survived, index * 100))
+            .collect();
+        let mut text = String::new();
+        write_slowest(&mut text, &mutants);
+        let rows: Vec<_> = text.lines().skip(2).collect();
+        assert_eq!(rows.len(), 10);
+        assert!(rows[0].contains("f11.rs"));
+        assert!(rows[9].contains("f02.rs"));
+        assert!(!text.contains("f01.rs"));
+        let mut breakdown = String::new();
+        write_breakdown(&mut breakdown, "file", &group(&mutants, |mutant| mutant.file.to_string()));
+        assert!(breakdown.starts_with("\nby file (10 of 11)\n"));
+        let rows: Vec<_> = breakdown.lines().skip(3).collect();
+        assert_eq!(rows.len(), 10);
+        assert!(rows[0].ends_with("f11.rs"));
+        assert!(rows[9].ends_with("f02.rs"));
+        let mut empty = String::new();
+        write_slowest(&mut empty, &[]);
+        write_breakdown(&mut empty, "file", &HashMap::default());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn survivor_ordering_diagnostics_show_either_nonzero_dimension() {
+        for (offered, rounds, expected) in [
+            (0, 0, ""),
+            (
+                1,
+                0,
+                "hints     1 mutant front-loaded over 0 probe rounds, 2 confirmed unviable by the compiler\n",
+            ),
+            (
+                0,
+                1,
+                "hints     0 mutants front-loaded over 1 probe round, 2 confirmed unviable by the compiler\n",
+            ),
+            (
+                3,
+                4,
+                "hints     3 mutants front-loaded over 4 probe rounds, 2 confirmed unviable by the compiler\n",
+            ),
+        ] {
+            let mut session = session(Vec::new());
+            session.ordering.offered = offered;
+            session.ordering.rounds = rounds;
+            session.ordering.confirmed = 2;
+            let mut text = String::new();
+            write_ordering(&mut text, &session);
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn survivor_complete_diagnostic_render_retains_jobs_slowest_tables_and_all_dimension_labels() {
+        let mut first = mutant("left.rs", "arith.add_to_sub", Outcome::Killed, 100);
+        first.package = "left-package".into();
+        let mut second = mutant("right.rs", "relational.lt_to_le", Outcome::Survived, 200);
+        second.package = "right-package".into();
+        let plan = plan(vec![first, second]);
+        let mut measured = session(Vec::new());
+        measured.ordering.offered = 3;
+        measured.ordering.rounds = 2;
+        measured.ordering.confirmed = 1;
+        let text = render(&plan, Some(&measured), 7, Duration::from_secs(10));
+        assert!(text.contains("0.3 effective jobs of 7"), "{text}");
+        assert!(
+            text.contains("hints     3 mutants front-loaded over 2 probe rounds, 1 confirmed unviable by the compiler\n"),
+            "{text}"
+        );
+        let slowest = text
+            .split_once("\nslowest mutants\n")
+            .unwrap()
+            .1
+            .split_once("\nby mutator")
+            .unwrap()
+            .0;
+        assert!(slowest.contains("left.rs"), "{slowest}");
+        assert!(slowest.contains("right.rs"), "{slowest}");
+        let mut previous = 0;
+        for label in ["mutator", "package", "file"] {
+            let heading = format!("\nby {label} (2 of 2)\n");
+            let position = text.find(&heading).unwrap();
+            assert!(position > previous, "diagnostic dimensions must retain their user-visible order");
+            previous = position;
+        }
+    }
+
+    #[test]
+    fn survivor_census_and_binary_rank_limits_preserve_ten_rows_and_exact_omitted_counts() {
+        let binaries: Vec<_> = (1..=11)
+            .map(|index| {
+                let mut binary = crate::testing::test_binary(&format!("target/binary-{index:02}"));
+                binary.baseline = Duration::from_millis(index * 100);
+                binary
+            })
+            .collect();
+        let mut measured = session(binaries);
+        measured.census = (1..=11)
+            .map(|index| crate::exec::Withdrawal {
+                package: format!("package-{index:02}"),
+                code: format!("E{index:04}"),
+                category: "fixture category".into(),
+                replacement_site: true,
+                mutator: "literal.int_decrement".into(),
+                mutants: index,
+            })
+            .collect();
+        let mut census = String::new();
+        write_census(&mut census, &measured);
+        assert_eq!(census.lines().count(), 12, "{census}");
+        assert!(census.contains("E0010"), "{census}");
+        assert!(!census.contains("E0011"), "{census}");
+        assert!(
+            census.ends_with("  1 withdrawal group omitted, accounting for 11 mutants\n"),
+            "{census}"
+        );
+        let mut binaries = String::new();
+        write_binaries(&mut binaries, &measured);
+        let rows: Vec<_> = binaries.lines().skip(3).collect();
+        assert_eq!(rows.len(), 10, "{binaries}");
+        assert!(rows[0].ends_with("binary-11"), "{binaries}");
+        assert!(rows[9].ends_with("binary-02"), "{binaries}");
+        assert!(!binaries.contains("binary-01"), "{binaries}");
+        let mut empty = String::new();
+        write_binaries(&mut empty, &session(Vec::new()));
+        assert_eq!(empty, "");
+    }
+
+    #[test]
+    fn survivor_zero_duration_convergence_rounds_report_zero_not_one_percent() {
+        let mut measured = session(Vec::new());
+        for round in &mut measured.rounds_taken {
+            round.elapsed = Duration::ZERO;
+        }
+        let mut text = String::new();
+        write_rounds(&mut text, &measured);
+        assert!(
+            text.starts_with("rounds    first 0ms, then 0ms over 1 further round (0% of the build's rounds)\n"),
+            "{text}"
+        );
+        assert!(!crowded_timeout(Duration::from_secs(1), Duration::ZERO));
+    }
+
+    #[test]
     fn a_percentile_of_nothing_is_zero_rather_than_a_panic() {
         assert_eq!(percentile(&[], 0.9), Duration::ZERO);
     }
@@ -837,8 +1009,8 @@ mod tests {
                     probes: 12,
                     exact_probes: 5,
                     exact_hits: 4,
-                    generalized_probes: 7,
-                    generalized_hits: 3,
+                    inferred_probes: 7,
+                    inferred_hits: 3,
                     launches_saved: 9,
                     reach_launches_saved: 4,
                     ..crate::exec::SweepCost::default()
@@ -852,7 +1024,7 @@ mod tests {
         assert!(text.contains("phases    copy 1.0s, preflight 2.0s, baseline 2.0s"), "{text}");
         assert!(text.contains("census 8.0s, 1681 tests over 30 binaries"), "{text}");
         assert!(
-            text.contains("sweep 42.0s, 47 launches, 12 probes, 9 saved (4 from reach; exact 4/5, generalized 3/7, 0 rejected)"),
+            text.contains("sweep 42.0s, 47 launches, 12 probes, 9 saved (4 from reach; exact 4/5, inferred tests 3/7, 0 rejected)"),
             "{text}"
         );
     }

@@ -198,6 +198,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_fitting_preserves_variation_selectors_joined_emoji_and_utf8_after_color_sequences() {
+        for (text, width, expected) in [
+            ("❤\u{fe0f}abcd", 4, "..."),
+            ("🏳\u{fe0f}\u{200d}🌈abcd", 5, "🏳\u{fe0f}\u{200d}🌈..."),
+            ("\u{1b}[31m界long", 4, "\u{1b}[31m...\u{1b}[0m"),
+        ] {
+            let fitted = fit(text, width);
+            assert_eq!(fitted, expected, "{text:?}");
+            assert!(unstyled_width(&fitted) <= width);
+        }
+    }
+
+    #[test]
     fn styling_is_removed_without_disturbing_the_text_around_it() {
         assert_eq!(
             unstyled("\u{1b}[1;36m    Building\u{1b}[0m [==>   ] 3/9"),

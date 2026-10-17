@@ -31,14 +31,47 @@ pub(crate) fn append(path: &Utf8Path, panel: &str) -> io::Result<()> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn append_locked(lock: &File, writer: &mut impl io::Write, panel: &str) -> io::Result<()> {
     lock.lock()?;
+    append_unlocking(writer, panel, || lock.unlock())
+}
 
+fn append_unlocking(writer: &mut impl io::Write, panel: &str, unlock: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     match writer.write_all(panel.as_bytes()) {
-        Ok(()) => lock.unlock(),
+        Ok(()) => unlock(),
         Err(cause) => {
-            let _ = lock.unlock();
+            let _ = unlock();
 
             Err(cause)
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod writer_tests {
+    use super::*;
+
+    pub(super) struct Broken;
+    impl io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "summary sink closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn append_preserves_the_writer_error_even_when_unlocking_also_fails() {
+        let mut unlocked = false;
+        let cause = append_unlocking(&mut Broken, "panel", || {
+            unlocked = true;
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "unlock denied"))
+        })
+        .unwrap_err();
+        assert!(unlocked);
+        assert_eq!(cause.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(cause.to_string(), "summary sink closed");
     }
 }
 
@@ -227,6 +260,54 @@ mod tests {
     const SHORT_WRITER_PATH: &str = "CARGO_GAMMA_SHORT_WRITER_PATH";
     const SHORT_WRITER_GATE: &str = "CARGO_GAMMA_SHORT_WRITER_GATE";
     const SHORT_WRITER_PANEL: &str = "CARGO_GAMMA_SHORT_WRITER_PANEL";
+
+    #[test]
+    fn survivor_markdown_cell_boundaries_and_controls_have_exact_spellings() {
+        for (input, expected) in [
+            ("", "`  `"),
+            ("a", "`a`"),
+            (" a", "`  a `"),
+            ("a ", "` a  `"),
+            ("`a", "`` `a ``"),
+            ("a`", "`` a` ``"),
+            ("a`b", "``a`b``"),
+            ("x", "`x`"),
+            ("a|b", r"`a\|b`"),
+            ("a\n\r\tb", r"`a\n\r\tb`"),
+            ("a\0\u{1b}\u{7f}b", r"`a\u{0000}\u{001b}\u{007f}b`"),
+            (r"a\n", r"`a\\n`"),
+        ] {
+            assert_eq!(cell(input), expected, "{input:?}");
+        }
+        assert!(summary(&[], &root()).starts_with("## Mutation testing\n\n**Score"));
+    }
+
+    #[test]
+    fn survivor_gap_ranking_keeps_exactly_ten_of_eleven_files() {
+        let mutants: Vec<_> = (0..11)
+            .map(|index| mutant(&format!("/w/src/f{index:02}.rs"), index + 1, "m", Outcome::Survived))
+            .collect();
+        let ranked = under_tested(&mutants, &root());
+        assert_eq!(ranked.len(), 10);
+        assert_eq!(ranked.first(), Some(&("src/f00.rs".to_owned(), 1)));
+        assert_eq!(ranked.last(), Some(&("src/f09.rs".to_owned(), 1)));
+        assert!(!ranked.iter().any(|(path, _)| path == "src/f10.rs"));
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn survivor_append_returns_the_writer_error_and_releases_the_lock() {
+        use super::writer_tests::Broken;
+        let directory = crate::testing::workdir("summary-writer-error-");
+        let path = directory.path().join("summary");
+        let lock = OpenOptions::new().create(true).append(true).read(true).open(&path).unwrap();
+        let cause = append_locked(&lock, &mut Broken, "panel").unwrap_err();
+        assert_eq!(cause.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(cause.to_string(), "summary sink closed");
+        let other = OpenOptions::new().append(true).read(true).open(&path).unwrap();
+        other.try_lock().expect("failed append must release its lock");
+        other.unlock().unwrap();
+    }
 
     struct ShortWriter {
         file: File,

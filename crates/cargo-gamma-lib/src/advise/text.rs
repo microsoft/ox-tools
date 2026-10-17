@@ -77,6 +77,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_anchor_slugs_retain_hyphens_without_treating_controls_or_letters_as_separators() {
+        for (heading, expected) in [
+            ("Build-order X-ray -- 2", "build-order-x-ray----2"),
+            ("x\0-ray", "x-ray"),
+            ("A--B", "a--b"),
+        ] {
+            assert_eq!(slug(heading), expected);
+        }
+    }
+
+    #[test]
     fn counts_of_one_are_not_pluralized() {
         assert_eq!(plural(1, "mutant"), "mutant");
         assert_eq!(plural(0, "mutant"), "mutants");
@@ -105,5 +116,7 @@ mod tests {
     fn a_slug_matches_the_anchor_a_markdown_renderer_would_generate() {
         assert_eq!(slug("Yield by mutator family"), "yield-by-mutator-family");
         assert_eq!(slug("1. 97% of the run was the build"), "1-97-of-the-run-was-the-build");
+        assert_eq!(slug("Build-order x-ray -- 2"), "build-order-x-ray----2");
+        assert_eq!(slug("A\0B"), "ab");
     }
 }

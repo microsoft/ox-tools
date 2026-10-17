@@ -43,11 +43,20 @@ struct GitFetcher;
 
 impl DbFetcher for GitFetcher {
     fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
-        // #[gamma::skip(call.replace_with_default, call_result.default, tag = "external", reason = "the lock flag only changes rustsec's process-global git-cache locking, which cannot be distinguished deterministically without concurrent external repository access")]
-        Repository::fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
-            .map(|_| ())
-            .map_err(Into::into)
+        fetch_repository(repo_path, database_url, |url, path, ensure_fresh, timeout| {
+            Repository::fetch(url, path, ensure_fresh, timeout)
+        })
     }
+}
+
+fn fetch_repository(
+    repo_path: &Path,
+    database_url: &str,
+    fetch: impl FnOnce(&str, &Path, bool, Duration) -> core::result::Result<Repository, rustsec::Error>,
+) -> Result<()> {
+    fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 impl Provider {
@@ -192,6 +201,22 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn git_fetch_requires_a_fresh_database_and_forwards_the_repository_and_timeout() {
+        let repository = Path::new("synthetic/advisories");
+        let url = "https://example.invalid/advisories";
+        let expected = rustsec::Error::new(rustsec::ErrorKind::Io, "scripted fetch failure");
+        let error = fetch_repository(repository, url, |actual_url, path, ensure_fresh, timeout| {
+            assert_eq!(actual_url, url);
+            assert_eq!(path, repository);
+            assert!(ensure_fresh, "accepting a stale advisory database defeats freshness validation");
+            assert_eq!(timeout, Duration::from_mins(1));
+            Err(expected.clone())
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected.to_string());
+    }
 
     fn write_advisory(root: &Path, package: &str, id: &str, withdrawn: Option<&str>) {
         let dir = root.join("crates").join(package);

@@ -206,6 +206,11 @@ impl Dashboard {
         self.enabled && self.active
     }
 
+    #[cfg(test)]
+    pub(super) fn testing_status_for_test(&self) -> &str {
+        &self.status
+    }
+
     pub(super) const fn enabled(&self) -> bool {
         self.enabled
     }
@@ -954,6 +959,56 @@ mod tests {
         dashboard
     }
 
+    #[test]
+    fn survivor_wide_dashboard_rows_keep_exact_three_column_gaps_and_centering_for_both_width_parities() {
+        let now = Instant::now();
+        for width in [160, 161] {
+            let dashboard = populated(width);
+            let left = dashboard.mutants_panel();
+            let right = dashboard.test_execution_panel_at(now);
+            assert_eq!(left.len(), right.len());
+            let columns = left[0].chars().count() + 3 + right[0].chars().count();
+            let indent = " ".repeat((usize::from(width) - columns) / 2);
+            let rendered = dashboard.render_at(now);
+            for (row, (left, right)) in left.iter().zip(&right).enumerate() {
+                assert_eq!(rendered[row + 2], format!("{indent}{left}   {right}"), "width {width}, row {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_exceptional_dashboard_output_requires_a_complete_redraw_and_keeps_hint_table_order() {
+        let mut dashboard = populated(160);
+        let now = Instant::now();
+        let mut host = Sink::default().terminal(160);
+        dashboard.dirty = true;
+        dashboard.tick_at(&mut host, now);
+        assert!(!dashboard.dirty);
+        dashboard.line(&mut host, "compiler", "native\nline");
+        assert!(
+            dashboard.dirty,
+            "an exceptional line invalidates the frame even when no counters changed"
+        );
+        assert!(dashboard.drawn_frame.is_none());
+        assert!(host.err().contains("compiler native\\nline"));
+        let before_redraw = host.err();
+        dashboard.tick_at(&mut host, now + REDRAW_INTERVAL);
+        assert!(
+            host.err().len() > before_redraw.len(),
+            "the cleared dashboard must actually be repainted"
+        );
+        assert!(dashboard.drawn_frame.is_some());
+        assert!(!dashboard.dirty);
+        let table = dashboard.hints_panel();
+        assert!(
+            table[1].contains("Type") && table[1].contains("Count") && table[1].contains("Hit rate"),
+            "{table:?}"
+        );
+        assert!(table[2].contains(&"─".repeat(48)), "{table:?}");
+        assert!(table[3].contains("Explicit hints") && table[3].contains("87.5%"), "{table:?}");
+        assert!(table[4].contains("Inferred hints") && table[4].contains("50.0%"), "{table:?}");
+    }
+
     fn selection(tier: SelectionTier, result: SelectionResult, all_tests: bool, elapsed_ms: u64, fallback_ms: u64) -> SelectionAttempt {
         SelectionAttempt {
             ordinal: 1,
@@ -967,6 +1022,147 @@ mod tests {
             elapsed_ms,
             fallback_ms,
         }
+    }
+
+    #[test]
+    fn survivor_formatting_boundaries_have_exact_human_readable_values() {
+        for (input, expected) in [
+            (0, "0ms"),
+            (999, "999ms"),
+            (1_000, "1.0s"),
+            (59_999, "60.0s"),
+            (60_000, "1m00s"),
+            (61_999, "1m01s"),
+            (3_599_999, "59m59s"),
+            (3_600_000, "1h00m"),
+            (7_321_999, "2h02m"),
+        ] {
+            assert_eq!(duration(input), expected, "{input}");
+        }
+        for (value, total, expected) in [(0, 0, "0.0%"), (0, 3, "0.0%"), (1, 1, "100.0%"), (1, 3, "33.3%"), (3, 3, "100.0%")] {
+            assert_eq!(percent(value, total), expected);
+        }
+        for (value, expected) in [
+            (0, "0"),
+            (1, "1"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (10_001, "10,001"),
+            (1_234_567, "1,234,567"),
+        ] {
+            assert_eq!(number(value), expected);
+        }
+        for (cells, expected) in [(0, 1), (1, 1), (2, 2), (4, 2), (5, 3), (9, 3), (10, 4), (100, 10)] {
+            assert_eq!(square_columns(cells), expected);
+        }
+    }
+
+    #[test]
+    fn survivor_panels_preserve_borders_padding_centering_and_insert_before_the_bottom() {
+        let styler = Styler::new(false);
+        assert_eq!(panel("X", &[], styler), ["╭─ X ╮", "╰────╯"]);
+        let short = panel("X", &["ab".to_owned(), "c".to_owned()], styler);
+        assert_eq!(short, ["╭─ X ╮", "│ ab │", "│ c  │", "╰────╯"]);
+        let tall = panel("Y", &["1234".to_owned(), "q".to_owned(), "r".to_owned()], styler);
+        assert_eq!(centered(short.clone(), 11), ["  ╭─ X ╮", "  │ ab │", "  │ c  │", "  ╰────╯"]);
+        assert_eq!(centered(short.clone(), 3), short);
+        let mut left = short.clone();
+        let mut right = tall.clone();
+        equalize_panels(&mut left, &mut right);
+        assert_eq!(left, ["╭─ X ╮", "│ ab │", "│ c  │", "│    │", "╰────╯"]);
+        assert_eq!(right, tall);
+        let mut left = tall.clone();
+        let mut right = short;
+        equalize_panels(&mut left, &mut right);
+        assert_eq!(left, tall);
+        assert_eq!(right, ["╭─ X ╮", "│ ab │", "│ c  │", "│    │", "╰────╯"]);
+        let colored = panel("X", &["ab".to_owned(), "c".to_owned()], Styler::new(true));
+        assert!(colored[0].contains('\u{1b}'));
+        assert_eq!(
+            colored.iter().map(|line| crate::report::unstyled(line)).collect::<Vec<_>>(),
+            ["╭─ X ╮", "│ ab │", "│ c  │", "╰────╯"]
+        );
+    }
+
+    #[test]
+    fn survivor_waffle_population_matrix_retains_classification_and_blank_rows() {
+        for (killed, survived, columns, rows) in [(0, 0, 1, 0), (1, 0, 1, 1), (2, 1, 2, 2), (9, 0, 3, 3), (99, 1, 10, 10)] {
+            let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+            dashboard.summary.killed = killed;
+            dashboard.summary.survived = survived;
+            let (cells, actual_columns, actual_rows) = dashboard.waffle();
+            assert_eq!((actual_columns, actual_rows), (columns, rows));
+            assert_eq!(cells.len(), (killed + survived) as usize);
+            assert_eq!(cells.iter().filter(|&&state| state == WaffleState::Killed).count(), killed as usize);
+            assert_eq!(
+                cells.iter().filter(|&&state| state == WaffleState::Survived).count(),
+                survived as usize
+            );
+            assert_eq!(
+                cells,
+                core::iter::repeat_n(WaffleState::Killed, killed as usize)
+                    .chain(core::iter::repeat_n(WaffleState::Survived, survived as usize))
+                    .collect::<Vec<_>>()
+            );
+            let rendered = dashboard.mutants_panel();
+            assert_eq!(rendered.len(), 12);
+            let chart: Vec<_> = rendered[1..11]
+                .iter()
+                .map(|line| line.chars().skip(2).take(20).collect::<String>())
+                .collect();
+            assert_eq!(chart.iter().map(|line| line.matches("KK").count()).sum::<usize>(), killed as usize);
+            assert_eq!(
+                chart.iter().map(|line| line.matches("SS").count()).sum::<usize>(),
+                survived as usize
+            );
+            for line in &chart[rows..] {
+                assert_eq!(line, &" ".repeat(20));
+            }
+            assert_eq!(rendered.iter().filter(|line| line.contains("Mutation score")).count(), 1);
+            assert!(rendered[10].contains("Mutation score"));
+        }
+        let classes = [
+            (WaffleState::Killed, 101),
+            (WaffleState::Survived, 202),
+            (WaffleState::Timeout, 303),
+        ];
+        assert_eq!(apportioned(&classes, 100, 606), [17, 33, 50]);
+        assert_eq!(apportioned(&classes, 606, 606), [101, 202, 303]);
+        assert_eq!(
+            apportioned(
+                &[
+                    (WaffleState::Killed, 303),
+                    (WaffleState::Survived, 202),
+                    (WaffleState::Timeout, 101)
+                ],
+                100,
+                606
+            ),
+            [50, 33, 17]
+        );
+        let mut capped = Dashboard::new(true, None, Styler::new(false));
+        capped.summary.killed = 101;
+        let (cells, columns, rows) = capped.waffle();
+        assert_eq!((cells.len(), columns, rows), (100, 10, 10));
+    }
+
+    #[test]
+    fn survivor_throughput_includes_the_five_minute_boundary_and_excludes_older_completions() {
+        let started = Instant::now();
+        let now = started + Duration::from_mins(10);
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        assert!(dashboard.recent_throughput_at(now).abs() < f64::EPSILON);
+        dashboard.testing_started = Some(started);
+        dashboard.completions = [
+            started + Duration::from_secs(299),
+            started + Duration::from_mins(5),
+            started + Duration::from_secs(599),
+            now,
+        ]
+        .into();
+        assert!((dashboard.recent_throughput_at(now) - 0.6).abs() < f64::EPSILON);
+        dashboard.testing_started = Some(now);
+        assert!(dashboard.recent_throughput_at(now).abs() < f64::EPSILON);
     }
 
     #[test]

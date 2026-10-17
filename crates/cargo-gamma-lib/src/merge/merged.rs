@@ -157,6 +157,25 @@ mod tests {
     use crate::fixtures::{mutant_result_at as mutant, report_with as report};
 
     #[test]
+    fn survivor_rotation_zero_one_and_missing_first_shard_have_distinct_coverage() {
+        for (count, seen, expected, missing) in [
+            (None, Vec::new(), 100.0, Vec::new()),
+            (Some(0), Vec::new(), 100.0, Vec::new()),
+            (Some(1), Vec::new(), 0.0, vec![0]),
+            (Some(1), vec![0], 100.0, Vec::new()),
+            (Some(4), vec![1, 3], 50.0, vec![0, 2]),
+        ] {
+            let merged = Merged {
+                shard_count: count,
+                shards_seen: seen.into_iter().collect(),
+                ..Merged::default()
+            };
+            assert!((merged.coverage() - expected).abs() < f64::EPSILON);
+            assert_eq!(merged.missing_shards(), missing);
+        }
+    }
+
+    #[test]
     fn rotation_coverage_reports_the_shards_that_were_missed() {
         let merged = super::super::merge(
             &[

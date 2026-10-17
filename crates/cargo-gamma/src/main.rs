@@ -1304,16 +1304,20 @@
 //! cargo gamma hints                     # update gamma-hints.yaml
 //! ```
 //!
-//! Later runs read `gamma-hints.yaml` automatically without any command-line flags. Three
-//! kinds of information are promoted into the hints file, and none can change an answer:
+//! Later runs read `gamma-hints.yaml` automatically without any command-line flags. Inferred tests
+//! are candidates proposed from related items, files, or observed reachability; an exact killer hint
+//! identifies the previous killer for the same mutant. Three kinds of information are promoted into
+//! the hints file, and none can change an answer:
 //!
-//! - **Killer hints** — which test caught each mutant. Canonical binary order is preserved, and the
-//!   named test narrows its own binary only when filtering cannot replace another outcome. It is run
-//!   rather than believed, so a stale hint costs one filtered process before falling back to the
-//!   standard whole-binary sweep.
-//! - **Generalized scheduling hints** — ranked candidate tests for an item, candidate binaries for
+//! - **Killer hints** — which test caught each mutant. The named test is tried before inferred tests,
+//!   regardless of its binary's position. A confirmed later-binary kill skips inferred probes but
+//!   waits for earlier canonical outcomes. It is run rather than believed, so a stale hint falls
+//!   back to inferred selection and the standard whole-binary sweep. Duplicate targeted attempts
+//!   are skipped without removing confirmations or necessary whole-binary fallback.
+//! - **Test-selection hints** — ranked candidate tests for an item, candidate binaries for
 //!   a source file, and test sets observed reaching a stable source site. Every candidate is run
-//!   again and falls back conservatively when stale; no prior verdict is carried forward.
+//!   again as inferred tests and falls back conservatively when stale; no prior verdict is carried
+//!   forward. The persisted section retains its `generalized` name for compatibility.
 //! - **Build order** — which mutants failed to compile for whoever promoted the file. These are *not*
 //!   carried as verdicts. They are spliced in and offered to the compiler first, on their own, so a
 //!   mutant that really is unviable is blamed in a single probe round without another mutant's error
@@ -1338,7 +1342,7 @@
 //! ### Running only the tests that reach the mutant
 //!
 //! By default gamma skips the reachability census and runs complete reachable test binaries after
-//! exact and generalized test hints have been tried. Pass `--optimize-test-execution` to
+//! exact hints and inferred tests have been tried. Pass `--optimize-test-execution` to
 //! experimentally narrow mutants to the test cases observed executing their sites:
 //!
 //! ```bash

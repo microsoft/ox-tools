@@ -262,8 +262,18 @@ fn write_population<H: Host>(
     shard: Option<(u32, u32)>,
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
+    write_population_at(host, plan, shard, path, SystemTime::now())
+}
+
+fn write_population_at<H: Host>(
+    host: &mut H,
+    plan: &crate::discover::Plan,
+    shard: Option<(u32, u32)>,
+    path: &Utf8PathBuf,
+    now: SystemTime,
+) -> crate::Result<()> {
     let info = crate::elements::RunInfo {
-        started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
+        started_at: now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
         shard: shard.map(|(count, index)| crate::elements::ShardInfo { index, count }),
@@ -287,6 +297,7 @@ fn write_population<H: Host>(
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::fmt::Write as _;
     use std::fs;
 
     use super::*;
@@ -295,6 +306,326 @@ mod tests {
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
         crate::fixtures::crate_dir(name, "pub fn less(a: i32, b: i32) -> bool { a < b }\n").0
+    }
+
+    #[test]
+    fn survivor_registry_lists_mark_partial_selections_and_preserve_machine_fields() {
+        let select = super::super::cli::SelectArgs {
+            mutators: Some("relational.lt_to_le".to_owned()),
+            ..super::super::cli::SelectArgs::default()
+        };
+        let mut host = Sink::default();
+        assert_eq!(list_mutators(&mut host, &select, true).unwrap(), EXIT_OK);
+        assert!(host.out().ends_with('\n'));
+        let entries: Value = serde_json::from_str(&host.out()).unwrap();
+        let entries = entries.as_array().unwrap();
+        let selected = entries.iter().find(|entry| entry["name"] == "relational.lt_to_le").unwrap();
+        assert_eq!(selected["enabled"], true);
+        assert!(selected["description"].is_string());
+        assert!(selected["default"].is_boolean());
+        assert!(selected["aliases"].is_array());
+        assert!(selected["optimisticRequiresExplicitSelection"].is_boolean());
+        let unselected = entries.iter().find(|entry| entry["name"] == "literal.int_decrement").unwrap();
+        assert_eq!(unselected["enabled"], false);
+        assert_eq!(unselected["optimisticRequiresExplicitSelection"], true);
+        host.out.clear();
+        list_mutators(&mut host, &select, false).unwrap();
+        let output = host.out();
+        assert!(
+            output
+                .lines()
+                .find(|line| line.contains("relational.lt_to_le"))
+                .unwrap()
+                .starts_with("* ")
+        );
+        let unselected = output.lines().find(|line| line.contains("literal.int_decrement")).unwrap();
+        assert!(unselected.starts_with("  "));
+        assert!(unselected.ends_with("[optimistic sites require explicit selection]"));
+        host.out.clear();
+        list_presets(&mut host, &select, false).unwrap();
+        let output = host.out();
+        let boundary = output.lines().find(|line| line.contains("@boundary")).unwrap();
+        assert!(boundary.starts_with("  @boundary"), "{boundary}");
+        assert!(output.ends_with("\n\n* = enabled by the current selection\n"));
+    }
+
+    #[test]
+    fn registry_text_rows_have_exact_alignment_selection_and_confidence_suffixes() {
+        let select = super::super::cli::SelectArgs {
+            mutators: Some("relational.lt_to_le".into()),
+            ..super::super::cli::SelectArgs::default()
+        };
+        let mut host = Sink::default();
+        list_presets(&mut host, &select, false).unwrap();
+        let width = registry::PRESETS.iter().map(|preset| preset.name.len()).max().unwrap() + 1;
+        let expected = registry::PRESETS.iter().fold(String::new(), |mut output, preset| {
+            writeln!(output, "  @{:width$}  {}", preset.name, preset.description).unwrap();
+            output
+        });
+        assert_eq!(host.out(), format!("{expected}\n* = enabled by the current selection\n"));
+
+        host.out.clear();
+        list_mutators(&mut host, &select, false).unwrap();
+        let width = registry::REGISTRY.iter().map(|mutator| mutator.name.len()).max().unwrap();
+        let expected = registry::REGISTRY.iter().fold(String::new(), |mut output, mutator| {
+            let mark = if mutator.name == "relational.lt_to_le" { "*" } else { " " };
+            let suffix = if registry::optimistic_requires_explicit(mutator.name) {
+                " [optimistic sites require explicit selection]"
+            } else {
+                ""
+            };
+            writeln!(output, "{mark} {:width$}  {}{suffix}", mutator.name, mutator.description).unwrap();
+            output
+        });
+        assert_eq!(host.out(), format!("{expected}\n* = enabled by the current selection\n"));
+    }
+
+    #[test]
+    fn registry_selection_arguments_keep_the_explicit_configuration_and_opt_out() {
+        for kind in [ListKind::Presets, ListKind::Mutators] {
+            for config in [
+                crate::commands::ConfigArgs {
+                    path: Some("custom-gamma.toml".into()),
+                    no_config: false,
+                },
+                crate::commands::ConfigArgs {
+                    path: None,
+                    no_config: true,
+                },
+            ] {
+                let mut listing = args("custom-project", kind, false);
+                let (ListCommand::Presets(registry) | ListCommand::Mutators(registry)) = &mut listing.command else {
+                    panic!("fixture is a registry listing");
+                };
+                registry.config = config.clone();
+                registry.mutators = Some("literal.bool_flip".into());
+                let select = selection_args(&listing);
+                assert_eq!(select.dir, Utf8PathBuf::from("custom-project"));
+                assert_eq!(select.mutators.as_deref(), Some("literal.bool_flip"));
+                assert_eq!(select.config.path, config.path);
+                assert_eq!(select.config.no_config, config.no_config);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn listings_return_explicit_config_and_workspace_discovery_failures_without_panicking() {
+        let directory = crate_dir("list-initialization-failures-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        for kind in [ListKind::Presets, ListKind::Mutators] {
+            let mut listing = args(root.clone(), kind, false);
+            let (ListCommand::Presets(registry) | ListCommand::Mutators(registry)) = &mut listing.command else {
+                panic!("fixture is a registry listing");
+            };
+            registry.config.path = Some(root.join("missing-config.toml"));
+            list(&mut Sink::default(), &listing, Styler::new(false))
+                .expect_err("an explicitly requested missing configuration must be returned");
+        }
+        fs::write(root.join("Cargo.toml"), "invalid toml ]").unwrap();
+        let select = super::super::cli::SelectArgs {
+            dir: root,
+            mutators: Some("literal.bool_flip".into()),
+            ..super::super::cli::SelectArgs::default()
+        };
+        let cargo = CargoOptions::default();
+        list_files(&mut Sink::default(), &select, false, Styler::new(false), &cargo)
+            .expect_err("file discovery must return the invalid manifest error");
+        list_mutants(&mut Sink::default(), &select, false, None, Styler::new(false), &cargo)
+            .expect_err("mutant discovery must return the invalid manifest error");
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn discovery_listings_preserve_skipped_file_colors_and_return_diagnostic_write_errors() {
+        let directory = crate_dir("list-skipped-diagnostics-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let source = format!("pub fn deep() -> i32 {{ {}1{} }}", "(".repeat(512), ")".repeat(512));
+        fs::write(root.join("src/lib.rs"), source).unwrap();
+        for kind in [ListKind::Files, ListKind::Mutants] {
+            let listing = args(root.clone(), kind, false);
+            for colored in [false, true] {
+                let mut host = Sink::default();
+                assert_eq!(list(&mut host, &listing, Styler::new(colored)).unwrap(), EXIT_OK);
+                let diagnostics = String::from_utf8(host.err).unwrap();
+                assert!(diagnostics.contains("1 file could not be analyzed:"), "{diagnostics}");
+                assert_eq!(diagnostics.contains("\x1b["), colored, "{diagnostics}");
+            }
+            list(&mut BrokenHost, &listing, Styler::new(false))
+                .expect_err("skipped-file diagnostic failures must propagate through either listing consumer");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn population_publication_propagates_report_write_and_diagnostic_failures() {
+        let directory = crate_dir("list-population-failures-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let select = super::super::cli::SelectArgs {
+            dir: root.clone(),
+            mutators: Some("relational.lt_to_le".into()),
+            ..super::super::cli::SelectArgs::default()
+        };
+        let selection = select.selection().unwrap();
+        let cargo = CargoOptions::default();
+        let plan = crate::discover::plan_for_build(&select, &selection, None, &cargo, &mut |_| {}).unwrap();
+        let blocker = root.join("not-a-directory");
+        fs::write(&blocker, "fixture").unwrap();
+        let report = blocker.join("population.json");
+        write_population(&mut Sink::default(), &plan, None, &report).expect_err("a report below a file cannot be published");
+        list_mutants(&mut Sink::default(), &select, false, Some(&report), Styler::new(false), &cargo)
+            .expect_err("the listing must return the population publication failure");
+
+        let report = root.join("population.json");
+        write_population(&mut BrokenHost, &plan, Some((5, 2)), &report).expect_err("a failed publication diagnostic must be returned");
+        let report: Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+        assert_eq!(report["config"]["shard"], serde_json::json!({ "index": 2, "count": 5 }));
+
+        let path = root.join("unknown-start-time.json");
+        let before_epoch = UNIX_EPOCH.checked_sub(core::time::Duration::from_secs(1)).unwrap();
+        write_population_at(&mut Sink::default(), &plan, None, &path, before_epoch).unwrap();
+        let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(report["config"]["startedAt"], 0);
+
+        write_population_at(
+            &mut Sink::default(),
+            &plan,
+            None,
+            &path,
+            UNIX_EPOCH + core::time::Duration::from_secs(1_234_567),
+        )
+        .unwrap();
+        let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(report["config"]["startedAt"], 1_234_567);
+    }
+
+    #[test]
+    fn survivor_json_writer_reports_failure_at_the_final_newline_with_context() {
+        struct NoNewline(Vec<u8>);
+        impl Write for NoNewline {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if buf == b"\n" {
+                    return Err(std::io::Error::other("newline rejected"));
+                }
+                self.0.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut stream = NoNewline(Vec::new());
+        let cause = write_pretty_json(&mut stream, &17, "the survivor listing").unwrap_err();
+        assert_eq!(stream.0, b"17");
+        assert!(cause.to_string().contains("could not write the survivor listing as JSON"));
+    }
+
+    #[test]
+    fn survivor_registry_and_discovery_lists_reject_invalid_selections_and_shards_before_reading_sources() {
+        let mut select = super::super::cli::SelectArgs {
+            mutators: Some("not_a_real_mutator".into()),
+            ..super::super::cli::SelectArgs::default()
+        };
+        let cargo = CargoOptions::default();
+        let styler = Styler::new(false);
+        let mut host = Sink::default();
+        list_presets(&mut host, &select, true).expect_err("invalid selection must reject the preset listing");
+        list_mutators(&mut host, &select, true).expect_err("invalid selection must reject the mutator listing");
+        list_files(&mut host, &select, true, styler, &cargo).expect_err("invalid selection must reject the file listing");
+        list_mutants(&mut host, &select, true, None, styler, &cargo).expect_err("invalid selection must reject the mutant listing");
+        select.mutators = None;
+        select.shard_count = Some(0);
+        select.shard_index = Some(0);
+        list_files(&mut host, &select, false, styler, &cargo).expect_err("zero shard count must reject the file listing");
+        list_mutants(&mut host, &select, false, None, styler, &cargo).expect_err("zero shard count must reject the mutant listing");
+        assert!(host.out.is_empty());
+    }
+
+    struct Limited<'a>(&'a mut usize);
+    impl Write for Limited<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if *self.0 == 0 {
+                return Err(std::io::Error::other("registry output denied"));
+            }
+            *self.0 -= buf.iter().map(|&byte| usize::from(byte == b'\n')).sum::<usize>();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    #[derive(Debug)]
+    struct LimitedHost(usize);
+    impl Host for LimitedHost {
+        fn output(&mut self) -> impl Write {
+            Limited(&mut self.0)
+        }
+        fn error(&mut self) -> impl Write {
+            std::io::sink()
+        }
+        fn is_terminal(&self) -> bool {
+            false
+        }
+        fn terminal_width(&self) -> Option<u16> {
+            None
+        }
+    }
+    #[test]
+    fn survivor_registry_writes_return_non_pipe_errors_in_json_rows_and_both_text_footers() {
+        let select = super::super::cli::SelectArgs::default();
+        for remaining in 0..registry::PRESETS.len() + 2 {
+            list_presets(&mut LimitedHost(remaining), &select, false).expect_err("denied preset row or footer must propagate");
+        }
+        for remaining in 0..registry::REGISTRY.len() + 2 {
+            list_mutators(&mut LimitedHost(remaining), &select, false).expect_err("denied mutator row or footer must propagate");
+        }
+        assert!(
+            list_presets(&mut LimitedHost(0), &select, true)
+                .unwrap_err()
+                .to_string()
+                .contains("the presets")
+        );
+        assert!(
+            list_mutators(&mut LimitedHost(0), &select, true)
+                .unwrap_err()
+                .to_string()
+                .contains("the mutator registry")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn native_discovery_writer_acceptance() {
+        let directory = crate_dir("list-discovery-write-failures-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        fs::write(root.join("src/lib.rs"), "#[gamma::skip]\npub fn f()->bool { true }\n").unwrap();
+        let select = super::super::cli::SelectArgs {
+            dir: root,
+            mutators: Some("literal.bool_flip".into()),
+            ..super::super::cli::SelectArgs::default()
+        };
+        let cargo = CargoOptions::default();
+        for json in [false, true] {
+            let mut host = Sink::default();
+            list_files(&mut host, &select, json, Styler::new(false), &cargo).unwrap();
+            for remaining in 0..host.out().lines().count() {
+                let error = list_files(&mut LimitedHost(remaining), &select, json, Styler::new(false), &cargo).unwrap_err();
+                if json {
+                    assert!(error.to_string().contains("could not write the file list as JSON"));
+                }
+            }
+            host.out.clear();
+            list_mutants(&mut host, &select, json, None, Styler::new(false), &cargo).unwrap();
+            if !json {
+                assert!(host.out().ends_with("\n\n1 suppressed\n"), "{}", host.out());
+            }
+            for remaining in 0..host.out().lines().count() {
+                let error = list_mutants(&mut LimitedHost(remaining), &select, json, None, Styler::new(false), &cargo).unwrap_err();
+                if json {
+                    assert!(error.to_string().contains("could not write the mutant list as JSON"));
+                }
+            }
+        }
     }
 
     fn args(dir: impl Into<Utf8PathBuf>, what: ListKind, json: bool) -> ListArgs {
@@ -629,15 +960,15 @@ mod tests {
         let report: crate::elements::Report = serde_json::from_str(&text).expect("json");
 
         assert_eq!(code, EXIT_OK);
-        assert!(report.config.as_ref().is_some_and(|run| run.shard.is_none()), "{text}");
+        let run = report.config.as_ref().unwrap();
+        assert!(run.shard.is_none(), "{text}");
+        assert_eq!(run.mutant_id_version, Some(crate::model::MUTANT_ID_VERSION));
+        assert!(!run.merged);
         assert!(
             report.files.values().any(|file| !file.mutants.is_empty()),
             "the population is empty: {text}"
         );
-        assert!(
-            String::from_utf8(host.err).expect("utf-8").contains("Wrote"),
-            "the path was not echoed"
-        );
+        assert_eq!(String::from_utf8(host.err).unwrap(), format!("Wrote {path}\n"));
     }
 
     #[test]

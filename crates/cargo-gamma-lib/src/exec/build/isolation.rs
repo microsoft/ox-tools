@@ -41,8 +41,24 @@ pub(super) const MAX_ISOLATION_CONTEXTS: usize = 64;
 /// context and local limits still impose a strict derived launch ceiling on pathological input.
 pub(super) const MAX_INVOCATION_ISOLATION_PROOFS: usize = MAX_ISOLATION_CONTEXTS * MAX_ISOLATION_PROOFS;
 
-const fn candidate_tier_admitted(candidates: usize) -> bool {
+#[cfg(test)]
+type CandidatePolicy = Box<dyn FnMut(usize) -> bool>;
+
+#[cfg(test)]
+thread_local! {
+    static CANDIDATE_POLICY: std::cell::RefCell<Option<CandidatePolicy>> = const { std::cell::RefCell::new(None) };
+}
+
+fn candidate_tier_admitted(candidates: usize) -> bool {
+    #[cfg(test)]
+    if let Some(admitted) = CANDIDATE_POLICY.with_borrow_mut(|policy| policy.as_mut().map(|policy| policy(candidates))) {
+        return admitted;
+    }
     candidates <= MAX_ISOLATION_CANDIDATES
+}
+
+fn isolation_proofs_exhausted(local: usize, invocation: usize) -> bool {
+    local >= MAX_ISOLATION_PROOFS || invocation >= MAX_INVOCATION_ISOLATION_PROOFS
 }
 
 fn without_withdrawn(mut candidates: HashSet<u32>, withdrawn: &HashSet<u32>) -> HashSet<u32> {
@@ -96,6 +112,10 @@ impl IsolationBudget {
         }
         self.contexts = self.contexts.saturating_add(1);
         true
+    }
+
+    fn context_limit_reached(&mut self, admissible: bool) -> bool {
+        admissible && !self.enter_context()
     }
 
     pub(super) fn proof(&mut self, local: usize) -> bool {
@@ -336,7 +356,10 @@ impl Converger {
             push_isolation_tiers(&mut tiers, dependencies.clone(), plan, &context.codes);
 
             // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, tag = "outofmemory", reason = "bypassing the admissible-tier budget guard exhausted memory in campaign isolation")]
-            if has_admissible_tier(&tiers, &self.withdrawn) && !self.isolation_budget.enter_context() {
+            if self
+                .isolation_budget
+                .context_limit_reached(has_admissible_tier(&tiers, &self.withdrawn))
+            {
                 events.warn(&format!(
                     "left {} unresolved after the Cargo invocation reached its {MAX_ISOLATION_CONTEXTS}-context isolation budget",
                     context.label()
@@ -387,7 +410,7 @@ impl Converger {
                     }
                     IsolationAttempt::NotReproduced | IsolationAttempt::Inconclusive => {}
                 }
-                if proofs.local >= MAX_ISOLATION_PROOFS || self.isolation_budget.proofs >= MAX_INVOCATION_ISOLATION_PROOFS {
+                if isolation_proofs_exhausted(proofs.local, self.isolation_budget.proofs) {
                     break;
                 }
             }
@@ -534,7 +557,7 @@ impl Converger {
     ) -> Result<Option<Vec<u32>>> {
         let mut active = failing.to_vec();
         let mut granularity = 2;
-        while active.len() > 1 && proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS {
+        while Self::minimization_can_continue(active.len(), proofs.local, self.isolation_budget.proofs) {
             let width = active.len().div_ceil(granularity);
             let chunks = active.chunks(width).map(<[_]>::to_vec).collect::<Vec<_>>();
             // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "claiming reduction without a successful proof keeps retrying the same active population")]
@@ -542,7 +565,7 @@ impl Converger {
             for chunk in &chunks {
                 if self.subset_fails(work, plan, scope, verb, limits, events, population, chunk, proofs)? == Some(true) {
                     active.clone_from(chunk);
-                    granularity = 2;
+                    granularity = Self::reduced_chunk_granularity();
                     reduced = true;
                     break;
                 }
@@ -579,6 +602,14 @@ impl Converger {
             (proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS)
                 .then(|| active.iter().map(|mutant| mutant.ordinal).collect()),
         )
+    }
+
+    fn minimization_can_continue(active: usize, local: usize, invocation: usize) -> bool {
+        active > 1 && local < MAX_ISOLATION_PROOFS && invocation < MAX_INVOCATION_ISOLATION_PROOFS
+    }
+
+    const fn reduced_chunk_granularity() -> usize {
+        2
     }
 
     #[cfg(test)]
@@ -699,6 +730,931 @@ impl Converger {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::exec::build::tests::{
+        probe_plan, scripted_output, split_native_isolation_plan, trivial_workspace, unpositioned_native_context,
+    };
+
+    #[derive(Default)]
+    struct ProofEvents {
+        observations: Vec<(usize, usize, Vec<std::path::PathBuf>)>,
+        warnings: Vec<String>,
+    }
+
+    impl Events for ProofEvents {
+        fn phase(&mut self, _verb: &str, _detail: &str) {}
+
+        fn mutant(&mut self, _mutant: &Mutant) {}
+
+        fn warn(&mut self, warning: &str) {
+            self.warnings.push(warning.to_owned());
+        }
+
+        fn wants_isolation_evidence(&self) -> bool {
+            true
+        }
+
+        fn isolation_evidence(
+            &mut self,
+            active: usize,
+            population: usize,
+            written: &[&Path],
+            _fresh: usize,
+            _rebuilt: usize,
+            _failed_targets: &[String],
+        ) {
+            self.observations
+                .push((active, population, written.iter().map(|path| path.to_path_buf()).collect()));
+        }
+    }
+
+    fn proof_scope() -> BuildScope<'static> {
+        BuildScope {
+            roots: None,
+            mutants: None,
+            publish_progress: false,
+        }
+    }
+
+    // Emits ordinal-bearing source markers and controlled item groups for native instrumentation.
+    // The paired compiler script inspects these markers rather than compiling the schema.
+    fn marked_proof_plan(work: &Workspace, mutants: usize, separate_items: bool) -> Plan {
+        let mut plan = probe_plan(work, 0, mutants);
+        for mutant in &mut plan.mutants {
+            let ordinal = mutant.ordinal;
+            mutant.replacement = format!("{{ let proof_marker_{ordinal}_end = 2; proof_marker_{ordinal}_end }}").into();
+            let item = if separate_items {
+                format!("item_{ordinal}")
+            } else {
+                "same_item".to_owned()
+            };
+            mutant.item_path = item.into();
+        }
+        plan
+    }
+
+    // Reads actual instrumented source: a proof fails when every required ordinal is present.
+    // failure_at injects a transport error at that attempt; the returned trace records proof order,
+    // cache reuse and budget behavior independently of the scripted compiler verdict.
+    fn native_proof_script<T>(
+        work: &Workspace,
+        population: usize,
+        required: &[u32],
+        failure_at: Option<usize>,
+        body: impl FnOnce() -> T,
+    ) -> (T, Vec<Vec<u32>>) {
+        let attempted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let result = super::super::with_compiler(
+            {
+                let attempted = std::rc::Rc::clone(&attempted);
+                let root = work.root.clone();
+                let required = required.to_vec();
+                move |observed, arguments, budget, _| {
+                    assert_eq!(observed.root, root);
+                    assert_eq!(arguments[0], "check");
+                    assert_eq!(budget, Some(core::time::Duration::from_millis(19)));
+                    let text = std::fs::read_to_string(root.join("src").join("lib.rs")).unwrap();
+                    let active = (1..=u32::try_from(population).unwrap())
+                        .filter(|ordinal| text.contains(&format!("proof_marker_{ordinal}_end")))
+                        .collect::<Vec<_>>();
+                    let failed = required.iter().all(|ordinal| active.contains(ordinal));
+                    let mut attempted = attempted.borrow_mut();
+                    attempted.push(active);
+                    assert!(attempted.len() <= MAX_ISOLATION_PROOFS, "proof orchestration must stay bounded");
+                    if failure_at == Some(attempted.len()) {
+                        return Err(crate::error::error!("scripted proof failure {}", attempted.len()));
+                    }
+                    Ok(Some(scripted_output(!failed, "proof stdout", "")))
+                }
+            },
+            body,
+        );
+        let attempted = attempted.borrow().clone();
+        (result, attempted)
+    }
+
+    fn proof_limits() -> BuildLimits {
+        BuildLimits {
+            timeout: Some(core::time::Duration::from_millis(19)),
+            ..BuildLimits::default()
+        }
+    }
+
+    fn with_candidate_policy<T>(policy: impl FnMut(usize) -> bool + 'static, body: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CANDIDATE_POLICY.with_borrow_mut(|policy| *policy = None);
+            }
+        }
+        CANDIDATE_POLICY.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "candidate policies must not nest");
+            *slot = Some(Box::new(policy));
+        });
+        let _reset = Reset;
+        body()
+    }
+
+    #[test]
+    fn scoped_native_proofs_prefer_file_then_package_tiers_and_stop_after_a_resolved_or_complete_context() {
+        for mode in 0..4 {
+            let (_directory, work) = trivial_workspace("native-isolation-tier-order");
+            let mut plan = split_native_isolation_plan(&work);
+            if mode != 0 {
+                for mutant in &mut plan.mutants[1..] {
+                    mutant.package = "dependency".into();
+                }
+                plan.reach
+                    .insert("trivial".into(), ["trivial".into(), "dependency".into()].into_iter().collect());
+            }
+            let mut context: serde_json::Value =
+                serde_json::from_str(&unpositioned_native_context("first")).expect("the fixture serializes a valid compiler diagnostic");
+            if mode == 1 {
+                context["message"]["spans"][0]["file_name"] = "src/unrelated.rs".into();
+            } else if mode == 2 {
+                let mut second = context["message"]["spans"][0].clone();
+                second["file_name"] = "src/second.rs".into();
+                context["message"]["spans"]
+                    .as_array_mut()
+                    .expect("fixture spans are an array")
+                    .push(second);
+            } else if mode == 3 {
+                context["message"]["spans"][0]["file_name"] = "src/second.rs".into();
+            }
+            let attempted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut converger = Converger::default();
+            let mut events = ProofEvents::default();
+            let result = with_candidate_policy(
+                move |count| count <= if mode == 3 { 1 } else { MAX_ISOLATION_CANDIDATES },
+                || {
+                    super::super::with_compiler(
+                        {
+                            let attempted = std::rc::Rc::clone(&attempted);
+                            move |work, _, _, _| {
+                                let source = ["first", "second"]
+                                    .map(|name| {
+                                        std::fs::read_to_string(work.root.join(format!("src/{name}.rs")))
+                                            .expect("the split fixture has both native source files")
+                                    })
+                                    .join("\n");
+                                let active = (1..=3)
+                                    .filter(|ordinal| source.contains(&format!("regression_marker_{ordinal}_end")))
+                                    .collect::<Vec<_>>();
+                                let failed = active.contains(&1) && (mode != 2 || !active.contains(&2));
+                                let mut attempted = attempted.borrow_mut();
+                                attempted.push(active);
+                                assert!(attempted.len() <= 8, "a three-mutant tier proof must remain bounded");
+                                Ok(Some(scripted_output(!failed, "", "")))
+                            }
+                        },
+                        || {
+                            converger.isolate_scoped(
+                                &work,
+                                &plan,
+                                &context.to_string(),
+                                &["check", "--tests"],
+                                None,
+                                proof_limits(),
+                                &mut events,
+                            )
+                        },
+                    )
+                },
+            )
+            .expect("native tier proofs use an infallible compiler callback");
+            if mode == 2 {
+                assert!(result.is_empty(), "a complete non-reproducing population ends this context");
+                assert_eq!(*attempted.borrow(), [vec![], vec![1, 2, 3]]);
+            } else {
+                assert_eq!(result.len(), 1, "resolution must not continue into later tiers");
+                assert!(matches!(&result[0], Isolation::Blamed(ordinals) if ordinals == &[1]));
+                assert_eq!(*attempted.borrow(), [vec![], vec![1]]);
+            }
+            assert_eq!(events.warnings.len(), usize::from(mode == 3));
+        }
+    }
+
+    #[test]
+    fn exhausted_contexts_report_every_context_and_a_proof_cap_stops_before_considering_another_tier() {
+        for local in [MAX_ISOLATION_PROOFS - 1, MAX_ISOLATION_PROOFS] {
+            for invocation in [MAX_INVOCATION_ISOLATION_PROOFS - 1, MAX_INVOCATION_ISOLATION_PROOFS] {
+                assert_eq!(
+                    isolation_proofs_exhausted(local, invocation),
+                    local == MAX_ISOLATION_PROOFS || invocation == MAX_INVOCATION_ISOLATION_PROOFS
+                );
+            }
+        }
+        let (_directory, work) = trivial_workspace("native-isolation-proof-cap");
+        let plan = split_native_isolation_plan(&work);
+        let mut converger = Converger::default();
+        converger.isolation_budget.contexts = MAX_ISOLATION_CONTEXTS;
+        let mut events = ProofEvents::default();
+        let contexts = ["first", "second"].map(unpositioned_native_context).join("\n");
+        let result = converger
+            .isolate_scoped(&work, &plan, &contexts, &["check", "--tests"], None, proof_limits(), &mut events)
+            .expect("exhausted context admission cannot execute a compiler");
+        assert_eq!(result.len(), 2, "one exhausted context must not abandon the next");
+        assert!(result.iter().all(|result| matches!(result, Isolation::Unresolved { .. })));
+        assert_eq!(events.warnings.len(), 2);
+        let visited = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut converger = Converger::default();
+        converger.isolation_budget.proofs = MAX_INVOCATION_ISOLATION_PROOFS - 1;
+        let mut events = ProofEvents::default();
+        let result = with_candidate_policy(
+            {
+                let visited = std::rc::Rc::clone(&visited);
+                move |count| {
+                    visited.borrow_mut().push(count);
+                    true
+                }
+            },
+            || {
+                super::super::with_compiler(
+                    |_, _, _, _| Ok(Some(scripted_output(true, "", ""))),
+                    || {
+                        converger.isolate_scoped(
+                            &work,
+                            &plan,
+                            &unpositioned_native_context("first"),
+                            &["check", "--tests"],
+                            None,
+                            proof_limits(),
+                            &mut events,
+                        )
+                    },
+                )
+            },
+        )
+        .expect("the last admitted pristine proof succeeds");
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], Isolation::Unresolved { .. }));
+        assert_eq!(
+            *visited.borrow(),
+            [1, 1],
+            "the exhausted proof budget forbids even considering the next tier"
+        );
+        assert_eq!(events.warnings.len(), 1);
+        assert!(events.warnings[0].contains("1 local and 2048 invocation proof builds"));
+    }
+
+    #[test]
+    fn inadmissible_contexts_do_not_consume_the_last_admission_slot_or_trigger_a_spurious_limit() {
+        let mut budget = IsolationBudget {
+            contexts: MAX_ISOLATION_CONTEXTS - 1,
+            proofs: 0,
+        };
+        assert!(!budget.context_limit_reached(false));
+        assert_eq!(budget.contexts, MAX_ISOLATION_CONTEXTS - 1);
+        assert!(!budget.context_limit_reached(true));
+        assert_eq!(budget.contexts, MAX_ISOLATION_CONTEXTS);
+        assert!(!budget.context_limit_reached(false));
+        assert!(budget.context_limit_reached(true));
+        assert_eq!(budget.contexts, MAX_ISOLATION_CONTEXTS);
+    }
+
+    #[test]
+    fn minimization_admission_stops_singletons_and_both_exact_proof_caps_without_entering_a_cached_loop() {
+        assert_eq!(Converger::reduced_chunk_granularity(), 2);
+        for active in [0, 1, 2] {
+            for local in [MAX_ISOLATION_PROOFS - 1, MAX_ISOLATION_PROOFS] {
+                for invocation in [MAX_INVOCATION_ISOLATION_PROOFS - 1, MAX_INVOCATION_ISOLATION_PROOFS] {
+                    assert_eq!(
+                        Converger::minimization_can_continue(active, local, invocation),
+                        active == 2 && local < MAX_ISOLATION_PROOFS && invocation < MAX_INVOCATION_ISOLATION_PROOFS
+                    );
+                }
+            }
+        }
+    }
+
+    // Population, failure-predicate mode, ordered compiler queries, and minimal surviving ordinals.
+    type MinimizationCase = (usize, u8, Vec<Vec<u32>>, Vec<u32>);
+
+    fn minimization_cases() -> [MinimizationCase; 5] {
+        [
+            // A required prefix pair survives repeated half reductions, then rejects both singletons.
+            (8, 0, vec![vec![1, 2, 3, 4], vec![1, 2], vec![1], vec![2]], vec![1, 2]),
+            // Independent failures occupy opposite halves; retaining the first restarts reduction there.
+            (8, 1, vec![vec![1, 2, 3, 4], vec![1, 2], vec![1]], vec![1]),
+            // Member 4 masks failure 1; the competing 2/11 pair spans halves, forcing smaller chunks
+            // until an unmasked prefix can be retained and reduced to its single failing member.
+            (
+                12,
+                2,
+                vec![
+                    vec![1, 2, 3, 4, 5, 6],
+                    vec![7, 8, 9, 10, 11, 12],
+                    vec![1, 2, 3],
+                    vec![1, 2],
+                    vec![1],
+                ],
+                vec![1],
+            ),
+            // The required 2/7 pair spans halves and quarter chunks: only chunk removal can shrink it,
+            // and each successful removal must restart reduction before the final pair is minimal.
+            (
+                8,
+                3,
+                vec![
+                    vec![1, 2, 3, 4],
+                    vec![5, 6, 7, 8],
+                    vec![1, 2],
+                    vec![3, 4],
+                    vec![5, 6],
+                    vec![7, 8],
+                    vec![3, 4, 5, 6, 7, 8],
+                    vec![1, 2, 5, 6, 7, 8],
+                    vec![1, 2, 7, 8],
+                    vec![1],
+                    vec![2],
+                    vec![7],
+                    vec![8],
+                    vec![2, 7, 8],
+                    vec![2, 8],
+                    vec![2, 7],
+                ],
+                vec![2, 7],
+            ),
+            // A larger population places required 1/8 in separate three-member chunks, exercising
+            // repeated complement reductions and repartitioning before singleton removals fail.
+            (
+                12,
+                4,
+                vec![
+                    vec![1, 2, 3, 4, 5, 6],
+                    vec![7, 8, 9, 10, 11, 12],
+                    vec![1, 2, 3],
+                    vec![4, 5, 6],
+                    vec![7, 8, 9],
+                    vec![10, 11, 12],
+                    vec![4, 5, 6, 7, 8, 9, 10, 11, 12],
+                    vec![1, 2, 3, 7, 8, 9, 10, 11, 12],
+                    vec![1, 2, 3, 10, 11, 12],
+                    vec![1, 2, 3, 7, 8, 9],
+                    vec![1, 2],
+                    vec![3, 7],
+                    vec![8, 9],
+                    vec![3, 7, 8, 9],
+                    vec![1, 2, 8, 9],
+                    vec![1],
+                    vec![2],
+                    vec![8],
+                    vec![9],
+                    vec![2, 8, 9],
+                    vec![1, 8, 9],
+                    vec![1, 9],
+                    vec![1, 8],
+                ],
+                vec![1, 8],
+            ),
+        ]
+    }
+
+    #[test]
+    fn minimization_uses_the_exact_bounded_native_query_order_for_prefix_competing_and_unmasked_failures() {
+        for (count, mode, expected, members) in minimization_cases() {
+            let (_directory, work) = trivial_workspace("native-minimization-query-order");
+            let plan = marked_proof_plan(&work, count, true);
+            let attempted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut converger = Converger::default();
+            let mut proofs = Proofs::default();
+            let population = plan.mutants.iter().collect::<Vec<_>>();
+            let result = super::super::with_compiler(
+                {
+                    let root = work.root.clone();
+                    let attempted = std::rc::Rc::clone(&attempted);
+                    move |_, _, _, _| {
+                        let source = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+                        let active = (1..=u32::try_from(count).unwrap())
+                            .filter(|ordinal| source.contains(&format!("proof_marker_{ordinal}_end")))
+                            .collect::<Vec<_>>();
+                        let has = |ordinal| active.contains(&ordinal);
+                        let failed = match mode {
+                            0 => has(1) && has(2),
+                            1 => has(1) || has(5),
+                            2 => (has(1) && !has(4)) || (has(2) && has(11)),
+                            3 => has(2) && has(7),
+                            _ => has(1) && has(8),
+                        };
+                        let mut attempted = attempted.borrow_mut();
+                        attempted.push(active);
+                        assert!(attempted.len() <= MAX_ISOLATION_PROOFS);
+                        Ok(Some(scripted_output(!failed, "", "")))
+                    }
+                },
+                || {
+                    converger.minimize_interaction(
+                        &work,
+                        &plan,
+                        proof_scope(),
+                        &["check"],
+                        proof_limits(),
+                        &mut ProofEvents::default(),
+                        &population,
+                        &population,
+                        &mut proofs,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(result, Some(members), "mode={mode}");
+            assert_eq!(*attempted.borrow(), expected, "mode={mode}");
+            assert_eq!(proofs.local, expected.len());
+            assert_eq!(converger.isolation_budget.proofs, expected.len());
+        }
+    }
+
+    #[test]
+    fn actual_isolation_proofs_propagate_each_early_bisection_and_minimization_transport_failure() {
+        for separate_items in [false, true] {
+            for failed_call in 1..=9 {
+                let (_directory, work) = trivial_workspace("exec-isolation-transport-");
+                let plan = marked_proof_plan(&work, 4, separate_items);
+                let mut converger = Converger::default();
+                let (result, attempted) = native_proof_script(&work, 4, &[1, 4], Some(failed_call), || {
+                    converger.isolate(&work, &plan, None, &["check"], proof_limits(), &mut ProofEvents::default())
+                });
+                let failure =
+                    result.expect_err("the selected proof must propagate its transport failure through the full isolation caller");
+                assert_eq!(failure.message(), format!("scripted proof failure {failed_call}"));
+                assert_eq!(attempted.len(), failed_call);
+                if failed_call > 1 {
+                    assert!(attempted[0].is_empty(), "the pristine proof restores every mutant");
+                }
+                if failed_call > 2 {
+                    assert_eq!(attempted[1], [1, 2, 3, 4]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actual_isolation_proofs_report_minimal_cross_item_interactions_and_exact_cache_population() {
+        let (_directory, work) = trivial_workspace("exec-isolation-native-interaction-");
+        let plan = marked_proof_plan(&work, 4, true);
+        let mut converger = Converger::default();
+        let (result, attempted) = native_proof_script(&work, 4, &[1, 4], None, || {
+            converger.isolate(&work, &plan, None, &["check"], proof_limits(), &mut ProofEvents::default())
+        });
+        let result = result.unwrap().expect("the finite full proof graph resolves the interaction");
+        let Isolation::Interaction { excluded, members } = result else {
+            panic!("both endpoint mutants are necessary: {result:?}")
+        };
+        assert_eq!(excluded, 1);
+        assert_eq!(members, [1, 4]);
+        assert!(attempted.contains(&vec![1]));
+        assert!(attempted.contains(&vec![4]));
+        assert_eq!(attempted.len(), 11);
+        assert_eq!(
+            attempted.iter().collect::<HashSet<_>>().len(),
+            attempted.len(),
+            "repeated schemas use cached proofs"
+        );
+        let active = vec![&plan.mutants[0]];
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let mut events = ProofEvents::default();
+        let (result, _) = native_proof_script(&work, 4, &[1, 4], None, || {
+            converger.subset_fails(
+                &work,
+                &plan,
+                proof_scope(),
+                &["check"],
+                proof_limits(),
+                &mut events,
+                &population,
+                &active,
+                &mut Proofs::default(),
+            )
+        });
+        assert_eq!(result.unwrap(), Some(false));
+        assert_eq!((events.observations[0].0, events.observations[0].1), (1, 4));
+    }
+
+    #[test]
+    fn empty_or_already_withdrawn_candidate_tiers_never_invoke_the_compiler() {
+        let (_directory, work) = trivial_workspace("exec-isolation-no-candidates-");
+        let plan = marked_proof_plan(&work, 2, true);
+        for withdrawn in [HashSet::default(), HashSet::from_iter([1, 2])] {
+            let eligible = if withdrawn.is_empty() {
+                HashSet::default()
+            } else {
+                HashSet::from_iter([1, 2])
+            };
+            let mut converger = Converger {
+                withdrawn,
+                ..Converger::default()
+            };
+            let result = super::super::with_compiler(
+                |_, _, _, _| panic!("an empty effective tier must not start a proof"),
+                || {
+                    converger.isolate_candidates(
+                        &work,
+                        &plan,
+                        proof_scope(),
+                        &["check"],
+                        proof_limits(),
+                        &mut ProofEvents::default(),
+                        &eligible,
+                        &mut Proofs::default(),
+                    )
+                },
+            )
+            .unwrap();
+            assert!(matches!(result, IsolationAttempt::Inconclusive));
+        }
+    }
+
+    #[test]
+    fn scoped_isolation_retains_nondefault_limits_and_uses_thirteen_cached_endpoint_proofs() {
+        let (_directory, work) = trivial_workspace("exec-scoped-endpoint-proofs-");
+        let plan = marked_proof_plan(&work, 5, true);
+        let mut converger = Converger::default();
+        let stdout = error_stream().replace("subject", "trivial");
+        let (isolated, attempted) = native_proof_script(&work, 5, &[1, 5], None, || {
+            converger.isolate_scoped(&work, &plan, &stdout, &["check"], None, proof_limits(), &mut ProofEvents::default())
+        });
+        let isolated = isolated.unwrap();
+        assert_eq!(isolated.len(), 1);
+        let Isolation::Interaction { excluded, members } = &isolated[0] else {
+            panic!("endpoint interaction must be retained: {isolated:?}")
+        };
+        assert_eq!(*excluded, 1);
+        assert_eq!(members, &[1, 5]);
+        assert_eq!(attempted.len(), 13);
+        assert_eq!(converger.isolation_budget.proofs, 13);
+        assert_eq!(converger.isolation_budget.contexts, 1);
+        assert_eq!(attempted.iter().collect::<HashSet<_>>().len(), 13);
+        assert_eq!(&attempted[..4], &[vec![], vec![1, 2, 3, 4, 5], vec![1, 2], vec![3, 4, 5]]);
+    }
+
+    #[test]
+    fn scoped_isolation_propagates_a_late_proof_failure_after_pristine_and_populated_builds() {
+        let (_directory, work) = trivial_workspace("exec-scoped-proof-failure-");
+        let plan = marked_proof_plan(&work, 5, true);
+        let mut converger = Converger::default();
+        let stdout = error_stream().replace("subject", "trivial");
+        let (result, attempted) = native_proof_script(&work, 5, &[1, 5], Some(5), || {
+            converger.isolate_scoped(&work, &plan, &stdout, &["check"], None, proof_limits(), &mut ProofEvents::default())
+        });
+        let failure = result.expect_err("a late file-tier proof error must propagate through scoped isolation");
+        assert_eq!(failure.message(), "scripted proof failure 5");
+        assert_eq!(attempted.len(), 5);
+        assert_eq!(attempted[0], Vec::<u32>::new());
+        assert_eq!(attempted[1], [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn context_streams_ignore_each_rejected_message_and_choose_the_first_kind_before_harness_routing() {
+        let root = Utf8Path::new("workspace");
+        let plan = plan(root, 1);
+        for (kinds, expected_kind, failed, expected_verb) in [
+            (vec!["lib", "example"], "lib", vec!["build"], vec!["check", "--keep-going", "--lib"]),
+            (vec!["lib", "example"], "lib", vec!["test", "--no-run"], vec!["test", "--no-run"]),
+            (
+                vec!["example", "lib"],
+                "example",
+                vec!["test", "--no-run"],
+                vec!["check", "--keep-going", "--example", "subject"],
+            ),
+            (Vec::new(), "target", vec!["build"], vec!["check", "--keep-going"]),
+        ] {
+            let mut accepted: serde_json::Value = serde_json::from_str(&error_stream()).unwrap();
+            accepted["target"]["kind"] = serde_json::json!(kinds);
+            let mut wrong_reason = accepted.clone();
+            wrong_reason["reason"] = "compiler-artifact".into();
+            wrong_reason["target"]["name"] = "wrong-reason".into();
+            let mut warning = accepted.clone();
+            warning["message"]["level"] = "warning".into();
+            warning["target"]["name"] = "warning-target".into();
+            let mut missing = accepted.clone();
+            missing.as_object_mut().unwrap().remove("message");
+            missing["target"]["name"] = "missing-diagnostic".into();
+            let stream = format!("not-json\n{wrong_reason}\n{warning}\n{missing}\n{accepted}");
+            let contexts = failure_contexts(&stream, &plan, root, &failed);
+            assert_eq!(contexts.len(), 1);
+            assert_eq!(contexts[0].kind, expected_kind);
+            assert_eq!(contexts[0].verb(), expected_verb);
+            assert_eq!(contexts[0].target, "subject");
+            assert_eq!(contexts[0].files, HashSet::from_iter([Utf8PathBuf::from("src/lib.rs")]));
+            assert_eq!(contexts[0].codes, HashSet::from_iter(["E0308".to_owned()]));
+        }
+    }
+
+    #[test]
+    fn contexts_without_any_pending_dependency_are_not_admitted_even_at_zero_boundary() {
+        let root = Utf8Path::new("workspace");
+        let plan = plan(root, 1);
+        let by_package = isolation_population(&plan, &HashSet::default());
+        let ranked = prioritized_contexts(
+            vec![context("foreign", "not-pending"), context("subject", "pending")],
+            &plan,
+            &by_package,
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0.package, "subject");
+        assert_eq!(ranked[0].1, ["subject"]);
+        assert_eq!(ranked[0].2, 1);
+    }
+    #[test]
+    fn native_proof_adapter_preserves_limits_population_written_files_and_all_terminal_results() {
+        let (_directory, work) = trivial_workspace("exec-native-proof-adapter-");
+        let plan = probe_plan(&work, 0, 3);
+        let limits = BuildLimits {
+            timeout: Some(core::time::Duration::from_millis(19)),
+            ..BuildLimits::default()
+        };
+        let mut converger = Converger::default();
+        for (output, expected) in [(Some(true), Some(false)), (Some(false), Some(true)), (None, None)] {
+            let mut events = ProofEvents::default();
+            let result = super::super::with_compiler(
+                move |_, arguments, budget, _| {
+                    assert_eq!(arguments[0], "check");
+                    assert_eq!(budget, limits.timeout);
+                    Ok(output.map(|success| scripted_output(success, "proof stdout", "")))
+                },
+                || {
+                    converger.run_proof(
+                        &work,
+                        &plan,
+                        proof_scope(),
+                        &["check"],
+                        limits,
+                        &mut events,
+                        3,
+                        &HashSet::from_iter([2]),
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(result, expected);
+            if output.is_some() {
+                assert_eq!(events.observations.len(), 1);
+                let (active, population, written) = &events.observations[0];
+                assert_eq!((*active, *population), (1, 3));
+                if output == Some(true) {
+                    assert_eq!(written, &[plan.files[0].path.as_std_path().to_path_buf()]);
+                } else {
+                    assert!(written.is_empty(), "reusing an identical schema does not rewrite a clean file");
+                }
+            } else {
+                assert!(events.observations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn native_proof_adapter_propagates_instrumentation_and_compiler_failures_without_publishing_evidence() {
+        let (_directory, work) = trivial_workspace("exec-proof-errors-");
+        let plan = probe_plan(&work, 0, 2);
+        let mut converger = Converger::default();
+        let mut events = ProofEvents::default();
+        let failure = super::super::with_compiler(
+            |_, _, _, _| Err(crate::error::error!("proof transport failed")),
+            || {
+                converger.run_proof(
+                    &work,
+                    &plan,
+                    proof_scope(),
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut events,
+                    2,
+                    &HashSet::from_iter([1]),
+                )
+            },
+        )
+        .expect_err("a compiler transport failure must propagate from the proof adapter");
+        assert_eq!(failure.message(), "proof transport failed");
+        assert!(events.observations.is_empty());
+        std::fs::remove_file(work.root.join("src/lib.rs")).unwrap();
+        let mut converger = Converger::default();
+        let failure = super::super::with_compiler(
+            |_, _, _, _| panic!("no compiler may run after source instrumentation failed"),
+            || {
+                converger.run_proof(
+                    &work,
+                    &plan,
+                    proof_scope(),
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut events,
+                    2,
+                    &HashSet::from_iter([1]),
+                )
+            },
+        )
+        .expect_err("an unreadable copied source cannot be treated as a proof");
+        assert_eq!(failure.message(), format!("could not read `{}`", work.root.join("src/lib.rs")));
+        assert!(events.observations.is_empty());
+    }
+
+    std::thread_local! {
+        static REQUIRED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    fn required_subset(active: &HashSet<u32>) -> bool {
+        REQUIRED.with(|required| {
+            (1..=5)
+                .filter(|ordinal| required.get() & (1 << (ordinal - 1)) != 0)
+                .all(|ordinal| active.contains(&ordinal))
+        })
+    }
+
+    #[test]
+    fn isolation_proves_every_nonempty_five_mutant_interaction_within_and_across_items() {
+        let root = Utf8PathBuf::from(if cfg!(windows) {
+            "C:/synthetic/isolation-matrix"
+        } else {
+            "/synthetic/isolation-matrix"
+        });
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        for separate_items in [false, true] {
+            let mut plan = plan(&root, 5);
+            for mutant in &mut plan.mutants {
+                mutant.item_path = if separate_items {
+                    format!("item_{}", mutant.ordinal).into()
+                } else {
+                    "shared_item".into()
+                };
+            }
+            for mask in 1..32_u32 {
+                REQUIRED.with(|required| required.set(mask));
+                let mut converger = Converger {
+                    subset_oracle: Some(|active| Some(required_subset(active))),
+                    ..Converger::default()
+                };
+                let result = converger
+                    .isolate(
+                        &work,
+                        &plan,
+                        None,
+                        &["check"],
+                        BuildLimits::default(),
+                        &mut crate::testing::Recorder::default(),
+                    )
+                    .unwrap()
+                    .expect("a finite monotone interaction can be proved");
+                let expected = (1..=5).filter(|ordinal| mask & (1 << (ordinal - 1)) != 0).collect::<HashSet<_>>();
+                match result {
+                    Isolation::Blamed(ordinals) => {
+                        assert_eq!(expected.len(), 1, "mask={mask}, separate={separate_items}");
+                        assert_eq!(ordinals.into_iter().collect::<HashSet<_>>(), expected);
+                    }
+                    Isolation::Interaction { excluded, members } => {
+                        assert!(expected.len() > 1, "mask={mask}, separate={separate_items}");
+                        assert_eq!(excluded, members[0]);
+                        assert_eq!(members.into_iter().collect::<HashSet<_>>(), expected);
+                    }
+                    other @ Isolation::Unresolved { .. } => panic!("unexpected isolation for mask={mask}: {other:?}"),
+                }
+                assert!(converger.isolation_budget.proofs <= MAX_ISOLATION_PROOFS);
+                assert!(converger.withdrawn.is_empty(), "proofs must not withdraw any candidate themselves");
+            }
+        }
+    }
+
+    #[test]
+    fn minimization_refuses_local_and_invocation_exhaustion_independently() {
+        let root = Utf8PathBuf::from(if cfg!(windows) {
+            "C:/synthetic/isolation-budget"
+        } else {
+            "/synthetic/isolation-budget"
+        });
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let plan = plan(&root, 3);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        for local_exhausted in [false, true] {
+            let mut converger = Converger {
+                subset_oracle: Some(|active| Some(required_subset(active))),
+                ..Converger::default()
+            };
+            converger.isolation_budget.proofs = if local_exhausted { 0 } else { MAX_INVOCATION_ISOLATION_PROOFS };
+            let mut proofs = Proofs {
+                local: if local_exhausted { MAX_ISOLATION_PROOFS } else { 0 },
+                ..Proofs::default()
+            };
+            let result = converger
+                .minimize_interaction(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: false,
+                    },
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut crate::testing::Recorder::default(),
+                    &population,
+                    &population,
+                    &mut proofs,
+                )
+                .unwrap();
+            assert_eq!(result, None);
+            assert!(proofs.results.is_empty());
+        }
+    }
+
+    #[test]
+    fn proof_cache_counts_each_distinct_schema_once_even_when_ordinal_order_changes() {
+        let root = Utf8PathBuf::from(if cfg!(windows) {
+            "C:/synthetic/isolation-cache"
+        } else {
+            "/synthetic/isolation-cache"
+        });
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let plan = plan(&root, 5);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        REQUIRED.with(|required| required.set(1));
+        let mut converger = Converger {
+            subset_oracle: Some(|active| Some(required_subset(active))),
+            ..Converger::default()
+        };
+        let mut proofs = Proofs::default();
+        let mut events = crate::testing::Recorder::default();
+        for mask in 1..32 {
+            let mut active = population
+                .iter()
+                .copied()
+                .filter(|mutant| mask & (1 << (mutant.ordinal - 1)) != 0)
+                .collect::<Vec<_>>();
+            for reversed in [false, true] {
+                if reversed {
+                    active.reverse();
+                }
+                let result = converger
+                    .subset_fails(
+                        &work,
+                        &plan,
+                        BuildScope {
+                            roots: None,
+                            mutants: None,
+                            publish_progress: false,
+                        },
+                        &["check"],
+                        BuildLimits::default(),
+                        &mut events,
+                        &population,
+                        &active,
+                        &mut proofs,
+                    )
+                    .unwrap();
+                assert_eq!(result, Some(mask & 1 != 0));
+            }
+            assert_eq!(proofs.local, mask);
+            assert_eq!(proofs.results.len(), mask);
+            assert_eq!(converger.isolation_budget.proofs, mask);
+        }
+        assert_eq!(converger.proof_roots.len(), 31);
+    }
+
+    #[test]
+    fn diagnostic_tiers_distinguish_file_item_and_repeated_population_identity() {
+        let mut plan = plan(Utf8Path::new("root"), 3);
+        plan.mutants[1].mutator = "literal.bool_flip".into();
+        plan.mutants[2].mutator = "relational.lt_to_le".into();
+        for codes in [
+            HashSet::default(),
+            HashSet::from_iter(["unrelated".into()]),
+            HashSet::from_iter(["E0308".into(), "unrelated".into()]),
+        ] {
+            let population = HashSet::from_iter([1, 2, 3]);
+            let expected = if codes.contains("E0308") {
+                vec![HashSet::from_iter([1]), population.clone()]
+            } else {
+                vec![population.clone()]
+            };
+            let mut tiers = Vec::new();
+            push_isolation_tiers(&mut tiers, population.clone(), &plan, &codes);
+            assert_eq!(tiers, expected);
+            push_isolation_tiers(&mut tiers, HashSet::default(), &plan, &codes);
+            assert_eq!(tiers, expected);
+            if !codes.contains("E0308") {
+                push_isolation_tiers(&mut tiers, population, &plan, &codes);
+                assert_eq!(tiers, expected);
+            }
+        }
+        let mut tiers = vec![HashSet::from_iter([1]), HashSet::from_iter([2])];
+        push_isolation_tiers(&mut tiers, HashSet::from_iter([1]), &plan, &HashSet::default());
+        assert_eq!(tiers, [HashSet::from_iter([1]), HashSet::from_iter([2]), HashSet::from_iter([1])]);
+        assert_eq!(Proofs::key(&[&plan.mutants[2], &plan.mutants[0], &plan.mutants[1]]), [1, 2, 3]);
+    }
+
+    #[test]
+    fn admissible_tiers_require_one_remaining_candidate_but_not_every_tier() {
+        let empty = HashSet::default();
+        let one = HashSet::from_iter([1]);
+        assert!(!has_admissible_tier(&[], &empty));
+        assert!(!has_admissible_tier(core::slice::from_ref(&empty), &empty));
+        assert!(!has_admissible_tier(core::slice::from_ref(&one), &one));
+        assert!(has_admissible_tier(&[empty.clone(), one.clone()], &empty));
+        let maximum = u32::try_from(MAX_ISOLATION_CANDIDATES).expect("the fixed 4096-candidate isolation limit fits u32");
+        let full = (1..=maximum).collect::<HashSet<_>>();
+        assert!(has_admissible_tier(core::slice::from_ref(&full), &empty));
+        let mut overflow = full;
+        overflow.insert(maximum + 1);
+        assert!(!has_admissible_tier(core::slice::from_ref(&overflow), &empty));
+        assert!(has_admissible_tier(core::slice::from_ref(&overflow), &one));
+    }
 
     fn plan(root: &Utf8Path, mutants: usize) -> Plan {
         let mut population = (1..=mutants)

@@ -494,12 +494,23 @@ async fn prep_tables_core(
     now: DateTime<Utc>,
     progress: Arc<dyn Progress>,
 ) -> Result<TableMgr> {
+    prep_tables_core_with_client(source, tables_root, max_ttl, now, progress, || {
+        reqwest::Client::builder().user_agent("cargo-aprz").build()
+    })
+    .await
+}
+
+async fn prep_tables_core_with_client(
+    source: &Url,
+    tables_root: std::path::PathBuf,
+    max_ttl: Duration,
+    now: DateTime<Utc>,
+    progress: Arc<dyn Progress>,
+    client: impl FnOnce() -> core::result::Result<reqwest::Client, reqwest::Error>,
+) -> Result<TableMgr> {
     log::info!(target: LOG_TARGET, "Starting crates database download from {source}");
 
-    let client = reqwest::Client::builder()
-        .user_agent("cargo-aprz")
-        .build()
-        .into_app_err("creating HTTP client")?;
+    let client = client().into_app_err("creating HTTP client")?;
 
     let response = download_response(&client, source)
         .await
@@ -704,6 +715,7 @@ impl Read for ChannelReader {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::ErrorKind;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
@@ -716,8 +728,8 @@ mod tests {
         CRATES_DB_DOWNLOAD_OPERATION, CRATES_DB_DOWNLOAD_TIMEOUT, ChannelReader, CratesTable, DELETE_ALL_TABLES_HOOK, ELAPSED_MS_HOOK,
         IoError, Path, SHARING_VIOLATION, SLEEP_HOOK, SLEEP_SECONDS_HOOK, Table, TableMgr, archive_entry_path, archive_filename,
         delete_all_tables, determinate_download_progress, download_channel, download_response, finish_download, forward_download_stream,
-        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, process_download, removal_left_file_locked,
-        send_download_chunk, set_download_progress,
+        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, prep_tables_core_with_client, process_download,
+        removal_left_file_locked, send_download_chunk, set_download_progress,
     };
     use crate::facts::progress::Progress;
 
@@ -1266,6 +1278,38 @@ mod tests {
             .await
             .expect_err("a panicking processing task must be returned as an error");
         assert!(format!("{error:#}").contains("joining crates database processing task"));
+    }
+
+    #[tokio::test]
+    async fn table_preparation_returns_client_builder_errors_with_the_creation_context() {
+        let source = url::Url::parse("http://127.0.0.1:0/must-not-be-contacted").unwrap();
+        let progress = Arc::new(RecordingProgress::default());
+        let call_progress = Arc::clone(&progress);
+        let error = prep_tables_core_with_client(
+            &source,
+            PathBuf::from("synthetic/cache"),
+            Duration::from_hours(1),
+            chrono::DateTime::UNIX_EPOCH,
+            call_progress,
+            || reqwest::Client::builder().user_agent("\n").build(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("creating HTTP client"), "{error}");
+        assert!(
+            progress
+                .determinate
+                .lock()
+                .expect("client creation fails before this test-owned callback slot is modified; locked access only reads it")
+                .is_none()
+        );
+        assert!(
+            progress
+                .indeterminate
+                .lock()
+                .expect("client creation fails before this test-owned callback slot is modified; locked access only reads it")
+                .is_none()
+        );
     }
 
     #[tokio::test]

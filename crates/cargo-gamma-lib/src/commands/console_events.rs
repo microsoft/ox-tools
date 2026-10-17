@@ -788,4 +788,62 @@ mod tests {
         }
         assert!(!text.contains("\u{1b}["), "the durable log contains terminal styling: {text:?}");
     }
+    #[test]
+    fn survivor_testing_status_resizes_progress_and_only_updates_an_active_dashboard() {
+        for dashboard in [false, true] {
+            let mut host = Sink::default().terminal(160);
+            let styler = Styler::new(false);
+            let mut events = ConsoleEvents {
+                host: &mut host,
+                progress: Progress::new(true, styler, Some(160)),
+                dashboard: Dashboard::new(dashboard, Some(160), styler),
+                styler,
+                show_build: false,
+                verdict_log: VerdictLog::default(),
+            };
+            events.progress.set_total(4);
+            events.progress.record(Outcome::Killed);
+            if dashboard {
+                events.dashboard.start_testing(events.host, 2, "old status".into());
+            }
+            let previous = events.dashboard.testing_status_for_test().to_owned();
+            events.host.resize_terminal(80);
+            events.sync_testing_status();
+            let rendered = events.progress.render();
+            assert!(rendered.contains("1/4 mutants evaluated"), "{rendered}");
+            if dashboard {
+                assert_ne!(rendered, previous);
+                assert_eq!(events.dashboard.testing_status_for_test(), rendered);
+            } else {
+                assert_eq!(events.dashboard.testing_status_for_test(), previous);
+            }
+            events.host.resize_terminal(20);
+            events.sync_testing_status();
+            assert!(crate::report::unstyled_width(&events.progress.render()) <= 20);
+        }
+    }
+
+    #[test]
+    fn survivor_abandon_clears_the_dashboard_and_closes_the_pending_progress_row() {
+        let mut host = Sink::default().terminal(160);
+        let styler = Styler::new(false);
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(true, styler, Some(160)),
+            dashboard: Dashboard::new(true, Some(160), styler),
+            styler,
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+        events.progress.begin(events.host, "Building", "Built", "subject");
+        events.progress.borrowed(events.host, "compiler progress");
+        events.dashboard.start_testing(events.host, 2, "testing".into());
+        assert!(events.dashboard.is_active());
+        events.abandon();
+        assert!(!events.dashboard.is_active());
+        assert!(events.host.err().ends_with("subject\n"), "{}", events.host.err());
+        let length = events.host.err.len();
+        events.abandon();
+        assert_eq!(events.host.err.len(), length);
+    }
 }

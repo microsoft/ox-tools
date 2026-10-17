@@ -240,6 +240,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_display_preserves_formatting_errors_before_and_inside_the_cause() {
+        struct Limited {
+            remaining: usize,
+            written: String,
+        }
+        impl fmt::Write for Limited {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                if s.len() > self.remaining {
+                    return Err(fmt::Error);
+                }
+                self.remaining -= s.len();
+                self.written.push_str(s);
+                Ok(())
+            }
+        }
+        let error = Error::from(io::Error::other("cause"));
+        assert_eq!(error.to_string(), "I/O error: cause");
+        assert!(!error.is_usage());
+        for remaining in [0, "I/O error".len() + 2] {
+            let mut destination = Limited {
+                remaining,
+                written: String::new(),
+            };
+            fmt::write(&mut destination, format_args!("{error}")).expect_err("the limited formatter must reject the error text");
+            assert!(destination.written.len() <= remaining);
+        }
+    }
+
+    #[test]
     fn message_is_preserved() {
         let error = Error::new("could not read the manifest");
 

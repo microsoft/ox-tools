@@ -519,11 +519,15 @@ pub struct SweepPhase {
     pub probes: usize,
     pub exact_probes: usize,
     pub exact_hits: usize,
-    pub generalized_probes: usize,
-    pub generalized_hits: usize,
-    pub generalized_rejected: usize,
+    #[serde(rename = "generalizedProbes")]
+    pub inferred_probes: usize,
+    #[serde(rename = "generalizedHits")]
+    pub inferred_hits: usize,
+    #[serde(rename = "generalizedRejected")]
+    pub inferred_rejected: usize,
     pub exact_candidates: usize,
-    pub generalized_candidates: usize,
+    #[serde(rename = "generalizedCandidates")]
+    pub inferred_candidates: usize,
     pub item_candidates: usize,
     pub reach_candidates: usize,
     pub file_candidates: usize,
@@ -695,6 +699,22 @@ pub struct Context<'a> {
 /// still worth describing: a run that found no work is exactly the kind that wants explaining.
 #[must_use]
 pub fn bundle(plan: &Plan, session: Option<&Session>, context: &Context<'_>) -> Bundle {
+    bundle_with_environment(
+        plan,
+        session,
+        context,
+        crate::discover::toolchain(),
+        crate::discover::rustflags().as_deref(),
+    )
+}
+
+fn bundle_with_environment(
+    plan: &Plan,
+    session: Option<&Session>,
+    context: &Context<'_>,
+    toolchain: Option<String>,
+    rustflags: Option<&str>,
+) -> Bundle {
     let summary = Summary::of(&plan.mutants);
     let fixed = session.map_or(Duration::ZERO, |session| session.build + session.baseline_wall);
     let testing = context.wall.saturating_sub(fixed);
@@ -720,8 +740,8 @@ pub fn bundle(plan: &Plan, session: Option<&Session>, context: &Context<'_>) -> 
             os: consts::OS.to_owned(),
             arch: consts::ARCH.to_owned(),
             cores: context.cores,
-            toolchain: redact_toolchain(crate::discover::toolchain(), context.redaction),
-            rustflags_set: crate::discover::rustflags().is_some(),
+            toolchain: redact_toolchain(toolchain, context.redaction),
+            rustflags_set: rustflags.is_some(),
         },
         config: Config {
             mutators: context.mutators.iter().map(|name| (*name).to_owned()).collect(),
@@ -913,11 +933,11 @@ fn phases_of(session: &Session, redaction: Redaction) -> Phases {
             probes: sweep.probes,
             exact_probes: sweep.exact_probes,
             exact_hits: sweep.exact_hits,
-            generalized_probes: sweep.generalized_probes,
-            generalized_hits: sweep.generalized_hits,
-            generalized_rejected: sweep.generalized_rejected,
+            inferred_probes: sweep.inferred_probes,
+            inferred_hits: sweep.inferred_hits,
+            inferred_rejected: sweep.inferred_rejected,
             exact_candidates: sweep.exact_candidates,
-            generalized_candidates: sweep.generalized_candidates,
+            inferred_candidates: sweep.inferred_candidates,
             item_candidates: sweep.item_candidates,
             reach_candidates: sweep.reach_candidates,
             file_candidates: sweep.file_candidates,
@@ -1169,6 +1189,159 @@ mod tests {
     use crate::fixtures;
 
     #[test]
+    fn survivor_package_accessors_preserve_redacted_names_counts_and_distinct_time_offsets() {
+        for name in [None, Some("private-package".to_owned())] {
+            let round = RoundPackage {
+                name: name.clone(),
+                mutants: 7,
+            };
+            assert_eq!(round.name(), name.as_deref());
+            assert_eq!(round.mutants(), 7);
+            let sweep = PackageSweep {
+                name: name.clone(),
+                mutants: 11,
+                first_started_ms: 13,
+                settled_ms: 41,
+                wall_span_ms: 28,
+            };
+            assert_eq!(sweep.name(), name.as_deref());
+            assert_eq!(
+                (sweep.mutants(), sweep.first_started_ms(), sweep.settled_ms(), sweep.wall_span_ms()),
+                (11, 13, 41, 28)
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_bundle_preserves_shard_order_effective_work_and_survivor_breakdowns_under_each_policy() {
+        let mut plan = plan();
+        for (outcome, elapsed_ms) in [(Outcome::Killed, 5_000), (Outcome::Survived, 15_000)] {
+            let mut mutant = fixtures::mutant();
+            mutant.outcome = outcome;
+            mutant.elapsed_ms = elapsed_ms;
+            plan.mutants.push(mutant);
+        }
+        for (redaction, expected) in [
+            (Redaction::Hashed, "hashed"),
+            (Redaction::Names, "names"),
+            (Redaction::Omitted, "omitted"),
+        ] {
+            let context = Context {
+                redaction,
+                shard: Some((7, 2)),
+                wall: Duration::from_secs(10),
+                ..context()
+            };
+            let bundle = bundle_with_environment(&plan, None, &context, None, None);
+            assert_eq!(bundle.redaction, expected);
+            assert_eq!(bundle.config.shard, Some([2, 7]));
+            assert_eq!(
+                (bundle.run.wall_ms, bundle.run.cpu_ms, bundle.run.testing_ms),
+                (10_000, 20_000, 10_000)
+            );
+            assert!((bundle.run.effective_jobs - 2.0).abs() < f64::EPSILON);
+            let durations = bundle.durations.unwrap();
+            assert_eq!(
+                (durations.evaluated, durations.min_ms, durations.p50_ms, durations.max_ms),
+                (2, 5_000, 15_000, 15_000)
+            );
+            assert_eq!(
+                (bundle.mutators[0].mutants, bundle.mutators[0].killed, bundle.mutators[0].survivors),
+                (2, 1, 1)
+            );
+            assert_eq!(redact_package("", redaction), None);
+            assert_eq!(redact_category("", redaction), "");
+        }
+        assert_eq!(redact_package("subject", Redaction::Names).as_deref(), Some("subject"));
+        assert_eq!(redact_package("subject", Redaction::Omitted), None);
+        assert_eq!(redact_toolchain(None, Redaction::Names), None);
+        assert_eq!(percentile(&[], 0.0), 0);
+        assert_eq!(percentile(&[4], 1.0), 4);
+    }
+
+    #[test]
+    fn survivor_bundle_environment_snapshot_preserves_tool_versions_and_distinguishes_rustflags_presence() {
+        let toolchain = "rustc=/private/rustc\ncargo=/private/cargo\nrustc version=1.97.0";
+        for redaction in [Redaction::Names, Redaction::Hashed, Redaction::Omitted] {
+            for rustflags in [None, Some("-Ctarget-cpu=native".to_owned())] {
+                let expected_flags = rustflags.is_some();
+                let context = Context { redaction, ..context() };
+                let actual = bundle_with_environment(&plan(), None, &context, Some(toolchain.into()), rustflags.as_deref());
+                assert_eq!(actual.host.rustflags_set, expected_flags);
+                let retained = actual.host.toolchain.unwrap();
+                assert!(retained.ends_with("rustc version=1.97.0"));
+                match redaction {
+                    Redaction::Names => assert_eq!(retained, toolchain),
+                    Redaction::Hashed => {
+                        assert!(retained.starts_with("rustc="));
+                        assert!(retained.contains("\ncargo="));
+                        assert!(!retained.contains("/private/"));
+                    }
+                    Redaction::Omitted => assert_eq!(retained, "rustc version=1.97.0"),
+                }
+                let absent = bundle_with_environment(&plan(), None, &context, None, None);
+                assert_eq!(absent.host.toolchain, None);
+                assert!(!absent.host.rustflags_set);
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_built_bundle_retains_measurements_binary_rows_and_unredacted_package_dimensions() {
+        let mut session = session_with(crate::exec::Phases::default());
+        session.widened = true;
+        session.rounds_taken.push(crate::exec::Round {
+            elapsed: Duration::from_millis(250),
+            withdrew: 3,
+            packages: vec![crate::exec::PackageWithdrawal {
+                package: "private-package".into(),
+                mutants: 3,
+            }],
+        });
+        session.census.push(crate::exec::Withdrawal {
+            package: "private-package".into(),
+            code: "E0308".into(),
+            category: "mismatched types".into(),
+            replacement_site: true,
+            mutator: "literal.int_decrement".into(),
+            mutants: 3,
+        });
+        let mut binary = crate::testing::test_binary("target/private-tests");
+        binary.package = "private-package".into();
+        binary.target = "private-tests".into();
+        binary.baseline = Duration::from_millis(173);
+        binary.budget = Some(Duration::from_millis(521));
+        session.binaries.push(binary);
+        session.phases.sweep = Some(crate::exec::SweepCost {
+            packages: vec![crate::exec::PackageSweepCost {
+                package: "private-package".into(),
+                mutants: 3,
+                first_started_ms: 11,
+                settled_ms: 29,
+            }],
+            ..crate::exec::SweepCost::default()
+        });
+        let context = Context {
+            redaction: Redaction::Names,
+            ..context()
+        };
+        let actual = bundle_with_environment(&plan(), Some(&session), &context, None, None);
+        let build = actual.build.unwrap();
+        assert_eq!(build.elapsed_ms, 7_000);
+        assert!(build.widened);
+        assert_eq!(build.rounds[0].packages[0].name(), Some("private-package"));
+        assert_eq!(build.withdrawals[0].package.as_deref(), Some("private-package"));
+        assert_eq!(actual.binaries.len(), 1);
+        assert_eq!(actual.binaries[0].target.as_deref(), Some("private-tests"));
+        assert_eq!((actual.binaries[0].baseline_ms, actual.binaries[0].budget_ms), (173, Some(521)));
+        let sweep = actual.phases.unwrap().sweep.unwrap();
+        assert_eq!(sweep.packages[0].name(), Some("private-package"));
+        assert_eq!((sweep.packages[0].first_started_ms(), sweep.packages[0].settled_ms()), (11, 29));
+        session.widened = false;
+        assert!(!build_of(&session, Redaction::Names).widened);
+    }
+
+    #[test]
     fn withdrawals_missing_reason_dimensions_use_defaults() {
         let withdrawal: Withdrawal = serde_json::from_str(r#"{"code":"E0308","mutator":"literal.int_decrement","mutants":3}"#)
             .expect("a withdrawal without reason dimensions remains readable");
@@ -1276,11 +1449,11 @@ mod tests {
                 probes: 12,
                 exact_probes: 5,
                 exact_hits: 4,
-                generalized_probes: 7,
-                generalized_hits: 3,
-                generalized_rejected: 0,
+                inferred_probes: 7,
+                inferred_hits: 3,
+                inferred_rejected: 0,
                 exact_candidates: 8,
-                generalized_candidates: 21,
+                inferred_candidates: 21,
                 item_candidates: 9,
                 reach_candidates: 7,
                 file_candidates: 5,
@@ -1544,8 +1717,8 @@ mod tests {
                 probes: 5,
                 exact_probes: 2,
                 exact_hits: 1,
-                generalized_probes: 3,
-                generalized_hits: 2,
+                inferred_probes: 3,
+                inferred_hits: 2,
                 launches_saved: 1,
                 reach_launches_saved: 1,
                 ..crate::exec::SweepCost::default()
@@ -1563,6 +1736,25 @@ mod tests {
         // The census did not run, so it must not appear as a key at all.
         assert!(!json.contains("\"census\""), "an absent census must be omitted, not null: {json}");
         assert!(!json.contains("\"walked\""), "{json}");
+    }
+
+    #[test]
+    fn inferred_test_counters_preserve_diagnostic_field_names() {
+        let mut legacy = serde_json::to_value(SweepPhase::default()).unwrap();
+        for (field, count) in [
+            ("generalizedProbes", 7),
+            ("generalizedHits", 3),
+            ("generalizedRejected", 5),
+            ("generalizedCandidates", 11),
+        ] {
+            legacy[field] = serde_json::json!(count);
+        }
+        let restored: SweepPhase = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(restored.inferred_probes, 7);
+        assert_eq!(restored.inferred_hits, 3);
+        assert_eq!(restored.inferred_rejected, 5);
+        assert_eq!(restored.inferred_candidates, 11);
+        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
     }
 
     /// The whole point of the file. Anything a reader has to take on trust before attaching it to a

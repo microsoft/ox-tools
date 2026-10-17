@@ -453,6 +453,27 @@ mod tests {
     }
 
     #[test]
+    fn bare_optional_dependencies_with_x_are_still_feature_references() {
+        let manifest = concat!(
+            "[dependencies]\n",
+            "extra = {version = '1', optional = true}\n",
+            "[features]\n",
+            "enabled = ['extra']\n",
+            "local = ['enabled']\n",
+        )
+        .parse()
+        .expect("fixture TOML is valid");
+
+        let references = feature_references(&manifest);
+        assert_eq!(references.implicit_optional, BTreeSet::from(["extra".to_owned()]));
+        assert!(references.explicit.is_empty());
+
+        let declarations = declared_dependencies(&manifest);
+        assert_eq!(declarations.len(), 1);
+        assert!(declarations[0].feature_referenced);
+    }
+
+    #[test]
     fn declarations_include_target_specific_sections() {
         let manifest = r#"
 [dependencies]

@@ -765,6 +765,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn qualified_self_and_nonprimitive_syntax_do_not_invent_bare_type_or_callee_names() {
+        assert_eq!(callee_path(&parse_quote!(<T>::run)), None);
+        assert_eq!(callee_path(&parse_quote!((module::run))), Some(&parse_quote!(module::run)));
+        for text in ["<T>::u8", "<T as Trait>::u8", "foreign::u8", "&u8", "(u8, bool)"] {
+            assert_eq!(primitive_type_name(&syn::parse_str(text).unwrap()), None, "{text}");
+        }
+        assert_eq!(primitive_type_name(&parse_quote!((core::primitive::u8))), Some("u8".into()));
+    }
+
+    #[test]
     fn generic_payload_and_callee_helpers_reject_empty_path_nodes() {
         let path = syn::Path {
             leading_colon: None,

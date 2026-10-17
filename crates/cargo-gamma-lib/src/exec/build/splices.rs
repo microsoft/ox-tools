@@ -399,7 +399,219 @@ fn absent_from_plan(path: &Utf8PathBuf, current: &HashSet<&camino::Utf8Path>) ->
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
+
     use super::*;
+
+    #[test]
+    fn proof_schema_root_changes_clear_stale_guards_and_selection_before_reindexing() {
+        let root = Utf8PathBuf::from(if cfg!(windows) {
+            "C:/synthetic/splice-reset"
+        } else {
+            "/synthetic/splice-reset"
+        });
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let path = Utf8PathBuf::from("old.rs");
+        let start = crate::schema::Position::new(1, 1).unwrap();
+        let end = crate::schema::Position::new(2, 1).unwrap();
+        let mut splices = Splices {
+            root: "other-root".into(),
+            sources: HashMap::from_iter([(
+                path.clone(),
+                Original {
+                    parsed: "old".into(),
+                    serialized: "old".into(),
+                    digest: "old".into(),
+                },
+            )]),
+            placed: HashMap::from_iter([(path.clone(), (vec![9], HashMap::default()))]),
+            guards: HashMap::from_iter([(
+                9,
+                (
+                    path.clone(),
+                    Guard {
+                        site: start..end,
+                        mutated: None,
+                    },
+                ),
+            )]),
+            file_index: HashMap::from_iter([(path.clone(), 0)]),
+            mutants_by_file: HashMap::from_iter([(path.clone(), vec![0])]),
+            file_by_ordinal: HashMap::from_iter([(9, path)]),
+            indexed_files: 4,
+            indexed_mutants: 5,
+            plan_identity: Some(71),
+            withdrawn: HashSet::from_iter([9]),
+            active_selection: true,
+        };
+        let result = splices.instrument_active(&work, &empty_plan(&root), &HashSet::default()).unwrap();
+        assert!(result.guards.is_empty());
+        assert!(result.written.is_empty());
+        assert!(splices.guards.is_empty());
+        assert_eq!(splices.root, root);
+        assert!(splices.sources.is_empty());
+        assert!(splices.placed.is_empty());
+        assert!(splices.file_index.is_empty());
+        assert!(splices.mutants_by_file.is_empty());
+        assert!(splices.file_by_ordinal.is_empty());
+        assert_eq!((splices.indexed_files, splices.indexed_mutants), (0, 0));
+        assert!(splices.withdrawn.is_empty());
+        assert!(splices.active_selection);
+        splices.plan_reordered();
+        assert!(!splices.active_selection);
+    }
+
+    fn stale_root_at_same_plan_address(plan: &Plan) -> Splices {
+        let path = Utf8PathBuf::from("old.rs");
+        let start = crate::schema::Position::new(1, 1).unwrap();
+        let end = crate::schema::Position::new(2, 1).unwrap();
+        Splices {
+            root: "previous-workspace-root".into(),
+            sources: HashMap::from_iter([(
+                path.clone(),
+                Original {
+                    parsed: "old".into(),
+                    serialized: "old".into(),
+                    digest: "old".into(),
+                },
+            )]),
+            placed: HashMap::from_iter([(path.clone(), (vec![9], HashMap::default()))]),
+            guards: HashMap::from_iter([(
+                9,
+                (
+                    path.clone(),
+                    Guard {
+                        site: start..end,
+                        mutated: None,
+                    },
+                ),
+            )]),
+            file_index: HashMap::from_iter([(path.clone(), 0)]),
+            mutants_by_file: HashMap::from_iter([(path.clone(), vec![0])]),
+            file_by_ordinal: HashMap::from_iter([(9, path)]),
+            indexed_files: 1,
+            indexed_mutants: 1,
+            plan_identity: Some(core::ptr::from_ref(plan) as usize),
+            withdrawn: HashSet::from_iter([9]),
+            active_selection: true,
+        }
+    }
+
+    #[test]
+    fn a_real_active_schema_dirties_its_placed_file_once_then_normal_unchanged_rounds_have_no_delta() {
+        let (_directory, work) = super::super::tests::trivial_workspace("splice-selection-delta");
+        let plan = super::super::tests::probe_plan(&work, 0, 2);
+        let mut splices = Splices::default();
+        splices.instrument(&work, &plan, &HashSet::default()).unwrap();
+        assert!(splices.refresh_index(&plan, &HashSet::default()).is_empty());
+        splices.instrument_active(&work, &plan, &HashSet::from_iter([1])).unwrap();
+        assert_eq!(
+            splices.refresh_index(&plan, &HashSet::default()),
+            HashSet::from_iter([Utf8PathBuf::from("src/lib.rs")])
+        );
+        assert!(!splices.active_selection);
+        assert!(splices.refresh_index(&plan, &HashSet::default()).is_empty());
+        assert!(splices.refresh_index(&plan, &HashSet::default()).is_empty());
+    }
+
+    #[test]
+    fn changing_roots_invalidates_every_old_cache_even_when_the_plan_address_and_lengths_are_reused() {
+        for proof in [false, true] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap();
+            let work = Workspace::adopt(root.clone(), root.join("target"));
+            let path = Utf8PathBuf::from("src/lib.rs");
+            fs::create_dir(root.join("src")).unwrap();
+            fs::write(root.join(&path), "fn f(){1;}\n").unwrap();
+            let mut plan = empty_plan(&root);
+            plan.files.push(TargetFile {
+                absolute: root.join(&path),
+                path: path.clone(),
+                package: "subject".into(),
+                source: None,
+            });
+            let mut mutant = crate::fixtures::mutant();
+            mutant.ordinal = 2;
+            mutant.file = path.clone().into();
+            mutant.span = 7..8;
+            mutant.original = "1".into();
+            mutant.replacement = "2".into();
+            plan.mutants.push(mutant);
+            let mut splices = stale_root_at_same_plan_address(&plan);
+            let result = if proof {
+                splices.instrument_active(&work, &plan, &HashSet::from_iter([2]))
+            } else {
+                splices.instrument(&work, &plan, &HashSet::default())
+            }
+            .unwrap();
+            assert_eq!(result.written.as_slice(), std::slice::from_ref(&path));
+            assert_eq!(result.guards.len(), usize::from(!proof));
+            assert_eq!(splices.guards.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([2]));
+            assert_eq!(splices.root, root);
+            assert_eq!(
+                splices.sources.keys().cloned().collect::<HashSet<_>>(),
+                HashSet::from_iter([path.clone()])
+            );
+            assert_eq!(
+                splices.placed.keys().cloned().collect::<HashSet<_>>(),
+                HashSet::from_iter([path.clone()])
+            );
+            assert_eq!(splices.file_index, HashMap::from_iter([(path.clone(), 0)]));
+            assert_eq!(splices.mutants_by_file, HashMap::from_iter([(path.clone(), vec![0])]));
+            assert_eq!(splices.file_by_ordinal, HashMap::from_iter([(2, path.clone())]));
+            assert_eq!((splices.indexed_files, splices.indexed_mutants), (1, 1));
+            assert!(splices.withdrawn.is_empty());
+            assert_eq!(splices.active_selection, proof);
+            assert_ne!(fs::read_to_string(root.join(&path)).unwrap(), "fn f(){1;}\n");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn both_schema_entry_points_propagate_write_and_removed_file_restore_denials_without_losing_pristine_state() {
+        for proof in [false, true] {
+            for restore in [false, true] {
+                let (_directory, work) = super::super::tests::trivial_workspace("splice-native-denial");
+                let plan = super::super::tests::probe_plan(&work, 0, 1);
+                let removed = empty_plan(&work.root);
+                let path = work.root.join("src/lib.rs");
+                let pristine = fs::read_to_string(&path).unwrap();
+                let mut splices = Splices::default();
+                if restore {
+                    splices.instrument(&work, &plan, &HashSet::default()).unwrap();
+                }
+                let preserved = fs::read(&path).unwrap();
+                let locked = fs::File::options().read(true).share_mode(1).open(&path).unwrap();
+                let selected = if restore { &removed } else { &plan };
+                let failure = if proof {
+                    splices.instrument_active(&work, selected, &HashSet::from_iter([1]))
+                } else {
+                    splices.instrument(&work, selected, &HashSet::default())
+                }
+                .expect_err("a write-sharing denial must propagate from the native schema/restore boundary");
+                assert_eq!(failure.message(), format!("could not write `{path}`"));
+                assert_eq!(fs::read(&path).unwrap(), preserved);
+                assert_eq!(splices.placed.len(), usize::from(restore));
+                drop(locked);
+                if !restore {
+                    splices.plan_reordered();
+                }
+                if proof {
+                    splices.instrument_active(&work, selected, &HashSet::from_iter([1])).unwrap();
+                } else {
+                    splices.instrument(&work, selected, &HashSet::default()).unwrap();
+                }
+                if restore {
+                    assert_eq!(fs::read_to_string(&path).unwrap(), pristine);
+                    assert!(splices.placed.is_empty());
+                } else {
+                    assert_ne!(fs::read_to_string(&path).unwrap(), pristine);
+                    assert_eq!(splices.placed.len(), 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn instrumented_text_retains_the_original_byte_order_mark() {

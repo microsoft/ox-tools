@@ -409,6 +409,108 @@ mod tests {
     use crate::testing::test_binary;
 
     #[test]
+    fn an_unconfigured_required_resource_has_one_slot_and_returns_it_without_waiting() {
+        let binary = test_binary("default-capacity");
+        let mut resources = Resources::fake_tests(&binary, &[("selected", "io")]);
+        resources.capacities.clear();
+        let permit = resources.acquire_observed(&binary, Only::One("selected"), || {
+            panic!("an idle default-capacity resource must not wait")
+        });
+        let active = resources.active.lock().unwrap().get("io").copied();
+        assert_eq!(active, Some(1));
+        drop(permit);
+        assert!(resources.active.lock().unwrap().is_empty());
+        let permit = resources.acquire_observed(&binary, Only::All, || {
+            panic!("dropping the first permit must return the default slot")
+        });
+        let active = resources.active.lock().unwrap().get("io").copied();
+        assert_eq!(active, Some(1));
+        drop(permit);
+        assert!(resources.active.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resource_discovery_forwards_the_prebaseline_memory_request_to_marker_enumeration() {
+        let root = camino::Utf8Path::new(if cfg!(windows) { "C:/resource-policy" } else { "/resource-policy" });
+        let work = Workspace::adopt(root.to_owned(), root.join("target"));
+        let binary = test_binary("resource-listing");
+        let resources = census::with_listing_runner(
+            |command, budget, request| {
+                assert_eq!(command.get_program(), "resource-listing");
+                assert!(request.meter);
+                assert_eq!(request.limit, Some(37));
+                assert!(budget > Duration::ZERO);
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    ["--list", "--format=terse", "--ignored"].map(std::ffi::OsStr::new),
+                );
+                Some(vec!["__cargo_gamma_resource_696f_binary".into()])
+            },
+            || {
+                Resources::discover(
+                    &work,
+                    core::slice::from_ref(&binary),
+                    &[],
+                    MemoryRequest {
+                        meter: true,
+                        limit: Some(37),
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(resources.capacities().get("io"), Some(&1));
+        assert_eq!(resources.binaries.len(), 1);
+        assert_eq!(
+            resources
+                .required(&binary, Only::All)
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["io"]
+        );
+    }
+
+    #[test]
+    fn resource_hex_decode_rejects_a_bad_low_nibble_without_panicking() {
+        for invalid in ["0g", "fg", "ag", "0G", "0é", "ff", "c328"] {
+            assert_eq!(decode(invalid), None, "{invalid}");
+        }
+        assert_eq!(decode("616263"), Some("abc".into()));
+    }
+
+    #[test]
+    fn all_selection_and_partial_selection_have_identical_unique_resource_unions() {
+        let binary = test_binary("resource-union");
+        let resources = Resources::discover_with(
+            core::slice::from_ref(&binary),
+            &[],
+            |_| {
+                Some(vec![
+                    "__cargo_gamma_resource_6462_binary".into(),
+                    "__cargo_gamma_resource_6462_test_6f6e65".into(),
+                    "__cargo_gamma_resource_696f_test_6f6e65".into(),
+                ])
+            },
+            |_| Some(vec!["one".into()]),
+        )
+        .unwrap();
+        let expected = vec![Arc::<str>::from("db"), Arc::<str>::from("io")];
+        assert_eq!(resources.required(&binary, Only::All), expected);
+        assert_eq!(resources.required(&binary, Only::These(&["one", "one"])), expected);
+        assert_eq!(resources.required(&binary, Only::One("unknown")), [Arc::<str>::from("db")]);
+        let only_test_resources = Resources::discover_with(
+            core::slice::from_ref(&binary),
+            &[],
+            |_| Some(vec!["__cargo_gamma_resource_696f_test_6f6e65".into()]),
+            |_| Some(vec!["one".into()]),
+        )
+        .unwrap();
+        assert_eq!(only_test_resources.required(&binary, Only::All), [Arc::<str>::from("io")]);
+        assert!(only_test_resources.required(&binary, Only::One("unknown")).is_empty());
+    }
+
+    #[test]
     fn discovery_matrix_authenticates_markers_filters_tests_and_retains_exact_sorted_resources() {
         use core::fmt::Write as _;
         let encode = |text: &str| {

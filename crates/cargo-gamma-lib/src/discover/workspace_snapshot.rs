@@ -153,7 +153,11 @@ impl WorkspaceSnapshot {
     /// and ends inside a single tick. And a platform that reports no modification time at all
     /// leaves the comparison as the content check it always was.
     pub(super) fn matches_current(&self, root: &Utf8Path) -> bool {
-        self.complete && *self == self.recapture(root)
+        self.matches_snapshot(|| self.recapture(root))
+    }
+
+    fn matches_snapshot(&self, current: impl FnOnce() -> Self) -> bool {
+        self.complete && *self == current()
     }
 
     pub(super) fn recapture(&self, root: &Utf8Path) -> Self {
@@ -320,7 +324,7 @@ fn capture_tree(root: &Utf8Path, excluded: &[Utf8PathBuf], complete: &mut bool) 
                     path: relative.to_path_buf(),
                     digest: digest(bytes),
                     size: bytes.len() as u64,
-                    modified: symlink_modified_at(&path),
+                    modified: symlink_modified_at(&path, native_timestamp),
                 };
 
                 files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(file);
@@ -349,7 +353,7 @@ fn capture_tree(root: &Utf8Path, excluded: &[Utf8PathBuf], complete: &mut bool) 
                 // the two leaves a time ahead of the content it describes rather than behind it.
                 // The stale direction would be dangerous: a recorded time older than the bytes
                 // recorded beside it would match a later capture of those same bytes.
-                modified: modified_at(&path),
+                modified: modified_at(&path, native_timestamp),
             };
 
             files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(file);
@@ -374,18 +378,23 @@ fn capture_tree(root: &Utf8Path, excluded: &[Utf8PathBuf], complete: &mut bool) 
 /// Every failure — an unsupported filesystem, a time before the epoch, a value past what fits —
 /// answers "unknown" rather than a wrong number, because a wrong time is worse than none: it would
 /// either invalidate a record that is sound or, in the other direction, be equal across a change.
-fn modified_at(path: &Utf8Path) -> Option<u64> {
-    modified(&fs::metadata(path.as_std_path()).ok()?)
+fn modified_at(path: &Utf8Path, query: impl FnOnce(&Utf8Path, bool) -> std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    modified(query(path, true))
 }
 
 /// A symlink's own modification time, without following its target.
-fn symlink_modified_at(path: &Utf8Path) -> Option<u64> {
-    modified(&fs::symlink_metadata(path.as_std_path()).ok()?)
+fn symlink_modified_at(path: &Utf8Path, query: impl FnOnce(&Utf8Path, bool) -> std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    modified(query(path, false))
+}
+
+fn native_timestamp(path: &Utf8Path, follow: bool) -> std::io::Result<std::time::SystemTime> {
+    let metadata = if follow { fs::metadata(path) } else { fs::symlink_metadata(path) }?;
+    metadata.modified()
 }
 
 // #[gamma::skip(all, reason = "filesystem timestamp precision and range are platform-defined; adjacent nanoseconds and overflow values are not portably observable")]
-fn modified(metadata: &fs::Metadata) -> Option<u64> {
-    let since = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+fn modified(timestamp: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    let since = timestamp.ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
 
     u64::try_from(since.as_nanos()).ok()
 }
@@ -415,10 +424,70 @@ fn exclusions(root: &Utf8Path, excluded: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use camino::Utf8Path;
 
     use super::{WorkspaceSnapshot, digest};
+
+    #[test]
+    fn survivor_snapshot_timestamp_queries_preserve_controlled_values_and_return_none_for_errors() {
+        let file = Utf8Path::new("workspace/source.rs");
+        for (time, expected) in [
+            (UNIX_EPOCH, Some(0)),
+            (UNIX_EPOCH + Duration::from_nanos(200), Some(200)),
+            (UNIX_EPOCH - Duration::from_secs(1), None),
+            (UNIX_EPOCH + Duration::from_secs(u64::MAX / 1_000_000_000 + 1), None),
+        ] {
+            assert_eq!(
+                super::modified_at(file, |path, follow| {
+                    assert_eq!(path, file);
+                    assert!(follow);
+                    Ok(time)
+                }),
+                expected
+            );
+            assert_eq!(
+                super::symlink_modified_at(file, |path, follow| {
+                    assert_eq!(path, file);
+                    assert!(!follow);
+                    Ok(time)
+                }),
+                expected
+            );
+        }
+        for kind in [std::io::ErrorKind::NotFound, std::io::ErrorKind::Unsupported] {
+            assert_eq!(super::modified_at(file, |_, _| Err(kind.into())), None);
+            assert_eq!(super::symlink_modified_at(file, |_, _| Err(kind.into())), None);
+        }
+    }
+
+    #[test]
+    fn survivor_identical_incomplete_workspace_snapshots_never_authorize_cache_reuse() {
+        let snapshot = WorkspaceSnapshot {
+            files: vec![super::SnapshotFile {
+                path: "normal.rs".into(),
+                digest: digest(b"fn f() {}\n"),
+                size: 10,
+                modified: Some(200),
+            }],
+            ..WorkspaceSnapshot::default()
+        };
+        assert!(!snapshot.is_complete());
+        assert_eq!(snapshot, snapshot.clone());
+        assert!(
+            !snapshot.matches_snapshot(|| snapshot.clone()),
+            "equality cannot override incomplete capture evidence"
+        );
+        let complete = WorkspaceSnapshot {
+            complete: true,
+            ..snapshot
+        };
+        assert!(complete.matches_snapshot(|| complete.clone()));
+        let mut changed = complete.clone();
+        changed.files[0].modified = Some(300);
+        assert!(!complete.matches_snapshot(|| changed));
+    }
 
     #[test]
     fn a_raw_bom_source_matches_its_normalized_discovery_generation() {
@@ -497,4 +566,60 @@ mod tests {
             "a change outside the workspace must invalidate reuse"
         );
     }
+}
+#[test]
+fn survivor_compilation_input_matrix_requires_both_complete_generations_and_exact_relevant_files() {
+    let source = SnapshotFile {
+        path: "src/lib.rs".into(),
+        digest: "a".into(),
+        size: 1,
+        modified: Some(7),
+    };
+    let snapshot = WorkspaceSnapshot {
+        complete: true,
+        files: vec![source],
+        ..WorkspaceSnapshot::default()
+    };
+    let roots = [Utf8PathBuf::from("src")];
+    assert!(snapshot.matches_compilation_inputs(&snapshot, &roots));
+    for (left_complete, right_complete) in [(false, false), (false, true), (true, false)] {
+        let mut left = snapshot.clone();
+        let mut right = snapshot.clone();
+        left.complete = left_complete;
+        right.complete = right_complete;
+        assert!(!left.matches_compilation_inputs(&right, &roots));
+    }
+    let mut changed = snapshot.clone();
+    changed.files[0].digest = "b".into();
+    assert!(!snapshot.matches_compilation_inputs(&changed, &roots));
+    assert!(snapshot.matches_compilation_inputs(&changed, &[Utf8PathBuf::from("other")]));
+    assert!(!snapshot.matches_compilation_inputs(&changed, &[Utf8PathBuf::new()]));
+    changed.external.push(ExternalInput {
+        root: "dependency".into(),
+        files: Vec::new(),
+    });
+    assert!(!snapshot.matches_compilation_inputs(&changed, &[Utf8PathBuf::from("other")]));
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config.toml",
+    ] {
+        assert!(WorkspaceSnapshot::is_compilation_input(Utf8Path::new(path), &[]), "{path}");
+    }
+    for path in ["README.md", "nested/.cargo", "xyzzy/config.toml"] {
+        assert!(!WorkspaceSnapshot::is_compilation_input(Utf8Path::new(path), &[]), "{path}");
+    }
+    assert!(WorkspaceSnapshot::source_generation_matches("same", "same", None));
+    assert!(WorkspaceSnapshot::source_generation_matches(
+        &digest(b"original"),
+        "normalized",
+        Some("original")
+    ));
+    assert!(!WorkspaceSnapshot::source_generation_matches(
+        "different",
+        "normalized",
+        Some("original")
+    ));
 }

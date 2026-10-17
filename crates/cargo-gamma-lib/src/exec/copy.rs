@@ -237,7 +237,17 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
 /// rather than by re-deriving what the walk decided.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_tracked(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
-    let Some(tracked) = tracked_files(from)? else {
+    copy_tracked_with(from, to, skip, reflinks, tracked_files)
+}
+
+fn copy_tracked_with(
+    from: &Utf8Path,
+    to: &Utf8Path,
+    skip: &Utf8Path,
+    reflinks: &Reflinks,
+    list: impl FnOnce(&Utf8Path) -> Result<Option<Vec<Utf8PathBuf>>>,
+) -> Result<()> {
+    let Some(tracked) = list(from)? else {
         return Ok(());
     };
 
@@ -291,16 +301,20 @@ pub(super) fn tracked_files(root: &Utf8Path) -> Result<Option<Vec<Utf8PathBuf>>>
         return Ok(None);
     }
 
+    parse_tracked_files(root, &output.stdout).map(Some)
+}
+
+fn parse_tracked_files(root: &Utf8Path, stdout: &[u8]) -> Result<Vec<Utf8PathBuf>> {
     let mut tracked = Vec::new();
 
-    for name in output.stdout.split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
+    for name in stdout.split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
         let name = str::from_utf8(name)
             .map_err(|cause| error!("git reported a tracked path that is not valid UTF-8 in `{root}`").caused_by(cause))?;
 
         tracked.push(Utf8PathBuf::from(name));
     }
 
-    Ok(Some(tracked))
+    Ok(tracked)
 }
 
 /// Returns whether any directory on the way to `relative` is one the copy leaves out.
@@ -401,22 +415,39 @@ fn place(metadata: &fs::Metadata, source: &Utf8Path, destination: &Utf8Path, ref
 /// wholesale. The link is reproduced verbatim, including a relative or broken one, since a build
 /// that worked with it in the original tree is the thing being reproduced.
 fn copy_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+    copy_symlink_with(source, destination, |target, destination, directory| {
+        #[cfg(unix)]
+        {
+            let _ = directory;
+            std::os::unix::fs::symlink(target, destination)
+        }
+        #[cfg(windows)]
+        {
+            if directory {
+                std::os::windows::fs::symlink_dir(target, destination)
+            } else {
+                std::os::windows::fs::symlink_file(target, destination)
+            }
+        }
+    })
+}
+
+fn copy_symlink_with(
+    source: &Utf8Path,
+    destination: &Utf8Path,
+    create: impl FnOnce(&std::path::Path, &std::path::Path, bool) -> std::io::Result<()>,
+) -> Result<()> {
     let target = fs::read_link(source.as_std_path()).map_err(|cause| error!("could not read the link `{source}`").caused_by(cause))?;
 
-    #[cfg(unix)]
-    let created = std::os::unix::fs::symlink(&target, destination.as_std_path());
-
     #[cfg(windows)]
-    let created = if source
+    let directory = source
         .parent()
-        .map_or_else(|| target.is_dir(), |parent| parent.as_std_path().join(&target).is_dir())
-    {
-        std::os::windows::fs::symlink_dir(&target, destination.as_std_path())
-    } else {
-        std::os::windows::fs::symlink_file(&target, destination.as_std_path())
-    };
+        .map_or_else(|| target.is_dir(), |parent| parent.as_std_path().join(&target).is_dir());
+    #[cfg(not(windows))]
+    let directory = false;
 
-    created.map_err(|cause| error!("could not recreate the link `{destination}`").caused_by(cause))
+    create(&target, destination.as_std_path(), directory)
+        .map_err(|cause| error!("could not recreate the link `{destination}`").caused_by(cause))
 }
 
 /// Copies one file, cloning it if the filesystem can.
@@ -470,8 +501,207 @@ const fn reflink_supported() -> bool {
 /// `/var/folders` once they pass three days, so a scratch tree cloned from an old checkout can
 /// have files deleted out from under a run that is still using them.
 fn freshen(destination: &Utf8Path) {
+    freshen_at(destination, SystemTime::now());
+}
+
+fn freshen_at(destination: &Utf8Path, now: SystemTime) {
     if let Ok(file) = File::options().write(true).open(destination.as_std_path()) {
-        let _stamped = file.set_times(FileTimes::new().set_modified(SystemTime::now()));
+        let _stamped = file.set_times(FileTimes::new().set_modified(now));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
+
+    use super::*;
+
+    #[test]
+    fn tracked_recovery_skips_each_rejected_prefix_without_hiding_the_later_missing_destination() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("excluded")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("excluded/pruned"), "excluded bytes").unwrap();
+        fs::write(source.join("already"), "source must not overwrite destination").unwrap();
+        fs::write(destination.join("already"), "preserved copied bytes").unwrap();
+        fs::write(source.join("later"), "later recovered bytes").unwrap();
+        let paths = ["excluded/pruned", "already", "missing-source", "later"]
+            .map(Utf8PathBuf::from)
+            .to_vec();
+        copy_tracked_with(&source, &destination, &source.join("excluded"), &Reflinks::new(), |root| {
+            assert_eq!(root, source);
+            Ok(Some(paths))
+        })
+        .unwrap();
+        assert!(!destination.join("excluded").exists());
+        assert!(!destination.join("missing-source").exists());
+        assert_eq!(fs::read_to_string(destination.join("already")).unwrap(), "preserved copied bytes");
+        assert_eq!(fs::read_to_string(destination.join("later")).unwrap(), "later recovered bytes");
+    }
+
+    #[test]
+    fn tracked_recovery_propagates_listing_errors_before_accessing_either_tree() {
+        let source = Utf8Path::new("synthetic-source");
+        let failure = copy_tracked_with(
+            source,
+            Utf8Path::new("synthetic-destination"),
+            &source.join("excluded"),
+            &Reflinks::new(),
+            |_| Err(error!("tracked listing refused")),
+        )
+        .expect_err("a refused inventory must propagate before copying");
+        assert_eq!(failure.message(), "tracked listing refused");
+    }
+
+    #[test]
+    fn tracked_recovery_preserves_a_native_destination_collision() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("blocked")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("blocked/child"), "input bytes").unwrap();
+        fs::write(destination.join("blocked"), "preserved parent collision").unwrap();
+        let failure = copy_tracked_with(&source, &destination, &source.join("excluded"), &Reflinks::new(), |_| {
+            Ok(Some(vec!["blocked/child".into()]))
+        })
+        .expect_err("neither a failed tracked inventory nor a refused native copy may report success");
+        assert_eq!(failure.message(), format!("could not create `{}`", destination.join("blocked")));
+        assert_eq!(
+            fs::read_to_string(destination.join("blocked")).unwrap(),
+            "preserved parent collision"
+        );
+    }
+
+    #[test]
+    fn tracked_protocol_rejects_invalid_utf8_after_a_valid_nul_delimited_prefix() {
+        let root = Utf8Path::new("selected-source");
+        assert_eq!(
+            parse_tracked_files(root, b"\0one.rs\0two.rs\0").unwrap(),
+            [Utf8PathBuf::from("one.rs"), Utf8PathBuf::from("two.rs")]
+        );
+        let failure = parse_tracked_files(root, b"one.rs\0\xff\0two.rs\0")
+            .expect_err("a valid prefix does not authorize a partial tracked inventory");
+        assert_eq!(
+            failure.message(),
+            "git reported a tracked path that is not valid UTF-8 in `selected-source`"
+        );
+    }
+
+    #[test]
+    fn a_native_unrepresentable_source_name_fails_the_actual_parallel_copy_without_discarding_prior_destination_bytes() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("preserved"), "prior destination bytes").unwrap();
+        #[cfg(windows)]
+        let name = { std::ffi::OsString::from_wide(&[0xd800]) };
+        #[cfg(unix)]
+        let name = { std::ffi::OsString::from_vec(vec![0xff]) };
+        let path = source.as_std_path().join(name);
+        fs::write(&path, "unrepresentable input").unwrap();
+        let failure = copy_tree(&source, &destination, &source.join("excluded"))
+            .expect_err("the real walk must retain its invalid-path failure rather than returning a partial success");
+        assert_eq!(
+            failure.message(),
+            format!("`{}` is not valid UTF-8 and cannot be copied", path.display())
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("preserved")).unwrap(),
+            "prior destination bytes"
+        );
+    }
+
+    #[test]
+    fn a_nonlink_source_cannot_be_recreated_as_a_link_or_silently_accepted() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("ordinary-file");
+        let destination = root.join("not-created");
+        fs::write(&source, "ordinary file bytes").unwrap();
+        let failure = copy_symlink(&source, &destination).expect_err("native read_link must reject a regular source before recreation");
+        assert_eq!(failure.message(), format!("could not read the link `{source}`"));
+        assert!(!destination.exists());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "ordinary file bytes");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn native_link_copy_routes_directory_and_file_targets_to_the_matching_factory_operation() {
+        for directory_target in [false, true] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let target = root.join("target");
+            let source = root.join("source-link");
+            let destination = root.join("destination-link");
+            fs::create_dir(&target).unwrap();
+            super::super::sync::junction_for_test(&source, &target);
+            if !directory_target {
+                fs::remove_dir(&target).unwrap();
+                fs::write(&target, "file target bytes").unwrap();
+            }
+            let attempted = std::cell::Cell::new(false);
+            let failure = copy_symlink_with(&source, &destination, |observed, to, is_directory| {
+                assert_eq!(observed, fs::read_link(&source).unwrap());
+                assert_eq!(to, destination.as_std_path());
+                assert_eq!(is_directory, directory_target);
+                attempted.set(true);
+                Err(std::io::Error::other("late native link factory refusal"))
+            })
+            .expect_err("the selected native recreation failure must propagate");
+            assert!(attempted.get());
+            assert_eq!(failure.message(), format!("could not recreate the link `{destination}`"));
+            assert!(!destination.exists());
+            assert_eq!(target.is_dir(), directory_target);
+        }
+    }
+
+    #[test]
+    fn freshening_replaces_an_old_timestamp_without_changing_content_or_creating_missing_files() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let path = Utf8Path::from_path(directory.path()).unwrap().join("cloned");
+        fs::write(&path, "preserved bytes").unwrap();
+        let old = SystemTime::UNIX_EPOCH + core::time::Duration::from_hours(262_968);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(old))
+            .unwrap();
+        let now = old + core::time::Duration::from_hours(24);
+        freshen_at(&path, now);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), now);
+        assert_eq!(fs::read(&path).unwrap(), b"preserved bytes");
+        let missing = path.with_file_name("missing");
+        freshen_at(&missing, now);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn missing_copy_sources_propagate_the_recorded_walk_error_instead_of_reporting_success() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let failure = copy_tree_with(
+            &root.join("missing-source"),
+            &root.join("destination"),
+            &root.join("skip"),
+            CopyOptions::default(),
+            &Reflinks::new(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "could not read the source tree");
+        assert_eq!(fs::read_dir(root.join("destination")).unwrap().count(), 0);
     }
 }
 

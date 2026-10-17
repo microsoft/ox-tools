@@ -37,7 +37,15 @@ pub(crate) enum RustcWrapperChain {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> RustcWrapperChain {
-    rustc_wrapper_chain_in(root, environment_wrapper(|name| env::var_os(name)), &Environment::ambient())
+    rustc_wrapper_chain_using(root, |name| env::var_os(name), &Environment::ambient())
+}
+
+fn rustc_wrapper_chain_using(
+    root: &Utf8Path,
+    get: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    environment: &Environment,
+) -> RustcWrapperChain {
+    rustc_wrapper_chain_in(root, environment_wrapper(get), environment)
 }
 
 fn environment_wrapper(mut get: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
@@ -662,7 +670,15 @@ fn predicate_of(table: &str) -> Option<&str> {
 /// to choose. Failing to run says nothing, which leaves every `cfg(…)` table unread and its names
 /// unanswerable — the same direction every other uncertainty in this module resolves in.
 fn probe_cfgs(target: Option<&str>) -> Option<CfgSet> {
-    let program = env::var("RUSTC").unwrap_or_else(|_absent| "rustc".to_owned());
+    probe_cfgs_using(target, |name| env::var(name), Command::output)
+}
+
+fn probe_cfgs_using(
+    target: Option<&str>,
+    get: impl FnOnce(&str) -> Result<String, env::VarError>,
+    run: impl FnOnce(&mut Command) -> std::io::Result<std::process::Output>,
+) -> Option<CfgSet> {
+    let program = get("RUSTC").unwrap_or_else(|_absent| "rustc".to_owned());
     let mut command = Command::new(program);
 
     let _builder = command.arg("--print").arg("cfg");
@@ -671,7 +687,7 @@ fn probe_cfgs(target: Option<&str>) -> Option<CfgSet> {
         let _builder = command.arg("--target").arg(triple);
     }
 
-    let output = command.output().ok().filter(|output| output.status.success())?;
+    let output = run(&mut command).ok().filter(|output| output.status.success())?;
 
     Some(CfgSet::parse(&String::from_utf8_lossy(&output.stdout)))
 }
@@ -720,12 +736,15 @@ fn host_triple(config: &CargoConfig, asked_about: bool) -> Option<&'static str> 
     HOST.get_or_init(|| {
         // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; host parsing and command behavior are exercised independently")]
         let program = env::var("RUSTC").unwrap_or_else(|_absent| "rustc".to_owned());
-        let output = Command::new(program).arg("-vV").output().ok()?;
-        let printed = String::from_utf8_lossy(&output.stdout).into_owned();
-
-        parse_host(&printed)
+        host_from_output(|| Command::new(program).arg("-vV").output())
     })
     .as_deref()
+}
+
+fn host_from_output(run: impl FnOnce() -> std::io::Result<std::process::Output>) -> Option<String> {
+    let output = run().ok()?;
+    let printed = String::from_utf8_lossy(&output.stdout);
+    parse_host(&printed)
 }
 
 fn parse_host(printed: &str) -> Option<String> {
@@ -908,6 +927,167 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn survivor_wrapper_lookup_is_forwarded_and_non_unicode_or_disappeared_target_flags_are_ignored() {
+        let root = Utf8Path::new("synthetic/workspace");
+        for preferred in ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"] {
+            let chain = rustc_wrapper_chain_using(
+                root,
+                |name| (name == preferred).then(|| std::ffi::OsString::from("outer compiler wrapper")),
+                &Environment::default(),
+            );
+            assert_eq!(chain, RustcWrapperChain::Interpose(Some("outer compiler wrapper".into())));
+        }
+        let environment = Environment::read(
+            |name| {
+                if name == "CARGO_TARGET_VALID_RUSTFLAGS" {
+                    Ok("--cfg retained".to_owned())
+                } else {
+                    Err(env::VarError::NotPresent)
+                }
+            },
+            [
+                "CARGO_TARGET_MISSING_RUSTFLAGS".to_owned(),
+                "CARGO_TARGET_VALID_RUSTFLAGS".to_owned(),
+            ],
+        );
+        assert_eq!(environment.target_rustflags.len(), 1);
+        assert_eq!(
+            environment.target_rustflags.get("VALID").map(String::as_str),
+            Some("--cfg retained")
+        );
+        assert!(!environment.target_rustflags.contains_key("MISSING"));
+    }
+
+    #[test]
+    fn survivor_ambient_rustflags_leave_overridden_target_table_predicates_undecided() {
+        let config = CargoConfig {
+            tables: vec![
+                toml::from_str("[target.fixture-target]\nrustflags = ['--cfg', 'from_table', '-Cpanic=abort']\n")
+                    .expect("valid Cargo configuration"),
+            ],
+            sources: Vec::new(),
+        };
+        for encoded in [false, true] {
+            let environment = Environment {
+                encoded_rustflags: encoded.then(String::new),
+                rustflags: (!encoded).then(|| "--cfg from_environment".to_owned()),
+                ..Environment::default()
+            };
+            let (flags, undecided) = rustflags(&environment, &config, Some("fixture-target"));
+            assert_eq!(
+                flags,
+                if encoded {
+                    Vec::<String>::new()
+                } else {
+                    vec!["--cfg".into(), "from_environment".into()]
+                }
+            );
+            assert_eq!(undecided, ["from_table", "panic"]);
+        }
+        let (flags, undecided) = rustflags(&Environment::default(), &config, Some("fixture-target"));
+        assert_eq!(flags, ["--cfg", "from_table", "-Cpanic=abort"]);
+        assert!(undecided.is_empty());
+    }
+
+    #[test]
+    fn survivor_cfg_and_host_probes_forward_rustc_and_return_native_process_failures() {
+        let directory = crate::testing::workdir("cfg-probe-native-errors-");
+        let missing = directory.path().join("missing-rustc");
+        assert!(
+            probe_cfgs_using(
+                Some("fixture-target"),
+                |name| {
+                    assert_eq!(name, "RUSTC");
+                    Ok(missing.to_string_lossy().into_owned())
+                },
+                |command| {
+                    assert_eq!(command.get_program(), missing.as_os_str());
+                    assert_eq!(
+                        command.get_args().collect::<Vec<_>>(),
+                        ["--print", "cfg", "--target", "fixture-target"]
+                    );
+                    command.output()
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            probe_cfgs_using(
+                None,
+                |name| {
+                    assert_eq!(name, "RUSTC");
+                    Ok("rustc".to_owned())
+                },
+                std::process::Command::output
+            )
+            .is_some(),
+            "the installed compiler answers about its host"
+        );
+        assert!(probe_cfgs_using(Some("not-a-real-rust-target"), |_| Ok("rustc".to_owned()), Command::output).is_none());
+        assert!(host_from_output(|| Command::new(&missing).arg("-vV").output()).is_none());
+        assert!(host_from_output(|| Command::new("rustc").arg("-vV").output()).is_some());
+    }
+
+    #[test]
+    fn survivor_public_profile_and_requested_host_queries_are_checked_in_an_isolated_environment() {
+        const ROOT: &str = "GAMMA_SURVIVOR_CFG_BUILD_CHILD_ROOT";
+        if let Ok(root) = env::var(ROOT) {
+            let root = Utf8Path::new(&root);
+            assert_eq!(Build::resolve(root, Some("quiet"), &[]).debug_assertions, Some(false));
+            assert_eq!(Build::resolve(root, None, &[]).debug_assertions, Some(true));
+            let config = CargoConfig {
+                tables: Vec::new(),
+                sources: Vec::new(),
+            };
+            assert!(host_triple(&config, false).is_none());
+            assert!(
+                host_triple(&config, true).is_some(),
+                "a named environment target needs the host even without file target tables"
+            );
+            return;
+        }
+        let directory = crate::testing::workdir("cfg-build-isolated-profile-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture paths are UTF-8");
+        crate::testing::write_fixture(
+            root.as_std_path(),
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = 'subject'\nversion = '0.0.0'\n\
+                [profile.dev]\ndebug-assertions = true\n[profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
+                ),
+                (
+                    ".cargo/config.toml",
+                    "[profile.dev]\ndebug-assertions = true\n\
+                [profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
+                ),
+            ],
+        );
+        let mut child = Command::new(env::current_exe().expect("the test executable has a native path"));
+        child
+            .args([
+                "--exact",
+                "cfg::build::tests::survivor_public_profile_and_requested_host_queries_are_checked_in_an_isolated_environment",
+                "--nocapture",
+            ])
+            .env(ROOT, root.as_str())
+            .env("RUSTFLAGS", "")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_TARGET")
+            .env_remove("RUSTC")
+            .env("CARGO_HOME", root.join("private-cargo-home"));
+        let output = crate::testing::within(crate::testing::WATCHDOG, "isolated profile and host queries", move || {
+            child.output().expect("the isolated test process starts")
+        });
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// A workspace root with the given files written into it, and no environment at all.
     fn tree(files: &[(&str, &str)]) -> (TempDir, Utf8PathBuf) {
         let directory = TempDir::new().expect("a temporary directory");
@@ -927,6 +1107,29 @@ mod tests {
             cargo_home: Some(root.join("nowhere")),
             ..Environment::default()
         }
+    }
+
+    #[test]
+    fn survivor_nested_lookup_and_explicit_codegen_predicate_names_do_not_guess_missing_values() {
+        let table: Table = toml::from_str("[build]\ntarget = 'host'\n").unwrap();
+        assert!(lookup(&table, &[]).is_none());
+        assert!(lookup(&table, &["missing", "target"]).is_none());
+        assert!(lookup(&table, &["build", "target", "nested"]).is_none());
+        assert_eq!(lookup(&table, &["build", "target"]).and_then(Value::as_str), Some("host"));
+        let flags = [
+            "--cfg",
+            "custom=\"yes\"",
+            "-C",
+            "debug-assertions",
+            "-Cpanic=abort",
+            "-Ctarget-feature=+sse2",
+            "-Cdebug-assertions-extra=on",
+            "-Copt-level=3",
+        ]
+        .map(str::to_owned);
+        assert_eq!(decided_names(&flags), ["custom", "debug_assertions", "panic", "target_feature"]);
+        let environment = Environment::read(|_| Err(env::VarError::NotPresent), ["CARGO_TARGET_GHOST_RUSTFLAGS".to_owned()]);
+        assert!(environment.target_rustflags.is_empty());
     }
 
     #[test]

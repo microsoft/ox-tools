@@ -417,11 +417,11 @@ pub(super) fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) 
         probes: spent.probes,
         exact_probes: spent.exact_probes,
         exact_hits: spent.exact_hits,
-        generalized_probes: spent.generalized_probes,
-        generalized_hits: spent.generalized_hits,
-        generalized_rejected: spent.generalized_rejected,
+        inferred_probes: spent.inferred_probes,
+        inferred_hits: spent.inferred_hits,
+        inferred_rejected: spent.inferred_rejected,
         exact_candidates: spent.exact_candidates,
-        generalized_candidates: spent.generalized_candidates,
+        inferred_candidates: spent.inferred_candidates,
         item_candidates: spent.item_candidates,
         reach_candidates: spent.reach_candidates,
         file_candidates: spent.file_candidates,
@@ -1643,13 +1643,873 @@ fn calibrate_stall(baseline: &Baseline, config: &Config) -> Stall {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use camino::Utf8Path;
 
     use super::*;
     use crate::discover::{Killer, ReachCluster, SiteIdentity, TargetFile};
     use crate::exec::memory::{Demand, MemoryControl};
+    use crate::exec::verdict::Only;
     use crate::fixtures;
     use crate::testing::Recorder;
+
+    #[derive(Default)]
+    struct MeasurementEvents {
+        recorded: Recorder,
+        measurements: usize,
+        planning: Vec<(usize, usize)>,
+        before_baseline: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl Events for MeasurementEvents {
+        fn phase(&mut self, verb: &str, detail: &str) {
+            self.recorded.phase(verb, detail);
+            if verb == "Baselining"
+                && let Some(before) = self.before_baseline.take()
+            {
+                before();
+            }
+        }
+
+        fn mutant(&mut self, mutant: &Mutant) {
+            self.recorded.mutant(mutant);
+        }
+
+        fn measured(&mut self, _plan: &Plan, _session: &Session) {
+            self.measurements += 1;
+        }
+
+        fn sweep_planning(&mut self, _plan: &Plan, binaries: usize, jobs: usize) {
+            self.planning.push((binaries, jobs));
+        }
+    }
+
+    /// Surveys a real tiny crate with isolated cache/output; compilation is scripted by callers,
+    /// while workspace preparation, metadata, baseline execution and publication remain native.
+    fn orchestration_fixture(source: &str) -> (tempfile::TempDir, Survey, Selection, Config) {
+        let (directory, root) = fixtures::crate_dir("measure-orchestration-", source);
+        let arguments = crate::commands::SelectArgs {
+            dir: root.clone(),
+            mutators: Some("literal.bool_flip".to_owned()),
+            ..crate::commands::SelectArgs::default()
+        };
+        let selection = arguments.selection().unwrap();
+        let survey = Survey::new(&arguments, None).unwrap();
+        let config = Config {
+            jobs: 3,
+            test_lib: true,
+            nextest: false,
+            cache_dir: Some(root.join("target").join("isolated-campaign-cache")),
+            memory: MemoryPolicy {
+                control: MemoryControl::Off,
+                ..MemoryPolicy::default()
+            },
+            ..Config::default()
+        };
+        (directory, survey, selection, config)
+    }
+
+    /// Uses real package identity but reports the supplied executable instead of compiling source.
+    fn successful_compiler_output(work: &Workspace, executable: &Utf8Path, emit_binary: bool) -> std::process::Output {
+        let metadata = std::process::Command::new("cargo")
+            .args(["metadata", "--format-version=1", "--no-deps", "--manifest-path"])
+            .arg(work.root.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(metadata.status.success(), "{}", String::from_utf8_lossy(&metadata.stderr));
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let package = &metadata["packages"][0];
+        let stdout = if emit_binary {
+            serde_json::json!({
+                "reason": "compiler-artifact",
+                "profile": {"test": true},
+                "package_id": package["id"],
+                "manifest_path": work.root.join("Cargo.toml"),
+                "target": {"name": package["targets"][0]["name"], "kind": ["lib"], "test": true},
+                "executable": executable,
+                "filenames": [executable],
+            })
+            .to_string()
+            .into_bytes()
+        } else {
+            Vec::new()
+        };
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(0)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(0)
+        };
+        std::process::Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn measurement_drives_library_build_baseline_scope_and_phase_contracts() {
+        for baseline in [false, true] {
+            let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            let config = Config { baseline, ..config };
+            let executable = crate::testing::helper().path;
+            let mut events = MeasurementEvents::default();
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let observed = Rc::clone(&calls);
+            let result = super::super::build::with_compiler(
+                move |work, arguments, _timeout, _events| {
+                    observed.borrow_mut().push(arguments.to_vec());
+                    Ok(Some(successful_compiler_output(work, &executable, true)))
+                },
+                || measure(&survey, &selection, &config, &mut events),
+            )
+            .unwrap();
+            assert_eq!(result.plan.mutants.len(), 1);
+            assert!(result.learning.is_none());
+            assert!(result.stuck.is_empty());
+            assert!(result.dropped.is_empty());
+            let built = result
+                .built
+                .expect("one viable mutation and its test artifact must retain a measured workspace");
+            assert_eq!(built.session.binaries.len(), 1);
+            assert!(built.work.runner().is_none());
+            assert!(!built.session.metered);
+            assert_eq!(built.oracle.packages, survey.selected);
+            assert!(built.oracle.package_local);
+            assert!(!built.oracle.whole_workspace);
+            assert_eq!(built.session.stall.is_some(), baseline);
+            let calls = calls.borrow();
+            assert!(
+                calls.len() >= 2,
+                "preflight and instrumented schema are separate compiler invocations"
+            );
+            for test_build in calls
+                .iter()
+                .filter(|arguments| arguments.first().is_some_and(|argument| argument == "test"))
+            {
+                assert!(test_build.iter().any(|argument| argument == "--lib"), "{test_build:?}");
+            }
+            assert_eq!(events.planning, [(1, 3)]);
+            assert!(
+                events
+                    .recorded
+                    .phases
+                    .iter()
+                    .any(|(_, detail)| detail == "0 unviable mutants, leaving 1 viable mutant")
+            );
+            if baseline {
+                assert!(
+                    events
+                        .recorded
+                        .phases
+                        .iter()
+                        .any(|(_, detail)| detail.contains("1 test binary passed"))
+                );
+            } else {
+                assert!(
+                    events
+                        .recorded
+                        .phases
+                        .iter()
+                        .any(|(_, detail)| detail == "no baseline was measured")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_populations_do_not_build_or_invent_learning_or_a_prepared_session() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> u8 { 7 }\n");
+        let executable = crate::testing::helper().path;
+        let mut events = Recorder::default();
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, false))),
+            || run(&survey, &selection, &config, &mut events),
+        )
+        .unwrap();
+        assert!(result.plan.mutants.is_empty());
+        assert!(result.built.is_none());
+        assert!(result.learning.is_none());
+        assert!(result.stuck.is_empty());
+        assert!(!events.phases.iter().any(|(verb, _)| verb == "Excluding"));
+        assert!(events.phases.iter().any(|(_, detail)| detail == ", 0 mutants"));
+    }
+
+    #[test]
+    fn preflight_whole_workspace_requests_reach_the_actual_compiler_arguments() {
+        let (_directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        config.test_workspace = true;
+        let executable = crate::testing::helper().path;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&calls);
+        let measured = super::super::build::with_compiler(
+            move |work, arguments, _timeout, _events| {
+                observed.borrow_mut().push(arguments.to_vec());
+                Ok(Some(successful_compiler_output(work, &executable, true)))
+            },
+            || measure(&survey, &selection, &config, &mut Recorder::default()),
+        )
+        .unwrap();
+        let calls = calls.borrow();
+        assert!(calls[0].iter().any(|argument| argument == "--workspace"), "{calls:?}");
+        let built = measured.built.unwrap();
+        assert!(built.oracle.whole_workspace);
+        assert!(!built.oracle.package_local);
+    }
+
+    #[test]
+    fn early_measurement_validation_returns_memory_oracle_and_native_cache_errors() {
+        for refusal in ["memory", "oracle", "cache"] {
+            let (_directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            match refusal {
+                "memory" => {
+                    config.baseline = false;
+                    config.memory = MemoryPolicy {
+                        control: MemoryControl::Enforce,
+                        demand: Demand::Stated,
+                        ..MemoryPolicy::default()
+                    };
+                }
+                "oracle" => config.include_tests.push("missing-target".to_owned()),
+                "cache" => {
+                    let blocker = survey.root.join("cache-is-a-file");
+                    fs::write(&blocker, "not a directory").unwrap();
+                    config.cache_dir = Some(blocker);
+                }
+                _ => unreachable!(),
+            }
+            let mut failed = FailedMeasurement::default();
+            let result = super::super::build::with_compiler(
+                |_work, _arguments, _timeout, _events| panic!("early validation must not invoke a compiler"),
+                || run_with_locks(&survey, &selection, &config, &mut Recorder::default(), None, &mut failed, None),
+            );
+            let error = result.expect_err("invalid preparation input must be returned without panic");
+            match refusal {
+                "memory" => assert!(error.to_string().contains("--memory"), "{error}"),
+                "oracle" => assert!(error.to_string().contains("missing-target"), "{error}"),
+                "cache" => assert!(error.to_string().contains("cache-is-a-file"), "{error}"),
+                _ => unreachable!(),
+            }
+            assert!(failed.plan.is_none());
+            assert!(failed.session.is_none());
+            assert!(failed.work.is_none());
+        }
+    }
+
+    #[test]
+    fn schema_compiler_errors_are_returned_instead_of_unwrapped() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let executable = crate::testing::helper().path;
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| {
+                if fs::read_to_string(work.root.join("Cargo.toml")).unwrap().contains("gamma_rt") {
+                    return Err(error!("the controlled schema compiler refused its input"));
+                }
+                Ok(Some(successful_compiler_output(work, &executable, false)))
+            },
+            || measure(&survey, &selection, &config, &mut Recorder::default()),
+        );
+        let error = result.expect_err("a refused schema compiler must propagate its diagnostic");
+        assert!(
+            error.to_string().contains("the controlled schema compiler refused its input"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn nonlibrary_measurement_can_report_an_empty_oracle_without_a_library_usage_error() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let config = Config { test_lib: false, ..config };
+        let executable = crate::testing::helper().path;
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, false))),
+            || measure(&survey, &selection, &config, &mut Recorder::default()),
+        )
+        .unwrap();
+        let built = result.built.expect("a viable nonlibrary population still has a measured run");
+        assert!(built.session.binaries.is_empty());
+        assert!(result.learning.is_none());
+    }
+
+    #[test]
+    fn library_measurement_rejects_absent_artifacts_without_losing_its_discovered_plan() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let executable = crate::testing::helper().path;
+        let mut failed = FailedMeasurement::default();
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, false))),
+            || measure_with_locks(&survey, &selection, &config, &mut Recorder::default(), None, &mut failed),
+        );
+        let error = result.expect_err("a library oracle cannot proceed without a runnable library artifact");
+        assert!(error.is_usage());
+        assert!(
+            error.to_string().contains("selected no runnable library unit-test harness"),
+            "{error}"
+        );
+        let plan = failed
+            .plan
+            .expect("post-convergence preparation errors must retain their discovered population");
+        assert_eq!(plan.mutants.len(), 1);
+        assert!(failed.session.is_none());
+    }
+
+    #[test]
+    fn failed_measured_baselines_retain_the_session_population_and_workspace() {
+        let (_directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        config.cargo.test_args = vec!["--gamma-step=when-arg:--list|exit:0".to_owned(), "--gamma-step=exit:1".to_owned()];
+        let executable = crate::testing::helper().path;
+        let mut failed = FailedMeasurement::default();
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, true))),
+            || measure_with_locks(&survey, &selection, &config, &mut Recorder::default(), None, &mut failed),
+        );
+        assert!(
+            result.is_err(),
+            "the native helper must fail its baseline after successful marker enumeration"
+        );
+        let session = failed
+            .session
+            .expect("a failed baseline must retain all its measured session diagnostics");
+        assert_eq!(session.binaries.len(), 1);
+        assert!(!session.metered);
+        assert!(session.stall.is_none());
+        assert_eq!(
+            failed
+                .plan
+                .expect("a failed baseline retains its selected population")
+                .mutants
+                .len(),
+            1
+        );
+        assert!(
+            failed
+                .work
+                .expect("a failed baseline retains its workspace until publication")
+                .root
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn postbuild_filter_and_resource_errors_preserve_the_discovered_population() {
+        for wrong_target in [false, true] {
+            let (_directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            if wrong_target {
+                config.include_tests = vec![survey.library_tests[0].target.clone()];
+            }
+            let executable = if wrong_target {
+                crate::testing::helper().path
+            } else {
+                survey.root.join("missing-runnable-library")
+            };
+            let mut failed = FailedMeasurement::default();
+            let result = super::super::build::with_compiler(
+                move |work, _arguments, _timeout, _events| {
+                    let mut output = successful_compiler_output(work, &executable, true);
+                    if wrong_target {
+                        let mut artifact: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                        artifact["target"]["name"] = "not-the-selected-library".into();
+                        output.stdout = artifact.to_string().into_bytes();
+                    }
+                    Ok(Some(output))
+                },
+                || measure_with_locks(&survey, &selection, &config, &mut Recorder::default(), None, &mut failed),
+            );
+            let error = result.expect_err("an excluded or unlaunchable test artifact must not form a measured oracle");
+            if wrong_target {
+                assert!(error.to_string().contains("no test target"), "{error}");
+            } else {
+                assert!(error.to_string().contains("missing-runnable-library"), "{error}");
+            }
+            assert_eq!(
+                failed
+                    .plan
+                    .expect("postbuild preparation errors must preserve the population")
+                    .mutants
+                    .len(),
+                1
+            );
+            assert!(failed.session.is_none());
+        }
+    }
+
+    fn census_helper_arguments() -> Vec<String> {
+        let records = (1..=8)
+            .chain(core::iter::once(gamma_rt::SEAL))
+            .map(|ordinal| ordinal.to_string())
+            .collect::<Vec<_>>()
+            .join("|");
+        vec![
+            "--gamma-step=when-arg:--list|print:covered: test".to_owned(),
+            "--gamma-step=when-arg:--list|exit:0".to_owned(),
+            format!(
+                "--gamma-step=when-env:{}|write-le:{}|{records}",
+                gamma_rt::CENSUS_VAR,
+                gamma_rt::CENSUS_VAR
+            ),
+            "--gamma-step=print:running 1 test".to_owned(),
+            "--gamma-step=print:test covered ... ok".to_owned(),
+            "--gamma-step=exit:0".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn run_orchestration_preserves_census_admission_phase_costs_and_completed_learning() {
+        let source = (0..8).fold(String::new(), |mut source, index| {
+            writeln!(source, "pub fn subject{index}() -> bool {{ true }}").unwrap();
+            source
+        });
+        for (optimize, whole_binary) in [(false, false), (true, false), (true, true)] {
+            let (_directory, survey, selection, config) = orchestration_fixture(&source);
+            let mut config = Config {
+                optimize_test_execution: optimize,
+                whole_test_binaries: whole_binary,
+                ..config
+            };
+            config.cargo.test_args = census_helper_arguments();
+            let executable = crate::testing::helper().path;
+            let result = super::super::build::with_compiler(
+                move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, true))),
+                || {
+                    census::with_census_result(
+                        |binaries| Census::complete(&binaries[0].path),
+                        || run(&survey, &selection, &config, &mut Recorder::default()),
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(result.plan.mutants.len(), 8);
+            assert!(result.plan.mutants.iter().all(|mutant| mutant.outcome != Outcome::Pending));
+            assert!(
+                result.learning.is_some(),
+                "a completed run must return its learning even when the learned map is empty"
+            );
+            let built = result.built.unwrap();
+            assert_eq!(built.session.binaries[0].tests, Some(1));
+            assert!(built.session.phases.sweep.is_some());
+            let expected = if !optimize {
+                CensusStatus::Disabled
+            } else if whole_binary {
+                CensusStatus::Declined
+            } else {
+                CensusStatus::Complete
+            };
+            assert_eq!(built.session.phases.census_status, expected);
+            assert_eq!(built.session.phases.census.is_some(), optimize && !whole_binary);
+        }
+    }
+
+    fn prepared_record(survey: &Survey, config: &Config) -> super::super::testing_state::RecordPreparation {
+        let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
+        super::super::testing_state::RecordPreparation {
+            report_info: None,
+            inputs: crate::discover::RunRecord::snapshot_with_external(
+                &survey.root,
+                &base,
+                survey.external_inputs(),
+                survey.has_untracked_build_script_inputs(),
+            ),
+            base,
+            context: crate::discover::ContextDigest::default(),
+            killers: survey.killers(),
+        }
+    }
+
+    #[test]
+    fn a_published_testing_session_returns_a_native_journal_arming_failure_without_panicking() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let record = prepared_record(&survey, &config);
+        let executable = crate::testing::helper().path;
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let triggered = std::rc::Rc::clone(&observed);
+        let result = super::super::workspace::with_journal_arm_hook(
+            move |base| {
+                assert!(base.join("testing-session.json").is_file());
+                let journal = base.join("testing-verdicts.jsonl");
+                assert!(journal.is_file(), "the session must have published its initial journal first");
+                fs::remove_file(&journal).unwrap();
+                fs::create_dir(&journal).unwrap();
+                triggered.set(true);
+            },
+            || {
+                super::super::build::with_compiler(
+                    move |work, _arguments, _timeout, _events| Ok(Some(retained_compiler_output(work, &executable))),
+                    || {
+                        run_with_locks(
+                            &survey,
+                            &selection,
+                            &config,
+                            &mut Recorder::default(),
+                            None,
+                            &mut FailedMeasurement::default(),
+                            Some(&record),
+                        )
+                    },
+                )
+            },
+        );
+        assert!(
+            observed.get(),
+            "the failure must occur after state publication, not during initial preparation"
+        );
+        let failure = result.expect_err("a directory replacing the published journal cannot be armed");
+        assert!(failure.message().contains("testing-verdicts.jsonl"), "{failure}");
+        assert!(record.base.join("testing-session.json").is_file());
+        assert!(record.base.join("testing-verdicts.jsonl").is_dir());
+    }
+
+    fn retained_compiler_output(work: &Workspace, executable: &Utf8Path) -> std::process::Output {
+        fs::create_dir_all(&work.target).unwrap();
+        let retained = work.target.join(executable.file_name().unwrap());
+        fs::copy(executable, &retained).unwrap();
+        successful_compiler_output(work, &retained, true)
+    }
+
+    /// Publishes testing state for resume, retaining its executable and arming the durable journal.
+    /// Compilation is scripted; publication, native baseline and subsequent resume remain real.
+    fn prepared_testing_fixture(
+        survey: &Survey,
+        selection: &Selection,
+        config: &Config,
+        killers: Killers,
+    ) -> (super::super::testing_state::TestingState, Workspace) {
+        let record = prepared_record(survey, config);
+        let executable = crate::testing::helper().path;
+        let measured = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(retained_compiler_output(work, &executable))),
+            || measure(survey, selection, config, &mut Recorder::default()),
+        )
+        .unwrap();
+        let mut built = measured.built.unwrap();
+        let state = super::super::testing_state::TestingState::start(
+            &measured.plan,
+            &built,
+            Census::default(),
+            killers,
+            super::super::testing_state::TestingSettings {
+                jobs: config.jobs,
+                mutators: Some(selection.sorted().join(",")),
+                timeout_floor: config.timeout_floor,
+                confirm: config.confirm,
+                narrowed: true,
+                incremental: config.incremental.is_enabled(),
+            },
+            &record,
+            (&measured.stuck, &measured.dropped),
+        )
+        .unwrap();
+        built.work.arm_testing_journal().unwrap();
+        (state, built.work)
+    }
+
+    #[test]
+    fn resumed_prepared_testing_returns_measurements_learning_and_a_new_sweep_cost() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let (state, work) = prepared_testing_fixture(&survey, &selection, &config, Killers::default());
+        let mut events = MeasurementEvents::default();
+        let resumed = resume_testing(state, work, &mut events).unwrap();
+        assert_eq!(events.measurements, 1);
+        assert_eq!(events.planning, [(1, 3)]);
+        assert!(resumed.learning.is_some());
+        assert!(resumed.plan.mutants.iter().all(|mutant| mutant.outcome != Outcome::Pending));
+        assert!(
+            resumed
+                .built
+                .expect("a resumed run must retain its measured workspace")
+                .session
+                .phases
+                .sweep
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn run_with_a_record_publishes_the_prepared_state_before_sweeping() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let record = prepared_record(&survey, &config);
+        let executable = crate::testing::helper().path;
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(retained_compiler_output(work, &executable))),
+            || {
+                run_with_locks(
+                    &survey,
+                    &selection,
+                    &config,
+                    &mut Recorder::default(),
+                    None,
+                    &mut FailedMeasurement::default(),
+                    Some(&record),
+                )
+            },
+        )
+        .unwrap();
+        let (saved, _journal_bytes) = super::super::testing_state::TestingState::load(&record.base).unwrap();
+        assert_eq!(saved.settings.mutators.as_deref(), Some("literal.bool_flip"));
+        assert_eq!(saved.plan.mutants.len(), result.plan.mutants.len());
+        assert!(result.learning.is_some());
+    }
+
+    struct PublicationCollision {
+        base: Utf8PathBuf,
+        fired: bool,
+    }
+
+    impl Events for PublicationCollision {
+        fn phase(&mut self, _verb: &str, _detail: &str) {}
+
+        fn mutant(&mut self, _mutant: &Mutant) {}
+
+        fn measured(&mut self, _plan: &Plan, _session: &Session) {
+            assert!(!self.fired);
+            self.fired = true;
+            let phase = self.base.join("testing-phase.json");
+            fs::remove_file(&phase).unwrap();
+            fs::create_dir(&phase).unwrap();
+        }
+    }
+
+    #[test]
+    fn completed_and_resumed_sweeps_propagate_native_phase_publication_errors() {
+        for resume in [false, true] {
+            let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            let record = prepared_record(&survey, &config);
+            let mut events = PublicationCollision {
+                base: record.base.clone(),
+                fired: false,
+            };
+            let result = if resume {
+                let (state, work) = prepared_testing_fixture(&survey, &selection, &config, Killers::default());
+                resume_testing(state, work, &mut events)
+            } else {
+                let executable = crate::testing::helper().path;
+                super::super::build::with_compiler(
+                    move |work, _arguments, _timeout, _events| Ok(Some(retained_compiler_output(work, &executable))),
+                    || {
+                        run_with_locks(
+                            &survey,
+                            &selection,
+                            &config,
+                            &mut events,
+                            None,
+                            &mut FailedMeasurement::default(),
+                            Some(&record),
+                        )
+                    },
+                )
+            };
+            assert!(events.fired);
+            let error = result.expect_err("a directory at the phase filename must refuse completed-state publication");
+            assert!(error.to_string().contains("testing-phase.json"), "{error}");
+        }
+    }
+
+    fn startup_failure_arguments() -> Vec<String> {
+        let marker = core::str::from_utf8(gamma_rt::ENVIRONMENT_ERROR_MARKER).unwrap();
+        vec![
+            "--gamma-step=when-arg:--list|print:covered: test".to_owned(),
+            "--gamma-step=when-arg:--list|exit:0".to_owned(),
+            format!("--gamma-step=when-env:{}|print:{marker}", gamma_rt::ACTIVE_VAR),
+            format!("--gamma-step=when-env:{}|exit:1", gamma_rt::ACTIVE_VAR),
+            "--gamma-step=print:running 1 test".to_owned(),
+            "--gamma-step=print:test covered ... ok".to_owned(),
+            "--gamma-step=exit:0".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn failed_full_and_resumed_sweeps_publish_partial_learning_and_retain_the_failed_population() {
+        for resume in [false, true] {
+            let (_directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            config.optimize_test_execution = false;
+            config.cargo.test_args = startup_failure_arguments();
+            let scanned = survey.scan(None, &selection, &mut 0).unwrap();
+            let mutant = scanned.mutants[0].clone();
+            let killer = Killer {
+                package: mutant.package.to_string(),
+                target: mutant.package.replace('-', "_"),
+                test: "covered".to_owned(),
+            };
+            let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
+            let mut failed = FailedMeasurement::default();
+            let result = if resume {
+                let mut killers = Killers::default();
+                killers.record(mutant.id.clone(), killer.clone());
+                let (state, work) = prepared_testing_fixture(&survey, &selection, &config, killers);
+                resume_testing(state, work, &mut Recorder::default())
+            } else {
+                let executable = crate::testing::helper().path;
+                let probes = core::iter::once((mutant.id.clone(), killer.clone())).collect();
+                super::super::build::with_compiler(
+                    move |work, _arguments, _timeout, _events| {
+                        let output = successful_compiler_output(work, &executable, true);
+                        crate::discover::RunRecord::store_probes(work.base(), &probes);
+                        Ok(Some(output))
+                    },
+                    || run_with_locks(&survey, &selection, &config, &mut Recorder::default(), None, &mut failed, None),
+                )
+            };
+            let error = result.expect_err("a runtime startup marker must abort the sweep after its valid baseline");
+            assert!(error.to_string().contains("startup"), "{error}");
+            assert_eq!(
+                crate::discover::RunRecord::load_incomplete(&base).probes().get(&mutant.id),
+                Some(&killer)
+            );
+            if !resume {
+                let retained = failed
+                    .plan
+                    .expect("a failed sweep must retain its population for command-level diagnostics");
+                assert_eq!(retained.mutants.len(), 1);
+                assert_eq!(retained.mutants[0].id, mutant.id);
+            }
+        }
+    }
+
+    #[test]
+    fn measurement_installs_discovered_resources_before_returning_its_workspace() {
+        let (directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        config.resources = vec![super::super::resources::ResourceLimit::new("db", 1).unwrap()];
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("resource_helper.rs");
+        let executable = root.join(format!("resource_helper{}", std::env::consts::EXE_SUFFIX));
+        fs::write(
+            &source,
+            "#[test] #[ignore] fn __cargo_gamma_resource_6462_binary() {}\n#[test] fn covered() {}\n",
+        )
+        .unwrap();
+        let compiler = std::process::Command::new("rustc")
+            .args(["--test", "--edition=2024"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(compiler.status.success(), "{}", String::from_utf8_lossy(&compiler.stderr));
+        let measured = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, true))),
+            || measure(&survey, &selection, &config, &mut Recorder::default()),
+        )
+        .unwrap();
+        let built = measured.built.unwrap();
+        assert!(!built.work.required_resources(&built.session.binaries[0], Only::All).is_empty());
+    }
+
+    #[test]
+    fn postbuild_environment_arming_errors_keep_the_converged_population() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let executable = crate::testing::helper().path;
+        let manifest = Rc::new(RefCell::new(None));
+        let observed = Rc::clone(&manifest);
+        let mut events = MeasurementEvents {
+            before_baseline: Some(Box::new(move || {
+                fs::write(
+                    manifest
+                        .borrow()
+                        .as_ref()
+                        .expect("a successful compiler must supply its copied manifest"),
+                    "not = [valid TOML",
+                )
+                .unwrap();
+            })),
+            ..MeasurementEvents::default()
+        };
+        let mut failed = FailedMeasurement::default();
+        let result = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| {
+                *observed.borrow_mut() = Some(work.root.join("Cargo.toml"));
+                Ok(Some(successful_compiler_output(work, &executable, true)))
+            },
+            || measure_with_locks(&survey, &selection, &config, &mut events, None, &mut failed),
+        );
+        let error = result.expect_err("the finalized environment must not be armed from a malformed manifest");
+        assert!(error.to_string().contains("metadata"), "{error}");
+        assert_eq!(failed.plan.unwrap().mutants.len(), 1);
+        assert!(failed.session.is_none());
+    }
+
+    #[test]
+    fn an_unattributed_schema_refusal_reports_stuck_mutants_without_claiming_learning() {
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let executable = crate::testing::helper().path;
+        let mut events = Recorder::default();
+        let measured = super::super::build::with_compiler(
+            move |work, _arguments, _timeout, _events| {
+                let mut output = successful_compiler_output(work, &executable, false);
+                if fs::read_to_string(work.root.join("Cargo.toml")).unwrap().contains("gamma_rt") {
+                    output.status = std::process::Command::new(&executable).arg("--gamma-step=exit:1").status().unwrap();
+                    output.stderr = b"controlled unattributed compiler refusal".to_vec();
+                }
+                Ok(Some(output))
+            },
+            || measure(&survey, &selection, &config, &mut events),
+        )
+        .unwrap();
+        assert!(measured.built.is_none());
+        assert!(measured.learning.is_none());
+        assert_eq!(measured.stuck.len(), 1);
+        assert!(
+            events
+                .phases
+                .iter()
+                .any(|(_, detail)| detail == "the build could not be made to compile, 1 mutant not run")
+        );
+    }
+
+    #[test]
+    fn population_scan_and_runtime_link_errors_propagate_without_panicking() {
+        for scan in [false, true] {
+            let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            let original = survey.root.join("src/lib.rs");
+            let executable = crate::testing::helper().path;
+            let result = super::super::build::with_compiler(
+                move |work, _arguments, _timeout, _events| {
+                    let output = successful_compiler_output(work, &executable, false);
+                    if scan {
+                        fs::write(&original, "pub fn subject( {").unwrap();
+                    } else {
+                        fs::write(work.root.join("Cargo.toml"), "not = [valid TOML").unwrap();
+                    }
+                    Ok(Some(output))
+                },
+                || measure(&survey, &selection, &config, &mut Recorder::default()),
+            );
+            let error = result.expect_err("invalid source or a malformed copied manifest must be returned as an error");
+            let error = error.to_string();
+            assert!(error.contains(if scan { "lib.rs" } else { "Cargo.toml" }), "{error}");
+        }
+    }
+
+    #[test]
+    fn measurement_propagates_preflight_errors_and_synchronized_source_drift() {
+        for corrupt in [false, true] {
+            let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+            let executable = crate::testing::helper().path;
+            let mut failed = FailedMeasurement::default();
+            let result = super::super::build::with_compiler(
+                move |work, _arguments, _timeout, _events| {
+                    if !corrupt {
+                        return Err(error!("the controlled preflight compiler refused its input"));
+                    }
+                    let output = successful_compiler_output(work, &executable, true);
+                    fs::write(work.root.join("src/lib.rs"), "pub fn subject() -> bool { false }\n").unwrap();
+                    Ok(Some(output))
+                },
+                || run_with_locks(&survey, &selection, &config, &mut Recorder::default(), None, &mut failed, None),
+            );
+            let error = result.expect_err("a failed preflight or changed synchronized source must be returned");
+            let error = error.to_string();
+            if corrupt {
+                assert!(error.contains("changed between discovery and workspace synchronization"), "{error}");
+            } else {
+                assert!(error.contains("the controlled preflight compiler refused its input"), "{error}");
+            }
+        }
+    }
 
     #[test]
     fn oracle_scope_and_library_admission_truth_tables_preserve_package_ownership() {
@@ -2014,10 +2874,19 @@ mod tests {
             test: "tests::caught".to_owned(),
         };
         crate::discover::RunRecord::store_probes(base, &core::iter::once((mutant.id.clone(), killer.clone())).collect());
+        let mut pending = Killers::default();
+        pending.record(
+            mutant.id.clone(),
+            Killer {
+                test: "tests::newly_caught".to_owned(),
+                ..killer.clone()
+            },
+        );
 
-        store_incomplete_learning(false, &Killers::default(), base, std::slice::from_ref(&mutant));
+        store_incomplete_learning(false, &pending, base, std::slice::from_ref(&mutant));
 
         assert_eq!(crate::discover::RunRecord::load(base).probes().get(&mutant.id), Some(&killer));
+        assert!(!base.join("incomplete-gamma-learning.json").exists());
     }
 
     #[test]
@@ -2203,6 +3072,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stuck_build_diagnostic_pins_group_order_and_omits_empty_group_lines() {
+        let plan = stuck_plan(vec![stuck_mutant(1, "operator", "scope")]);
+        let abandoned = Abandoned {
+            reason: "compiler detail".into(),
+            ordinals: vec![1],
+        };
+        assert_eq!(
+            describe_stuck(&plan, &["subject".into()], &abandoned),
+            "the build for 1 package subject could not be made to compile, so 1 mutant never ran and is reported as `notbuilt` rather than as survivors.\nNot run, by mutator: operator (1).\nNot run, by scope: scope (1).\ncompiler detail"
+        );
+        assert_eq!(
+            describe_stuck(
+                &stuck_plan(Vec::new()),
+                &[],
+                &Abandoned {
+                    reason: "compiler detail".into(),
+                    ordinals: Vec::new()
+                }
+            ),
+            "the build for the workspace could not be made to compile, so 0 mutants never ran and are reported as `notbuilt` rather than as survivors.\ncompiler detail"
+        );
+    }
+
     /// A build that could not be made to compile is described by where it got stuck, not merely by
     /// the fact that it did.
     ///
@@ -2299,6 +3192,74 @@ mod tests {
                 (String::new(), "1 unviable mutant, leaving 2 viable mutants".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn phase_opening_labels_preserve_the_completed_verbs() {
+        #[derive(Default)]
+        struct Labels(Vec<(String, String, String)>);
+
+        impl Events for Labels {
+            fn phase(&mut self, _verb: &str, _detail: &str) {
+                panic!("phase openings must pass both display verbs through begin");
+            }
+
+            fn begin(&mut self, active: &str, completed: &str, detail: &str) {
+                self.0.push((active.to_owned(), completed.to_owned(), detail.to_owned()));
+            }
+
+            fn mutant(&mut self, _mutant: &Mutant) {}
+        }
+
+        let mut events = Labels::default();
+        begin_schema_build(&mut events);
+        begin_preflight(&mut events);
+        begin_population(&mut events, 2);
+        assert_eq!(
+            events.0,
+            [
+                ("Excluding".to_owned(), "Excluded".to_owned(), "unviable mutants".to_owned()),
+                ("Validating".to_owned(), "Validated".to_owned(), "the workspace".to_owned()),
+                ("Mutating".to_owned(), "Mutated".to_owned(), "2 target packages".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_baselines_return_errors_without_discarding_completed_measurements() {
+        let (_directory, work) = crate::testing::helper_workspace(
+            "retained-failed-baseline-",
+            &[
+                "print:running 2 tests",
+                "print:test alpha ... FAILED",
+                "print:test beta ... ok",
+                "exit:1",
+            ],
+        );
+        let mut binaries = [crate::testing::helper()];
+        let mut retained = None;
+        let result = take_baseline_retaining(
+            &work,
+            &mut binaries,
+            &Config {
+                jobs: 1,
+                ..Config::default()
+            },
+            &MemoryPolicy {
+                control: MemoryControl::Off,
+                ..MemoryPolicy::default()
+            },
+            Some(&mut retained),
+            &mut Recorder::default(),
+        );
+        assert!(
+            result.is_err(),
+            "a failing native baseline must not become a successful measurement"
+        );
+        let retained = retained.expect("completed measurements must survive the baseline error");
+        assert_eq!(retained.tests, Some(2));
+        assert_eq!(binaries[0].tests, Some(2));
+        assert_eq!(retained.peak, None);
     }
 
     /// A long tail is counted rather than printed, so one line stays one line.
@@ -2727,6 +3688,24 @@ mod tests {
         assert!(!warning.contains("--exclude-test compile_fail"), "{warning}");
     }
 
+    #[test]
+    fn whole_workspace_oracles_warn_about_compile_fail_targets_outside_the_selected_packages() {
+        let mut events = Recorder::default();
+        warn_about_compile_fail_targets(
+            &[target_in("external", "external_compile_fail")],
+            &["routerama".to_owned()],
+            &Config {
+                test_workspace: true,
+                ..Config::default()
+            },
+            &mut events,
+        );
+        let [warning] = events.warnings.as_slice() else {
+            panic!("a workspace-wide oracle must include the external compile-fail target");
+        };
+        assert!(warning.contains("--exclude-test external_compile_fail"), "{warning}");
+    }
+
     /// The ordinary case is a workspace with no such target at all, which must say nothing.
     #[test]
     fn a_workspace_without_one_is_silent() {
@@ -2784,6 +3763,54 @@ mod tests {
     }
 
     #[test]
+    fn empty_oracle_warnings_delimit_withdrawn_packages_and_count_only_unshown_helpers() {
+        let packages = ["core".to_owned()];
+        let scope = capped(&packages);
+        let mut events = Recorder::default();
+        warn_about_an_empty_oracle(
+            &oracle_plan("core"),
+            &[],
+            &scope,
+            false,
+            &["alpha".to_owned(), "beta".to_owned()],
+            &mut events,
+        );
+        assert_eq!(events.warnings.len(), 1);
+        assert!(
+            events.warnings[0].contains("The preflight could not compile `alpha`, `beta`, so their tests were withdrawn"),
+            "{:?}",
+            events.warnings
+        );
+
+        for helpers in [2, 7] {
+            let mut plan = oracle_plan("core");
+            plan.reach.clear();
+            for index in 1..=helpers {
+                let _previous = plan
+                    .reach
+                    .insert(format!("helper{index}"), core::iter::once("core".to_owned()).collect());
+            }
+            let mut events = Recorder::default();
+            warn_if_oracle_is_empty(&plan, &[], &scope, &Config::default(), &[], &mut events);
+            let [warning] = events.warnings.as_slice() else {
+                panic!("an inferred empty oracle must explain which helpers can supply its missing tests");
+            };
+            let names = if helpers == 2 {
+                "`helper1`, `helper2`"
+            } else {
+                "`helper1`, `helper2`, `helper3`, `helper4`, `helper5` and 2 more"
+            };
+            assert!(
+                warning.ends_with(&format!(
+                    "{names} also links this code. Add `--test-package helper1` to let its tests decide a verdict, or `--test-workspace` for every package's"
+                )),
+                "{warning}"
+            );
+            assert!(!warning.contains("and 0 more"), "{warning}");
+        }
+    }
+
+    #[test]
     fn census_targets_only_selected_pending_sites_and_relevant_binaries() {
         let mut plan = oracle_plan("core");
         let mut inactive = plan.mutants[0].clone();
@@ -2816,6 +3843,31 @@ mod tests {
         let selected: HashSet<u32> = core::iter::once(1).collect();
         assert_eq!(targets.get(Utf8Path::new("/tmp/app")), Some(&selected));
         assert_eq!(savings, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_mutant_without_reachable_tests_does_not_hide_later_census_targets() {
+        let mut plan = oracle_plan("orphan");
+        let _previous = plan
+            .reach
+            .insert("orphan".to_owned(), core::iter::once("orphan".to_owned()).collect());
+        let mut reachable = plan.mutants[0].clone();
+        reachable.package = "core".to_owned().into();
+        reachable.ordinal = 2;
+        plan.mutants.push(reachable);
+        let mut app = oracle_binary("app", Some(1));
+        app.path = "/tmp/census-app".into();
+        app.baseline = Duration::from_secs(7);
+        let binaries = [app];
+        let packages = ["app".to_owned()];
+        let scope = capped(&packages);
+        let reach = Reachability::build(&plan, &binaries, &scope);
+        let (targets, savings) = census_targets(&plan, &reach, &Killers::default());
+        assert_eq!(
+            targets,
+            HashMap::from_iter([(Utf8PathBuf::from("/tmp/census-app"), core::iter::once(2).collect(),)])
+        );
+        assert_eq!(savings, Duration::from_secs(7));
     }
 
     #[test]
@@ -2896,8 +3948,8 @@ mod tests {
                 probes: 2,
                 exact_probes: 3,
                 exact_hits: 4,
-                generalized_probes: 5,
-                generalized_hits: 6,
+                inferred_probes: 5,
+                inferred_hits: 6,
                 saved: 7,
                 reach_saved: 8,
                 ..super::super::sweep::Spent::default()
@@ -2912,8 +3964,8 @@ mod tests {
                 cost.probes,
                 cost.exact_probes,
                 cost.exact_hits,
-                cost.generalized_probes,
-                cost.generalized_hits,
+                cost.inferred_probes,
+                cost.inferred_hits,
                 cost.launches_saved,
                 cost.reach_launches_saved,
             ),

@@ -127,6 +127,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aliases_keep_catalog_order_and_tied_direction_names_keep_the_first_suggestion() {
+        assert_eq!(
+            resolve("rOr").unwrap(),
+            [
+                "relational.lt_to_le",
+                "relational.lt_to_gt",
+                "relational.le_to_lt",
+                "relational.le_to_ge",
+                "relational.gt_to_ge",
+                "relational.gt_to_lt",
+                "relational.ge_to_gt",
+                "relational.ge_to_le",
+                "relational.eq_to_ne",
+                "relational.ne_to_eq",
+                "range.exclusive_to_inclusive",
+                "range.inclusive_to_exclusive",
+            ]
+        );
+        let error = resolve("relational.lt_to_").unwrap_err();
+        assert!(error.is_usage());
+        assert_eq!(
+            error.to_string(),
+            "unknown mutator selector `relational.lt_to_`; did you mean `relational.lt_to_le`?"
+        );
+    }
+
+    #[test]
     fn unknown_presets_and_alias_queries_preserve_error_and_success_contracts() {
         for selector in ["@unknown", "", "unrecognized-alias"] {
             let error = resolve(selector).unwrap_err();

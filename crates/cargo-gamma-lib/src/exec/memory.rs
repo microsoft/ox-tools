@@ -237,6 +237,19 @@ fn scale(peak: u64, multiplier: f64) -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn calibrated_binaries_without_an_observed_peak_have_no_invented_ceiling() {
+        let policy = MemoryPolicy {
+            control: MemoryControl::Enforce,
+            multiplier: 2.0,
+            headroom: 17,
+            ..MemoryPolicy::default()
+        };
+        assert_eq!(policy.ceiling(None, true), None);
+        assert_eq!(policy.ceiling(Some(11), true), Some(28));
+        assert_eq!(MemoryPolicy { limit: Some(13), ..policy }.ceiling(None, true), Some(13));
+    }
+
     /// A policy that is not enforcing never produces a ceiling, however it was measured.
     #[test]
     fn measuring_without_enforcing_never_produces_a_ceiling() {

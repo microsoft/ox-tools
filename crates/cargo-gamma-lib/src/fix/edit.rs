@@ -49,6 +49,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_render_separates_multiple_exact_mutators_in_sorted_order() {
+        let edit = Edit {
+            file: "src/lib.rs".into(),
+            line: 3,
+            mutators: ["stmt.delete".to_owned(), "arith.add_to_sub".to_owned()].into_iter().collect(),
+            tag: "timeout",
+        };
+        assert_eq!(
+            edit.render("\t", "2026-08-05", "\r\n"),
+            "\t// #[gamma::skip(arith.add_to_sub, stmt.delete, tag = \"timeout\", reason = \"written by cargo gamma suppress 2026-08-05\")]\r\n"
+        );
+    }
+
+    #[test]
     fn a_directive_names_the_exact_mutators_never_a_family() {
         let edit = Edit {
             file: Utf8PathBuf::from("src/lib.rs"),

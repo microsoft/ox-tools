@@ -72,6 +72,31 @@ impl<W: Write> Write for Results<W> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn survivor_result_writer_only_absorbs_broken_pipe_in_write_and_flush() {
+        struct Failing(io::ErrorKind);
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(self.0.into())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(self.0.into())
+            }
+        }
+        let mut closed = Results(Failing(io::ErrorKind::BrokenPipe));
+        assert_eq!(closed.write(b"hello").unwrap(), 5);
+        closed.flush().unwrap();
+        let mut failed = Results(Failing(io::ErrorKind::PermissionDenied));
+        assert_eq!(failed.write(b"hello").unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(failed.flush().unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let mut output = Vec::new();
+        let mut open = Results(&mut output);
+        assert_eq!(open.write(b"hello").unwrap(), 5);
+        open.flush().unwrap();
+        assert_eq!(output, b"hello");
+    }
+
     /// A host that only says it is a terminal is not thereby the real process.
     ///
     /// Regression: relaunching under a test harness re-runs the harness, so the suite spawns a

@@ -133,6 +133,15 @@ const SARIF_BYTES: usize = 10 * 1024 * 1024;
 /// fits and the returned [`Truncation`] says what was dropped, because a CI run that uploads
 /// nothing is worse than one that uploads the survivors it had room for.
 pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(String, Option<Truncation>)> {
+    sarif_fitting(mutants, root, level, fits)
+}
+
+fn sarif_fitting(
+    mutants: &[Mutant],
+    root: &Utf8Path,
+    level: Level,
+    accepts: impl Fn(usize) -> bool,
+) -> Result<(String, Option<Truncation>)> {
     let survivors = findings(mutants);
     let found = survivors.len();
     let kept: Vec<&Mutant> = survivors.into_iter().take(SARIF_LIMIT).collect();
@@ -153,7 +162,7 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
         let rules = rules(&kept[..length], level);
         let log = log(&results[..length], rules);
 
-        if fits(measure(&log)?) || length == 0 {
+        if accepts(measure(&log)?) || length == 0 {
             let text = serde_json::to_string_pretty(&log)
                 .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
             let truncation = (found > length).then_some(Truncation { found, written: length });
@@ -305,6 +314,28 @@ mod tests {
     use super::*;
     use crate::model::Outcome;
     use crate::testing::ci_fixture::{mutant, root};
+
+    #[test]
+    fn survivor_one_oversized_sarif_finding_is_removed_instead_of_bypassing_the_byte_budget() {
+        let population = [mutant("/w/src/a.rs", 12, "relational.gt_to_ge", Outcome::Survived)];
+        let (empty, _) = sarif(&[], &root(), Level::Warning).expect("the fixed empty document serializes");
+        let (one, _) = sarif(&population, &root(), Level::Warning).expect("one ordinary finding serializes");
+        let budget = empty.len() + 1;
+        assert!(one.len() > budget, "the budget lies strictly between zero and one actual findings");
+        let (text, truncation) = sarif_fitting(&population, &root(), Level::Warning, |bytes| bytes <= budget)
+            .expect("bounded fitting uses the same real serializer");
+        let document: serde_json::Value = serde_json::from_str(&text).expect("the rendered document is valid JSON");
+        assert!(
+            document["runs"][0]["results"]
+                .as_array()
+                .expect("SARIF results are an array")
+                .is_empty()
+        );
+        let truncation = truncation.expect("the single omitted result must be announced");
+        assert_eq!(truncation.found, 1);
+        assert_eq!(truncation.written, 0);
+        assert!(text.len() <= budget);
+    }
 
     #[test]
     fn sarif_carries_one_rule_per_mutator() {

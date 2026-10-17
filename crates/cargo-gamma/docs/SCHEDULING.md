@@ -286,7 +286,7 @@ that narrower test selections could avoid across all pending mutants.
 - estimated census cost, maximum possible savings, and the admission decision.
 
 When census is disabled or declined, the empty census carries no negative
-reachability evidence. Exact and generalized probes remain active, and a probe
+reachability evidence. Exact-hint and inferred-test probes remain active, and a probe
 that does not kill falls back to the complete reachable binary.
 
 Diagnostics classify census as `disabled`, `declined`, `incomplete`, or
@@ -372,9 +372,9 @@ Cargo-gamma estimates each pending mutant's serial test cost:
   fallback;
 - `Uncovered`: zero.
 
-Persisted generalized candidates seed their scheduling probability and probe
+Saved selection hints seed inferred candidates' scheduling probability and probe
 cost from the hint artifact's hit, miss, measured-time, and sample counters.
-Speculative hint probes are bounded candidates, not an exhaustive isolation
+Speculative inferred-test probes are bounded candidates, not an exhaustive isolation
 search: a miss or inconclusive probe falls back to the authoritative admitted
 selection instead of enumerating every possible test subset.
 
@@ -442,17 +442,22 @@ Evidence is attempted in this order:
 6. Binaries that killed another mutant in the same file.
 7. Canonical census-selected or whole-binary execution.
 
-The first valid detection stops testing that mutant. Candidate results from a
-later binary are held until canonical iteration reaches that binary, so they
-cannot bypass an earlier timeout, resource failure, flake, or metering error.
+The exact killer test is probed before inferred tests even when its binary is
+later in canonical order. A confirmed exact kill suppresses inferred probes;
+if it belongs to a later binary, it is held until canonical iteration reaches
+that binary, so it cannot bypass an earlier failure, timeout, resource failure,
+flake, or metering error. Inferred binary results are likewise adjudicated in
+canonical order. Targeted attempts are deduplicated by resolved binary and
+test name across exact and inferred selections, including target aliases.
+Confirmation and necessary whole-binary fallback still run.
 
-Generalized evidence distinguishes the exact kill or reach observation that
+Inferred-test evidence distinguishes the exact kill or reach observation that
 seeded a candidate from transfer evidence gathered against other mutants. A
 candidate is admitted only while its smoothed transfer probability can repay
 its measured launch cost from the fallback work it may avoid. Unmeasured
 candidates may be explored once; two misses without a transfer hit retire
 them. One mutant tries at most two same-item tests and one candidate binary
-from each generalized tier. After eight attempts without a hit, that tier's
+from each inferred tier. After eight attempts without a hit, that tier's
 campaign-wide circuit breaker rejects further exploration. Exact hints and
 canonical fallback remain available.
 
@@ -520,7 +525,7 @@ After the sweep:
   uncovered decisions, plus selected and available named tests;
 - hint funnels report candidates, attempts, hits, and economically, cap-, or
   circuit-breaker-rejected opportunities for exact mutant hints and
-  generalized item, reach, file, and census tiers;
+  inferred item, reach, file, and census tiers;
 - `gamma-selection.jsonl` receives each mutant's completed attempts as one worker-side batch, then
   records and immediately flushes every retained selection attempt with its mutant ordinal,
   candidate tier and rank, binary and optional test identity, hit/miss/inconclusive result, elapsed

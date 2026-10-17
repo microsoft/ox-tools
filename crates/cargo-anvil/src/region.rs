@@ -1582,6 +1582,26 @@ mod tests {
     const SYN: CommentSyntax = CommentSyntax::Hash;
 
     #[test]
+    fn dotted_root_setting_conflicts_report_the_full_key_path() {
+        let adoption = adopt_unmanaged_toml_tables("settings.feature = true\n", "settings.feature = false\n", SYN);
+
+        let TomlAdoption::Conflict {
+            table,
+            key,
+            managed,
+            hand_written,
+        } = adoption
+        else {
+            panic!("a different dotted setting must be reported as a conflict: {adoption:?}");
+        };
+
+        assert_eq!(table, "<root>");
+        assert_eq!(key, "settings.feature");
+        assert_eq!(managed, "false");
+        assert_eq!(hand_written, "true");
+    }
+
+    #[test]
     fn nonempty_legacy_bodies_without_the_parent_header_stay_masked() {
         let text = "# >>> anvil-managed: anvil-lints\nunrelated = \"not a parent header\"\n# <<< anvil-managed: anvil-lints\n";
         assert_eq!(mask_legacy_lint_region_to_header(text, SYN), mask_managed_regions(text, SYN));
@@ -3097,6 +3117,28 @@ mod tests {
             ),
             "the following managed region must not become dotted residue: {adoption:?}"
         );
+    }
+
+    #[test]
+    fn legacy_adoption_orders_managed_boundaries_before_later_table_headers() {
+        let text = "# >>> anvil-managed: anvil-lints\n\
+                    # <<< anvil-managed: anvil-lints\n\
+                    rust.custom = \"warn\"\n\
+                    # >>> anvil-managed: keep\n\
+                    protected = true\n\
+                    # <<< anvil-managed: keep\n\
+                    [package]\n\
+                    name = \"fixture\"\n";
+
+        let adoption = adopt_unmanaged_toml_tables(text, "[lints.rust]\nmanaged = \"warn\"\n", SYN);
+
+        let TomlAdoption::Adopted { text: remaining, residue } = adoption else {
+            panic!("legacy dotted assignments should be adopted: {adoption:?}");
+        };
+        assert_eq!(residue, "custom = \"warn\"\n");
+        assert!(remaining.contains("# >>> anvil-managed: keep\nprotected = true\n# <<< anvil-managed: keep\n"));
+        assert!(remaining.ends_with("[package]\nname = \"fixture\"\n"));
+        assert!(!remaining.contains("rust.custom"));
     }
 
     #[test]

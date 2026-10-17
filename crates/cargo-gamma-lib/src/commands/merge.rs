@@ -37,13 +37,22 @@ pub(super) fn merge<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler) -> 
 fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option<u64>) -> crate::Result<i32> {
     validate_output_paths(args)?;
     let inputs = collect_reports(&args.inputs)?;
+    merge_reports_at(host, args, styler, now, &inputs)
+}
 
+fn merge_reports_at<H: Host>(
+    host: &mut H,
+    args: &MergeArgs,
+    styler: Styler,
+    now: Option<u64>,
+    inputs: &[(String, Report)],
+) -> crate::Result<i32> {
     if inputs.is_empty() {
         return Err(error!("no reports were found in the given paths").usage());
     }
 
     let window = (args.window > 0).then(|| args.window.saturating_mul(86_400));
-    let mut merged = crate::merge::merge(&inputs, now.unwrap_or(0), window);
+    let mut merged = crate::merge::merge(inputs, now.unwrap_or(0), window);
 
     if now.is_none() {
         merged.fresh = 0;
@@ -220,22 +229,43 @@ fn validate_output_paths(args: &MergeArgs) -> crate::Result<()> {
 /// and requiring a glob would mean the command behaves differently under shells that do not expand
 /// one.
 fn collect_reports(inputs: &[Utf8PathBuf]) -> crate::Result<Vec<(String, Report)>> {
-    collect_reports_limited(inputs, MAX_REPORTS, MAX_TOTAL_BYTES)
+    collect_reports_using(inputs, collect_reports_limited)
+}
+
+fn collect_reports_using(
+    inputs: &[Utf8PathBuf],
+    collect: impl FnOnce(&[Utf8PathBuf], usize, u64) -> crate::Result<Vec<(String, Report)>>,
+) -> crate::Result<Vec<(String, Report)>> {
+    collect(inputs, MAX_REPORTS, MAX_TOTAL_BYTES)
 }
 
 /// Collects inputs under explicit budgets, so the production limits have cheap boundary tests.
 fn collect_reports_limited(inputs: &[Utf8PathBuf], max_reports: usize, max_bytes: u64) -> crate::Result<Vec<(String, Report)>> {
+    collect_reports_reading(inputs, max_reports, max_bytes, Utf8Path::is_dir, |input| {
+        fs::read_dir(input).map(|entries| entries.map(|entry| entry.map(|entry| entry.path())))
+    })
+}
+
+// Replaces directory enumeration and entry outcomes only; report reads and retention enforcement
+// remain ordinary collection work.
+fn collect_reports_reading<I: IntoIterator<Item = std::io::Result<std::path::PathBuf>>>(
+    inputs: &[Utf8PathBuf],
+    max_reports: usize,
+    max_bytes: u64,
+    mut is_dir: impl FnMut(&Utf8Path) -> bool,
+    mut read_dir: impl FnMut(&Utf8Path) -> std::io::Result<I>,
+) -> crate::Result<Vec<(String, Report)>> {
     let mut out = Vec::new();
     let mut retained_bytes = 0;
 
     for input in inputs {
-        if input.is_dir() {
-            let entries = fs::read_dir(input).map_err(|cause| error!("could not read `{input}`").caused_by(cause))?;
+        if is_dir(input) {
+            let entries = read_dir(input).map_err(|cause| error!("could not read `{input}`").caused_by(cause))?;
             let mut paths: Vec<Utf8PathBuf> = Vec::new();
 
             for entry in entries {
                 let entry = entry.map_err(|cause| error!("could not read `{input}`").caused_by(cause))?;
-                let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| error!("{} is not a UTF-8 path", path.display()))?;
+                let path = Utf8PathBuf::from_path_buf(entry).map_err(|path| error!("{} is not a UTF-8 path", path.display()))?;
 
                 if path.extension() == Some("json") {
                     if paths.len() >= max_reports.saturating_sub(out.len()) {
@@ -407,6 +437,10 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
 
     use super::*;
     use crate::elements::{FileResult, RunInfo, ShardInfo};
@@ -477,6 +511,317 @@ mod tests {
 
     fn write_report(path: &Utf8Path, report: &Report) {
         crate::elements::write(&path.to_path_buf(), &crate::elements::to_json(report).expect("json")).expect("write");
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn survivor_report_budgets_are_inclusive_cumulative_and_paths_are_sorted() {
+        let directory = workdir("merge-survivor-budgets-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let a = root.join("a.json");
+        let z = root.join("z.json");
+        write_report(&z, &report(1, 2, "Survived"));
+        write_report(&a, &report(0, 2, "Killed"));
+        fs::write(root.join("ignored.txt"), "not JSON").unwrap();
+        let total = fs::metadata(&a).unwrap().len() + fs::metadata(&z).unwrap().len();
+        let retained = collect_reports_limited(&[root.to_owned()], 2, total).unwrap();
+        assert_eq!(
+            retained.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            [a.as_str(), z.as_str()]
+        );
+        collect_reports_limited(&[root.to_owned()], 2, total - 1).expect_err("cumulative byte budget must reject one extra byte");
+        collect_reports_limited(&[a.clone(), z.clone()], 1, total).expect_err("report-count budget must reject a second report");
+        collect_reports_limited(&[a, z], 2, total).expect("both inclusive budgets admit exactly two reports");
+        let mut bytes = 9;
+        let mut out = Vec::new();
+        let cause = read_report(&root.join("absent.json"), 0, total, &mut bytes, &mut out).unwrap_err();
+        assert!(cause.message().contains("more than the 0 reports"));
+        assert_eq!(bytes, 9);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn survivor_merge_window_day_boundaries_and_disabled_clock_have_exact_freshness() {
+        let input = Utf8PathBuf::from("synthetic/input.json");
+        let inputs = [(input.to_string(), unsharded_report(10, "id", 1, "Killed"))];
+        for (window, now, expected) in [
+            (1, Some(86_409), "1 fresh, 0 older than 1 days"),
+            (1, Some(86_410), "1 fresh, 0 older than 1 days"),
+            (1, Some(86_411), "0 fresh, 1 older than 1 days"),
+            (0, Some(86_411), "window disabled, 1 verdicts current"),
+            (1, None, "unavailable because the system clock is before the Unix epoch"),
+        ] {
+            let args = MergeArgs {
+                inputs: vec![input.clone()],
+                json_report: None,
+                html_report: None,
+                window,
+                min_score: None,
+                max_flaky: None,
+            };
+            let mut host = Sink::default();
+            assert_eq!(
+                merge_reports_at(&mut host, &args, Styler::new(false), now, &inputs).unwrap(),
+                EXIT_OK
+            );
+            let output = host.err();
+            assert!(output.contains(expected), "{output}");
+            assert!(!output.contains("dropped, tested"));
+            assert!(!output.contains("presentation is incompatible"));
+            assert!(!output.contains("withdrawals unchecked"));
+        }
+    }
+
+    #[test]
+    fn survivor_incomplete_merge_gate_distinguishes_each_reason_and_propagates_diagnostic_errors() {
+        for (reason, expected) in [
+            (0, "mutant-ID scheme"),
+            (1, "different shard count"),
+            (2, "were never run"),
+            (3, "still pending"),
+        ] {
+            let mut merged = crate::merge::Merged::default();
+            match reason {
+                0 => merged.identity_incompatible.push("other".into()),
+                1 => merged.inconsistent.push("other".into()),
+                2 => {
+                    merged.shard_count = Some(2);
+                    let _ = merged.shards_seen.insert(1);
+                }
+                _ => merged.never_tested = 1,
+            }
+            let mut host = Sink::default();
+            assert!(report_incomplete_gate(&mut host, &merged, "score gate", Styler::new(false)).unwrap());
+            assert!(host.err().contains(expected), "{}", host.err());
+            crate::testing::fails_at_every_line(1, |host| {
+                report_incomplete_gate(host, &merged, "score gate", Styler::new(false)).map(|_| ())
+            });
+        }
+        let mut host = Sink::default();
+        assert!(!report_incomplete_gate(&mut host, &crate::merge::Merged::default(), "score gate", Styler::new(false)).unwrap());
+        assert!(host.err.is_empty());
+    }
+
+    fn survivor_args(input: Utf8PathBuf) -> MergeArgs {
+        MergeArgs {
+            inputs: vec![input],
+            json_report: None,
+            html_report: None,
+            window: 1,
+            min_score: None,
+            max_flaky: None,
+        }
+    }
+
+    #[test]
+    fn survivor_merge_collectors_forward_exact_retention_limits_and_propagate_directory_and_entry_errors() {
+        let root = Utf8Path::new("synthetic/merge-directory");
+        let inputs = [root.to_owned()];
+        let reports = collect_reports_using(&inputs, |actual, reports, bytes| {
+            assert_eq!(actual, inputs);
+            assert_eq!(reports, 4_096);
+            assert_eq!(bytes, 512 * 1024 * 1024);
+            Ok(Vec::new())
+        })
+        .unwrap();
+        assert!(reports.is_empty());
+        let failure = collect_reports_reading::<Vec<std::io::Result<std::path::PathBuf>>>(
+            &inputs,
+            2,
+            100,
+            |_| true,
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "directory listing denied",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("directory listing denied"));
+        assert!(failure.message().contains(root.as_str()));
+        let failure = collect_reports_reading(
+            &inputs,
+            2,
+            100,
+            |_| true,
+            |_| {
+                Ok(vec![Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "directory entry denied",
+                ))])
+            },
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("directory entry denied"));
+        assert!(failure.message().contains(root.as_str()));
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn survivor_merge_directory_entries_reject_native_non_utf8_paths_without_panicking() {
+        let directory = workdir("merge-native-entry-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        #[cfg(windows)]
+        let name = std::ffi::OsString::from_wide(&[0xd800]);
+        #[cfg(unix)]
+        let name = std::ffi::OsString::from_vec(vec![0xff]);
+        #[cfg(any(windows, unix))]
+        {
+            let path = root.as_std_path().join(name);
+            fs::write(&path, "native filename").unwrap();
+            let failure = collect_reports_limited(&[root.to_owned()], 2, 100)
+                .expect_err("native directory entries that cannot be represented as UTF-8 must return a path error");
+            assert!(failure.message().contains("is not a UTF-8 path"));
+            assert_eq!(fs::read_to_string(path).unwrap(), "native filename");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    fn survivor_merge_entrypoint_styles_and_collision_labels_are_preserved() {
+        let directory = workdir("merge-styled-entrypoints-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let input = root.join("input.json");
+        write_report(&input, &unsharded_report(10, "deadbeefcafe", 1, "Killed"));
+        let mut args = survivor_args(input);
+        let mut host = Sink::default();
+        assert_eq!(merge(&mut host, &args, Styler::new(true)).unwrap(), EXIT_OK);
+        assert!(
+            host.err().contains("\u{1b}["),
+            "both public and fixed-clock entrypoints must retain color"
+        );
+        let output = root.join("collision.json");
+        args.json_report = Some(output.clone());
+        args.html_report = Some(output.clone());
+        let collision = validate_output_paths(&args).unwrap_err();
+        assert!(collision.message().contains("JSON report"));
+        assert!(collision.message().contains("HTML report"));
+        assert!(!output.exists());
+        args.html_report = None;
+        fs::create_dir(&output).unwrap();
+        merge_at(&mut Sink::default(), &args, Styler::new(false), Some(20))
+            .expect_err("a directory blocking JSON output must return its publication error");
+        assert!(output.is_dir());
+    }
+
+    #[test]
+    fn survivor_merge_report_matrix_keeps_all_optional_diagnostics_and_each_writer_error() {
+        let mut args = survivor_args("unused.json".into());
+        let mut merged = crate::merge::Merged {
+            valid: 3,
+            detected: 2,
+            fresh: 2,
+            stale: 1,
+            withdrawn: 1,
+            incompatible: 1,
+            unchecked: 1,
+            shard_count: Some(2),
+            inconsistent: vec!["inconsistent.json".into()],
+            identity_incompatible: vec!["identity.json".into()],
+            ..crate::merge::Merged::default()
+        };
+        let _inserted = merged.shards_seen.insert(0);
+        let mut host = Sink::default();
+        report_merge(&mut host, &args, &merged, Styler::new(true)).unwrap();
+        assert!(host.err().contains("\u{1b}["));
+        for required in [
+            "1 dropped, tested against code that has since changed",
+            "1 verdict excluded because their source presentation is incompatible",
+            "withdrawals unchecked for 1 file",
+            "identity.json used a different mutant-ID scheme",
+        ] {
+            assert!(host.err().contains(required), "{}", host.err());
+        }
+        fails_at_every_line(9, |host| report_merge(host, &args, &merged, Styler::new(false)));
+        let mut host = Sink::default();
+        assert!(report_incomplete_gate(&mut host, &merged, "score gate", Styler::new(true)).unwrap());
+        assert!(host.err().contains("\u{1b}["));
+        for (unavailable, window) in [(true, 1), (false, 0)] {
+            args.window = window;
+            merged.freshness_unavailable = unavailable;
+            fails_at_every_line(9, |host| report_merge(host, &args, &merged, Styler::new(false)));
+        }
+    }
+
+    #[test]
+    fn survivor_merge_gate_matrix_checks_only_requested_gates_and_returns_each_output_failure() {
+        let input = Utf8PathBuf::from("synthetic/input.json");
+        for (status, minimum, flaky, code, message) in [
+            ("Pending", None, None, EXIT_OK, None),
+            (
+                "Pending",
+                Some(50.0),
+                None,
+                EXIT_GATE_FAILED,
+                Some("the `--min-score` gate cannot evaluate"),
+            ),
+            (
+                "Pending",
+                None,
+                Some(0),
+                EXIT_GATE_FAILED,
+                Some("the `--max-flaky` gate cannot evaluate"),
+            ),
+            ("CompileError", None, None, EXIT_OK, None),
+            (
+                "CompileError",
+                Some(50.0),
+                None,
+                EXIT_GATE_FAILED,
+                Some("no mutant counted toward the merged score"),
+            ),
+            (
+                "CompileError",
+                None,
+                Some(0),
+                EXIT_GATE_FAILED,
+                Some("no mutant counted toward the `--max-flaky` gate"),
+            ),
+            ("Killed", None, Some(0), EXIT_OK, None),
+            (
+                "Survived",
+                Some(50.0),
+                None,
+                EXIT_GATE_FAILED,
+                Some("merged mutation score 0.0% is below the required 50.0%"),
+            ),
+        ] {
+            let inputs = [(input.to_string(), unsharded_report(10, "deadbeefcafe", 1, status))];
+            let mut args = survivor_args(input.clone());
+            args.min_score = minimum;
+            args.max_flaky = flaky;
+            let mut host = Sink::default();
+            assert_eq!(
+                merge_reports_at(&mut host, &args, Styler::new(false), Some(20), &inputs).unwrap(),
+                code,
+                "{status}"
+            );
+            if let Some(message) = message {
+                assert!(host.err().contains(message), "{}", host.err());
+            }
+            fails_at_every_line(host.err().lines().count(), |host| {
+                merge_reports_at(host, &args, Styler::new(false), Some(20), &inputs).map(|_| ())
+            });
+        }
+        let mut report = unsharded_report(10, "deadbeefcafe", 1, "Ignored");
+        report.files.values_mut().next().unwrap().mutants[0].status_reason = Some("flaky: failed without a mutant".into());
+        let inputs = [(input.to_string(), report)];
+        let mut args = survivor_args(input);
+        args.max_flaky = Some(0);
+        let mut host = Sink::default();
+        assert_eq!(
+            merge_reports_at(&mut host, &args, Styler::new(false), Some(20), &inputs).unwrap(),
+            EXIT_GATE_FAILED
+        );
+        assert!(
+            host.err().contains("1 unresolved flaky outcome exceed the configured maximum of 0"),
+            "{}",
+            host.err()
+        );
+        fails_at_every_line(host.err().lines().count(), |host| {
+            merge_reports_at(host, &args, Styler::new(false), Some(20), &inputs).map(|_| ())
+        });
     }
 
     #[test]

@@ -58,7 +58,7 @@ campaign runs.
 ## Test selection and uncovered verdicts
 
 The reachability census is now opt-in. A default run still uses checked exact
-and generalized hints, but otherwise falls back to running each reachable test
+and inferred tests, but otherwise falls back to running each reachable test
 binary as a whole. Consequently, the up-front case selection and immediate
 `uncovered` classifications supplied by the census no longer occur by default.
 A default run can still establish `uncovered` later from a complete, sealed
