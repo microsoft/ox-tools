@@ -102,7 +102,7 @@ pub(super) const fn binary_replacements(op: &BinOp) -> &'static [(&'static str, 
         replacements = &[("arith.div_to_mul", "*"), ("arith.div_to_rem", "%")];
     }
     if matches!(op, BinOp::Rem(_)) {
-        replacements = &[("arith.rem_to_div", "/"), ("arith.rem_to_mul", "*")];
+        replacements = &[("arith.rem_to_div", "/"), ("arith.rem_to_mul", "*"), ("arith.rem_to_add", "+")];
     }
     if matches!(op, BinOp::BitAnd(_)) {
         replacements = &[("bitwise.and_to_or", "|"), ("bitwise.and_to_xor", "^")];
@@ -125,8 +125,11 @@ pub(super) const fn binary_replacements(op: &BinOp) -> &'static [(&'static str, 
     if matches!(op, BinOp::Or(_)) {
         replacements = &[("logical.or_to_and", "&&")];
     }
+    // Compound assignments rely on compiler convergence to withdraw unsupported trait operations.
+    // Screening by type names or aliases can discard valid custom implementations when names
+    // are shadowed. Emit the candidates and let rustc check them, at the cost of extra build rounds.
     if matches!(op, BinOp::AddAssign(_)) {
-        replacements = &[("assign.add_to_sub", "-=")];
+        replacements = &[("assign.add_to_sub", "-="), ("assign.add_to_mul", "*=")];
     }
     if matches!(op, BinOp::SubAssign(_)) {
         replacements = &[("assign.sub_to_add", "+=")];
