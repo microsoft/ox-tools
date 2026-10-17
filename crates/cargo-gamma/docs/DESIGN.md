@@ -79,6 +79,9 @@ The design therefore optimizes each component of campaign cost:
 
 The architecture separates responsibilities into the following domains.
 
+The CLI builds on macOS with the system allocator. Linux and Windows use the
+`rallocator` integration; that dependency is available only on those hosts.
+
 ```mermaid
 flowchart TB
     User[CLI and configuration] --> Coordinator[Campaign coordinator]
