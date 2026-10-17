@@ -10,7 +10,7 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
@@ -574,6 +574,105 @@ exit 0
 "#,
     );
     tmp
+}
+
+struct RecipeDeclaration<'a> {
+    visibility: Vec<&'a str>,
+    signature: String,
+}
+
+fn declared_anvil_recipes(catalog: &cargo_anvil::Catalog) -> BTreeMap<&str, RecipeDeclaration<'_>> {
+    let mut recipes = BTreeMap::new();
+    for artifact in catalog.artifacts() {
+        let cargo_anvil::Artifact::OwnedFile(spec) = artifact else {
+            continue;
+        };
+        if !spec.path.starts_with("justfiles/anvil/") {
+            continue;
+        }
+        let lines: Vec<_> = spec.body.lines().collect();
+        for (index, line) in lines.iter().enumerate().filter(|(_, line)| line.starts_with("anvil-")) {
+            let name = line.split([' ', ':']).next().unwrap();
+            let visibility = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|line| line.starts_with('['))
+                .copied()
+                .filter(|line| *line == "[private]" || line.starts_with("[group("))
+                .collect();
+            let mut end = index;
+            while lines[end].ends_with('\\') {
+                end += 1;
+            }
+            let signature = lines[index..=end].join("\n");
+            assert!(
+                recipes.insert(name, RecipeDeclaration { visibility, signature }).is_none(),
+                "duplicate recipe declaration: {name}"
+            );
+        }
+    }
+    recipes
+}
+
+#[test]
+fn generated_recipe_visibility_exposes_only_grouped_public_entry_points() {
+    let catalog = cargo_anvil::Catalog::anvil();
+    let recipes = declared_anvil_recipes(&catalog);
+    let mut groups = BTreeMap::<_, Vec<_>>::new();
+    for (name, recipe) in &recipes {
+        if !recipe.visibility.contains(&"[private]") {
+            groups.entry(&recipe.visibility).or_default().push(*name);
+        }
+    }
+    let surface = groups
+        .iter()
+        .map(|(attributes, names)| format!("{}\n{}", attributes.join("\n"), names.join("\n")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        surface.lines().collect::<Vec<_>>(),
+        include_str!("fixtures/recipe-public-surface.txt").lines().collect::<Vec<_>>()
+    );
+
+    let aliases: Vec<_> = catalog
+        .artifacts()
+        .iter()
+        .filter_map(|artifact| match artifact {
+            cargo_anvil::Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/anvil/") => Some(&spec.body),
+            _ => None,
+        })
+        .flat_map(|body| body.lines().filter(|line| line.starts_with("alias ")))
+        .collect();
+    assert_eq!(aliases, ["alias anvil := anvil-pr"]);
+    assert_eq!(recipes["anvil-pr"].visibility, ["[group(\"anvil\")]"]);
+}
+
+#[test]
+fn private_prerequisite_recipes_preserve_their_definitions() {
+    let catalog = cargo_anvil::Catalog::anvil();
+    let recipes = declared_anvil_recipes(&catalog);
+    let mut signatures = Vec::new();
+    for recipe in [
+        "anvil-build-setup",
+        "anvil-clippy-setup",
+        "anvil-pr-fast-setup",
+        "anvil-pr-setup",
+        "anvil-tool-cargo-audit-install",
+        "anvil-component-default-clippy-install",
+        "anvil-toolchain-stable-install",
+        "anvil-clippy-validate-prereqs",
+        "anvil-pr-fast-validate-prereqs",
+        "anvil-pr-validate-prereqs",
+        "anvil-tool-cargo-audit-validate-prereqs",
+    ] {
+        let declaration = &recipes[recipe];
+        assert_eq!(declaration.visibility, ["[private]"], "{recipe}");
+        signatures.push(declaration.signature.as_str());
+    }
+    assert_eq!(
+        signatures.join("\n\n").lines().collect::<Vec<_>>(),
+        include_str!("fixtures/recipe-private-definitions.txt").lines().collect::<Vec<_>>()
+    );
 }
 
 /// `anvil-container-tag` resolves the declared root MSRV through
