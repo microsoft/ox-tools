@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
+- ✨ Features
+
+  - add `{cargo-spec}` for source-qualified Cargo package selection without changing `{spec}` ([#278](https://github.com/microsoft/ox-tools/pull/278))
+  - add `--list-json` with manifest paths, package names, Cargo selectors, and literal metadata IDs ([#278](https://github.com/microsoft/ox-tools/pull/278))
+  - add `--metadata-toolchain` to select the toolchain for metadata queries independently of child commands ([#278](https://github.com/microsoft/ox-tools/pull/278))
+
 ## [0.5.0] - 2026-10-13
 
 - ⚠️ Breaking

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
@@ -48,34 +48,27 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
         return run_json(args);
     }
+    run_workspace_with(args, build_selection, Workspace::load, &mut io::stdout(), execute)
+}
 
+fn run_workspace_with(
+    args: &EachArgs,
+    load_selection: impl FnOnce(&EachArgs) -> Result<Selection, crate::error::EachError>,
+    load_workspace: impl FnOnce(Option<&std::path::Path>, Option<&str>) -> Result<Workspace, crate::error::EachError>,
+    output: &mut impl io::Write,
+    execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
+) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
 
-    let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
+    let selection = load_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
     let workspace =
-        Workspace::load(args.manifest_path.as_deref(), args.metadata_toolchain.as_deref()).into_app_err("failed to load workspace")?;
+        load_workspace(args.manifest_path.as_deref(), args.metadata_toolchain.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
     apply_filters(&mut members, args)?;
 
     if args.list_json {
-        let records = members
-            .iter()
-            .map(|member| {
-                serde_json::json!({
-                    "manifest_path": member.manifest_path,
-                    "name": member.name,
-                    "cargo_spec": member.cargo_spec(),
-                    "id": member.id,
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut stdout = io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &records).into_app_err("failed to write package selection")?;
-        stdout
-            .write_all(b"\n")
-            .and_then(|()| stdout.flush())
-            .into_app_err("failed to write package selection")?;
+        write_selection(&members, output)?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -133,7 +126,26 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    execute(&plan, args.keep_going, args.jobs, args.timeout)
+    execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
+}
+
+fn write_selection(members: &[&Member], output: &mut impl io::Write) -> Result<(), AppError> {
+    let records = members
+        .iter()
+        .map(|member| {
+            serde_json::json!({
+                "manifest_path": member.manifest_path,
+                "name": member.name,
+                "cargo_spec": member.cargo_spec(),
+                "id": member.id,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_writer(&mut *output, &records).into_app_err("failed to write package selection")?;
+    output
+        .write_all(b"\n")
+        .and_then(|()| output.flush())
+        .into_app_err("failed to write package selection")
 }
 
 fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
@@ -1014,6 +1026,10 @@ fn exit_byte(raw: Option<i32>) -> u8 {
     let byte = u8::try_from(raw & 0xFF).expect("`raw & 0xFF` masks to the low byte, always within 0..=255");
     if byte == 0 { 1 } else { byte }
 }
+
+#[cfg(test)]
+#[path = "package_identity_tests.rs"]
+mod package_identity_tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

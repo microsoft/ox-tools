@@ -121,7 +121,7 @@ impl Workspace {
         Ok(Self::from_metadata(&metadata))
     }
 
-    fn from_metadata(metadata: &Metadata) -> Self {
+    pub(crate) fn from_metadata(metadata: &Metadata) -> Self {
         let mut members: Vec<Member> = metadata
             .workspace_packages()
             .iter()
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn selectors_do_not_parse_legacy_or_modern_metadata_ids() {
         let mut fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("metadata fixture");
-        let path = std::env::temp_dir()
+        let path = PathBuf::from(if cfg!(windows) { r"C:\checkouts" } else { "/checkouts" })
             .join("checkout with spaces")
             .join("enabled-lib")
             .join("Cargo.toml");
