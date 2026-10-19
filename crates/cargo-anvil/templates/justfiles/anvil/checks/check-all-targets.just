@@ -20,7 +20,7 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-check-all-targets: no affected packages; skipping'; exit 0 }
     . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
-    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}} -Adapter each)
+    $packages = @(Get-AnvilPackages $include -Toolchain {{_anvil_stable_toolchain_args}})
     $configs = @(
         @{ name = 'default';    flags = @() },
         @{ name = 'no-default'; flags = @('--no-default-features') }
@@ -28,14 +28,19 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     foreach ($cfg in $configs) {
         Write-Host "anvil-check-all-targets: checking $($cfg.name) features"
         $featureArgs = $cfg.flags
-        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --manifest-path '{manifest}' --package '{spec}' --all-targets @featureArgs --locked
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $checkExit = 0
+        foreach ($p in $packages) {
+            $packageArgs = @(Get-AnvilPackageArguments @($p) -Adapter manifest)
+            & cargo {{_anvil_stable_toolchain_args}} check @packageArgs --all-targets @featureArgs --locked
+            if ($LASTEXITCODE -ne 0) { $checkExit = $LASTEXITCODE }
+        }
+        if ($checkExit -ne 0) { exit $checkExit }
     }
 
 # Install prerequisites for the `anvil-check-all-targets` recipe.
 [group("anvil-setup")]
-anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-check-all-targets` recipe.
 [group("anvil-setup")]
-anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs

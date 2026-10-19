@@ -724,8 +724,6 @@ fn all_targets_fixture() -> TempDir {
         &[
             "anvil-tool-rustc-validate-prereqs",
             "anvil-toolchain-stable-install",
-            "anvil-tool-cargo-each-validate-prereqs",
-            "anvil-tool-cargo-each-install installer",
             "anvil-impact",
         ],
     );
@@ -736,77 +734,6 @@ fn all_targets_fixture() -> TempDir {
     );
     write(&justfile_path, &justfile);
     tmp
-}
-
-#[test]
-fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = all_targets_fixture();
-    let log = tmp.path().join("cargo.log");
-
-    for selection in ["--package fixture@0.1.0", "--workspace"] {
-        seed_include(tmp.path(), "affected", selection);
-        let output = run_just(tmp.path(), &["anvil-check-all-targets"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
-        assert!(
-            output.status.success(),
-            "isolated checks failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            fs::read_to_string(&log)
-                .unwrap()
-                .lines()
-                .filter(|line| line.contains(" each "))
-                .collect::<Vec<_>>(),
-            [
-                format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --manifest-path {{manifest}} --package {{spec}} --all-targets --locked"
-                ),
-                format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --manifest-path {{manifest}} --package {{spec}} --all-targets --no-default-features --locked"
-                ),
-            ],
-            "both configurations must check packages independently, with both Cargo processes selecting stable"
-        );
-        fs::remove_file(&log).unwrap();
-    }
-
-    for failure in ["FAKE_EACH_EXIT", "FAKE_EACH_DEFAULT_EXIT", "FAKE_EACH_NO_DEFAULT_EXIT"] {
-        let failed = run_just(
-            tmp.path(),
-            &["anvil-check-all-targets"],
-            &[("FAKE_CARGO_LOG", log.as_os_str()), (failure, OsStr::new(ARBITRARY_FAILURE_EXIT))],
-        );
-        assert_failed(&failed, "isolated check cargo-each failure");
-        assert_eq!(failed.status.code(), Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()));
-        assert_eq!(
-            fs::read_to_string(&log).unwrap().lines().count(),
-            if failure == "FAKE_EACH_NO_DEFAULT_EXIT" { 2 } else { 1 },
-            "a failed configuration must stop the check before the next configuration"
-        );
-        fs::remove_file(&log).unwrap();
-    }
-
-    let justfile_path = tmp.path().join("Justfile");
-    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
-    justfile.push_str("\n[script(\"pwsh\", \"-NoProfile\")]\n_anvil-impact-include tier:\n    exit 0\n");
-    write(&justfile_path, &justfile);
-    let fallback = run_just(tmp.path(), &["anvil-check-all-targets"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
-    assert!(
-        fallback.status.success(),
-        "empty impact output must fall back to the workspace:\n{}",
-        String::from_utf8_lossy(&fallback.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
-        [
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --manifest-path {manifest} --package {spec} --all-targets --locked",
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --manifest-path {manifest} --package {spec} --all-targets --no-default-features --locked",
-        ]
-    );
 }
 
 #[test]
@@ -1400,25 +1327,6 @@ fn msrv_test_propagates_nested_just_failures() {
     assert!(
         fs::read_to_string(&cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after resolver failure"
-    );
-    let selected = run_just(
-        tmp.path(),
-        &["anvil-msrv-test"],
-        &[
-            ("FAKE_IMPACT_HELPER_OUTPUT", OsStr::new("--package fixture@0.1.0")),
-            ("FAKE_RESOLVER_OUTPUT", OsStr::new("1.95")),
-            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
-        ],
-    );
-    assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
-    let calls = fs::read_to_string(cargo_log).unwrap();
-    assert_eq!(
-        calls
-            .lines()
-            .filter(|line| line.starts_with(&format!("+1.95 test --manifest-path {}", tmp.path().join("Cargo.toml").display())))
-            .count(),
-        2,
-        "both MSRV feature configurations must retain single-manifest selection:\n{calls}"
     );
 }
 

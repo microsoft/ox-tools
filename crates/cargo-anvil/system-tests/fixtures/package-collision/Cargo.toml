@@ -1,0 +1,16 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "log"
+version = "0.4.28"
+edition = "2021"
+publish = false
+
+[workspace]
+members = ["member"]
+default-members = ["member"]
+resolver = "2"
+
+[dependencies]
+published-log = { package = "log", version = "=0.4.28" }

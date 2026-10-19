@@ -37,7 +37,10 @@ jobs:
           lfs: true
       - name: Check package identity in PowerShell
         shell: pwsh
-        run: ./crates/cargo-anvil/system-tests/package-identity.ps1
+        run: |
+          ./crates/cargo-anvil/system-tests/package-identity.ps1
+          ./crates/cargo-anvil/system-tests/recipe-selection.ps1
+          ./crates/cargo-anvil/system-tests/package-collision.ps1
       - name: Build cargo-anvil
         run: cargo build --locked -p cargo-anvil
       - name: Verify in-tree state matches templates

@@ -176,8 +176,7 @@
 //!
 //! - **Source and package hygiene:** [`rustfmt`](https://rust-lang.github.io/rustfmt/)
 //!   (`fmt`), [`Clippy`](https://doc.rust-lang.org/clippy/) (`clippy`),
-//!   package-isolated target checks with
-//!   [`cargo-each`](https://crates.io/crates/cargo-each) (`check-all-targets`),
+//!   package-isolated `cargo check` invocations (`check-all-targets`),
 //!   [`cargo-sort`](https://crates.io/crates/cargo-sort), license headers with
 //!   [`cargo-heather`](https://crates.io/crates/cargo-heather),
 //!   [`cargo-ensure-no-cyclic-deps`](https://crates.io/crates/cargo-ensure-no-cyclic-deps),
