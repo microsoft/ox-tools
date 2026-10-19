@@ -558,11 +558,13 @@ the released Cargo surface:
   conjoined with shared assignments. A Cargo target's local
   `required-features` are also true at its root, so code that can exist only
   when a required feature is absent is not counted as released.
-  Dependency-qualified selectors such as `dep/feature` enable another
-  package's feature and do not create a local `cfg(feature = "dep/feature")`
-  atom. Correlated occurrences of up to twelve distinct non-`test` cfg atoms
-  are evaluated exactly; larger or unsupported predicate shapes fall back to
-  conservative retention rather than hiding released code.
+  A dependency-qualified selector such as `dep/feature` also enables the
+  optional dependency's implicit local `dep` feature when Cargo metadata
+  exposes it. Weak selectors (`dep?/feature`) and explicit `dep:dep`
+  activations do not create local cfg atoms. Correlated occurrences of up to
+  twelve distinct non-`test` cfg atoms are evaluated exactly; larger or
+  unsupported predicate shapes fall back to conservative retention rather
+  than hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted

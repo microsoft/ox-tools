@@ -158,8 +158,9 @@ the workspace discovered from the invocation directory.
    only when it cannot hold with `test = false`. All `cfg` and `cfg_attr`
    effects on the same syntax owner are conjoined with enclosing owner,
    declaring-module, source-file, and local Cargo target `required-features`
-   guards. Dependency-qualified selectors are not local cfg atoms. Those
-   composed guards propagate through inline and out-of-line modules.
+   guards. Dependency selectors also add an implicit local dependency feature
+   only when that feature appears in Cargo metadata; weak and `dep:` selectors
+   do not. Those composed guards propagate through inline and out-of-line modules.
    Correlations among at most twelve distinct non-`test` atoms are compiled
    once and evaluated by bounded assignment enumeration; larger or unsupported
    shapes use the conservative truth-value approximation.

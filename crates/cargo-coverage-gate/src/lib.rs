@@ -25,9 +25,10 @@
 //! removed; feature-gated `test-util` APIs remain measured when they can compile
 //! in a non-test build. Local Cargo target `required-features` are treated as
 //! enabled at the target root, so code that requires one of those features to
-//! be absent is not part of that target's released surface. Dependency-qualified
-//! selectors such as `dep/feature` do not become local `cfg(feature = ...)`
-//! atoms.
+//! be absent is not part of that target's released surface. A dependency
+//! selector such as `dep/feature` also enables Cargo's implicit local `dep`
+//! feature when that feature exists; `dep?/feature` and `dep:dep` do not create
+//! local `cfg(feature = ...)` atoms.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
@@ -41,7 +42,8 @@
 //! tests or other non-release targets should migrate to the corresponding
 //! `evaluate_unfiltered*` function. The released-surface APIs also treat each
 //! target's local Cargo `required-features` as enabled when classifying its
-//! source; dependency-qualified selectors do not define local cfg atoms.
+//! source, including implicit optional-dependency features exposed by Cargo
+//! metadata.
 //!
 //! ## Configuration
 //!

@@ -34,9 +34,10 @@ semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
 removed; feature-gated `test-util` APIs remain measured when they can compile
 in a non-test build. Local Cargo target `required-features` are treated as
 enabled at the target root, so code that requires one of those features to
-be absent is not part of that target’s released surface. Dependency-qualified
-selectors such as `dep/feature` do not become local `cfg(feature = ...)`
-atoms.
+be absent is not part of that target’s released surface. A dependency
+selector such as `dep/feature` also enables Cargo’s implicit local `dep`
+feature when that feature exists; `dep?/feature` and `dep:dep` do not create
+local `cfg(feature = ...)` atoms.
 Numeric failures show exact covered/coverable counts and uncovered ranges;
 `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 and `NO DATA` explains that no records were attributed. Location lists are
@@ -50,7 +51,8 @@ than every attributed LCOV line. Existing callers that deliberately include
 tests or other non-release targets should migrate to the corresponding
 `evaluate_unfiltered*` function. The released-surface APIs also treat each
 target’s local Cargo `required-features` as enabled when classifying its
-source; dependency-qualified selectors do not define local cfg atoms.
+source, including implicit optional-dependency features exposed by Cargo
+metadata.
 
 ### Configuration
 
@@ -263,7 +265,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbb0HoIakYh0wbE4RdQdp4is4bM21kt82PzfIbIrfWzp0dZ9xhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbPP5nJ_sBrK4biqgfHAs2dFsbuNyTxNXeRQUbLtObzOnAy5xhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_text

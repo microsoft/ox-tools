@@ -199,6 +199,12 @@ mod tests {
     const EMPTY: &str = include_str!("../tests/fixtures/lcov/empty.info");
     const MALFORMED: &str = include_str!("../tests/fixtures/lcov/malformed.info");
 
+    fn merged_checksum_error(error: &CoverageGateError) -> &MergedSourceChecksumError {
+        std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(|source| source.downcast_ref::<MergedSourceChecksumError>())
+            .expect("merged checksum error cause")
+    }
+
     #[test]
     fn parses_empty_tracefile() {
         let report = CoverageReport::from_str(EMPTY).expect("empty fixture parses");
@@ -325,20 +331,22 @@ SF:/repo/crates/alpha/src/lib.rs
 DA:1,0,second
 end_of_record
 ";
-        let error = CoverageReport::from_str(input)
-            .expect_err("named sections from different source text must not merge")
-            .to_string();
-        assert!(error.contains("conflicting checksums for line 1"), "{error}");
+        let error = CoverageReport::from_str(input).expect_err("named sections from different source text must not merge");
+        let checksum = merged_checksum_error(&error);
+        assert_eq!(checksum.path, "/repo/crates/alpha/src/lib.rs");
+        assert_eq!(checksum.line, 1);
+        assert!(error.to_string().contains("conflicting checksums for line 1"), "{error}");
     }
 
     #[test]
     fn separate_reports_reject_conflicting_checksums() {
         let first = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,1,first\nend_of_record\n";
         let second = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0,second\nend_of_record\n";
-        let error = CoverageReport::from_strs(&[first, second])
-            .expect_err("reports from different source text must not merge")
-            .to_string();
-        assert!(error.contains("conflicting checksums for line 1"), "{error}");
+        let error = CoverageReport::from_strs(&[first, second]).expect_err("reports from different source text must not merge");
+        let checksum = merged_checksum_error(&error);
+        assert_eq!(checksum.path, "/repo/crates/alpha/src/lib.rs");
+        assert_eq!(checksum.line, 1);
+        assert!(error.to_string().contains("conflicting checksums for line 1"), "{error}");
     }
 
     #[test]
@@ -347,9 +355,11 @@ end_of_record
         let first_checksum = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,1,first\nend_of_record\n";
         let conflicting = "TN:\nSF:/repo/crates/alpha/src/lib.rs\nDA:1,0,second\nend_of_record\n";
         let error = CoverageReport::from_strs(&[without_checksum, first_checksum, conflicting])
-            .expect_err("a later checksum must participate in subsequent conflict checks")
-            .to_string();
-        assert!(error.contains("conflicting checksums for line 1"), "{error}");
+            .expect_err("a later checksum must participate in subsequent conflict checks");
+        let checksum = merged_checksum_error(&error);
+        assert_eq!(checksum.path, "/repo/crates/alpha/src/lib.rs");
+        assert_eq!(checksum.line, 1);
+        assert!(error.to_string().contains("conflicting checksums for line 1"), "{error}");
     }
 
     #[test]

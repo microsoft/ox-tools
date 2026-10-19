@@ -409,7 +409,7 @@ fn source_roots(
                     Surface::NonReleased
                 },
                 role: SourceRole::CrateRoot,
-                guard: target_required_features_guard(&target.required_features),
+                guard: target_required_features_guard(&target.required_features, &package.features),
                 owning_member: owning_member.clone(),
             });
         }
@@ -425,13 +425,18 @@ fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathB
     })
 }
 
-fn target_required_features_guard(required_features: &[String]) -> CfgFormula {
-    CfgFormula::all(
-        required_features
-            .iter()
-            .filter(|feature| !feature.contains('/'))
-            .map(|feature| CfgFormula::Atom(format!("feature={feature}"))),
-    )
+fn target_required_features_guard(required_features: &[String], package_features: &BTreeMap<String, Vec<String>>) -> CfgFormula {
+    CfgFormula::all(required_features.iter().filter_map(|selector| {
+        if selector.starts_with("dep:") {
+            return None;
+        }
+        let local_feature = match selector.split_once('/') {
+            Some((dependency, _)) if !dependency.ends_with('?') && package_features.contains_key(dependency) => dependency,
+            Some(_) => return None,
+            None => selector,
+        };
+        Some(CfgFormula::Atom(format!("feature={local_feature}")))
+    }))
 }
 
 fn relative_path(from: &Path, to: &Path) -> Option<PathBuf> {
@@ -2431,9 +2436,23 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
-    fn dependency_required_features_do_not_become_local_cfg_atoms() {
+    fn dependency_required_features_enable_implicit_local_features() {
         let root = source_index_fixture_root();
-        let mut metadata = source_index_fixture_metadata(&root);
+        let mut metadata_value = serde_json::to_value(source_index_fixture_metadata(&root)).expect("fixture metadata serializes");
+        metadata_value["packages"][0]["dependencies"] = json!([{
+            "name": "dep",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "req": "*",
+            "kind": null,
+            "rename": null,
+            "optional": true,
+            "uses_default_features": true,
+            "features": [],
+            "target": null,
+            "registry": null
+        }]);
+        metadata_value["packages"][0]["features"] = json!({"dep": ["dep:dep"]});
+        let mut metadata: Metadata = serde_json::from_value(metadata_value).expect("dependency fixture metadata parses");
         metadata.packages[0].targets[0].src_path = root
             .join("member/src/dependency-required-feature-root.rs")
             .to_string_lossy()
@@ -2444,11 +2463,11 @@ mod tests {
         let index = SourceIndex::from_metadata(&metadata).expect("dependency-required feature source index builds");
         let source = fs::canonicalize(root.join("member/src/dependency-required-feature-root.rs"))
             .expect("canonical dependency-required feature source");
-        assert!(index.files[&source].test_only_lines.is_empty());
+        assert_eq!(index.files[&source].test_only_lines, BTreeSet::from([7, 8]));
 
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov(
-                "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nend_of_record\n",
+                "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nDA:7,0\nDA:8,0\nend_of_record\n",
             )],
             &metadata,
         )
