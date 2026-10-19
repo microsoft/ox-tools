@@ -2435,6 +2435,23 @@ mod tests {
     }
 
     #[test]
+    fn dependency_required_feature_guards_follow_cargo_metadata() {
+        let implicit = BTreeMap::from([("dep".to_owned(), vec!["dep:dep".to_owned()])]);
+        assert_eq!(
+            target_required_features_guard(&["dep/x".to_owned()], &implicit),
+            CfgFormula::Atom("feature=dep".to_owned())
+        );
+        assert_eq!(
+            target_required_features_guard(&["dep/x".to_owned()], &BTreeMap::new()),
+            CfgFormula::Value(true)
+        );
+        assert_eq!(
+            target_required_features_guard(&["dep?/x".to_owned(), "dep:dep".to_owned()], &implicit),
+            CfgFormula::Value(true)
+        );
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
     fn dependency_required_features_enable_implicit_local_features() {
         let root = source_index_fixture_root();
@@ -2826,6 +2843,50 @@ mod tests {
             .expect_err("member directory resolution errors propagate")
             .to_string();
         assert!(error.contains("member resolution denied"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn declaration_enqueue_resolution_errors_propagate_for_new_and_revisited_sources() {
+        let root = source_index_fixture_root();
+        let shared_suffix = Path::new("member/src/shared.rs");
+        let mut fail_initial_enqueue = |path: &Path| {
+            if path.ends_with(shared_suffix) {
+                Err(ResolveCoverageSourceError::caused_by(
+                    diagnostic_path(path),
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "initial enqueue denied"),
+                )
+                .into())
+            } else {
+                resolve_source_path(path)
+            }
+        };
+        let error = SourceIndex::from_metadata_with_source_resolver(&source_index_fixture_metadata(&root), &mut fail_initial_enqueue)
+            .expect_err("initial declaration enqueue errors propagate")
+            .to_string();
+        assert!(error.contains("initial enqueue denied"), "{error}");
+
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[1].src_path = metadata.packages[0].targets[0].src_path.clone();
+        let attempts = std::cell::Cell::new(0);
+        let mut fail_revisit_enqueue = |path: &Path| {
+            if path.ends_with(shared_suffix) {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 2 {
+                    return Err(ResolveCoverageSourceError::caused_by(
+                        diagnostic_path(path),
+                        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "revisit enqueue denied"),
+                    )
+                    .into());
+                }
+            }
+            resolve_source_path(path)
+        };
+        let error = SourceIndex::from_metadata_with_source_resolver(&metadata, &mut fail_revisit_enqueue)
+            .expect_err("revisited declaration enqueue errors propagate")
+            .to_string();
+        assert!(error.contains("revisit enqueue denied"), "{error}");
     }
 
     #[test]
