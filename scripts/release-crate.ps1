@@ -105,7 +105,7 @@ $script:IgnoredTypes = @('test')
 # --- COMPILED REGEX PATTERNS ---
 
 # Pattern for conventional commit format: type(scope)!: description (! indicates breaking change)
-$script:ConventionalCommitRegex = [regex]'^(\w+)(?:\(.*\))?(!)?:\s*(.*)'
+$script:ConventionalCommitRegex = [regex]'^(\w+)(?:\(([^)]*)\))?(!)?:\s*(.*)'
 
 # Pattern for PR references: (#123)
 $script:PrReferenceRegex = [regex]'\s*(\(#(\d+)\))$'
@@ -349,6 +349,7 @@ function Format-ConventionalCommits {
 
     foreach ($message in $rawCommitMessages) {
         $type = "miscellaneous"
+        $scope = ""
         $description = $message
         $isConventional = $false
 
@@ -356,8 +357,12 @@ function Format-ConventionalCommits {
         $isBreaking = $false
         if ($conventionalMatch.Success) {
             $type = $conventionalMatch.Groups[1].Value
-            $isBreaking = $conventionalMatch.Groups[2].Value -eq '!'
-            $description = $conventionalMatch.Groups[3].Value
+            $scope = $conventionalMatch.Groups[2].Value
+            $isBreaking = $conventionalMatch.Groups[3].Value -eq '!'
+            $description = $conventionalMatch.Groups[4].Value
+            if (-not [string]::IsNullOrWhiteSpace($scope)) {
+                $description = "${scope}: $description"
+            }
             $isConventional = $true
         }
 
@@ -598,7 +603,7 @@ function Write-Changelog {
     # introduction belongs to that initial version, not to the next release generated from HEAD.
     $range = if ($latestTag) {
         "$latestTag..HEAD"
-    } elseif ($initialCommit -and $oldVersion -ne "0.0.0") {
+    } elseif ($initialCommit -and $oldVersion -ne "0.0.0" -and $oldVersion -ne $newVersion) {
         "$initialCommit..HEAD"
     } else {
         "HEAD"
