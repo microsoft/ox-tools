@@ -192,6 +192,12 @@ pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
 }
 
+/// Workspace identity resolution shared by generated PowerShell recipes.
+#[must_use]
+pub fn packages() -> Artifact {
+    Artifact::owned_file(".anvil/packages.ps1", include_str!("../../../templates/anvil/packages.ps1"))
+}
+
 /// `justfiles/anvil/impact.just` — the shared `anvil-impact` recipe.
 #[must_use]
 pub fn impact() -> Artifact {
@@ -365,7 +371,7 @@ mod tests {
             assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --profile release --package $packageName"),
+            checks.contains("bolero list --profile release @packageArgs"),
             "bolero discovery must use the execution profile once per affected package"
         );
         assert!(
@@ -622,7 +628,7 @@ mod tests {
             "git rev-parse --verify \"$base^{commit}\"",
             "git cat-file -e $baselineManifest",
             "$stableArgs = {{_anvil_stable_toolchain_args}}",
-            "cargo @stableArgs semver-checks --package $p --baseline-rev $base",
+            "cargo @stableArgs semver-checks @packageArgs --baseline-rev $base",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
         }

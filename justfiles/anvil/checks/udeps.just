@@ -32,7 +32,8 @@ anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}})
     # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
     # are only used by tests/benches/examples (should be dev-deps).
     & cargo '+{{ rust_nightly }}' udeps @pkg --all-features

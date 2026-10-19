@@ -29,38 +29,18 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
-    $pkgArgs = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $scope = if ($package) { "--package $package" } else { $include }
+    $selected = @(Get-AnvilPackages $scope -Toolchain {{_anvil_stable_toolchain_args}})
+    $pkgArgs = @(Get-AnvilPackageArguments $selected -Adapter manifest)
     $exampleArgs = @(if ($example) { '--example'; $example } else { '--examples' })
     $stableArgs = {{_anvil_stable_toolchain_args}}
     & cargo @stableArgs build @pkgArgs @exampleArgs --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $run) { exit 0 }
 
-    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-examples: cargo metadata failed'; exit $LASTEXITCODE }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-examples: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    $selectedPackages = if ($package) {
-        @($package)
-    } elseif ($include -and $include -ne '--workspace') {
-        $names = [System.Collections.Generic.List[string]]::new()
-        $parts = @(-split $include)
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
-                $names.Add(($parts[$i] -split '@', 2)[0])
-            }
-        }
-        @($names)
-    } else {
-        @($meta.packages | Where-Object { $meta.workspace_members -contains $_.id } | ForEach-Object { $_.name })
-    }
     $targets = @(
-        foreach ($p in $meta.packages) {
-            if ($p.name -notin $selectedPackages) { continue }
+        foreach ($p in $selected) {
             $noRun = @($p.metadata.anvil.examples.'no-run')
             foreach ($target in $p.targets) {
                 if ($target.kind -notcontains 'example') { continue }
@@ -69,7 +49,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
                     Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
                     continue
                 }
-                [pscustomobject]@{ package = $p.name; example = $target.name }
+                [pscustomobject]@{ package = $p.name; arguments = @(Get-AnvilPackageArguments @($p) -Adapter manifest); example = $target.name }
             }
         }
     )
@@ -92,8 +72,8 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.Environment['ANVIL_EXAMPLE'] = '1'
-        foreach ($arg in @($stableArgs) + @(
-            'run', '--package', $target.package, '--example', $target.example,
+        foreach ($arg in @($stableArgs) + @('run') + $target.arguments + @(
+            '--example', $target.example,
             '--all-features', '--locked'
         )) {
             $start.ArgumentList.Add($arg)

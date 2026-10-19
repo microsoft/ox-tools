@@ -20,7 +20,8 @@ anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}})
     & cargo {{_anvil_stable_toolchain_args}} doc @pkg --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

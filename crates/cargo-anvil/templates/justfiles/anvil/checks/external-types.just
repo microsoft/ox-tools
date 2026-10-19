@@ -15,8 +15,7 @@
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-check-
 # external-types is per-manifest (no --package/--workspace), so we
-# build a name->manifest map from cargo metadata, filter to lib crates,
-# intersect with the affected set ($include), and call the tool once per
+# resolve affected workspace members, filter to lib crates, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 
 # Check public APIs for unapproved external types.
@@ -30,41 +29,16 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
         Write-Host 'anvil-external-types: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
     # Build pkg-name -> manifest-path map, restricted to library crates.
     $libPkgs = @{}
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-external-types: cargo metadata failed'
-        exit $LASTEXITCODE
-    }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-external-types: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    foreach ($p in $meta.packages) {
+    foreach ($p in @(Get-AnvilPackages $include -Toolchain {{_anvil_stable_toolchain_args}})) {
         if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
             $libPkgs[$p.name] = $p.manifest_path
         }
     }
     # Decide which packages to check.
-    $packages = @()
-    if ($pkg -contains '--workspace') {
-        $packages = $libPkgs.Keys
-    } else {
-        for ($i = 0; $i -lt $pkg.Count; $i++) {
-            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Impact emits version-qualified specs (name@version);
-                # strip the @version to recover the bare package name
-                # this manifest-path map keys on.
-                $name = ($pkg[$i + 1] -split '@', 2)[0]
-                if ($libPkgs.ContainsKey($name)) { $packages += $name }
-                $i++
-            }
-        }
-    }
+    $packages = @($libPkgs.Keys)
     if ($packages.Count -eq 0) {
         Write-Host 'anvil-external-types: no affected library crates; skipping'
         exit 0

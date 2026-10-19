@@ -21,7 +21,9 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
+    . '{{ replace(justfile_directory(), "'", "''") }}/.anvil/packages.ps1'
+    $pkg = @(Resolve-AnvilPackageArguments $include -Toolchain {{_anvil_stable_toolchain_args}})
+    & cargo {{_anvil_stable_toolchain_args}} clippy @pkg --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-clippy` recipe.

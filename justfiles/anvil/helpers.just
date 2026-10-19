@@ -18,9 +18,9 @@
 #     member (cargo each).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps within the
-#     workspace). The tool takes --package; the recipe splices the resolved
-#     package list into the cargo invocation, defaulting to --workspace when
-#     the tier is unscoped.
+#     workspace). The recipe resolves workspace keys to manifest paths or
+#     tool-specific package arguments, using each tool's full-workspace
+#     behavior when the tier is unscoped.
 #
 #   - "required": run on the required set (affected ∪ workspace-internal
 #     transitive deps). Same splice/default as affected, for checks whose tool
@@ -48,13 +48,11 @@
 #   * "--workspace" (affected/required) or "" (modified) - the tier is
 #     unscoped: ANVIL_IMPACT=off, or no impact cache is present outside consume
 #     mode (under consume a missing cache is a hard failure, not an unscoped
-#     run). Recipes splat
-#     "--workspace" (an empty string is NOT $null, so recipes test truthiness
-#     rather than `?? "--workspace"`, which would splat an empty arg cargo
-#     rejects).
+#     run). Package helpers resolve this to all workspace members or pass
+#     "--workspace" to tools that support it.
 #   * "--package A@v --package B@v" - the tier has members. Packages are
-#     version-qualified cargo specs so they resolve uniquely even when a
-#     like-named crate is also a transitive dependency.
+#     portable workspace keys, resolved through .anvil/packages.ps1 against
+#     consumer-runner metadata before they become tool-specific arguments.
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
 # These resolver outputs are only meaningful when the resolver succeeded, so
@@ -72,7 +70,7 @@
 # asserts: a broken scope must stop the check, not quietly rescope it.
 #
 # This keeps the per-recipe boilerplate to a single capture, the exit-code
-# guard, a one-line skip guard, and the cargo invocation. Modified-tier
+# guard, a skip guard, shared package resolution, and the tool invocation. Modified-tier
 # recipes never forward `$include`; they only check the skip sentinel and then
 # let their command determine its normal input domain.
 #

@@ -1,0 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cfg-if"
+version = "1.0.4"
+edition = "2021"
+publish = false
+
+[dependencies]
+published-cfg-if = { package = "cfg-if", version = "=1.0.4" }
