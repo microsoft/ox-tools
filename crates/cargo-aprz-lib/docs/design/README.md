@@ -6,6 +6,13 @@ detail of the command-line tool, not a stable library API.
 
 ## Native provider acceptance
 
+User owners are identified by the crates.io `username` exported in `users.csv`,
+not necessarily their GitHub login. Older dumps with `gh_login` instead of
+`username` remain accepted. Missing identity columns are errors, not anonymous
+owners. When both columns exist, `username` takes precedence. The binary cache
+stores the same ID, identity, and display-name layout
+for both CSV schemas.
+
 `tests/crates_provider_integration.rs` and `tests/hosting_provider_integration.rs`
 are native acceptance suites, not in-process policy tests. They require Tokio's
 socket reactor and loopback listeners; crates-provider cases additionally need

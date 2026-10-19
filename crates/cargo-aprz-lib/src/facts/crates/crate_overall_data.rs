@@ -52,7 +52,7 @@ pub struct CrateOverallData {
     ///
     /// **Source**: Multi-table join:
     /// 1. `crate_owners.csv` from the `crate_owners` table (`crate_id` to owner mapping with user/team discriminant)
-    /// 2. `users.csv` from the `users` table, `gh_login` and `name` fields (for user owners)
+    /// 2. `users.csv` from the `users` table, `username` and `name` fields (legacy dumps use `gh_login`)
     /// 3. `teams.csv` from the `teams` table, `login` and `name` fields (for team owners)
     pub owners: Vec<Owner>,
 
