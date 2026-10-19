@@ -113,6 +113,10 @@ $script:PrReferenceRegex = [regex]'\s*(\(#(\d+)\))$'
 # Release preparation entries superseded by linked release history.
 $script:LinkedReleaseRegex = [regex]'(?:^|:\s*)(Release [a-zA-Z0-9_-]+ \d+\.\d+\.\d+)\s+\(#\d+\)$'
 
+# Changelog-only maintenance commits must not add themselves to the generated
+# release section on every same-version refresh.
+$script:GeneratedReleaseNotesRegex = [regex]'^(?:refresh|finalize|regenerate).*(?:release )?notes$'
+
 # Pattern for semantic version format: major.minor.patch
 $script:SemanticVersionRegex = [regex]'^\d+\.\d+\.\d+$'
 
@@ -364,6 +368,10 @@ function Format-ConventionalCommits {
         }
 
         if ($isConventional -and $script:IgnoredTypes -contains $type) {
+            continue
+        }
+
+        if ($type -eq 'chore' -and $script:GeneratedReleaseNotesRegex.IsMatch($description)) {
             continue
         }
 
