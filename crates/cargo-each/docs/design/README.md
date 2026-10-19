@@ -166,6 +166,36 @@ arbitrary-command + metadata-filter spine do not overlap.
 
 ## 4. CLI surface
 
+### Package identity and structured selection
+
+`--list-json` resolves the existing workspace selection and filters without a
+child command. It prints one JSON array in package-name order, including `[]`
+for an empty selection. Each object contains exactly these string fields:
+`manifest_path` (absolute member manifest path), `name` (package name),
+`cargo_spec` (source-qualified Cargo selector), and `id` (literal metadata ID).
+It conflicts with execution options, command arguments, and JSON-record input.
+
+`--metadata-toolchain <TOOLCHAIN>` selects the rustup toolchain for the metadata
+query only. Without this option, discovery preserves inherited Cargo selection.
+It applies to execution and listing, but not JSON-record mode. Consumers that
+compare metadata IDs must query with the same toolchain.
+Metadata from Cargo before 1.71 lacks default-member information. Explicit
+selection still works; implicit defaults produce an actionable error, not a
+panic or a guessed workspace-wide selection.
+
+`{cargo-spec}` is a per-package/per-target placeholder with the form
+`file:///...#name@version`. Its URL-encoded source is the absolute manifest
+directory; name and version come from structured package metadata. Metadata IDs
+are opaque and are never parsed or rewritten. `{spec}` and `{packages}` retain
+their existing expansions for compatibility.
+
+All selections resolve against workspace members only, not registry packages or
+target names. Existing `-p` and `--package-file` inputs suffice for portable
+name/version selections; no cargo-delta dependency or record parser is involved.
+Paths, selectors, and literal IDs in the output belong to the current checkout.
+Resolve the portable selection again after relocation rather than reusing this
+output as a portable artifact.
+
 ```
 cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 ```

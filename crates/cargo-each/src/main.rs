@@ -25,6 +25,7 @@
 //!
 //! ```text
 //! cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
+//! cargo each [SELECTION] [FILTERS] [--metadata-toolchain TOOLCHAIN] --list-json
 //! ```
 //!
 //! Everything after `--` is the command template; `cargo-each` spawns it
@@ -49,6 +50,28 @@
 //! matches no member is an error, so typos fail loudly. Package files contain
 //! package specs only: comments, command-line tokens, malformed input, and
 //! missing, unreadable, or non-UTF-8 files are errors.
+//!
+//! ### Structured selection
+//!
+//! `--list-json` uses the same package selection and filters, but prints a JSON
+//! array instead of running a child command. Each object has `manifest_path`
+//! (absolute path), `name` (package name, not a target name), `cargo_spec`
+//! (source-qualified Cargo selector), and `id` (the literal Cargo metadata ID).
+//! Empty selections print `[]`. Execution options and JSON-record input cannot
+//! be combined with `--list-json`.
+//!
+//! `--metadata-toolchain <TOOLCHAIN>` selects the rustup toolchain for the
+//! metadata query only; it does not change child commands. Use the same
+//! toolchain as an aggregate consumer that compares literal metadata IDs.
+//! Without it, the inherited Cargo/toolchain selection is unchanged.
+//! Cargo older than 1.71 does not report default members; use an explicit
+//! selection with that metadata toolchain rather than relying on defaults.
+//!
+//! Selection remains workspace-only, even when a registry dependency has the
+//! same name and version. Existing `-p name@version` and `--package-file`
+//! inputs resolve in the current checkout; no cargo-delta record format is
+//! required. Output paths, selectors, and IDs are checkout-local: resolve
+//! portable selections again after moving a checkout.
 //!
 //! ## Filters
 //!
@@ -99,6 +122,10 @@
 //!
 //! - `{name}` — bare package name (per-package and per-target).
 //! - `{spec}` — `name@version` (per-package and per-target).
+//! - `{cargo-spec}` — source-qualified `file:///...#name@version` Cargo
+//!   selector (per-package and per-target). Paths are URL-encoded, so spaces
+//!   remain part of one argv element. Built from the manifest directory,
+//!   package name, and version, never by parsing a metadata ID.
 //! - `{version}` — package version (per-package and per-target).
 //! - `{manifest}` — absolute member `Cargo.toml` path (per-package and
 //!   per-target).
@@ -106,6 +133,8 @@
 //! - `{packages}` — the cargo selection flags for the resolved set
 //!   (`--workspace` for the whole workspace, else `--package name@version …`);
 //!   valid only in `--once` mode and only as a standalone argument.
+//!   Like `{spec}`, this existing expansion is unchanged; use `--list-json`
+//!   for aggregate consumers needing source-qualified selectors or literal IDs.
 //! - `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
 //!   or root `[package].rust-version` in a single-package repository; valid in
 //!   Cargo-backed per-package, per-target, and `--once` modes. Expands to an
@@ -184,6 +213,13 @@
 //! Under `--keep-going`, any failure maps the aggregate result to `1`.
 //!
 //! # Examples
+//!
+//! Select a local package even when a registry dependency shares its identity:
+//!
+//! ```text
+//! cargo each -p crate-a@1.0.0 -- cargo check --package {cargo-spec}
+//! cargo each --package-file selected.txt --metadata-toolchain nightly --list-json
+//! ```
 //!
 //! Run a per-manifest tool over every library crate:
 //!

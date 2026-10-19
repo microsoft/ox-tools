@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
@@ -52,10 +52,32 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
 
     let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
-    let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
+    let workspace =
+        Workspace::load(args.manifest_path.as_deref(), args.metadata_toolchain.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
     apply_filters(&mut members, args)?;
+
+    if args.list_json {
+        let records = members
+            .iter()
+            .map(|member| {
+                serde_json::json!({
+                    "manifest_path": member.manifest_path,
+                    "name": member.name,
+                    "cargo_spec": member.cargo_spec(),
+                    "id": member.id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &records).into_app_err("failed to write package selection")?;
+        stdout
+            .write_all(b"\n")
+            .and_then(|()| stdout.flush())
+            .into_app_err("failed to write package selection")?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.

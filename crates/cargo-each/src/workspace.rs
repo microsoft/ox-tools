@@ -24,8 +24,8 @@ pub(crate) struct Workspace {
     pub(crate) members: Vec<Member>,
     /// Names of the workspace's default members (cargo's `default-members`,
     /// or every member when unset). Used to resolve a selection that names
-    /// no packages.
-    pub(crate) default_member_names: HashSet<String>,
+    /// no packages. Absent in metadata from Cargo before 1.71.
+    pub(crate) default_member_names: Option<HashSet<String>>,
     /// Absolute path to the workspace root manifest.
     pub(crate) root_manifest_path: PathBuf,
 }
@@ -33,6 +33,8 @@ pub(crate) struct Workspace {
 /// A single workspace member and the facts selection/filtering key on.
 #[derive(Debug, Clone)]
 pub(crate) struct Member {
+    /// Literal package ID returned by the selected metadata toolchain.
+    pub(crate) id: String,
     /// Cargo package name (e.g. `cargo-anvil`).
     pub(crate) name: String,
     /// Package version, rendered (e.g. `0.3.0`).
@@ -71,6 +73,14 @@ pub(crate) struct MemberTarget {
 }
 
 impl Member {
+    /// A source-qualified Cargo selector, independent of metadata ID syntax.
+    #[must_use]
+    pub(crate) fn cargo_spec(&self) -> String {
+        let source =
+            url::Url::from_file_path(self.manifest_dir()).expect("Cargo metadata manifest directories are absolute filesystem paths");
+        format!("{source}#{}", self.spec())
+    }
+
     /// The version-qualified cargo spec, `name@version`.
     #[must_use]
     pub(crate) fn spec(&self) -> String {
@@ -104,8 +114,10 @@ impl Workspace {
     /// Returns [`EachError`] when the workspace cannot be enumerated — for
     /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
-    pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
-        let metadata = load_metadata(manifest_path).map_err(LoadMetadataError::caused_by)?;
+    pub(crate) fn load(manifest_path: Option<&Path>, toolchain: Option<&str>) -> Result<Self, EachError> {
+        let metadata = metadata_command(manifest_path, toolchain)
+            .exec()
+            .map_err(LoadMetadataError::caused_by)?;
         Ok(Self::from_metadata(&metadata))
     }
 
@@ -126,6 +138,7 @@ impl Workspace {
                     .collect();
                 targets.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.kinds.cmp(&b.kinds)));
                 Member {
+                    id: pkg.id.repr.clone(),
                     name: pkg.name.to_string(),
                     version: pkg.version.to_string(),
                     rust_version: pkg.rust_version.clone(),
@@ -141,11 +154,13 @@ impl Workspace {
             .collect();
         members.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let default_member_names = metadata
-            .workspace_default_packages()
-            .iter()
-            .map(|pkg| pkg.name.to_string())
-            .collect();
+        let default_member_names = metadata.workspace_default_members.is_available().then(|| {
+            metadata
+                .workspace_default_packages()
+                .iter()
+                .map(|pkg| pkg.name.to_string())
+                .collect()
+        });
         let root_manifest_path = metadata.workspace_root.join("Cargo.toml").into_std_path_buf();
 
         Self {
@@ -267,17 +282,17 @@ fn parse_rust_version(value: &str) -> Result<Version, String> {
 
 // #[gamma::skip(all, reason = "replacing the configured command with its default makes integration tests traverse dependency metadata until the mutation-test budget expires; the exact argument-vector test covers this adapter")]
 #[mutants::skip] // The default-command replacement traverses dependency metadata until timeout; the exact argument-vector test covers this adapter.
-fn metadata_command(manifest_path: Option<&Path>) -> MetadataCommand {
+fn metadata_command(manifest_path: Option<&Path>, toolchain: Option<&str>) -> MetadataCommand {
     let mut command = MetadataCommand::new();
     command.no_deps();
     if let Some(path) = manifest_path {
         command.manifest_path(path);
     }
+    if let Some(toolchain) = toolchain {
+        // Do not inherit Cargo's absolute CARGO executable: it can bypass rustup.
+        command.cargo_path("cargo").env("RUSTUP_TOOLCHAIN", toolchain);
+    }
     command
-}
-
-fn load_metadata(manifest_path: Option<&Path>) -> cargo_metadata::Result<Metadata> {
-    metadata_command(manifest_path).exec()
 }
 
 /// Parse a supported Cargo target-kind spelling.
@@ -301,6 +316,7 @@ mod tests {
 
     fn member(name: &str, manifest_path: PathBuf, rust_version: &str) -> Member {
         Member {
+            id: format!("literal-{name}"),
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some(rust_version.parse().expect("the test Rust version is semver")),
@@ -317,7 +333,7 @@ mod tests {
     fn workspace(root_manifest_path: PathBuf, members: Vec<Member>) -> Workspace {
         Workspace {
             members,
-            default_member_names: HashSet::new(),
+            default_member_names: Some(HashSet::new()),
             root_manifest_path,
         }
     }
@@ -521,7 +537,7 @@ mod tests {
     #[test]
     fn metadata_command_is_no_deps_and_preserves_manifest_path() {
         let manifest = Path::new("some-workspace/Cargo.toml");
-        let command = metadata_command(Some(manifest)).cargo_command();
+        let command = metadata_command(Some(manifest), None).cargo_command();
         let args: Vec<String> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
         assert_eq!(
             args,
@@ -534,6 +550,81 @@ mod tests {
                 &manifest.to_string_lossy(),
             ]
         );
+    }
+
+    #[test]
+    fn metadata_toolchain_overrides_the_inherited_cargo_executable() {
+        let command = metadata_command(None, Some("custom-metadata-toolchain")).cargo_command();
+        assert_eq!(command.get_program(), "cargo");
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| { key == "RUSTUP_TOOLCHAIN" && value == Some(std::ffi::OsStr::new("custom-metadata-toolchain")) })
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["metadata", "--format-version", "1", "--no-deps"]
+        );
+    }
+
+    #[test]
+    fn selectors_do_not_parse_legacy_or_modern_metadata_ids() {
+        let mut fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("metadata fixture");
+        let path = std::env::temp_dir()
+            .join("checkout with spaces")
+            .join("enabled-lib")
+            .join("Cargo.toml");
+        let packages = fixture["packages"].as_array_mut().expect("packages array");
+        let original_id = packages[0]["id"].clone();
+        packages[0]["manifest_path"] = serde_json::json!(path);
+        let mut registry = packages[0].clone();
+        registry["id"] = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index#enabled-lib@0.1.0");
+        registry["source"] = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index");
+        packages.push(registry);
+        let source = url::Url::from_file_path(path.parent().expect("manifest parent")).expect("absolute fixture path");
+        for id in [
+            "enabled-lib 0.1.0 (path+file:///old/checkout)",
+            "path+file:///old/checkout#enabled-lib@0.1.0",
+            "opaque future metadata ID",
+        ] {
+            let mut value = fixture.clone();
+            value["packages"][0]["id"] = serde_json::json!(id);
+            for field in ["workspace_members", "workspace_default_members"] {
+                for entry in value[field].as_array_mut().expect("member IDs") {
+                    if *entry == original_id {
+                        *entry = serde_json::json!(id);
+                    }
+                }
+            }
+            let metadata: Metadata = serde_json::from_value(value.clone()).expect("metadata");
+            let workspace = Workspace::from_metadata(&metadata);
+            let selected = crate::select::Selection {
+                packages: vec!["enabled-lib@0.1.0".to_owned()],
+                ..Default::default()
+            };
+            let members = selected.resolve(&workspace).expect("workspace-only selection");
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].id, id);
+            assert_eq!(members[0].manifest_path, path);
+            assert_eq!(members[0].cargo_spec(), format!("{source}#enabled-lib@0.1.0"));
+        }
+    }
+
+    #[test]
+    fn metadata_without_default_members_requires_an_explicit_selection() {
+        let mut value: Value = serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("metadata fixture");
+        value.as_object_mut().expect("metadata object").remove("workspace_default_members");
+        let metadata: Metadata = serde_json::from_value(value).expect("legacy metadata");
+        let workspace = Workspace::from_metadata(&metadata);
+        let selected = crate::select::Selection {
+            packages: vec!["enabled-lib@0.1.0".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(selected.resolve(&workspace).expect("explicit selection").len(), 1);
+        let error = crate::select::Selection::default()
+            .resolve(&workspace)
+            .expect_err("missing defaults must not be guessed");
+        assert!(error.to_string().contains("select explicitly"), "{error}");
     }
 
     #[test]
@@ -565,7 +656,7 @@ mod tests {
             fs::write(directory.join("examples/a.rs"), "fn main() {}\n").expect("a example");
         }
 
-        let workspace = Workspace::load(Some(&root.join("Cargo.toml"))).expect("load fixture");
+        let workspace = Workspace::load(Some(&root.join("Cargo.toml")), None).expect("load fixture");
         assert_eq!(
             workspace.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
             ["alpha", "zeta"]

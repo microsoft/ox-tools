@@ -430,6 +430,7 @@ mod tests {
             });
         }
         Member {
+            id: "literal-id".to_owned(),
             name: "m".to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),

@@ -153,6 +153,7 @@ impl Plan {
                     let placeholders = Placeholders::Package {
                         name: m.name.clone(),
                         spec: m.spec(),
+                        cargo_spec: m.cargo_spec(),
                         version: m.version.clone(),
                         manifest: m.manifest_path.display().to_string(),
                         workspace_rust_version: workspace_rust_version.map(str::to_owned),
@@ -175,6 +176,7 @@ impl Plan {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
                                 spec: member.spec(),
+                                cargo_spec: member.cargo_spec(),
                                 version: member.version.clone(),
                                 manifest: member.manifest_path.display().to_string(),
                                 target: target.name.clone(),
@@ -245,10 +247,13 @@ mod tests {
 
     fn member(name: &str) -> Member {
         Member {
+            id: format!("literal-{name}"),
             name: name.to_owned(),
             version: "1.2.3".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),
-            manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
+            manifest_path: PathBuf::from(if cfg!(windows) { r"C:\ws" } else { "/ws" })
+                .join(name)
+                .join("Cargo.toml"),
             publishable: true,
             doctest: true,
             features: BTreeSet::new(),
@@ -345,17 +350,22 @@ mod tests {
         assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha"));
         assert_eq!(
             plan.invocations[0].argv,
-            ["cargo", "check-external-types", "--manifest-path", "/ws/alpha/Cargo.toml"]
+            [
+                "cargo",
+                "check-external-types",
+                "--manifest-path",
+                &a.manifest_path.display().to_string()
+            ]
         );
         assert!(plan.invocations[0].work_dir.is_none());
-        assert_eq!(plan.invocations[1].argv[3], "/ws/beta/Cargo.toml");
+        assert_eq!(plan.invocations[1].argv[3], b.manifest_path.display().to_string());
     }
 
     #[test]
     fn chdir_sets_work_dir_to_crate_root() {
         let a = member("alpha");
         let plan = build(&[&a], Mode::PerPackage, true, PackagesExpansion::Explicit, &cmd(&["cargo", "fmt"])).expect("build");
-        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
+        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(a.manifest_dir()));
     }
 
     #[test]
@@ -565,7 +575,7 @@ mod tests {
             },
         )
         .expect("build target plan");
-        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
+        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(a.manifest_dir()));
     }
 
     #[test]
