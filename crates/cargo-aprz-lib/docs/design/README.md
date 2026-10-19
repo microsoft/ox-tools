@@ -57,7 +57,9 @@ Extraction accepts only regular files and directories, refuses paths outside
 the destination and filesystem links, and imposes entry-count and uncompressed
 size limits. A staged database must parse successfully before it is published.
 Each transfer attempt uses its own temporary file so a timed-out write cannot
-corrupt a retry. Advisory HTTP failures that exhaust request resilience and
+corrupt a retry. The advisory body-transfer timeout starts after response headers
+arrive; it does not interrupt request retries or `Retry-After` waits.
+Advisory HTTP failures that exhaust request resilience and
 compressed-size violations do not trigger whole-transfer retries. Failed
 downloads or extraction never replace the last usable database or mark the
 refresh successful. Cache identity includes the archive URL so changing mirrors

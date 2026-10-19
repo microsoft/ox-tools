@@ -10,6 +10,7 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use ohno::{IntoAppError, bail};
 use tar::Archive;
+use tick::FutureExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::Result;
@@ -33,11 +34,10 @@ pub(super) async fn download_with_clock(
 ) -> Result<()> {
     let url = url.to_owned();
     let destination = destination.to_path_buf();
-    let archive_file = resilient_http::resilient_download_with_clock(
+    let archive_file = resilient_http::retry_download_with_clock(
         "advisory_archive",
-        (destination.clone(), url, client),
-        Some(timeout),
-        |(destination, url, client)| async move {
+        (destination.clone(), url, client, clock.clone()),
+        move |(destination, url, client, clock)| async move {
             // Request resilience is already exhausted; only body failures need a whole-transfer retry.
             let response = match resilient_http::resilient_get(&client, &url).await {
                 Ok(response) => response,
@@ -54,26 +54,10 @@ pub(super) async fn download_with_clock(
             {
                 return Ok(Err(error));
             }
-            let (archive_file, output) = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
-                let archive_file = tempfile::NamedTempFile::new_in(destination)?;
-                let output = archive_file.reopen()?;
-                Ok((archive_file, output))
-            })
-            .await??;
-            let mut output = tokio::fs::File::from_std(output);
-            let mut stream = std::pin::pin!(resilient_http::response_stream(response));
-            let mut downloaded = 0_u64;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                downloaded += chunk.len() as u64;
-                if let Err(error) = check_download_size(downloaded) {
-                    return Ok(Err(error));
-                }
-                output.write_all(&chunk).await?;
-            }
-            output.flush().await?;
-            drop(output);
-            Ok(Ok(archive_file))
+            write_archive(response, destination)
+                .timeout(&clock, timeout)
+                .await
+                .into_app_err("download timed out")?
         },
         clock,
     )
@@ -84,6 +68,29 @@ pub(super) async fn download_with_clock(
         Ok(())
     })
     .await?
+}
+
+async fn write_archive(response: fetch::HttpResponse, destination: std::path::PathBuf) -> Result<Result<tempfile::NamedTempFile>> {
+    let (archive_file, output) = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        let archive_file = tempfile::NamedTempFile::new_in(destination)?;
+        let output = archive_file.reopen()?;
+        Ok((archive_file, output))
+    })
+    .await??;
+    let mut output = tokio::fs::File::from_std(output);
+    let mut stream = std::pin::pin!(resilient_http::response_stream(response));
+    let mut downloaded = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        downloaded += chunk.len() as u64;
+        if let Err(error) = check_download_size(downloaded) {
+            return Ok(Err(error));
+        }
+        output.write_all(&chunk).await?;
+    }
+    output.flush().await?;
+    drop(output);
+    Ok(Ok(archive_file))
 }
 
 fn check_download_size(bytes: u64) -> Result<()> {
@@ -328,6 +335,63 @@ mod tests {
 
         assert!(format!("{error:#}").contains("request resilience exhausted"), "{error:#}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn request_retry_after_waits_do_not_consume_the_body_timeout() {
+        for status in [fetch::StatusCode::TOO_MANY_REQUESTS, fetch::StatusCode::FORBIDDEN] {
+            let control = tick::ClockControl::new();
+            let clock = tick::Clock::from(control.clone());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let recorded = Arc::clone(&calls);
+            let handler = fetch::fake::FakeHandler::from_fn(move |_| {
+                if recorded.fetch_add(1, Ordering::SeqCst) == 0 {
+                    fetch::HttpResponseBuilder::new_fake()
+                        .status(status)
+                        .header("retry-after", "120")
+                        .build()
+                } else {
+                    fetch::HttpResponseBuilder::new_fake()
+                        .bytes(bytes::Bytes::from_static(include_bytes!(
+                            "../../../tests/fixtures/advisories/root.tar.gz"
+                        )))
+                        .build()
+                }
+            });
+            let client = resilient_http::configure_request_resilience(fetch::HttpClient::builder_fake(handler, &clock)).build();
+            let destination = tempfile::tempdir().unwrap();
+            let download = download_with_clock(
+                destination.path(),
+                "https://example.test/database.tar.gz",
+                Duration::from_mins(1),
+                client,
+                clock,
+            );
+            let mut download = std::pin::pin!(download);
+            while calls.load(Ordering::SeqCst) == 0 {
+                assert!(futures_util::poll!(&mut download).is_pending());
+                tokio::task::yield_now().await;
+            }
+
+            control.advance(Duration::from_secs(61));
+            assert!(futures_util::poll!(&mut download).is_pending());
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "the body timeout must not restart a waiting request"
+            );
+            control.advance(Duration::from_secs(58));
+            assert!(futures_util::poll!(&mut download).is_pending());
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "Retry-After must elapse before the next GET");
+
+            control.advance(Duration::from_secs(1));
+            download
+                .await
+                .expect("the body receives its own timeout after the request retry succeeds");
+
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(rustsec::database::Database::open(destination.path()).unwrap().iter().count(), 1);
+        }
     }
 
     #[tokio::test]

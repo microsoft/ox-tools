@@ -17,43 +17,47 @@ use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusCode};
 use futures_util::{Stream, StreamExt};
 use http_body_util::BodyExt;
 use layered::{Execute, Service, Stack};
-use ohno::app_err;
+use ohno::{IntoAppError, app_err};
 use seatbelt::retry::{Backoff, Retry};
-use seatbelt::timeout::Timeout;
 use seatbelt::{RecoveryInfo, ResilienceContext};
-use tick::Clock;
+use tick::{Clock, FutureExt};
 use url::Url;
 
 /// Construct a streaming transport with request retry and timeout middleware.
 ///
 /// Must be called inside the Tokio runtime that will execute requests.
 pub fn new_client() -> HttpClient {
-    HttpClient::builder_tokio(TokioDeps::default())
-        .tls_options(fetch::tls::TlsOptions::new_native_tls())
-        .insecure_allow_http()
-        .custom_pipeline(|dispatch, context| {
-            (
-                HttpRetry::layer("retry", context.resilience_context())
-                    .http_configure_defaults()
-                    .recovery_with(|result, _| should_retry_response(result))
-                    .max_retry_attempts(MAX_RETRY_ATTEMPTS)
-                    .base_delay(RETRY_BASE_DELAY)
-                    .backoff(Backoff::Exponential)
-                    .on_retry(|_output, args| {
-                        log::debug!(
-                            "retrying HTTP GET (attempt {}, delay {}ms)",
-                            args.attempt().index() + 1,
-                            args.retry_delay().as_millis(),
-                        );
-                    }),
-                HttpTimeout::layer("timeout", context.resilience_context())
-                    .http_timeout_error()
-                    .timeout(DEFAULT_REQUEST_TIMEOUT),
-                dispatch,
-            )
-                .into_service()
-        })
-        .build()
+    configure_request_resilience(
+        HttpClient::builder_tokio(TokioDeps::default())
+            .tls_options(fetch::tls::TlsOptions::new_native_tls())
+            .insecure_allow_http(),
+    )
+    .build()
+}
+
+pub(crate) fn configure_request_resilience(builder: fetch::HttpClientBuilder) -> fetch::HttpClientBuilder {
+    builder.custom_pipeline(|dispatch, context| {
+        (
+            HttpRetry::layer("retry", context.resilience_context())
+                .http_configure_defaults()
+                .recovery_with(|result, _| should_retry_response(result))
+                .max_retry_attempts(MAX_RETRY_ATTEMPTS)
+                .base_delay(RETRY_BASE_DELAY)
+                .backoff(Backoff::Exponential)
+                .on_retry(|_output, args| {
+                    log::debug!(
+                        "retrying HTTP GET (attempt {}, delay {}ms)",
+                        args.attempt().index() + 1,
+                        args.retry_delay().as_millis(),
+                    );
+                }),
+            HttpTimeout::layer("timeout", context.resilience_context())
+                .http_timeout_error()
+                .timeout(DEFAULT_REQUEST_TIMEOUT),
+            dispatch,
+        )
+            .into_service()
+    })
 }
 
 /// The expected wire length, when the server supplies one.
@@ -225,8 +229,39 @@ where
     Fut: Future<Output = crate::Result<Out>> + Send,
     F: Fn(In) -> Fut + Send + Sync + Clone + 'static,
 {
-    let context = ResilienceContext::new(&clock).name(name);
     let timeout_duration = timeout.unwrap_or(DEFAULT_DOWNLOAD_TIMEOUT);
+    let retry_clock = clock.clone();
+    retry_download_with_clock(
+        name,
+        input,
+        move |input| {
+            let clock = clock.clone();
+            let download = download_fn.clone();
+            async move {
+                download(input)
+                    .timeout(&clock, timeout_duration)
+                    .await
+                    .into_app_err("download timed out")?
+            }
+        },
+        retry_clock,
+    )
+    .await
+}
+
+pub(crate) async fn retry_download_with_clock<In, Out, Fut, F>(
+    name: &'static str,
+    input: In,
+    download_fn: F,
+    clock: Clock,
+) -> crate::Result<Out>
+where
+    In: Clone + Send + Sync + 'static,
+    Out: Send + 'static,
+    Fut: Future<Output = crate::Result<Out>> + Send,
+    F: Fn(In) -> Fut + Send + Sync + Clone + 'static,
+{
+    let context = ResilienceContext::new(&clock).name(name);
 
     let service = (
         Retry::layer(stringify!(retry), &context)
@@ -245,9 +280,6 @@ where
                     args.retry_delay().as_millis(),
                 );
             }),
-        Timeout::layer(stringify!(timeout), &context)
-            .timeout_error(|_| app_err!("download timed out"))
-            .timeout(timeout_duration),
         Execute::new(move |input: In| {
             let f = download_fn.clone();
             async move { f(input).await }

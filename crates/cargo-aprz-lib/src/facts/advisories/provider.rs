@@ -51,13 +51,13 @@ impl Provider {
     }
 
     async fn with_fetcher<F: DbFetcher>(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<F>) -> Result<Self> {
-        let _lock = lock_cache(cache.dir()).await?;
+        let lock = Arc::new(lock_cache(cache.dir()).await?);
         if let CacheResult::Data((url, directory)) = cache.load::<(String, String)>("last_synced.bin")
             && url == database_url
         {
             let path = snapshot_path(cache.dir(), &directory)?;
             return Ok(Self {
-                database: Arc::new(open_db(path, progress.as_ref()).await?),
+                database: Arc::new(open_db(path, progress.as_ref(), lock).await?),
             });
         }
 
@@ -68,12 +68,12 @@ impl Provider {
             .into_app_err(
                 "downloading the advisory archive; --advisory-archive-url must point to a .tar.gz archive, not a Git repository",
             )?;
-        let database = open_db(stage.path(), progress.as_ref())
+        let database = open_db(stage.path(), progress.as_ref(), Arc::clone(&lock))
             .await
             .into_app_err("validating the downloaded advisory database")?;
         let cache = cache.clone();
         let database_url = database_url.to_owned();
-        tokio::task::spawn_blocking(move || publish_snapshot(&cache, stage, &database_url)).await??;
+        tokio::task::spawn_blocking(move || with_cache_lock(lock, || publish_snapshot(&cache, stage, &database_url))).await??;
         Ok(Self {
             database: Arc::new(database),
         })
@@ -145,14 +145,20 @@ where
         .map(|(crate_spec, data)| (crate_spec, ProviderResult::Found(data)))
 }
 
-async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress) -> Result<Database> {
+async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress, lock: Arc<std::fs::File>) -> Result<Database> {
     let cache_path = cache_dir.as_ref().to_path_buf();
 
     run_blocking_with_progress(progress, "Opening the advisory database", "opening", move || {
-        Database::open(&cache_path).map_err(Into::into)
+        with_cache_lock(lock, || Database::open(&cache_path).map_err(Into::into))
     })
     .await
     .into_app_err("opening the advisory database")
+}
+
+fn with_cache_lock<T>(lock: Arc<std::fs::File>, operation: impl FnOnce() -> T) -> T {
+    // Blocking work outlives a cancelled initializer, so it must own its lock guard.
+    let _lock = lock;
+    operation()
 }
 
 async fn download_db<F: DbFetcher>(
@@ -558,6 +564,56 @@ mod tests {
         assert!(error.to_string().contains("waiting for another advisory cache refresh"), "{error}");
     }
 
+    #[tokio::test]
+    async fn cancelled_cache_publication_keeps_the_lock_until_blocking_work_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let previous = root.path().join(".advisories-old");
+        write_advisory(&previous, "old-crate", "RUSTSEC-2020-0001", None);
+        cache.save("last_synced.bin", &("old-url", ".advisories-old")).unwrap();
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        write_advisory(stage.path(), "new-crate", "RUSTSEC-2020-0002", None);
+        let snapshot = stage.path().to_path_buf();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(async move {
+            let lock = Arc::new(lock_cache(cache.dir()).await?);
+            tokio::task::spawn_blocking(move || {
+                let result = with_cache_lock(lock, || {
+                    started_tx.send(()).expect("the test waits for publication to start");
+                    release_rx.recv().expect("the test releases the publication worker");
+                    publish_snapshot(&cache, stage, "new-url")
+                });
+                finished_tx.send(()).expect("the test waits for the publication worker to finish");
+                result
+            })
+            .await?
+        });
+
+        started_rx.await.unwrap();
+        caller.abort();
+        let cancelled = caller.await.unwrap_err();
+        let contender = lock_cache_with_timeout(root.path(), Duration::ZERO).await;
+        let blocked = contender.is_err();
+        drop(contender);
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        let _next_lock = lock_cache_with_timeout(root.path(), Duration::ZERO)
+            .await
+            .expect("publication must release the lock when its worker finishes");
+
+        assert!(cancelled.is_cancelled());
+        assert!(blocked, "a competing initializer must not lock during detached publication");
+        assert!(snapshot.join("crates").is_dir());
+        assert!(!previous.exists(), "the detached worker must finish old-snapshot cleanup");
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        assert!(matches!(
+            cache.load::<(String, String)>("last_synced.bin"),
+            CacheResult::Data((url, _)) if url == "new-url"
+        ));
+    }
+
     #[test]
     fn cache_snapshot_paths_cannot_escape_the_cache_root() {
         let error = snapshot_path(Path::new("cache"), "../outside").expect_err("the marker cannot reference a parent directory");
@@ -925,7 +981,8 @@ mod tests {
         let seeded = tmp.path().join("seeded");
         write_advisory(&seeded, "seeded-crate", "RUSTSEC-2020-0100", None);
         let progress = RecordingProgress::default();
-        let _database = open_db(&seeded, &progress).await.unwrap();
+        let lock = Arc::new(lock_cache(tmp.path()).await.unwrap());
+        let _database = open_db(&seeded, &progress, lock).await.unwrap();
 
         let downloaded = tmp.path().join("downloaded");
         download_db(
