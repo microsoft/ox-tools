@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use compact_str::CompactString;
+use fetch::http::header::LINK;
 use futures_util::future::join_all;
 use ohno::EnrichableExt;
-use reqwest::header::LINK;
 
 use super::cached_repo::{CachedIssue, CachedRepo};
 use super::client::{Client, HostingApiResult, Issue, RateLimitInfo, Repository};
@@ -526,7 +526,7 @@ impl Provider {
         let url = Self::repo_url(client, owner, repo, "");
 
         let (resp, rate_limit) = unwrap_or_return!(client.api_call(&url).await);
-        match resp.json().await {
+        match resp.into_body().into_json().await {
             Ok(repo_info) => HostingApiResult::Success(repo_info, rate_limit),
             Err(e) => HostingApiResult::Failed(e.into(), rate_limit),
         }
@@ -563,7 +563,7 @@ impl Provider {
                 .and_then(|h| h.to_str().ok())
                 .is_some_and(|link_str| link_str.contains(r#"rel="next""#));
 
-            let issues: Vec<Issue> = match resp.json().await {
+            let issues: Vec<Issue> = match resp.into_body().into_json().await {
                 Ok(i) => i,
                 Err(e) => return HostingApiResult::Failed(e.into(), latest_rate_limit),
             };
@@ -1286,9 +1286,9 @@ mod tests {
         assert!(filename.contains("passwd.bin"));
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime")]
-    fn test_repo_url() {
+    async fn test_repo_url() {
         let client = Client::new(None, "https://api.github.com").unwrap();
 
         let url = Provider::repo_url(&client, "tokio-rs", "tokio", "");
@@ -1345,9 +1345,9 @@ mod tests {
         assert_eq!(repo_data.rate_limit.unwrap().remaining, 5000);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime")]
-    fn test_provider_new() {
+    async fn test_provider_new() {
         let provider = Provider::new(
             None,
             None,
@@ -1402,9 +1402,9 @@ mod tests {
         assert_eq!(tracker.topic_state(TrackedTopic::Repos), (5, 0, TopicStatus::Active));
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime")]
-    fn test_provider_new_with_tokens() {
+    async fn test_provider_new_with_tokens() {
         let provider = Provider::new(
             Some("github_token"),
             Some("codeberg_token"),

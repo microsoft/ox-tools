@@ -6,7 +6,7 @@
 //! Minimal GitHub API client for fetching repository and issue data.
 
 use chrono::{DateTime, Utc};
-use reqwest::header::{HeaderMap, HeaderValue};
+use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusExt};
 use serde::Deserialize;
 
 const LOG_TARGET: &str = "   hosting";
@@ -82,7 +82,8 @@ pub enum HostingApiResult<T> {
 /// Hosting API client (GitHub, Codeberg, etc.)
 #[derive(Debug, Clone)]
 pub struct Client {
-    client: reqwest::Client,
+    transport: HttpClient,
+    authorization: Option<HeaderValue>,
     base_url: String,
 }
 
@@ -92,32 +93,15 @@ fn authorization_value(token: &str) -> crate::Result<HeaderValue> {
     Ok(value)
 }
 
-fn build_client(builder: reqwest::ClientBuilder) -> crate::Result<reqwest::Client> {
-    Ok(builder.build()?)
-}
-
 impl Client {
-    fn from_builder(client_builder: reqwest::ClientBuilder, base_url: String) -> crate::Result<Self> {
-        Ok(Self {
-            client: build_client(client_builder)?,
-            base_url,
-        })
-    }
-
     /// Create a new hosting API client with optional authentication token and base URL
     pub fn new(token: Option<&str>, base_url: impl Into<String>) -> crate::Result<Self> {
-        use reqwest::header::AUTHORIZATION;
-
-        let mut client_builder = reqwest::Client::builder().user_agent("cargo-aprz");
-
-        if let Some(t) = token {
-            let mut headers = HeaderMap::new();
-            let _ = headers.insert(AUTHORIZATION, authorization_value(t)?);
-
-            client_builder = client_builder.default_headers(headers);
-        }
-
-        Self::from_builder(client_builder, base_url.into())
+        let authorization = token.map(authorization_value).transpose()?;
+        Ok(Self {
+            transport: crate::facts::resilient_http::new_client(),
+            authorization,
+            base_url: base_url.into(),
+        })
     }
 
     /// Get the base URL for this client
@@ -127,8 +111,8 @@ impl Client {
     }
 
     /// Make an API call and classify the result
-    pub async fn api_call(&self, url: &str) -> HostingApiResult<reqwest::Response> {
-        let resp = match crate::facts::resilient_http::resilient_get(&self.client, url).await {
+    pub async fn api_call(&self, url: &str) -> HostingApiResult<HttpResponse> {
+        let resp = match crate::facts::resilient_http::resilient_get_authorized(&self.transport, url, self.authorization.clone()).await {
             Ok(r) => r,
             Err(e) => return HostingApiResult::Failed(e, None),
         };
@@ -141,7 +125,7 @@ impl Client {
 
 /// Classify an HTTP response into a [`HostingApiResult`].
 // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "discarding supplied rate-limit state replaces the mocked reset time with a one-hour retry pause")]
-fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>, url: &str) -> HostingApiResult<reqwest::Response> {
+fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url: &str) -> HostingApiResult<HttpResponse> {
     let status = resp.status();
     log::debug!(target: LOG_TARGET, "HTTP {status} for {url}");
 
@@ -155,7 +139,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
         // Extract Retry-After header (used by GitHub for secondary/abuse rate limits)
         let retry_after_secs = resp
             .headers()
-            .get(reqwest::header::RETRY_AFTER)
+            .get(fetch::http::header::RETRY_AFTER)
             .and_then(|h| h.to_str().ok())
             .and_then(|s| crate::facts::resilient_http::parse_retry_after_value(s, Utc::now()));
 
@@ -190,7 +174,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
         // 403 with remaining > 0 and no Retry-After — not a rate limit
         // (e.g., repo is private, DMCA takedown, insufficient permissions)
         log::warn!(target: LOG_TARGET, "HTTP 403 (not rate-limited, remaining: {}) for {url}", rate_limit.map_or(0, |rl| rl.remaining));
-        let error = resp.error_for_status().expect_err("status is not successful at this point");
+        let error = resp.ensure_success().expect_err("status is not successful at this point");
         return HostingApiResult::Failed(error.into(), rate_limit);
     }
 
@@ -202,7 +186,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
 
     // Any other HTTP error is a permanent failure
     log::warn!(target: LOG_TARGET, "HTTP {status_code} for {url}");
-    let error = resp.error_for_status().expect_err("status is not successful at this point");
+    let error = resp.ensure_success().expect_err("status is not successful at this point");
     HostingApiResult::Failed(error.into(), rate_limit)
 }
 
@@ -487,35 +471,33 @@ mod tests {
     }
 
     #[test]
-    fn client_builder_errors_are_propagated() {
-        let error = Client::from_builder(reqwest::Client::builder().user_agent("\n"), "unused".to_string())
-            .expect_err("an invalid user-agent must make client construction fail");
+    fn invalid_credentials_are_rejected() {
+        let error = Client::new(Some("invalid\ntoken"), "https://api.github.com")
+            .expect_err("a newline must not be accepted in an authorization header");
 
-        assert!(error.to_string().contains("builder error"), "{error}");
+        assert!(error.to_string().contains("header"), "{error}");
     }
 
-    #[test]
-    fn test_client_new_without_token() {
+    #[tokio::test]
+    async fn test_client_new_without_token() {
         let client = Client::new(None, "https://api.github.com").unwrap();
         assert_eq!(client.base_url(), "https://api.github.com");
     }
 
-    #[test]
-    fn test_client_new_with_token() {
+    #[tokio::test]
+    async fn test_client_new_with_token() {
         let client = Client::new(Some("test_token"), "https://api.github.com").unwrap();
         assert_eq!(client.base_url(), "https://api.github.com");
     }
 
-    #[test]
-    fn test_client_base_url() {
+    #[tokio::test]
+    async fn test_client_base_url() {
         let client = Client::new(None, "https://codeberg.org/api/v1").unwrap();
         assert_eq!(client.base_url(), "https://codeberg.org/api/v1");
     }
 
     #[test]
     fn test_hosting_api_result_success() {
-        // Create a mock response (we can't create a real reqwest::Response without network)
-        // So we'll just test that we can create the enum variant
         let rate_limit = Some(RateLimitInfo {
             remaining: 5000,
             reset_at: DateTime::from_timestamp(1_234_567_890, 0).unwrap(),
@@ -543,15 +525,15 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Helper: start a wiremock server, mount a response, GET it with a plain reqwest client,
+    /// Helper: start a wiremock server, mount a response, GET it with a plain HTTP client,
     /// then run `classify_response` on the result.
-    async fn classify(template: ResponseTemplate) -> HostingApiResult<reqwest::Response> {
+    async fn classify(template: ResponseTemplate) -> HostingApiResult<HttpResponse> {
         let server = MockServer::start().await;
         Mock::given(method("GET")).respond_with(template).mount(&server).await;
 
-        let client = reqwest::Client::new();
+        let client = crate::facts::resilient_http::new_client();
         let url = server.uri();
-        let resp = client.get(&url).send().await.unwrap();
+        let resp = client.get(url.as_str()).fetch().await.unwrap();
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
         classify_response(resp, rate_limit, &url)
     }
@@ -573,12 +555,12 @@ mod tests {
             .await;
         let client = Client::new(None, server.uri()).expect("fixed client settings are valid");
 
-        client.client.get(server.uri()).send().await.expect("mock request succeeds");
+        assert!(matches!(client.api_call(&server.uri()).await, HostingApiResult::Success(..)));
 
         let requests = server.received_requests().await.expect("wiremock records requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0].headers.get(reqwest::header::USER_AGENT),
+            requests[0].headers.get(fetch::http::header::USER_AGENT),
             Some(&HeaderValue::from_static("cargo-aprz"))
         );
     }

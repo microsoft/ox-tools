@@ -494,23 +494,9 @@ async fn prep_tables_core(
     now: DateTime<Utc>,
     progress: Arc<dyn Progress>,
 ) -> Result<TableMgr> {
-    prep_tables_core_with_client(source, tables_root, max_ttl, now, progress, || {
-        reqwest::Client::builder().user_agent("cargo-aprz").build()
-    })
-    .await
-}
-
-async fn prep_tables_core_with_client(
-    source: &Url,
-    tables_root: std::path::PathBuf,
-    max_ttl: Duration,
-    now: DateTime<Utc>,
-    progress: Arc<dyn Progress>,
-    client: impl FnOnce() -> core::result::Result<reqwest::Client, reqwest::Error>,
-) -> Result<TableMgr> {
     log::info!(target: LOG_TARGET, "Starting crates database download from {source}");
 
-    let client = client().into_app_err("creating HTTP client")?;
+    let client = crate::facts::resilient_http::new_client();
 
     let response = download_response(&client, source)
         .await
@@ -520,7 +506,7 @@ async fn prep_tables_core_with_client(
         bail!("unable to download crates database dump: HTTP {}", response.status());
     }
 
-    let content_length = response.content_length();
+    let content_length = crate::facts::resilient_http::content_length(&response);
 
     // Set up progress callback for download
     // #[gamma::skip(literal.int_increment, reason = "the initial byte count is transient telemetry sampled concurrently with network I/O; exact transferred and final totals are tested through deterministic seams")]
@@ -542,7 +528,7 @@ async fn prep_tables_core_with_client(
     Ok(table_mgr)
 }
 
-async fn download_response(client: &reqwest::Client, source: &Url) -> Result<reqwest::Response> {
+async fn download_response(client: &fetch::HttpClient, source: &Url) -> Result<fetch::HttpResponse> {
     crate::facts::resilient_http::resilient_get(client, source.as_str())
         .await
         .into_app_err("starting crates database dump download")
@@ -575,12 +561,12 @@ fn set_download_progress(progress: &dyn Progress, content_length: Option<u64>, d
 #[cfg_attr(coverage_nightly, coverage(off))]
 // #[gamma::skip(parameter.default_shadow, tag = "equivalent", reason = "a successfully exhausted HTTP body has transferred exactly its Content-Length; stream errors and closed receivers return before final bookkeeping, so discarding this final-store hint leaves the same byte count")]
 async fn stream_download(
-    response: reqwest::Response,
+    response: fetch::HttpResponse,
     tx: &mpsc::Sender<Result<Bytes>>,
     downloaded_bytes: &core::sync::atomic::AtomicU64,
     content_length: Option<u64>,
 ) {
-    let stream = response.bytes_stream().map(|chunk| chunk.map_err(Into::into));
+    let stream = crate::facts::resilient_http::response_stream(response).map(|chunk| chunk.map_err(Into::into));
     forward_download_stream(stream, tx, downloaded_bytes, content_length).await;
 }
 
@@ -715,7 +701,6 @@ impl Read for ChannelReader {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::ErrorKind;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
@@ -728,8 +713,8 @@ mod tests {
         CRATES_DB_DOWNLOAD_OPERATION, CRATES_DB_DOWNLOAD_TIMEOUT, ChannelReader, CratesTable, DELETE_ALL_TABLES_HOOK, ELAPSED_MS_HOOK,
         IoError, Path, SHARING_VIOLATION, SLEEP_HOOK, SLEEP_SECONDS_HOOK, Table, TableMgr, archive_entry_path, archive_filename,
         delete_all_tables, determinate_download_progress, download_channel, download_response, finish_download, forward_download_stream,
-        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, prep_tables_core_with_client, process_download,
-        removal_left_file_locked, send_download_chunk, set_download_progress,
+        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, process_download, removal_left_file_locked,
+        send_download_chunk, set_download_progress,
     };
     use crate::facts::progress::Progress;
 
@@ -1144,7 +1129,11 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let response = reqwest::get(format!("{}/bytes", server.uri())).await.unwrap();
+        let response = crate::facts::resilient_http::new_client()
+            .get(format!("{}/bytes", server.uri()))
+            .fetch()
+            .await
+            .unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let downloaded = AtomicU64::new(0);
 
@@ -1281,40 +1270,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn table_preparation_returns_client_builder_errors_with_the_creation_context() {
-        let source = url::Url::parse("http://127.0.0.1:0/must-not-be-contacted").unwrap();
-        let progress = Arc::new(RecordingProgress::default());
-        let call_progress = Arc::clone(&progress);
-        let error = prep_tables_core_with_client(
-            &source,
-            PathBuf::from("synthetic/cache"),
-            Duration::from_hours(1),
-            chrono::DateTime::UNIX_EPOCH,
-            call_progress,
-            || reqwest::Client::builder().user_agent("\n").build(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("creating HTTP client"), "{error}");
-        assert!(
-            progress
-                .determinate
-                .lock()
-                .expect("client creation fails before this test-owned callback slot is modified; locked access only reads it")
-                .is_none()
-        );
-        assert!(
-            progress
-                .indeterminate
-                .lock()
-                .expect("client creation fails before this test-owned callback slot is modified; locked access only reads it")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
     async fn download_transport_errors_are_returned_with_context() {
-        let client = reqwest::Client::new();
+        let client = crate::facts::resilient_http::new_client();
         let source = url::Url::parse("http://127.0.0.1:0/db-dump.tar.gz").expect("fixed URL is valid");
 
         let error = download_response(&client, &source)

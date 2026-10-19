@@ -16,8 +16,8 @@ pub const DEFAULT_GITHUB_URL: &str = "https://api.github.com";
 /// The Codeberg REST API queried by the hosting provider.
 pub const DEFAULT_CODEBERG_URL: &str = "https://codeberg.org/api/v1";
 
-/// The git repository holding the `RustSec` advisory database.
-pub const DEFAULT_ADVISORY_URL: &str = rustsec::repository::git::DEFAULT_URL;
+/// The gzip-compressed tar archive of the `RustSec` advisory database.
+pub const DEFAULT_ADVISORY_ARCHIVE_URL: &str = "https://github.com/RustSec/advisory-db/archive/refs/heads/main.tar.gz";
 
 /// Base addresses of the external services the providers talk to.
 ///
@@ -35,7 +35,7 @@ pub struct Endpoints {
     coverage_url: String,
     github_url: String,
     codeberg_url: String,
-    advisory_url: String,
+    advisory_archive_url: String,
 }
 
 impl Default for Endpoints {
@@ -46,7 +46,7 @@ impl Default for Endpoints {
             coverage_url: DEFAULT_COVERAGE_URL.to_owned(),
             github_url: DEFAULT_GITHUB_URL.to_owned(),
             codeberg_url: DEFAULT_CODEBERG_URL.to_owned(),
-            advisory_url: DEFAULT_ADVISORY_URL.to_owned(),
+            advisory_archive_url: DEFAULT_ADVISORY_ARCHIVE_URL.to_owned(),
         }
     }
 }
@@ -81,10 +81,10 @@ impl Endpoints {
         }
     }
 
-    /// Address of the `RustSec` advisory database repository.
+    /// Address of the `RustSec` advisory database tar.gz archive.
     #[must_use]
-    pub fn advisory_url(&self) -> &str {
-        &self.advisory_url
+    pub fn advisory_archive_url(&self) -> &str {
+        &self.advisory_archive_url
     }
 
     /// Redirect the crates.io database dump.
@@ -124,10 +124,10 @@ impl Endpoints {
         self
     }
 
-    /// Redirect the `RustSec` advisory database repository.
+    /// Redirect the `RustSec` advisory database archive.
     #[must_use]
-    pub fn with_advisory_url(mut self, url: impl Into<String>) -> Self {
-        self.advisory_url = url.into();
+    pub fn with_advisory_archive_url(mut self, url: impl Into<String>) -> Self {
+        self.advisory_archive_url = url.into();
         self
     }
 }
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), DEFAULT_COVERAGE_URL);
         assert_eq!(endpoints.host_url("github.com"), Some(DEFAULT_GITHUB_URL));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(DEFAULT_CODEBERG_URL));
-        assert_eq!(endpoints.advisory_url(), DEFAULT_ADVISORY_URL);
+        assert_eq!(endpoints.advisory_archive_url(), DEFAULT_ADVISORY_ARCHIVE_URL);
     }
 
     #[test]
@@ -163,14 +163,14 @@ mod tests {
             .with_coverage_url("http://localhost/badge")
             .with_github_url("http://localhost/github")
             .with_codeberg_url("http://localhost/codeberg")
-            .with_advisory_url("http://localhost/advisories.git");
+            .with_advisory_archive_url("http://localhost/advisories.tar.gz");
 
         assert_eq!(endpoints.dump_url(), "http://localhost/dump.tar.gz");
         assert_eq!(endpoints.docs_url(), "http://localhost/docs");
         assert_eq!(endpoints.coverage_url(), "http://localhost/badge");
         assert_eq!(endpoints.host_url("github.com"), Some("http://localhost/github"));
         assert_eq!(endpoints.host_url("codeberg.org"), Some("http://localhost/codeberg"));
-        assert_eq!(endpoints.advisory_url(), "http://localhost/advisories.git");
+        assert_eq!(endpoints.advisory_archive_url(), "http://localhost/advisories.tar.gz");
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), DEFAULT_COVERAGE_URL);
         assert_eq!(endpoints.host_url("github.com"), Some(DEFAULT_GITHUB_URL));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(DEFAULT_CODEBERG_URL));
-        assert_eq!(endpoints.advisory_url(), DEFAULT_ADVISORY_URL);
+        assert_eq!(endpoints.advisory_archive_url(), DEFAULT_ADVISORY_ARCHIVE_URL);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), DEFAULT_COVERAGE_URL);
         assert_eq!(endpoints.host_url("github.com"), Some(DEFAULT_GITHUB_URL));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(DEFAULT_CODEBERG_URL));
-        assert_eq!(endpoints.advisory_url(), DEFAULT_ADVISORY_URL);
+        assert_eq!(endpoints.advisory_archive_url(), DEFAULT_ADVISORY_ARCHIVE_URL);
     }
 
     #[test]
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), "http://example.invalid/coverage");
         assert_eq!(endpoints.host_url("github.com"), Some(DEFAULT_GITHUB_URL));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(DEFAULT_CODEBERG_URL));
-        assert_eq!(endpoints.advisory_url(), DEFAULT_ADVISORY_URL);
+        assert_eq!(endpoints.advisory_archive_url(), DEFAULT_ADVISORY_ARCHIVE_URL);
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), DEFAULT_COVERAGE_URL);
         assert_eq!(endpoints.host_url("github.com"), Some("http://example.invalid/github"));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(DEFAULT_CODEBERG_URL));
-        assert_eq!(endpoints.advisory_url(), DEFAULT_ADVISORY_URL);
+        assert_eq!(endpoints.advisory_archive_url(), DEFAULT_ADVISORY_ARCHIVE_URL);
     }
 
     #[test]
@@ -239,18 +239,18 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), DEFAULT_COVERAGE_URL);
         assert_eq!(endpoints.host_url("github.com"), Some(DEFAULT_GITHUB_URL));
         assert_eq!(endpoints.host_url("codeberg.org"), Some("http://example.invalid/codeberg"));
-        assert_eq!(endpoints.advisory_url(), DEFAULT_ADVISORY_URL);
+        assert_eq!(endpoints.advisory_archive_url(), DEFAULT_ADVISORY_ARCHIVE_URL);
     }
 
     #[test]
-    fn with_advisory_url_sets_only_the_advisory_url() {
-        let endpoints = Endpoints::default().with_advisory_url("http://example.invalid/advisories.git");
+    fn with_advisory_archive_url_sets_only_the_advisory_archive_url() {
+        let endpoints = Endpoints::default().with_advisory_archive_url("http://example.invalid/advisories.tar.gz");
 
         assert_eq!(endpoints.dump_url(), DEFAULT_DUMP_URL);
         assert_eq!(endpoints.docs_url(), DEFAULT_DOCS_URL);
         assert_eq!(endpoints.coverage_url(), DEFAULT_COVERAGE_URL);
         assert_eq!(endpoints.host_url("github.com"), Some(DEFAULT_GITHUB_URL));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(DEFAULT_CODEBERG_URL));
-        assert_eq!(endpoints.advisory_url(), "http://example.invalid/advisories.git");
+        assert_eq!(endpoints.advisory_archive_url(), "http://example.invalid/advisories.tar.gz");
     }
 }

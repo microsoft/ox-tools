@@ -6,7 +6,7 @@
 //! The helpers here let a test run the real code paths — including the whole CLI — without
 //! touching the network: [`dump`] builds a synthetic crates.io database dump, which is served
 //! from a [`wiremock`] server, and [`seed_advisory_db`] pre-populates the advisory cache so the
-//! advisory provider never clones its git repository.
+//! advisory provider never downloads the public archive.
 
 #![allow(
     dead_code,
@@ -199,10 +199,15 @@ pub async fn run_cli(world: &MockWorld, extra: &[&str]) -> TestHost {
 
 /// Pre-populates the advisory cache under `cache_dir` with a tiny advisory database.
 ///
-/// The advisory provider clones a git repository on a cache miss, which no test can afford to do.
+/// The advisory provider downloads an archive on a cache miss, which these tests avoid.
 /// Writing the "last synced" marker and a database directory in the layout `rustsec` expects makes
-/// the provider skip the clone and read the synthetic advisories instead.
+/// the provider skip the download and read the synthetic advisories instead.
 pub fn seed_advisory_db(cache_dir: &Path) {
+    seed_advisory_db_at(cache_dir, cargo_aprz_lib::internals::facts::DEFAULT_ADVISORY_ARCHIVE_URL);
+}
+
+/// Seed a fresh advisory snapshot for a specific archive endpoint.
+pub fn seed_advisory_db_at(cache_dir: &Path, archive_url: &str) {
     let advisories_dir = cache_dir.join("advisories");
     let repo_dir = advisories_dir.join("repo");
     let crate_dir = repo_dir.join("crates").join("adler2");
@@ -228,5 +233,7 @@ pub fn seed_advisory_db(cache_dir: &Path) {
     .expect("writing the synthetic advisory");
 
     let cache = Cache::new(&advisories_dir, Duration::MAX, false);
-    cache.save("last_synced.bin", &()).expect("writing the advisory sync marker");
+    cache
+        .save("last_synced.bin", &(archive_url, "repo"))
+        .expect("writing the advisory sync marker");
 }

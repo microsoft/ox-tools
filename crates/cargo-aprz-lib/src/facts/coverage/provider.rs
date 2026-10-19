@@ -27,7 +27,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: Arc<reqwest::Client>,
+    client: Arc<fetch::HttpClient>,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -36,10 +36,7 @@ pub struct Provider {
 impl Provider {
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent("cargo-aprz")
-            .build()
-            .expect("unable to create HTTP client");
+        let client = crate::facts::resilient_http::new_client();
 
         Self {
             client: Arc::new(client),
@@ -175,8 +172,8 @@ impl Provider {
             return Err(ohno::app_err!("unexpected HTTP status {status} from {codecov_url}"));
         }
 
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "reqwest body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
-        let text = contextualize_response_text(response.text().await)?;
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
+        let text = contextualize_response_text(response.into_body().into_text().await)?;
 
         log::debug!(target: LOG_TARGET, "Codecov SVG length: {} bytes", text.len());
 
@@ -327,8 +324,8 @@ mod tests {
         assert_eq!(captures.get(1).unwrap().as_str(), "100");
     }
 
-    #[test]
-    fn test_provider_new_default_base_url() {
+    #[tokio::test]
+    async fn test_provider_new_default_base_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, None);
@@ -338,8 +335,8 @@ mod tests {
         assert!(debug.contains(&expected), "unexpected throttler state: {debug}");
     }
 
-    #[test]
-    fn test_provider_new_custom_base_url() {
+    #[tokio::test]
+    async fn test_provider_new_custom_base_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, Some("https://custom.codecov.io"));

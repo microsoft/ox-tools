@@ -8,12 +8,80 @@
 
 use core::time::Duration;
 
+use bytes::{Buf, Bytes};
+use fetch::http::header::{AUTHORIZATION, CONTENT_LENGTH, LOCATION, RETRY_AFTER, USER_AGENT};
+use fetch::tokio::TokioDeps;
+use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusCode};
+use futures_util::{Stream, StreamExt};
+use http_body_util::BodyExt;
 use layered::{Execute, Service, Stack};
 use ohno::app_err;
 use seatbelt::retry::{Backoff, Retry};
 use seatbelt::timeout::Timeout;
 use seatbelt::{RecoveryInfo, ResilienceContext};
 use tick::Clock;
+use url::Url;
+
+/// Construct a streaming transport without a second retry or timeout policy.
+///
+/// Must be called inside the Tokio runtime that will execute requests.
+pub fn new_client() -> HttpClient {
+    HttpClient::builder_tokio(TokioDeps::default())
+        .tls_options(fetch::tls::TlsOptions::new_native_tls())
+        .insecure_allow_http()
+        .minimal_pipeline()
+        .build()
+}
+
+/// The expected wire length, when the server supplies one.
+pub fn content_length(response: &HttpResponse) -> Option<u64> {
+    response.headers().get(CONTENT_LENGTH)?.to_str().ok()?.parse().ok()
+}
+
+/// Adapt pooled transport frames to the byte chunks used by download consumers.
+pub fn response_stream(response: HttpResponse) -> impl Stream<Item = Result<Bytes, fetch::HttpError>> {
+    response.into_body().into_data_stream().map(|chunk| {
+        chunk.map(|mut chunk| {
+            let len = chunk.remaining();
+            chunk.copy_to_bytes(len)
+        })
+    })
+}
+
+async fn get_following_redirects(client: &HttpClient, mut url: Url, authorization: Option<HeaderValue>) -> crate::Result<HttpResponse> {
+    // Match the previous transport's default redirect limit.
+    const MAX_REDIRECTS: usize = 10;
+    let mut authorization = authorization;
+    let mut redirects = 0;
+
+    loop {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(app_err!("HTTP downloads require an http:// or https:// URL"));
+        }
+        let mut request = client.get(url.as_str()).header(USER_AGENT, "cargo-aprz");
+        if let Some(value) = &authorization {
+            request = request.header(AUTHORIZATION, value.clone());
+        }
+        let response = request.fetch().await?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let Some(location) = response.headers().get(LOCATION) else {
+            return Ok(response);
+        };
+        if redirects == MAX_REDIRECTS {
+            return Err(app_err!(
+                "HTTP redirect limit exceeded (maximum {MAX_REDIRECTS}); check the endpoint's redirect configuration"
+            ));
+        }
+        let next = url.join(location.to_str()?)?;
+        if next.origin() != url.origin() {
+            authorization = None;
+        }
+        url = next;
+        redirects += 1;
+    }
+}
 
 /// Default timeout for simple HTTP requests (API calls, badge fetches, etc.)
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
@@ -57,13 +125,13 @@ pub fn parse_retry_after_value(value: &str, now: chrono::DateTime<chrono::Utc>) 
 }
 
 /// Parse the `Retry-After` header as seconds.
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let s = headers.get(reqwest::header::RETRY_AFTER).and_then(|h| h.to_str().ok())?;
+fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
+    let s = headers.get(RETRY_AFTER).and_then(|h| h.to_str().ok())?;
     parse_retry_after_value(s, chrono::Utc::now())
 }
 
 /// Classify an HTTP response for retry purposes.
-fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryInfo {
+fn should_retry_response(result: &crate::Result<HttpResponse>) -> RecoveryInfo {
     match result {
         // Network / connection errors are always transient.
         Err(_) => RecoveryInfo::retry(),
@@ -73,13 +141,13 @@ fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryI
 
         // Rate-limited (429) – honor Retry-After if present, otherwise default to 5s.
         // #[gamma::skip(match_guard.always_true, tag = "timeout", reason = "treating every non-server response as rate limited repeatedly incurs retry delays")]
-        Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+        Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => {
             let delay = parse_retry_after(resp.headers()).unwrap_or(5);
             RecoveryInfo::retry().delay(Duration::from_secs(delay))
         }
 
         // Secondary rate limit (403 with Retry-After) – wait the requested duration and retry.
-        Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => parse_retry_after(resp.headers())
+        Ok(resp) if resp.status() == StatusCode::FORBIDDEN => parse_retry_after(resp.headers())
             .map_or_else(RecoveryInfo::never, |delay| RecoveryInfo::retry().delay(Duration::from_secs(delay))),
 
         // Everything else (success, 4xx client errors) is not retried.
@@ -90,7 +158,16 @@ fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryI
 /// Send an HTTP GET request with automatic retry and timeout.
 ///
 /// Retries on network errors, `5xx`, and 429 responses with exponential backoff.
-pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result<reqwest::Response> {
+pub async fn resilient_get(client: &HttpClient, url: &str) -> crate::Result<HttpResponse> {
+    resilient_get_authorized(client, url, None).await
+}
+
+/// Send a GET with a sensitive authorization header and the common retry policy.
+pub async fn resilient_get_authorized(client: &HttpClient, url: &str, authorization: Option<HeaderValue>) -> crate::Result<HttpResponse> {
+    let url = Url::parse(url)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(app_err!("HTTP downloads require an http:// or https:// URL"));
+    }
     let clock = Clock::new_tokio();
     let context = ResilienceContext::new(&clock).name(stringify!(http_get));
 
@@ -98,7 +175,7 @@ pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result
     let service = (
         Retry::layer(stringify!(retry), &context)
             .clone_input()
-            .recovery_with(|result: &crate::Result<reqwest::Response>, _| should_retry_response(result))
+            .recovery_with(|result: &crate::Result<HttpResponse>, _| should_retry_response(result))
             .max_retry_attempts(MAX_RETRY_ATTEMPTS)
             .base_delay(RETRY_BASE_DELAY)
             .backoff(Backoff::Exponential)
@@ -112,14 +189,15 @@ pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result
         Timeout::layer(stringify!(timeout), &context)
             .timeout_error(|_| app_err!("HTTP request timed out"))
             .timeout(DEFAULT_REQUEST_TIMEOUT),
-        Execute::new(move |url: String| {
+        Execute::new(move |url: Url| {
             let client = client.clone();
-            async move { client.get(&url).send().await.map_err(ohno::AppError::from) }
+            let authorization = authorization.clone();
+            async move { get_following_redirects(&client, url, authorization).await }
         }),
     )
         .into_service();
 
-    service.execute(url.to_string()).await
+    service.execute(url).await
 }
 
 /// Execute an async download operation with automatic retry and timeout.
@@ -229,7 +307,7 @@ mod tests {
 
     #[test]
     fn network_errors_are_classified_as_retryable() {
-        let err: crate::Result<reqwest::Response> = Err(app_err!("connection failed"));
+        let err: crate::Result<HttpResponse> = Err(app_err!("connection failed"));
 
         let recovery = should_retry_response(&err);
 
@@ -252,6 +330,128 @@ mod tests {
         ResponseTemplate::new(status).insert_header("retry-after", "0")
     }
 
+    fn credential() -> HeaderValue {
+        let mut value = HeaderValue::from_static("token secret");
+        value.set_sensitive(true);
+        value
+    }
+
+    #[tokio::test]
+    async fn follows_relative_redirects_and_preserves_same_origin_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/final?download=1"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/final"))
+            .and(wiremock::matchers::query_param("download", "1"))
+            .and(wiremock::matchers::header("authorization", "token secret"))
+            .and(wiremock::matchers::header("user-agent", "cargo-aprz"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("download"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = resilient_get_authorized(&new_client(), &format!("{}/start", server.uri()), Some(credential()))
+            .await
+            .expect("relative redirects should resolve against the current URL");
+
+        assert_eq!(response.into_body().into_text().await.unwrap(), "download");
+    }
+
+    #[tokio::test]
+    async fn cross_origin_redirects_permanently_drop_credentials() {
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(path("/start"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", format!("{}/redirect", other.uri())))
+            .expect(1)
+            .mount(&origin)
+            .await;
+        Mock::given(path("/redirect"))
+            .respond_with(ResponseTemplate::new(308).insert_header("location", format!("{}/final", origin.uri())))
+            .expect(1)
+            .mount(&other)
+            .await;
+        Mock::given(path("/final"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&origin)
+            .await;
+
+        resilient_get_authorized(&new_client(), &format!("{}/start", origin.uri()), Some(credential()))
+            .await
+            .expect("redirecting away and back should succeed");
+
+        let mut requests = origin.received_requests().await.unwrap();
+        requests.sort_by(|left, right| left.url.path().cmp(right.url.path()));
+        let others = other.received_requests().await.unwrap();
+        assert_eq!(
+            (
+                requests[0].headers.get(AUTHORIZATION).cloned(),
+                requests[1].headers.get(AUTHORIZATION).cloned(),
+                others[0].headers.get(AUTHORIZATION).cloned()
+            ),
+            (None, Some(HeaderValue::from_static("token secret")), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_loops_stop_after_ten_hops() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(301).insert_header("location", "/loop"))
+            .expect(11)
+            .mount(&server)
+            .await;
+
+        let error = get_following_redirects(&new_client(), Url::parse(&server.uri()).unwrap(), None)
+            .await
+            .expect_err("a redirect loop must be bounded");
+
+        assert!(error.to_string().contains("redirect limit exceeded"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn redirects_cannot_switch_to_non_http_schemes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "file:///outside"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = get_following_redirects(&new_client(), Url::parse(&server.uri()).unwrap(), None)
+            .await
+            .expect_err("redirects must not access other URL schemes");
+
+        assert!(error.to_string().contains("http:// or https://"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn redirects_without_a_location_return_the_original_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = resilient_get(&new_client(), &server.uri()).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+    }
+
+    #[tokio::test]
+    async fn initial_endpoints_must_use_http_or_https() {
+        let error = resilient_get(&new_client(), "file:///outside")
+            .await
+            .expect_err("non-HTTP endpoints must be rejected");
+
+        assert!(error.to_string().contains("http:// or https://"), "{error}");
+    }
+
     #[tokio::test]
     #[cfg_attr(miri, ignore = "requires network I/O")]
     async fn rate_limited_responses_are_retried() {
@@ -268,17 +468,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &format!("{}/thing", server.uri()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(response.text().await.unwrap(), "ok");
+        let response = resilient_get(&new_client(), &format!("{}/thing", server.uri())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.into_body().into_text().await.unwrap(), "ok");
     }
 
     async fn retry_classification(template: ResponseTemplate) -> RecoveryInfo {
         let server = MockServer::start().await;
         Mock::given(method("GET")).respond_with(template).mount(&server).await;
-        let result = reqwest::Client::new().get(server.uri()).send().await.map_err(ohno::AppError::from);
+        let result = new_client().get(server.uri()).fetch().await.map_err(ohno::AppError::from);
         should_retry_response(&result)
     }
 
@@ -303,11 +501,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &server.uri())
+        let response = resilient_get(&new_client(), &server.uri())
             .await
             .expect("HTTP responses are returned after retry exhaustion");
 
-        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(server.received_requests().await.expect("wiremock records requests").len(), 4);
     }
 
@@ -327,10 +525,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &format!("{}/thing", server.uri()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response = resilient_get(&new_client(), &format!("{}/thing", server.uri())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -344,10 +540,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &format!("{}/thing", server.uri()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        let response = resilient_get(&new_client(), &format!("{}/thing", server.uri())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -369,10 +563,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &format!("{}/thing", server.uri()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response = resilient_get(&new_client(), &format!("{}/thing", server.uri())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -386,10 +578,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &format!("{}/thing", server.uri()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        let response = resilient_get(&new_client(), &format!("{}/thing", server.uri())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -403,10 +593,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = resilient_get(&reqwest::Client::new(), &format!("{}/thing", server.uri()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        let response = resilient_get(&new_client(), &format!("{}/thing", server.uri())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

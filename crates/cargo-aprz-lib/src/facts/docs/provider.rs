@@ -33,7 +33,7 @@ const UNREADABLE_BODY_PLACEHOLDER: &str = "<unable to read body>";
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: Arc<reqwest::Client>,
+    client: Arc<fetch::HttpClient>,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -43,10 +43,7 @@ impl Provider {
     /// Create a new docs provider
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent("cargo-aprz")
-            .build()
-            .expect("unable to create HTTP client");
+        let client = crate::facts::resilient_http::new_client();
 
         Self {
             client: Arc::new(client),
@@ -177,10 +174,10 @@ impl Provider {
 
         let status = response.status();
         if !status.is_success() {
-            if status == reqwest::StatusCode::NOT_FOUND {
+            if status == fetch::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            let body = match response.text().await {
+            let body = match response.into_body().into_text().await {
                 Ok(body) => body,
                 Err(_) => UNREADABLE_BODY_PLACEHOLDER.to_owned(),
             };
@@ -193,7 +190,7 @@ impl Provider {
             .into_app_err_with(|| format!("creating temp file '{}'", temp_file.display()))?;
 
         // #[gamma::skip(try.propagate_to_unwrap, reason = "streaming an HTTP response into a file is an external I/O adapter boundary")]
-        let total_bytes = write_response_body(response.bytes_stream(), &mut file, &temp_file).await?;
+        let total_bytes = write_response_body(crate::facts::resilient_http::response_stream(response), &mut file, &temp_file).await?;
 
         log::debug!(target: LOG_TARGET, "Downloaded {total_bytes} bytes for {crate_spec} to temp file '{}'", temp_file.display());
         Ok(Some(temp_file))
@@ -550,8 +547,8 @@ mod tests {
         assert!(Path::new(&filename).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bin")));
     }
 
-    #[test]
-    fn test_provider_new_default_url() {
+    #[tokio::test]
+    async fn test_provider_new_default_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, None);
@@ -560,8 +557,8 @@ mod tests {
         assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
     }
 
-    #[test]
-    fn test_provider_new_custom_url() {
+    #[tokio::test]
+    async fn test_provider_new_custom_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, Some("https://custom.docs.rs"));

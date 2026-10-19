@@ -95,8 +95,12 @@ impl Collector {
             )
             .await?,
 
-            advisories_provider: super::advisories::Provider::new(&advisories_cache, Arc::clone(&progress), endpoints.advisory_url())
-                .await?,
+            advisories_provider: super::advisories::Provider::new(
+                &advisories_cache,
+                Arc::clone(&progress),
+                endpoints.advisory_archive_url(),
+            )
+            .await?,
 
             hosting_provider: super::hosting::Provider::new(github_token, codeberg_token, hosting_cache, bug_labels, endpoints)?,
             codebase_provider: super::codebase::Provider::new(codebase_cache),
@@ -793,7 +797,7 @@ mod portable_tests {
         let advisories_dir = cache_dir.join("advisories");
         write_advisory(&advisories_dir.join("repo"), "fixture-crate", "RUSTSEC-2020-0001");
         Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
-            .save("last_synced.bin", &())
+            .save("last_synced.bin", &("https://example.invalid/advisories.tar.gz", "repo"))
             .expect("writing advisory sync marker");
     }
 
@@ -813,7 +817,7 @@ mod portable_tests {
             .with_coverage_url(&server_uri)
             .with_github_url(&server_uri)
             .with_codeberg_url(&server_uri)
-            .with_advisory_url("https://example.invalid/advisories.git")
+            .with_advisory_archive_url("https://example.invalid/advisories.tar.gz")
     }
 
     async fn new_fixture_collector(cache_dir: &std::path::Path, progress: impl Progress + 'static, server: &MockServer) -> Collector {
@@ -999,7 +1003,7 @@ mod portable_tests {
         let server = MockServer::start().await;
         mount_minimal_dump(&server).await;
         let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
-        let endpoints = local_endpoints(&server).with_advisory_url("not a valid repository URL");
+        let endpoints = local_endpoints(&server).with_advisory_archive_url("not a valid archive URL");
 
         let result = Collector::new(
             None,
@@ -1056,7 +1060,7 @@ mod portable_tests {
         mount_minimal_dump(&server).await;
         let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
         mark_advisory_cache_fresh(cache_dir.path());
-        let endpoints = local_endpoints(&server).with_advisory_url("not a valid repository URL");
+        let endpoints = local_endpoints(&server).with_advisory_archive_url("not a valid archive URL");
 
         let result = Collector::new(
             None,
@@ -1166,7 +1170,7 @@ mod portable_tests {
         let advisories_dir = cache_dir.path().join("advisories");
         write_advisory(&advisories_dir.join("repo"), "queried-crate", "RUSTSEC-2020-0200");
         Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
-            .save("last_synced.bin", &())
+            .save("last_synced.bin", &("https://example.invalid/advisories.tar.gz", "repo"))
             .expect("writing advisory sync marker");
 
         let server_uri = server.uri();
@@ -1177,13 +1181,13 @@ mod portable_tests {
             .with_coverage_url(&server_uri)
             .with_github_url(&server_uri)
             .with_codeberg_url(&server_uri)
-            .with_advisory_url("https://example.invalid/advisories.git");
+            .with_advisory_archive_url("https://example.invalid/advisories.tar.gz");
         assert_eq!(endpoints.dump_url(), dump_url);
         assert_eq!(endpoints.docs_url(), server_uri);
         assert_eq!(endpoints.coverage_url(), server_uri);
         assert_eq!(endpoints.host_url("github.com"), Some(server_uri.as_str()));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(server_uri.as_str()));
-        assert_eq!(endpoints.advisory_url(), "https://example.invalid/advisories.git");
+        assert_eq!(endpoints.advisory_archive_url(), "https://example.invalid/advisories.tar.gz");
         let collector = Collector::new(
             None,
             None,

@@ -8,7 +8,7 @@ version = "1.2.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "dependencies", "analysis", "quality"]
 categories = ["development-tools"]
-exclude = ["tests/fixtures/*.tar.gz", "tests/fixtures/*.zst", "tests/fixtures/*.svg"]
+exclude = ["tests/fixtures/**/*.tar.gz", "tests/fixtures/*.zst", "tests/fixtures/*.svg"]
 
 edition.workspace = true
 rust-version.workspace = true
@@ -79,9 +79,11 @@ clap = { workspace = true, features = [
 compact_str = { workspace = true, features = ["std", "serde"] }
 csv = { workspace = true }
 env_logger = { workspace = true }
+fetch = { workspace = true, features = ["json", "native-tls", "tokio"] }
 flate2 = { workspace = true, features = ["zlib-rs"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
+http-body-util = { workspace = true }
 indicatif = { workspace = true }
 layered = { workspace = true }
 log = { workspace = true }
@@ -93,7 +95,6 @@ pastey = { workspace = true }
 percent-encoding = { workspace = true, features = ["alloc"] }
 ra_ap_syntax = { workspace = true }
 regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
-reqwest = { workspace = true, features = ["json", "rustls", "stream"] }
 rmp-serde = { workspace = true }
 rust_xlsxwriter = { workspace = true, features = ["zlib"] }
 rustc-hash = { workspace = true, features = ["std"] }
@@ -105,17 +106,18 @@ rustdoc-types-v54 = { workspace = true }
 rustdoc-types-v55 = { workspace = true }
 rustdoc-types-v56 = { workspace = true }
 rustdoc-types-v57 = { workspace = true }
-rustsec = { workspace = true, features = ["git", "gix-reqwest"] }
+rustsec = { workspace = true }
 seatbelt = { workspace = true, features = ["retry", "timeout"] }
 semver = { workspace = true, features = ["serde"] }
-serde = { workspace = true, features = ["derive", "std"] }
+serde = { workspace = true, features = ["derive", "rc", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 strsim = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 tar = { workspace = true }
+tempfile = { workspace = true }
 terminal_size = { workspace = true }
 tick = { workspace = true, features = ["tokio"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "process", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "process", "time"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
 # Never named in this crate's code. It is here only to bound the `unicode-ident` that
 # `ra_ap_syntax` -> `ra-ap-rustc_lexer` resolves; see the catalog entry in the workspace
@@ -138,6 +140,7 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 cargo-gamma-attrs = { workspace = true }
+fetch = { workspace = true, features = ["test-util"] }
 insta = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

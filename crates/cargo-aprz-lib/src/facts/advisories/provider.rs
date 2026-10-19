@@ -2,13 +2,12 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use compact_str::CompactString;
 use ohno::IntoAppError;
 use rustsec::database::Database;
-use rustsec::repository::git::Repository;
 
 use super::AdvisoryData;
 use crate::facts::ProviderResult;
@@ -27,63 +26,56 @@ pub struct Provider {
 
 const DATABASE_FETCH_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// How the advisory database is brought into the cache directory.
-///
-/// This is a seam: production clones the `RustSec` git repository, while tests substitute a
-/// local database. `rustsec` refuses any database URL that does not start with `https://`,
-/// so without this seam the successful-fetch path could not be exercised offline.
-///
-/// Implementations run on a blocking thread.
+/// How an advisory database is installed into a new staging directory.
 trait DbFetcher: Send + Sync + 'static {
-    fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()>;
+    fn fetch(&self, repo_path: &Path, database_url: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
-/// The production fetcher: clones the advisory database over git.
-struct GitFetcher;
+struct ArchiveFetcher;
 
-impl DbFetcher for GitFetcher {
-    fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
-        fetch_repository(repo_path, database_url, |url, path, ensure_fresh, timeout| {
-            Repository::fetch(url, path, ensure_fresh, timeout)
-        })
+impl DbFetcher for ArchiveFetcher {
+    async fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
+        super::archive::download(
+            repo_path,
+            database_url,
+            DATABASE_FETCH_TIMEOUT,
+            crate::facts::resilient_http::new_client(),
+        )
+        .await
     }
-}
-
-fn fetch_repository(
-    repo_path: &Path,
-    database_url: &str,
-    fetch: impl FnOnce(&str, &Path, bool, Duration) -> core::result::Result<Repository, rustsec::Error>,
-) -> Result<()> {
-    fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
-        .map(|_| ())
-        .map_err(Into::into)
 }
 
 impl Provider {
     pub async fn new(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str) -> Result<Self> {
-        Self::with_fetcher(cache, progress, database_url, Arc::new(GitFetcher)).await
+        Self::with_fetcher(cache, progress, database_url, Arc::new(ArchiveFetcher)).await
     }
 
-    async fn with_fetcher(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<dyn DbFetcher>) -> Result<Self> {
-        let cache_dir = cache.dir();
-        let sync_filename = "last_synced.bin";
-        let repo_path = cache_dir.join("repo");
-
-        let needs_fetch = matches!(cache.load::<()>(sync_filename), CacheResult::Miss);
-
-        if needs_fetch {
-            download_db(&repo_path, database_url, progress.as_ref(), fetcher)
-                .await
-                .into_app_err("downloading the advisory database")?;
-            cache.save(sync_filename, &())?;
+    async fn with_fetcher<F: DbFetcher>(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<F>) -> Result<Self> {
+        let _lock = lock_cache(cache.dir()).await?;
+        if let CacheResult::Data((url, directory)) = cache.load::<(String, String)>("last_synced.bin")
+            && url == database_url
+        {
+            let path = snapshot_path(cache.dir(), &directory)?;
+            return Ok(Self {
+                database: Arc::new(open_db(path, progress.as_ref()).await?),
+            });
         }
 
+        let root = cache.dir().to_path_buf();
+        let stage = tokio::task::spawn_blocking(move || tempfile::Builder::new().prefix(".advisories-").tempdir_in(root)).await??;
+        download_db(stage.path(), database_url, progress.as_ref(), fetcher)
+            .await
+            .into_app_err(
+                "downloading the advisory archive; --advisory-archive-url must point to a .tar.gz archive, not a Git repository",
+            )?;
+        let database = open_db(stage.path(), progress.as_ref())
+            .await
+            .into_app_err("validating the downloaded advisory database")?;
+        let cache = cache.clone();
+        let database_url = database_url.to_owned();
+        tokio::task::spawn_blocking(move || publish_snapshot(&cache, stage, &database_url)).await??;
         Ok(Self {
-            database: Arc::new(
-                open_db(&repo_path, progress.as_ref())
-                    .await
-                    .into_app_err("opening the advisory database")?,
-            ),
+            database: Arc::new(database),
         })
     }
 
@@ -160,16 +152,94 @@ async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress) -> Result
         Database::open(&cache_path).map_err(Into::into)
     })
     .await
+    .into_app_err("opening the advisory database")
 }
 
-async fn download_db(cache_dir: impl AsRef<Path>, database_url: &str, progress: &dyn Progress, fetcher: Arc<dyn DbFetcher>) -> Result<()> {
-    let cache_path = cache_dir.as_ref().to_path_buf();
-    let database_url = database_url.to_owned();
+async fn download_db<F: DbFetcher>(
+    cache_dir: impl AsRef<Path>,
+    database_url: &str,
+    progress: &dyn Progress,
+    fetcher: Arc<F>,
+) -> Result<()> {
+    let msg = "Downloading the advisory database";
+    log::info!(target: LOG_TARGET, "{msg}");
+    progress.set_indeterminate(Box::new(move || msg.to_owned()));
+    let start = std::time::Instant::now();
+    fetcher.fetch(cache_dir.as_ref(), database_url).await?;
+    log::debug!(target: LOG_TARGET, "Finished downloading the advisory database in {:.3}s", start.elapsed().as_secs_f64());
+    Ok(())
+}
 
-    run_blocking_with_progress(progress, "Downloading the advisory database", "downloading", move || {
-        fetcher.fetch(&cache_path, &database_url)
+async fn lock_cache(root: &Path) -> Result<std::fs::File> {
+    lock_cache_with_timeout(root, DATABASE_FETCH_TIMEOUT).await
+}
+
+async fn lock_cache_with_timeout(root: &Path, timeout: Duration) -> Result<std::fs::File> {
+    tokio::fs::create_dir_all(root)
+        .await
+        .into_app_err("creating directory for the advisory cache")?;
+    let lock = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("archive.lock"))
+        .await?
+        .into_std()
+        .await;
+    tokio::time::timeout(timeout, async {
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(std::fs::TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
+        }
     })
     .await
+    .into_app_err("timed out waiting for another advisory cache refresh to finish")??;
+    Ok(lock)
+}
+
+fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
+    let mut components = Path::new(directory).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(ohno::app_err!(
+            "invalid advisory cache snapshot path; clear the advisory cache and retry"
+        ));
+    }
+    Ok(root.join(directory))
+}
+
+fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Result<()> {
+    let previous = match Cache::new(cache.dir(), Duration::MAX, false).load::<(String, String)>("last_synced.bin") {
+        CacheResult::Data((_, directory)) if directory.starts_with(".advisories-") => Some(snapshot_path(cache.dir(), &directory)?),
+        _ => None,
+    };
+    let directory = stage
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ohno::app_err!("advisory snapshot directory name is not UTF-8"))?;
+    let marker = tempfile::NamedTempFile::new_in(cache.dir())?;
+    let filename = marker
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ohno::app_err!("advisory marker filename is not UTF-8"))?;
+    cache.save(filename, &(url, directory))?;
+    marker
+        .persist(cache.dir().join("last_synced.bin"))
+        .map_err(|error| error.error)
+        .into_app_err("publishing the advisory cache synchronization marker")?;
+    let published = stage.keep();
+    if let Some(previous) = previous
+        && previous != published
+        && let Err(error) = std::fs::remove_dir_all(&previous)
+    {
+        log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", previous.display());
+    }
+    Ok(())
 }
 
 async fn run_blocking_with_progress<T, F>(progress: &dyn Progress, msg: &str, success_verb: &str, blocking_fn: F) -> Result<T>
@@ -201,22 +271,6 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-
-    #[test]
-    fn git_fetch_requires_a_fresh_database_and_forwards_the_repository_and_timeout() {
-        let repository = Path::new("synthetic/advisories");
-        let url = "https://example.invalid/advisories";
-        let expected = rustsec::Error::new(rustsec::ErrorKind::Io, "scripted fetch failure");
-        let error = fetch_repository(repository, url, |actual_url, path, ensure_fresh, timeout| {
-            assert_eq!(actual_url, url);
-            assert_eq!(path, repository);
-            assert!(ensure_fresh, "accepting a stale advisory database defeats freshness validation");
-            assert_eq!(timeout, Duration::from_mins(1));
-            Err(expected.clone())
-        })
-        .unwrap_err();
-        assert_eq!(error.to_string(), expected.to_string());
-    }
 
     fn write_advisory(root: &Path, package: &str, id: &str, withdrawn: Option<&str>) {
         let dir = root.join("crates").join(package);
@@ -252,7 +306,7 @@ mod tests {
     }
 
     impl DbFetcher for FixtureFetcher {
-        fn fetch(&self, repo_path: &Path, _database_url: &str) -> Result<()> {
+        async fn fetch(&self, repo_path: &Path, _database_url: &str) -> Result<()> {
             let _ = self.calls.fetch_add(1, Ordering::SeqCst);
             write_advisory(repo_path, "fetched-crate", "RUSTSEC-2020-0003", None);
             Ok(())
@@ -263,7 +317,7 @@ mod tests {
     struct NoOpFetcher;
 
     impl DbFetcher for NoOpFetcher {
-        fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
+        async fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
             Ok(())
         }
     }
@@ -383,6 +437,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_lock_contention_has_a_bounded_actionable_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let _owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
+
+        let error = lock_cache_with_timeout(root.path(), Duration::ZERO)
+            .await
+            .expect_err("a second owner must not wait indefinitely");
+
+        assert!(error.to_string().contains("waiting for another advisory cache refresh"), "{error}");
+    }
+
+    #[test]
+    fn cache_snapshot_paths_cannot_escape_the_cache_root() {
+        let error = snapshot_path(Path::new("cache"), "../outside").expect_err("the marker cannot reference a parent directory");
+
+        assert!(error.to_string().contains("invalid advisory cache snapshot path"), "{error}");
+    }
+
+    #[test]
+    fn marker_publication_failure_removes_the_unpublished_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("last_synced.bin")).unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        let snapshot = stage.path().to_path_buf();
+
+        let error = publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
+            .expect_err("a directory cannot be replaced by the marker file");
+
+        assert!(error.to_string().contains("publishing the advisory cache"), "{error}");
+        assert_eq!((snapshot.exists(), root.path().join("last_synced.bin").is_dir()), (false, true));
+    }
+
+    #[test]
+    fn failure_to_clean_an_old_snapshot_does_not_undo_a_successful_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let old_name = ".advisories-old";
+        fs::write(root.path().join(old_name), "not a directory").unwrap();
+        cache.save("last_synced.bin", &("old-url", old_name)).unwrap();
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
+
+        publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
+            .expect("old snapshot cleanup is optional once the new snapshot is published");
+
+        let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
+            panic!("the successful refresh must publish a marker");
+        };
+        assert_eq!(marker, ("https://example.invalid/archive.tar.gz".to_owned(), name));
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
     async fn a_successful_fetch_marks_the_database_as_synchronized() {
         let tmp = tempfile::tempdir().unwrap();
@@ -394,14 +501,14 @@ mod tests {
             &cache,
             Arc::clone(&progress) as Arc<dyn Progress>,
             "https://example.invalid/db.git",
-            Arc::clone(&fetcher) as Arc<dyn DbFetcher>,
+            Arc::clone(&fetcher),
         )
         .await
         .expect("the fixture fetcher always produces a valid database");
 
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1, "the database must be fetched exactly once");
         assert!(
-            matches!(cache.load::<()>("last_synced.bin"), CacheResult::Data(())),
+            matches!(cache.load::<(String, String)>("last_synced.bin"), CacheResult::Data((url, _)) if url == "https://example.invalid/db.git"),
             "a successful fetch must record the synchronization marker"
         );
         assert_eq!(
@@ -428,13 +535,13 @@ mod tests {
 
         // Seed a database and its synchronization marker, so no fetch is needed.
         write_advisory(&tmp.path().join("repo"), "seeded-crate", "RUSTSEC-2020-0004", None);
-        cache.save("last_synced.bin", &()).unwrap();
+        cache.save("last_synced.bin", &("https://example.invalid/db.git", "repo")).unwrap();
 
         let provider = Provider::with_fetcher(
             &cache,
             Arc::new(RecordingProgress::default()),
             "https://example.invalid/db.git",
-            Arc::clone(&fetcher) as Arc<dyn DbFetcher>,
+            Arc::clone(&fetcher),
         )
         .await
         .expect("a seeded database opens successfully");

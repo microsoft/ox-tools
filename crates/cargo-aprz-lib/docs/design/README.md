@@ -21,6 +21,39 @@ issue request. These native observations remain separate from pure ranking and
 pagination policy checks; moving them into integration targets does not make
 their prerequisites disappear.
 
+## HTTP and advisory acquisition
+
+HTTP requests use the public `fetch` crate's Tokio transport with native TLS.
+Windows and macOS use their platform TLS implementations; Linux builds require
+supported, patched OpenSSL 3 development packages, dynamically linked. The
+minimal Fetch pipeline leaves retry and timeout policy to our Seatbelt wrapper:
+three retries for transport errors,
+5xx, 429, and 403 with `Retry-After`. Downloads retry the complete transfer on
+body failures. Responses remain streamed for large database and documentation
+downloads.
+
+GET requests follow at most ten HTTP(S) redirects, including relative locations.
+Authorization is sensitive and is permanently removed when a redirect changes
+origin. The user agent remains `cargo-aprz`.
+
+Advisories use an explicit gzip-compressed tar archive endpoint, defaulting to
+`https://github.com/RustSec/advisory-db/archive/refs/heads/main.tar.gz`.
+`--advisory-archive-url` and `APRZ_ADVISORY_ARCHIVE_URL` replace the former
+repository-address override; there is no legacy alias or repository-to-archive
+URL inference. Local HTTP mirrors and arbitrary archive URLs are supported.
+The archive contains a `crates/` directory either directly or beneath one
+top-level directory, as in GitHub source archives.
+
+Extraction accepts only regular files and directories, refuses paths outside
+the destination and filesystem links, and imposes entry-count and uncompressed
+size limits. A staged database must parse successfully before it is published.
+Each transfer attempt uses its own temporary file so a timed-out write cannot
+corrupt a retry. Failed downloads or extraction never replace the last usable
+database or mark the refresh successful. Cache identity includes the archive URL so changing
+mirrors does not reuse another endpoint's freshness marker. RustSec is used only
+for parsing and queries, with its Git features disabled; advisory collection
+requires neither a Git executable nor RustSec's HTTP transports.
+
 ## Progress styling
 
 Progress phase labels use the command's explicit color policy. Colored labels

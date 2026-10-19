@@ -57,7 +57,7 @@ pub use crate_ref::CrateRef;
 pub use crate_spec::CrateSpec;
 pub use crates::CratesData;
 #[cfg(feature = "internals")]
-pub use endpoints::DEFAULT_ADVISORY_URL;
+pub use endpoints::DEFAULT_ADVISORY_ARCHIVE_URL;
 pub use endpoints::Endpoints;
 pub use hosting::BugLabelMatcher;
 pub use progress::Progress;

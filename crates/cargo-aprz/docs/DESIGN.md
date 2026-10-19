@@ -43,7 +43,8 @@ configured per-file size limit.
 
 Each provider talks to a service at a base address that defaults to the public
 production service: the crates.io database dump, docs.rs, Codecov, the GitHub
-and Codeberg REST APIs, and the RustSec advisory database repository.
+and Codeberg REST APIs, and a gzip-compressed tar archive of the RustSec advisory
+database.
 
 Every address is individually overridable, so the tool can run against a local
 mirror, an internally hosted service such as GitHub Enterprise, or a mock server
@@ -58,12 +59,22 @@ and testing rather than everyday use:
 | Codecov | `--coverage-url` | `APRZ_COVERAGE_URL` |
 | GitHub | `--github-url` | `APRZ_GITHUB_URL` |
 | Codeberg | `--codeberg-url` | `APRZ_CODEBERG_URL` |
-| RustSec advisory database | `--advisory-url` | `APRZ_ADVISORY_URL` |
+| RustSec advisory database archive | `--advisory-archive-url` | `APRZ_ADVISORY_ARCHIVE_URL` |
 
 An override replaces only the address of the service it names; every other
 service continues to use its default. Overriding an address does not change how
 the corresponding provider interprets the responses it receives, so a substitute
 service must speak the same protocol as the one it replaces.
+
+The advisory endpoint defaults to
+`https://github.com/RustSec/advisory-db/archive/refs/heads/main.tar.gz`. It is an
+archive URL, not a Git repository URL. The former `--advisory-url` and
+`APRZ_ADVISORY_URL` overrides are removed rather than interpreted heuristically.
+Mirrors must serve a `.tar.gz` containing `crates/`, either at its root or beneath
+one enclosing directory. Downloads follow HTTP(S) redirects and publish only a
+successfully extracted and parsed database, preserving the previous database on
+failure. Advisory collection does not require Git. See the implementation
+crate's [HTTP and advisory contract](../../cargo-aprz-lib/docs/design/README.md#http-and-advisory-acquisition).
 
 ### GitHub credential discovery
 
