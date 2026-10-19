@@ -3,13 +3,15 @@
 
 //! Resilient HTTP request utilities using retry and timeout middleware.
 //!
-//! Wraps HTTP operations with [`seatbelt`] retry and timeout middleware so that
-//! transient network failures are masked automatically.
+//! Configures request resilience in [`fetch`] and retries complete streamed downloads
+//! with [`seatbelt`] when a response body fails after the headers arrive.
 
 use core::time::Duration;
 
 use bytes::{Buf, Bytes};
 use fetch::http::header::{AUTHORIZATION, CONTENT_LENGTH, LOCATION, RETRY_AFTER, USER_AGENT};
+use fetch::resilience::retry::{HttpRetry, HttpRetryLayerExt};
+use fetch::resilience::timeout::{HttpTimeout, HttpTimeoutLayerExt};
 use fetch::tokio::TokioDeps;
 use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusCode};
 use futures_util::{Stream, StreamExt};
@@ -22,14 +24,35 @@ use seatbelt::{RecoveryInfo, ResilienceContext};
 use tick::Clock;
 use url::Url;
 
-/// Construct a streaming transport without a second retry or timeout policy.
+/// Construct a streaming transport with request retry and timeout middleware.
 ///
 /// Must be called inside the Tokio runtime that will execute requests.
 pub fn new_client() -> HttpClient {
     HttpClient::builder_tokio(TokioDeps::default())
         .tls_options(fetch::tls::TlsOptions::new_native_tls())
         .insecure_allow_http()
-        .minimal_pipeline()
+        .custom_pipeline(|dispatch, context| {
+            (
+                HttpRetry::layer("retry", context.resilience_context())
+                    .http_configure_defaults()
+                    .recovery_with(|result, _| should_retry_response(result))
+                    .max_retry_attempts(MAX_RETRY_ATTEMPTS)
+                    .base_delay(RETRY_BASE_DELAY)
+                    .backoff(Backoff::Exponential)
+                    .on_retry(|_output, args| {
+                        log::debug!(
+                            "retrying HTTP GET (attempt {}, delay {}ms)",
+                            args.attempt().index() + 1,
+                            args.retry_delay().as_millis(),
+                        );
+                    }),
+                HttpTimeout::layer("timeout", context.resilience_context())
+                    .http_timeout_error()
+                    .timeout(DEFAULT_REQUEST_TIMEOUT),
+                dispatch,
+            )
+                .into_service()
+        })
         .build()
 }
 
@@ -131,7 +154,7 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
 }
 
 /// Classify an HTTP response for retry purposes.
-fn should_retry_response(result: &crate::Result<HttpResponse>) -> RecoveryInfo {
+fn should_retry_response(result: &fetch::Result<HttpResponse>) -> RecoveryInfo {
     match result {
         // Network / connection errors are always transient.
         Err(_) => RecoveryInfo::retry(),
@@ -164,40 +187,7 @@ pub async fn resilient_get(client: &HttpClient, url: &str) -> crate::Result<Http
 
 /// Send a GET with a sensitive authorization header and the common retry policy.
 pub async fn resilient_get_authorized(client: &HttpClient, url: &str, authorization: Option<HeaderValue>) -> crate::Result<HttpResponse> {
-    let url = Url::parse(url)?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(app_err!("HTTP downloads require an http:// or https:// URL"));
-    }
-    let clock = Clock::new_tokio();
-    let context = ResilienceContext::new(&clock).name(stringify!(http_get));
-
-    let client = client.clone();
-    let service = (
-        Retry::layer(stringify!(retry), &context)
-            .clone_input()
-            .recovery_with(|result: &crate::Result<HttpResponse>, _| should_retry_response(result))
-            .max_retry_attempts(MAX_RETRY_ATTEMPTS)
-            .base_delay(RETRY_BASE_DELAY)
-            .backoff(Backoff::Exponential)
-            .on_retry(|_output, args| {
-                log::debug!(
-                    "retrying HTTP GET (attempt {}, delay {}ms)",
-                    args.attempt().index() + 1,
-                    args.retry_delay().as_millis(),
-                );
-            }),
-        Timeout::layer(stringify!(timeout), &context)
-            .timeout_error(|_| app_err!("HTTP request timed out"))
-            .timeout(DEFAULT_REQUEST_TIMEOUT),
-        Execute::new(move |url: Url| {
-            let client = client.clone();
-            let authorization = authorization.clone();
-            async move { get_following_redirects(&client, url, authorization).await }
-        }),
-    )
-        .into_service();
-
-    service.execute(url).await
+    get_following_redirects(client, Url::parse(url)?, authorization).await
 }
 
 /// Execute an async download operation with automatic retry and timeout.
@@ -307,7 +297,10 @@ mod tests {
 
     #[test]
     fn network_errors_are_classified_as_retryable() {
-        let err: crate::Result<HttpResponse> = Err(app_err!("connection failed"));
+        let err = Err(fetch::HttpError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection failed",
+        )));
 
         let recovery = should_retry_response(&err);
 
@@ -476,7 +469,13 @@ mod tests {
     async fn retry_classification(template: ResponseTemplate) -> RecoveryInfo {
         let server = MockServer::start().await;
         Mock::given(method("GET")).respond_with(template).mount(&server).await;
-        let result = new_client().get(server.uri()).fetch().await.map_err(ohno::AppError::from);
+        let result = HttpClient::builder_tokio(TokioDeps::default())
+            .insecure_allow_http()
+            .minimal_pipeline()
+            .build()
+            .get(server.uri())
+            .fetch()
+            .await;
         should_retry_response(&result)
     }
 

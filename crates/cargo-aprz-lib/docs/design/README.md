@@ -33,10 +33,11 @@ their prerequisites disappear.
 HTTP requests use the public `fetch` crate's Tokio transport with native TLS.
 Windows and macOS use their platform TLS implementations; Linux builds require
 supported, patched OpenSSL 3 development packages, dynamically linked. The
-minimal Fetch pipeline leaves retry and timeout policy to our Seatbelt wrapper:
+Fetch request pipeline configures native retry and timeout middleware:
 three retries for transport errors,
 5xx, 429, and 403 with `Retry-After`. Downloads retry the complete transfer on
-body failures. Responses remain streamed for large database and documentation
+body failures through a separate whole-transfer Seatbelt wrapper. Request timeouts
+apply to each attempt at each redirect hop. Responses remain streamed for large database and documentation
 downloads.
 
 GET requests follow at most ten HTTP(S) redirects, including relative locations.

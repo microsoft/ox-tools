@@ -531,7 +531,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET")).respond_with(template).mount(&server).await;
 
-        let client = crate::facts::resilient_http::new_client();
+        let client = fetch::HttpClient::builder_tokio(fetch::tokio::TokioDeps::default())
+            .insecure_allow_http()
+            .minimal_pipeline()
+            .build();
         let url = server.uri();
         let resp = client.get(url.as_str()).fetch().await.unwrap();
         let rate_limit = extract_rate_limit_from_headers(resp.headers());

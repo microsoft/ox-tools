@@ -81,7 +81,7 @@ impl Endpoints {
         }
     }
 
-    /// Address of the `RustSec` advisory database tar.gz archive.
+    /// Address of the `RustSec` advisory database `.tar.gz` archive.
     #[must_use]
     pub fn advisory_archive_url(&self) -> &str {
         &self.advisory_archive_url

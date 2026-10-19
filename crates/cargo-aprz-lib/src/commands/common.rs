@@ -180,7 +180,7 @@ pub struct CommonArgs {
     #[arg(long, hide = true, value_name = "URL", env = "APRZ_CODEBERG_URL")]
     pub codeberg_url: Option<String>,
 
-    /// Download the `RustSec` advisory database from this tar.gz archive URL.
+    /// Download the `RustSec` advisory database from this `.tar.gz` archive URL.
     ///
     /// Hidden: intended for archive mirrors and for testing against a mock server.
     #[arg(long, hide = true, value_name = "URL", env = "APRZ_ADVISORY_ARCHIVE_URL")]

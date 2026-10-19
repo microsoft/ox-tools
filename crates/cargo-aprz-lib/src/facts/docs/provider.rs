@@ -33,7 +33,7 @@ const UNREADABLE_BODY_PLACEHOLDER: &str = "<unable to read body>";
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: Arc<fetch::HttpClient>,
+    client: fetch::HttpClient,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -46,7 +46,7 @@ impl Provider {
         let client = crate::facts::resilient_http::new_client();
 
         Self {
-            client: Arc::new(client),
+            client,
             cache,
             base_url: base_url.unwrap_or(DOCS_BASE_URL).to_string(),
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
