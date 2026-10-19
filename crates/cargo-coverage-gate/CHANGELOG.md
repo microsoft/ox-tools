@@ -51,9 +51,6 @@
 
 - ✔️ Tasks
 
-  - coverage-gate: refresh final 0.7 notes
-  - coverage-gate: finalize 0.7 release notes
-  - coverage-gate: refresh 0.7 release notes
   - coverage-gate: prepare 0.7.0 release
   - coverage: defer Anvil rollout until release
 
