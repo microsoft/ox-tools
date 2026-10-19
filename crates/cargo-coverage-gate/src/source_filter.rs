@@ -1626,6 +1626,21 @@ mod tests {
         }
     }
 
+    fn pending_source_for_member(
+        surface: Surface,
+        role: SourceRole,
+        resolution_path: &Path,
+        guard: CfgFormula,
+        member: &Path,
+    ) -> PendingSource {
+        let mut pending = pending_source(surface, role, resolution_path, guard);
+        pending.owning_member = MemberDirectory {
+            canonical: fs::canonicalize(member).expect("canonical fixture member"),
+            reported: member.to_path_buf(),
+        };
+        pending
+    }
+
     fn declaration_is_test_only(declaration: &ModuleDeclaration) -> bool {
         !cfg_formula_possibilities_without_test(&declaration.guard).can_be_true
     }
@@ -2460,17 +2475,19 @@ mod tests {
         let helper_path = root.join("member/src/helper.rs");
         let helper_resolution = resolve_module_resolution_path(&helper_path).expect("helper resolution path");
         assert_eq!(indexed_helper.released_path.as_deref(), Some(helper_path.as_path()));
-        assert!(indexed_helper.has_visit(&pending_source(
+        assert!(indexed_helper.has_visit(&pending_source_for_member(
             Surface::Released,
             SourceRole::PathModule,
             &helper_resolution,
             CfgFormula::Value(true),
+            &root.join("member"),
         )));
-        assert!(indexed_helper.has_visit(&pending_source(
+        assert!(indexed_helper.has_visit(&pending_source_for_member(
             Surface::NonReleased,
             SourceRole::PathModule,
             &helper_resolution,
             CfgFormula::Value(true),
+            &root.join("member"),
         )));
         let indexed_root = index.files.get(&canonical_root).expect("canonical root source indexed");
         let resolution_path = resolve_module_resolution_path(&alias).expect("simulated symlink has a module-resolution path");
@@ -2585,11 +2602,12 @@ mod tests {
             3
         );
         let resolution_path = resolve_module_resolution_path(&included).expect("included source resolution path");
-        assert!(indexed.has_visit(&pending_source(
+        assert!(indexed.has_visit(&pending_source_for_member(
             Surface::NonReleased,
             SourceRole::IncludedSource,
             &resolution_path,
             CfgFormula::Value(false),
+            &root.join("member"),
         )));
 
         let expression = fs::canonicalize(root.join("member/src/included-expression.rs")).expect("canonical included expression source");
