@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path};
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use futures_util::StreamExt;
 use ohno::{IntoAppError, bail};
 use tar::Archive;
@@ -122,7 +122,7 @@ fn unpack(input: impl Read, destination: &Path) -> Result<()> {
 }
 
 fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_entries: usize) -> Result<()> {
-    let decoder = GzDecoder::new(input).take(max_bytes + 1);
+    let decoder = MultiGzDecoder::new(input).take(max_bytes + 1);
     let mut archive = Archive::new(decoder);
     let mut declared_bytes = 0_u64;
     for (index, entry) in archive.entries()?.enumerate() {
@@ -183,6 +183,7 @@ fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::io::Write;
     use std::sync::Arc;
 
     use super::*;
@@ -226,6 +227,74 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["archive-crate"]
         );
+    }
+
+    fn multi_member_archive() -> Vec<u8> {
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut split = 0;
+        for id in ["RUSTSEC-2020-0001", "RUSTSEC-2020-0002"] {
+            let advisory = format!(
+                "```toml\n[advisory]\nid = \"{id}\"\npackage = \"archive-crate\"\ndate = \"2020-01-01\"\n\
+                 [versions]\npatched = []\n```\n\n# Test advisory\n\nTest advisory body.\n"
+            );
+            let mut header = tar::Header::new_gnu();
+            header.set_size(advisory.len() as u64);
+            header.set_mode(0o644);
+            archive
+                .append_data(&mut header, format!("crates/archive-crate/{id}.md"), advisory.as_bytes())
+                .unwrap();
+            if split == 0 {
+                split = archive.get_ref().len();
+            }
+        }
+        let tar = archive.into_inner().unwrap();
+        let mut compressed = Vec::new();
+        for member in [&tar[..split], &tar[split..]] {
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(member).unwrap();
+            compressed.extend(encoder.finish().unwrap());
+        }
+        compressed
+    }
+
+    #[test]
+    fn reads_advisories_across_gzip_member_boundaries() {
+        let stage = tempfile::tempdir().unwrap();
+        let archive = stage.path().join("input.tar.gz");
+        std::fs::write(&archive, multi_member_archive()).unwrap();
+
+        extract(&archive, stage.path()).expect("gzip members form one complete tar archive");
+
+        let database = rustsec::database::Database::open(stage.path()).unwrap();
+        let mut ids = database.iter().map(|advisory| advisory.metadata.id.to_string()).collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["RUSTSEC-2020-0001", "RUSTSEC-2020-0002"]);
+    }
+
+    #[test]
+    fn rejects_a_corrupt_later_gzip_member_before_publishing_database_files() {
+        let stage = tempfile::tempdir().unwrap();
+        let archive = stage.path().join("input.tar.gz");
+        let mut compressed = multi_member_archive();
+        let checksum = compressed.len() - 8;
+        compressed[checksum] ^= 1;
+        std::fs::write(&archive, compressed).unwrap();
+
+        extract(&archive, stage.path()).expect_err("a later member's checksum must be validated");
+
+        assert!(
+            !stage.path().join("crates").exists(),
+            "the first member must not be published alone"
+        );
+    }
+
+    #[test]
+    fn uncompressed_size_limit_covers_all_gzip_members() {
+        let stage = tempfile::tempdir().unwrap();
+        let compressed = multi_member_archive();
+
+        unpack_with_limits(compressed.as_slice(), stage.path(), 2048, MAX_ENTRIES)
+            .expect_err("the combined tar entries and padding exceed the budget");
     }
 
     #[test]

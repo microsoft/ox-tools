@@ -55,7 +55,8 @@ top-level directory, as in GitHub source archives.
 
 Extraction accepts only regular files and directories, refuses paths outside
 the destination and filesystem links, and imposes entry-count and uncompressed
-size limits. A staged database must parse successfully before it is published.
+size limits. All gzip members are decoded and validated under one uncompressed
+size budget. A staged database must parse successfully before it is published.
 Each transfer attempt uses its own temporary file so a timed-out write cannot
 corrupt a retry. The advisory body-transfer timeout starts after response headers
 arrive; it does not interrupt request retries or `Retry-After` waits.
