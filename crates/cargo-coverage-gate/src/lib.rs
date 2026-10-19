@@ -23,9 +23,11 @@
 //! sources are removed. Within a released source file, only items whose `cfg`
 //! semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
 //! removed; feature-gated `test-util` APIs remain measured when they can compile
-//! in a non-test build. Cargo target `required-features` are treated as enabled
-//! at the target root, so code that requires one of those features to be absent
-//! is not part of that target's released surface.
+//! in a non-test build. Local Cargo target `required-features` are treated as
+//! enabled at the target root, so code that requires one of those features to
+//! be absent is not part of that target's released surface. Dependency-qualified
+//! selectors such as `dep/feature` do not become local `cfg(feature = ...)`
+//! atoms.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
@@ -38,7 +40,8 @@
 //! than every attributed LCOV line. Existing callers that deliberately include
 //! tests or other non-release targets should migrate to the corresponding
 //! `evaluate_unfiltered*` function. The released-surface APIs also treat each
-//! target's Cargo `required-features` as enabled when classifying its source.
+//! target's local Cargo `required-features` as enabled when classifying its
+//! source; dependency-qualified selectors do not define local cfg atoms.
 //!
 //! ## Configuration
 //!

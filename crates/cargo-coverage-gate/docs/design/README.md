@@ -555,12 +555,14 @@ the released Cargo surface:
   `cfg(any(test, feature = "test-util"))`, `cfg(feature = "test-util")`, and
   `cfg(not(test))` remain. All applicable `cfg` and `cfg_attr` effects on an
   item, its enclosing owners, its declaring module, and its source file are
-  conjoined with shared assignments. A Cargo target's `required-features` are
-  also true at its root, so code that can exist only when a required feature
-  is absent is not counted as released. Correlated occurrences of up to twelve
-  distinct non-`test` cfg atoms are evaluated exactly; larger or unsupported
-  predicate shapes fall back to conservative retention rather than hiding
-  released code.
+  conjoined with shared assignments. A Cargo target's local
+  `required-features` are also true at its root, so code that can exist only
+  when a required feature is absent is not counted as released.
+  Dependency-qualified selectors such as `dep/feature` enable another
+  package's feature and do not create a local `cfg(feature = "dep/feature")`
+  atom. Correlated occurrences of up to twelve distinct non-`test` cfg atoms
+  are evaluated exactly; larger or unsupported predicate shapes fall back to
+  conservative retention rather than hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted

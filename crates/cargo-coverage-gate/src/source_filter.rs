@@ -409,12 +409,7 @@ fn source_roots(
                     Surface::NonReleased
                 },
                 role: SourceRole::CrateRoot,
-                guard: CfgFormula::all(
-                    target
-                        .required_features
-                        .iter()
-                        .map(|feature| CfgFormula::Atom(format!("feature={feature}"))),
-                ),
+                guard: target_required_features_guard(&target.required_features),
                 owning_member: owning_member.clone(),
             });
         }
@@ -428,6 +423,15 @@ fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathB
         let relative = path.strip_prefix(ancestor).expect("path ancestors are always valid strip prefixes");
         Some(reported.join(relative))
     })
+}
+
+fn target_required_features_guard(required_features: &[String]) -> CfgFormula {
+    CfgFormula::all(
+        required_features
+            .iter()
+            .filter(|feature| !feature.contains('/'))
+            .map(|feature| CfgFormula::Atom(format!("feature={feature}"))),
+    )
 }
 
 fn relative_path(from: &Path, to: &Path) -> Option<PathBuf> {
@@ -1907,7 +1911,12 @@ mod tests {
     #[test]
     fn conflicting_released_package_attribution_fails() {
         let mut indexed = IndexedSource {
-            analysis: analyze(Path::new("fixture.rs"), "pub fn fixture() {}\n"),
+            analysis: SourceAnalysis {
+                syntax: None,
+                line_count: 0,
+                line_starts: vec![0],
+                test_only_lines: BTreeSet::new(),
+            },
             edition: Edition::Edition2024,
             released_path: None,
             test_only_lines: BTreeSet::new(),
@@ -2418,6 +2427,45 @@ mod tests {
         )
         .expect("required-feature report filters");
         assert_eq!(filtered, [""]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn dependency_required_features_do_not_become_local_cfg_atoms() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root
+            .join("member/src/dependency-required-feature-root.rs")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        metadata.packages[0].targets[0].required_features = vec!["dep/x".to_owned()];
+
+        let index = SourceIndex::from_metadata(&metadata).expect("dependency-required feature source index builds");
+        let source = fs::canonicalize(root.join("member/src/dependency-required-feature-root.rs"))
+            .expect("canonical dependency-required feature source");
+        assert!(index.files[&source].test_only_lines.is_empty());
+
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov(
+                "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nend_of_record\n",
+            )],
+            &metadata,
+        )
+        .expect("dependency-required feature report filters");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(
+            report
+                .sections
+                .values()
+                .next()
+                .expect("released section remains")
+                .lines
+                .keys()
+                .map(|line| line.line)
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
     }
 
     #[test]
