@@ -19,7 +19,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-sort: no modified packages; skipping'; exit 0 }

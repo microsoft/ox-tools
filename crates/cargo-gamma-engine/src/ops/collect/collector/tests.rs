@@ -7,10 +7,1370 @@ use syn::visit::Visit;
 use syn::{Expr, Item, Member, Stmt};
 
 use super::super::{Defaults, collect_in, collect_with};
-use super::{Collector, compact_path};
+use super::{Collector, Confidence, Shape, compact_path};
 use crate::cfg::CfgSet;
 use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
+
+// Initializes source-derived facts without traversal; callbacks drive selected visitor and binding transitions.
+fn with_source_facts(source: &str, selector: &str, check: impl FnOnce(&mut Collector<'_>)) {
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let selection = Selection::parse(selector).unwrap();
+    let cfg = CfgSet::parse("");
+    let defaults = Defaults::of(&file.ast);
+    let mut collector = Collector::new(&file, &selection, selection.errors(), &cfg, &defaults);
+    check(&mut collector);
+}
+
+#[test]
+fn local_literal_and_range_patterns_do_not_emit_expression_mutations() {
+    for (source, selector, original, replacement, mutator) in [
+        (
+            "fn f(value:u8){let 7=value else{return;};let _=9;}",
+            "literal.int_to_zero",
+            "9",
+            "0",
+            "literal.int_to_zero",
+        ),
+        (
+            "fn f(value:u8){let 3..=5=value else{return;};let _=9;}",
+            "literal.int_to_zero,range.inclusive_to_exclusive",
+            "9",
+            "0",
+            "literal.int_to_zero",
+        ),
+        (
+            "fn f(value:bool){let true=value else{return;};let _=false;}",
+            "literal.bool_flip",
+            "false",
+            "true",
+            "literal.bool_flip",
+        ),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::unconditional());
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        let candidate = &found[0];
+        let start = source.rfind(original).unwrap();
+        assert_eq!(candidate.span, start..start + original.len());
+        assert_eq!(file.slice(&candidate.span), original);
+        assert_eq!(candidate.mutator, mutator);
+        assert_eq!(candidate.replacement, replacement);
+        assert_eq!(candidate.replacement_index, 0);
+        assert_eq!(candidate.shape, super::Shape::Expr);
+        assert_eq!(candidate.confidence, super::Confidence::Proven);
+    }
+}
+
+#[test]
+fn local_pattern_exclusion_preserves_initializer_divergence_and_sibling_candidates() {
+    let source = "fn f(value:u8){let 7=std::hint::black_box(value+13) else{std::hint::black_box(11);return;};let _=9;}";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("literal.int_to_zero").unwrap(), &CfgSet::unconditional());
+    let originals: Vec<_> = found.iter().map(|candidate| file.slice(&candidate.span)).collect();
+    assert_eq!(originals, ["13", "11", "9"]);
+    for (candidate, original) in found.iter().zip(["13", "11", "9"]) {
+        let start = source.find(original).unwrap();
+        assert_eq!(candidate.span, start..start + original.len());
+        assert_eq!(candidate.replacement, "0");
+        assert_eq!(candidate.replacement_index, 0);
+        assert_eq!(candidate.shape, super::Shape::Expr);
+        assert_eq!(candidate.confidence, super::Confidence::Proven);
+    }
+}
+
+#[test]
+fn local_binding_evidence_preserves_pattern_trust_and_clears_shadowed_types() {
+    for (pattern, trusted) in [("value", true), ("ref value", false), ("value @ _", false)] {
+        let source = format!("fn f() {{let {pattern}:u32=7;}}");
+        with_source_facts(&source, "literal.int_to_zero", |collector| {
+            let file = collector.file;
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            let Stmt::Local(local) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            collector.visit_local(local);
+            assert_eq!(collector.binding_types["value"].resource_trusted, trusted, "{pattern}");
+        });
+    }
+    for statement in ["let value=unknown;", "let value;"] {
+        let source = format!("fn f(){{{statement}}}");
+        with_source_facts(&source, "literal.int_to_zero", |collector| {
+            let file = collector.file;
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            let Stmt::Local(local) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            collector.bind("value".into(), true);
+            collector.bind_type("value".into(), syn::parse_quote!(u32));
+            collector.visit_local(local);
+            assert!(!collector.binding_types.contains_key("value"), "{statement}");
+            assert!(!collector.inferred_unsigned.contains("value"), "{statement}");
+            assert_eq!(collector.bindings.get("value"), Some(&false), "{statement}");
+        });
+    }
+}
+
+#[test]
+fn untyped_shadowing_restores_outer_type_evidence_after_leaving_its_scope() {
+    with_source_facts("fn f() {}", "expr.increment", |collector| {
+        collector.bind_type("value".into(), syn::parse_quote!(u32));
+        collector.in_scope(|collector| {
+            collector.bind_unknown_type("value".into());
+            assert!(!collector.binding_types.contains_key("value"));
+            collector.in_scope(|collector| {
+                collector.bind_type("value".into(), syn::parse_quote!(bool));
+                assert_eq!(collector.binding_types["value"].ty, syn::parse_quote!(bool));
+            });
+            assert!(!collector.binding_types.contains_key("value"));
+        });
+        assert_eq!(collector.binding_types["value"].ty, syn::parse_quote!(u32));
+        assert!(collector.is_known_unsigned(&syn::parse_quote!(value)));
+    });
+}
+
+#[test]
+fn inferred_locals_keep_unsigned_evidence_separate_from_resource_trust() {
+    with_source_facts(
+        "fn f(source:u32){let value=u32::from(source);let copy=source;}",
+        "literal.int_to_zero",
+        |collector| {
+            let file = collector.file;
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            collector.in_function(&function.sig, |collector| {
+                for statement in &function.block.stmts {
+                    let Stmt::Local(local) = statement else { unreachable!() };
+                    collector.visit_local(local);
+                }
+                assert!(collector.inferred_unsigned.contains("value"));
+                assert!(!collector.binding_types["copy"].resource_trusted);
+                assert_eq!(collector.binding_types["copy"].ty, syn::parse_quote!(u32));
+            });
+        },
+    );
+}
+
+#[test]
+fn iterator_bindings_restore_prior_membership_and_cannot_escape_nested_functions() {
+    let source = "fn f(text:&str){let iter=text.chars().peekable();let iter=text.chars().peekable();fn nested(){}}";
+    for had_prior in [false, true] {
+        with_source_facts(source, "literal.int_to_zero", |collector| {
+            let file = collector.file;
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            collector.in_function(&function.sig, |collector| {
+                let Stmt::Local(first) = &function.block.stmts[0] else {
+                    unreachable!()
+                };
+                let Stmt::Local(second) = &function.block.stmts[1] else {
+                    unreachable!()
+                };
+                let Stmt::Item(Item::Fn(nested)) = &function.block.stmts[2] else {
+                    unreachable!()
+                };
+                if had_prior {
+                    collector.visit_local(first);
+                }
+                collector.in_scope(|collector| {
+                    collector.visit_local(second);
+                    assert!(collector.resource_iterators.contains("iter"));
+                    collector.in_function(&nested.sig, |collector| {
+                        assert!(!collector.resource_iterators.contains("iter"));
+                    });
+                    assert!(collector.resource_iterators.contains("iter"));
+                });
+                assert_eq!(collector.resource_iterators.contains("iter"), had_prior);
+            });
+        });
+    }
+}
+
+#[test]
+fn diverging_let_else_initializers_do_not_supply_resource_iterator_evidence() {
+    let source = "fn f(text:&str){let iter=text.chars().peekable() else {return;};}";
+    with_source_facts(source, "literal.int_to_zero", |collector| {
+        let file = collector.file;
+        let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+        collector.in_function(&function.sig, |collector| {
+            let Stmt::Local(local) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            collector.visit_local(local);
+            assert!(!collector.resource_iterators.contains("iter"));
+        });
+    });
+}
+
+#[test]
+fn default_and_payload_evidence_requires_the_correct_variant_family_and_parameter_type() {
+    for (source, selector) in [
+        ("fn Err(_:())->Option<u8>{Some(7)} fn f()->Option<u8>{Err(())}", "result.err_to_ok"),
+        (
+            "fn Err(_:())->Option<&'static u8>{None} fn f(value:&'static u8)->Option<&'static u8>{Err(())}",
+            "result.err_to_ok",
+        ),
+        ("fn f(other:&'static u16)->Option<&'static u8>{None}", "option.none_to_some"),
+        (
+            "const None:Result<&'static u8,()>=Err(()); fn f(value:&'static u8)->Result<&'static u8,()>{None}",
+            "option.none_to_some",
+        ),
+    ] {
+        with_source_facts(source, selector, |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert!(collector.candidates.is_empty(), "{source}: {:?}", collector.candidates);
+        });
+    }
+    with_source_facts(
+        "type Output=Option<&'static u8>;fn f(value:&'static u8)->Output{None}",
+        "option.none_to_some",
+        |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), 1);
+            assert_eq!(collector.candidates[0].replacement, "Some(value)");
+            assert_eq!(collector.candidates[0].replacement_index, 0);
+        },
+    );
+}
+
+#[test]
+fn typed_variant_evidence_uses_associated_types_and_lexically_visible_imports() {
+    for (source, replacement) in [
+        (
+            "trait Has{type Error;fn f()->Result<u8,Self::Error>;}struct S;impl Has for S{type Error=u16;fn f()->Result<u8,Self::Error>{Ok(7)}}",
+            "Err(Default::default())",
+        ),
+        (
+            "use foreign::HashMap;mod child{use std::collections::HashMap;fn f()->Option<HashMap<u8,u8>>{None}}",
+            "Some(Default::default())",
+        ),
+    ] {
+        with_source_facts(source, "option.none_to_some,result.ok_to_err", |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), 1, "{source}: {:?}", collector.candidates);
+            assert_eq!(collector.candidates[0].replacement, replacement);
+        });
+    }
+}
+
+#[test]
+fn nested_return_context_keeps_associated_nondefault_error_evidence() {
+    let source = "struct String;struct S;trait Has{type Error;fn f();}impl Has for S{type Error=String;fn f(){let _=||->Result<u8,Self::Error>{Ok(7)};}}";
+    with_source_facts(source, "result.ok_to_err", |collector| {
+        collector.visit_file(&collector.file.ast);
+        assert!(collector.candidates.is_empty(), "{:?}", collector.candidates);
+    });
+}
+
+#[test]
+fn assignment_default_evidence_resolves_aliases_and_associated_types_but_requires_a_type() {
+    for source in [
+        "type Value=Option<u8>;fn f(mut target:Value){target=Some(7);}",
+        "trait Has{type Value;fn f(target:Self::Value);}struct S;impl Has for S{type Value=u32;fn f(mut target:Self::Value){target=7;}}",
+    ] {
+        with_source_facts(source, "assign_value.default", |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), 1, "{source}: {:?}", collector.candidates);
+            assert_eq!(collector.candidates[0].replacement, "Default::default()");
+            assert_eq!(collector.candidates[0].replacement_index, 0);
+        });
+    }
+    with_source_facts("fn f(){unknown=7;}", "assign_value.default", |collector| {
+        collector.visit_file(&collector.file.ast);
+        assert!(collector.candidates.is_empty());
+    });
+}
+
+#[test]
+fn configured_out_struct_fields_do_not_hide_later_active_field_expressions() {
+    let source = "struct S{#[cfg(any())] hidden:u32,kept:u32}fn f(){let _=S{#[cfg(any())] hidden:7,kept:9};}";
+    with_source_facts(source, "literal.int_to_zero", |collector| {
+        collector.visit_file(&collector.file.ast);
+        assert_eq!(collector.candidates.len(), 1);
+        assert_eq!(collector.file.slice(&collector.candidates[0].span), "9");
+        assert_eq!(collector.candidates[0].replacement, "0");
+    });
+}
+
+#[test]
+fn unsigned_zero_collection_records_only_zero_literals_and_real_sum_sources() {
+    for (text, expected) in [
+        ("0", &["0"][..]),
+        ("7", &[][..]),
+        ("false", &[][..]),
+        ("'x'", &[][..]),
+        ("iter.map(|_|0).sum()", &["0"][..]),
+        ("iter.map(|_|0).count()", &[][..]),
+    ] {
+        let expression: Expr = syn::parse_str(text).unwrap();
+        let mut spans = Vec::new();
+        super::unsigned_zero_spans(&expression, &mut spans);
+        let actual: Vec<_> = spans.iter().map(|span| &text[span.clone()]).collect();
+        assert_eq!(actual, expected, "{text}");
+    }
+}
+
+#[test]
+fn expression_type_proofs_keep_parentheses_inferred_time_and_conservative_bare_option_vetoes() {
+    with_source_facts("use std::time::Duration;fn f<Option>(value:u32){}", "all", |collector| {
+        let Item::Fn(function) = collector.file.ast.items[1].clone() else {
+            unreachable!()
+        };
+        collector.in_function(&function.sig, |collector| {
+            assert_eq!(
+                collector.type_of_expression(&syn::parse_quote!((value))),
+                Some(&syn::parse_quote!(u32))
+            );
+            assert!(collector.is_known_textual_or_temporal(&syn::parse_quote!(Duration::from_secs(7))));
+            assert!(collector.is_known_textual_or_temporal_type(&syn::parse_quote!(Option)));
+            assert!(!collector.is_known_textual_or_temporal_type(&syn::parse_quote!(xyzzy)));
+            assert!(!collector.is_known_textual_or_temporal_type(&syn::parse_quote!(u32)));
+        });
+    });
+}
+
+#[test]
+fn textual_ordering_results_and_capacity_arguments_do_not_gain_numeric_perturbations() {
+    for source in ["fn f(){consume(\"a\".min(\"b\"));}", "fn f(){consume(\"a\".max(\"b\"));}"] {
+        with_source_facts(source, "expr.increment", |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert!(collector.candidates.is_empty(), "{source}: {:?}", collector.candidates);
+        });
+    }
+    let source = "fn f(mut values:Vec<u8>,count:usize){values.reserve(count);values.get(count);}";
+    with_source_facts(source, "expr.increment", |collector| {
+        collector.visit_file(&collector.file.ast);
+        assert_eq!(collector.candidates.len(), 1);
+        let candidate = &collector.candidates[0];
+        assert_eq!(collector.file.slice(&candidate.span), "count");
+        assert_eq!(candidate.span.start, source.rfind("count").unwrap());
+    });
+}
+
+#[test]
+fn invalid_original_regexes_cannot_be_repaired_into_mutation_candidates() {
+    assert_eq!(super::regex_mutations(r"\x?41"), [("regex.optional_to_required", r"\x41".into())]);
+    for (pattern, expected) in [(r"\x?41", 0), ("^a", 1)] {
+        let source = format!("fn f(){{let _=Regex::new({pattern:?});}}");
+        with_source_facts(&source, "regex.optional_to_required,regex.remove_start_anchor", |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), expected, "{pattern}: {:?}", collector.candidates);
+            if expected != 0 {
+                assert_eq!(collector.candidates[0].replacement, "\"a\"");
+            }
+        });
+    }
+}
+
+#[test]
+fn condition_range_and_option_rewrites_preserve_their_assigned_zero_ordinals() {
+    for (source, selector, original, replacement) in [
+        ("fn f(){if ready{}}", "cond.negate", "ready", "!(ready)"),
+        ("fn f(){while ready{}}", "cond.negate", "ready", "!(ready)"),
+        (
+            "fn f(){let _=lo..hi;}",
+            "range.exclusive_to_inclusive",
+            "lo..hi",
+            "(lo)..((hi) + 1)",
+        ),
+        (
+            "fn f(){let _=lo..=hi;}",
+            "range.inclusive_to_exclusive",
+            "lo..=hi",
+            "(lo)..=((hi) - 1)",
+        ),
+        (
+            "fn f()->Option<u8>{None}",
+            "option.none_to_some",
+            "None",
+            "Some(Default::default())",
+        ),
+    ] {
+        with_source_facts(source, selector, |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), 1, "{source}: {:?}", collector.candidates);
+            let candidate = &collector.candidates[0];
+            assert_eq!(collector.file.slice(&candidate.span), original);
+            assert_eq!(candidate.replacement, replacement);
+            assert_eq!(candidate.replacement_index, 0);
+        });
+    }
+    with_source_facts("fn f(){if (false){}}", "cond.always_false", |collector| {
+        collector.visit_file(&collector.file.ast);
+        assert!(collector.candidates.is_empty());
+    });
+}
+
+#[test]
+fn range_start_and_endpoint_are_independent_numeric_perturbation_sites() {
+    with_source_facts("fn f(lo:u32,hi:u32){let _=lo..hi;}", "expr.increment", |collector| {
+        collector.visit_file(&collector.file.ast);
+        let originals: Vec<_> = collector
+            .candidates
+            .iter()
+            .map(|candidate| collector.file.slice(&candidate.span))
+            .collect();
+        assert_eq!(originals, ["hi", "lo"]);
+        assert_eq!(collector.candidates[0].replacement, "(hi) + 1");
+        assert_eq!(collector.candidates[1].replacement, "(lo) + 1");
+    });
+}
+
+#[test]
+fn unknown_assignment_types_cannot_claim_signed_zero_confidence() {
+    with_source_facts(
+        "fn f(mut known:i32,mut unknown:dependency::Integer){known=0;unknown=0;}",
+        "literal.int_decrement",
+        |collector| {
+            collector.visit_file(&collector.file.ast);
+            let confidences: Vec<_> = collector.candidates.iter().map(|candidate| candidate.confidence).collect();
+            assert_eq!(confidences, [super::Confidence::Proven, super::Confidence::Optimistic]);
+            assert!(collector.candidates.iter().all(|candidate| candidate.replacement == "-1"));
+        },
+    );
+}
+
+#[test]
+fn value_bearing_breaks_and_diverging_else_loops_keep_their_control_flow_obligations() {
+    for (source, selector, expected) in [
+        ("fn f(){let _=loop{break 7;};}", "loop.delete_break,loop.break_to_continue", 0),
+        (
+            "fn f(value:Option<u8>){let Some(value)=value else{loop{continue;}};}",
+            "loop.continue_to_break",
+            0,
+        ),
+        ("fn f(){let _=loop{for _ in 0..1{continue;}break 7;};}", "loop.continue_to_break", 1),
+        ("fn f(work:fn()){loop{work();break;}}", "loop.break_to_continue", 1),
+    ] {
+        with_source_facts(source, selector, |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), expected, "{source}: {:?}", collector.candidates);
+            for candidate in &collector.candidates {
+                assert_eq!(
+                    candidate.replacement,
+                    if selector == "loop.continue_to_break" {
+                        "break"
+                    } else {
+                        "continue"
+                    }
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn parameter_patterns_and_impl_generic_contexts_keep_independent_proof_evidence() {
+    for (pattern, trusted) in [("value", true), ("ref value", false), ("value @ _", false)] {
+        let source = format!("fn f({pattern}:u32){{}}");
+        with_source_facts(&source, "all", |collector| {
+            let file = collector.file;
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            collector.in_function(&function.sig, |collector| {
+                assert_eq!(collector.binding_types["value"].resource_trusted, trusted);
+            });
+        });
+    }
+    for (source, selector, expected) in [
+        ("struct S<T>(T);impl<T>S<T>{fn f()->T{panic!()}}", "fn_value.default", 0),
+        ("struct S<T>(T);impl<T:Default>S<T>{fn f()->T{panic!()}}", "fn_value.default", 1),
+        (
+            "struct S<T>(T);impl<T:Iterator>S<T>{fn f(value:T){let _=value.filter(|_|true);}}",
+            "iter.remove_filter",
+            1,
+        ),
+    ] {
+        with_source_facts(source, selector, |collector| {
+            collector.visit_file(&collector.file.ast);
+            assert_eq!(collector.candidates.len(), expected, "{source}: {:?}", collector.candidates);
+            assert!(
+                collector
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.confidence == super::Confidence::Proven),
+                "{source}: {:?}",
+                collector.candidates
+            );
+        });
+    }
+}
+
+#[test]
+fn default_recursion_filter_does_not_remove_nonrecursive_value_families() {
+    let source = "struct String;impl Default for String{fn default()->Self{String}}";
+    with_source_facts(
+        source,
+        "fn_value.empty_string,fn_value.xyzzy_string,fn_value.default",
+        |collector| {
+            collector.visit_file(&collector.file.ast);
+            let replacements: Vec<_> = collector
+                .candidates
+                .iter()
+                .map(|candidate| candidate.replacement.as_str())
+                .collect();
+            assert_eq!(replacements, ["String::new()", "\"xyzzy\".to_owned()"]);
+            assert!(
+                collector
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.confidence == super::Confidence::Optimistic)
+            );
+        },
+    );
+}
+
+#[test]
+fn ordinal_conversion_preserves_small_values_and_the_largest_representable_value() {
+    assert_eq!(super::saturating_ordinal(0), 0);
+    assert_eq!(super::saturating_ordinal(7), 7);
+    if let Ok(maximum) = usize::try_from(u32::MAX) {
+        assert_eq!(super::saturating_ordinal(maximum - 1), u32::MAX - 1);
+        assert_eq!(super::saturating_ordinal(maximum), u32::MAX);
+    }
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn ordinal_conversion_saturates_above_the_u32_boundary_without_allocating_a_huge_collection() {
+    let maximum = usize::try_from(u32::MAX).unwrap();
+    assert_eq!(super::saturating_ordinal(maximum + 1), u32::MAX);
+    assert_eq!(super::saturating_ordinal(usize::MAX), u32::MAX);
+}
+
+#[test]
+fn numeric_and_iterator_proofs_preserve_qualification_parentheses_and_negative_controls() {
+    with_source_facts("use core::u32 as Number; const COUNT:u32=7; fn f() {}", "all", |collector| {
+        assert!(collector.is_primitive_constant(&syn::parse_quote!(Number::MAX)));
+        assert!(collector.is_known_numeric(&syn::parse_quote!(Number::MAX)));
+        assert!(!collector.is_known_numeric(&syn::parse_quote!(<Other>::COUNT)));
+        assert!(collector.is_known_numeric(&syn::parse_quote!(COUNT)));
+        assert_eq!(
+            collector.numeric_confidence(&syn::parse_quote!(!1u8)),
+            super::Confidence::Optimistic
+        );
+        assert_eq!(collector.numeric_confidence(&syn::parse_quote!(-1i8)), super::Confidence::Proven);
+        for (text, expected) in [
+            ("u32::from(value)", true),
+            ("<Other>::u32::from(value)", false),
+            ("from(value)", false),
+        ] {
+            let call = syn::parse_str(text).unwrap();
+            assert_eq!(collector.is_primitive_numeric_associated_call(&call), expected, "{text}");
+        }
+        assert!(collector.is_iterator_receiver(&syn::parse_quote!((0..3))));
+        assert!(!collector.is_iterator_receiver(&syn::parse_quote!((unknown))));
+    });
+}
+
+#[test]
+fn standard_paths_require_both_complete_qualifiers_and_the_requested_terminal_name() {
+    for (text, expected) in [
+        ("std::env::var", true),
+        ("std::env", false),
+        ("std::env::var::extra", false),
+        ("other::env::var", false),
+    ] {
+        assert_eq!(
+            super::path_matches(&syn::parse_str(text).unwrap(), &["std", "env", "var"]),
+            expected,
+            "{text}"
+        );
+    }
+    let imports = crate::HashMap::from_iter([("Clock".into(), Some(vec!["std".into(), "time".into(), "Instant".into()]))]);
+    assert!(super::imported_item_matches(
+        &imports,
+        &syn::parse_quote!(Clock),
+        "Instant",
+        &["std", "time"]
+    ));
+    assert!(!super::imported_item_matches(
+        &imports,
+        &syn::parse_quote!(Clock),
+        "Duration",
+        &["std", "time"]
+    ));
+    assert!(!super::standard_type_path(
+        &syn::parse_quote!(std::time::Instant),
+        &imports,
+        "Duration",
+        &["std", "time"]
+    ));
+    assert!(super::standard_type_path(
+        &syn::parse_quote!(std::time::Duration),
+        &imports,
+        "Duration",
+        &["std", "time"]
+    ));
+    with_source_facts("use std::vec::Vec as Buffer; fn f() {}", "all", |collector| {
+        assert!(!collector.type_has_standard_iterator_methods(&syn::parse_quote!(Buffer<u8>), collector.current_imports()));
+        assert!(collector.type_has_standard_iterator_methods(&syn::parse_quote!(Vec<u8>), collector.current_imports()));
+    });
+}
+
+#[test]
+fn tuple_default_proofs_require_every_element_and_none_requires_an_option_context() {
+    with_source_facts("const None:bool=true; fn f() {}", "all", |collector| {
+        for (text, expected) in [("(1, false)", true), ("()", true), ("(1, unknown)", false), ("(unknown, 1)", false)] {
+            assert_eq!(
+                collector.expression_can_directly_default(&syn::parse_str(text).unwrap()),
+                expected,
+                "{text}"
+            );
+        }
+        assert!(!collector.expression_is_known_default_for_type(&syn::parse_quote!(None), &syn::parse_quote!(bool)));
+        assert!(collector.expression_is_known_default_for_type(&syn::parse_quote!(None), &syn::parse_quote!(Option<u32>)));
+    });
+}
+
+#[test]
+fn typed_boolean_rewrites_never_negate_a_pattern_binding_condition() {
+    with_source_facts(
+        "fn f() { if let Some(value)=option {} if ready {} }",
+        "bool_expr.negate",
+        |collector| {
+            let file = collector.file;
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            for statement in &function.block.stmts {
+                let Stmt::Expr(Expr::If(branch), _) = statement else {
+                    unreachable!()
+                };
+                collector.boolean_expression(&branch.cond, &syn::parse_quote!(bool));
+            }
+            assert_eq!(collector.candidates.len(), 1);
+            assert_eq!(collector.file.slice(&collector.candidates[0].span), "ready");
+            assert_eq!(collector.candidates[0].replacement, "!(ready)");
+        },
+    );
+}
+
+#[test]
+fn lexical_default_imports_do_not_erase_the_independent_root_default_path_veto() {
+    with_source_facts("use foreign::Default; fn f() {use core::default::Default;}", "all", |collector| {
+        let Item::Fn(function) = &collector.file.ast.items[1] else {
+            unreachable!()
+        };
+        collector.scope_path.push(super::indexes::block_id(&function.block));
+        assert!(collector.types().supports_bare_default_trait());
+        assert!(!collector.standard_default_replacement());
+    });
+}
+
+#[test]
+fn textual_arithmetic_vetoes_are_independent_on_both_sides_and_do_not_hide_comparisons() {
+    for source in [
+        "fn f(){let _=String::from(\"a\")+suffix();}",
+        "fn f(){let _=prefix()+\"suffix\";}",
+        "fn f(left:String){let _=left+suffix();}",
+        "fn f(right:&str){let _=prefix()+right;}",
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        assert!(
+            collect_in(&file, &Selection::parse("arith.add_to_sub").unwrap(), &CfgSet::unconditional()).is_empty(),
+            "{source}"
+        );
+    }
+    let file = SourceFile::parse("fixture.rs", "fn f(left:String,right:String)->bool{left==right}".into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("relational.eq_to_ne").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].replacement, "(left) != (right)");
+}
+
+#[test]
+fn right_hand_temporal_evidence_keeps_subtraction_but_rejects_other_arithmetic_swaps() {
+    let file = SourceFile::parse("fixture.rs", "fn f(right:std::time::Duration){let _=left+right;}".into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("arith").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].mutator, "arith.add_to_sub");
+    assert_eq!(found[0].replacement, "(left) - (right)");
+    assert_eq!(found[0].replacement_index, 0);
+}
+
+#[test]
+fn configured_out_statements_and_unrelated_macros_do_not_stop_or_join_active_collection() {
+    for (source, selector, expected, original) in [
+        ("fn f(){#[cfg(any())] hidden(); active();}", "stmt.delete_call", 1, "active();"),
+        (
+            "fn f(){#[cfg(any())] vec![1,2]; other![5,6]; vec![3,4];}",
+            "collection.omit_element",
+            2,
+            "vec![3,4]",
+        ),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), expected, "{source}: {found:?}");
+        for candidate in &found {
+            assert_eq!(file.slice(&candidate.span), original);
+        }
+    }
+}
+
+#[test]
+fn every_unsigned_and_nested_value_traversal_keeps_observable_nonzero_children() {
+    for (source, expected) in [
+        ("fn callee(value:u32){} fn f(){callee(7);}", vec!["7"]),
+        ("fn f(){std::time::Duration::from_secs(7);}", vec!["7"]),
+        ("fn f(){let value:u32=7;}", vec!["7"]),
+        ("fn f(values:&[u8]){let index={7}; let _=values[index];}", vec!["7"]),
+        ("fn f()->u32{return 7;}", vec!["7"]),
+        ("fn f(mut value:u32){value=7;}", vec!["7"]),
+        ("fn f(values:&mut[u8]){values[7]=9;}", vec!["7", "9"]),
+        ("fn f(){[7].as_slice(9);}", vec!["7", "9"]),
+        ("fn f(){let _=[7][0];}", vec!["7"]),
+        ("fn f(){let _=(7 as u32)==unknown;let _=unknown==(9 as u32);}", vec!["7", "9"]),
+        ("fn f(){let _=fallible(7)?;}", vec!["7"]),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse("literal.int_to_zero").unwrap(), &CfgSet::unconditional());
+        assert_eq!(
+            found.iter().map(|candidate| file.slice(&candidate.span)).collect::<Vec<_>>(),
+            expected,
+            "{source}: {found:?}"
+        );
+        for candidate in &found {
+            assert_eq!(candidate.replacement, "0");
+            assert_eq!(candidate.replacement_index, 0);
+        }
+    }
+}
+
+#[test]
+fn numeric_conversion_proofs_require_a_primitive_numeric_owner() {
+    for (source, expected) in [
+        ("u32::from(value)", true),
+        ("i64::from_be_bytes(bytes)", true),
+        ("f32::from(value)", true),
+        ("String::from(value)", false),
+        ("Custom::from_be_bytes(bytes)", false),
+        ("u32::new(value)", false),
+        ("from(value)", false),
+    ] {
+        let call: syn::ExprCall = syn::parse_str(source).unwrap();
+        assert_eq!(super::numeric_associated_call(&call), expected, "{source}");
+    }
+}
+
+#[test]
+fn candidate_emission_cannot_bypass_the_selected_mutator() {
+    let file = SourceFile::parse("fixture.rs", "fn f()->bool { true }".into()).unwrap();
+    let Item::Fn(function) = &file.ast.items[0] else {
+        panic!("fixture contains one function");
+    };
+    let selection = Selection::parse("literal.bool_flip").unwrap();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::default();
+    let mut collector = Collector::new(&file, &selection, selection.errors(), &cfg, &defaults);
+    for mutator in ["fn_value.default", "literal.bool_flip"] {
+        collector.emit_shaped_with_confidence(
+            mutator,
+            function.block.span(),
+            "false",
+            3,
+            super::Shape::Block,
+            super::Confidence::Proven,
+        );
+    }
+    let candidates = collector.finish();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].mutator, "literal.bool_flip");
+    assert_eq!(candidates[0].replacement_index, 3);
+}
+
+#[test]
+fn inherent_impl_identity_keeps_the_exact_qualified_self_type() {
+    for (owner, expected) in [
+        ("a::Owner<u8>", "a::Owner<u8>"),
+        ("b::Owner<u16>", "b::Owner<u16>"),
+        ("&Owner", "&Owner"),
+    ] {
+        let source = format!("impl {owner} {{ fn value()->u32 {{ 7 }} }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let candidates = collect_in(&file, &Selection::parse("literal.int_to_zero").unwrap(), &CfgSet::unconditional());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(&*candidates[0].item_path, format!("{expected}::value"));
+    }
+}
+
+#[test]
+fn declaration_const_positions_stay_inert_while_method_trait_and_repeat_values_are_visited() {
+    let source = r#"
+        const CONSTANT: usize = 3;
+        static STATIC: usize = 3;
+        enum Discriminant { Value = 3 }
+        type Bytes = [u8; 3];
+        struct Owner;
+        struct Holder<const N: usize> { field: [u8; 2] }
+        impl Owner {
+            const ASSOCIATED: usize = 3;
+            fn method() -> usize { 3 }
+        }
+        trait Behavior {
+            const ASSOCIATED: usize = 3;
+            fn default_method() -> usize { 3 }
+        }
+        const fn constant_function() -> usize { 3 }
+        unsafe extern "C" {
+            fn foreign(value: [u8; 3]);
+            static FOREIGN: [u8; 3];
+        }
+        fn f() {
+            const LOCAL: usize = 3;
+            let _ = [3; 2];
+            callee::<{3}>();
+            let _ = Holder::<{3}> { field: [3; 2] };
+        }
+    "#;
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("literal.int_to_zero").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 4, "{found:?}");
+    assert_eq!(
+        found.iter().map(|value| value.item_path.as_ref()).collect::<Vec<_>>(),
+        ["Owner::method", "Behavior::default_method", "f", "f"]
+    );
+    assert_eq!(
+        found.iter().map(|value| value.identity_occurrence).collect::<Vec<_>>(),
+        [Some(0), Some(0), Some(0), Some(1)]
+    );
+    for candidate in &found {
+        assert_eq!(file.slice(&candidate.span), "3");
+        assert_eq!(candidate.replacement, "0");
+        assert_eq!(candidate.replacement_index, 0);
+        assert_eq!(candidate.shape, super::Shape::Expr);
+        assert_eq!(candidate.confidence, super::Confidence::Proven);
+    }
+}
+
+#[test]
+fn unsigned_context_tracks_both_comparison_sides_without_leaking_into_closures_or_async_blocks() {
+    for (source, expected) in [
+        ("fn f(u:u32) {let _=u==0;}", None),
+        ("fn f(u:u32) {let _=0==u;}", None),
+        ("fn f(s:i32) {let _=s==0;}", Some(super::Confidence::Proven)),
+        ("fn f(s:i32) {let _=0==s;}", Some(super::Confidence::Proven)),
+        ("fn f() {let _=0==unknown;}", Some(super::Confidence::Optimistic)),
+        ("fn f() {let n:u32={0};}", None),
+        ("fn f() {let _=0 as u32;}", None),
+        ("fn f()->u32 {if choose() {0}else{0}}", None),
+        ("fn f()->u32 {let _=||->u32 {0}; 0}", None),
+        ("fn f()->u32 {let _=|| {0}; 0}", Some(super::Confidence::Optimistic)),
+        ("fn f()->u32 {let _=async {0}; 0}", Some(super::Confidence::Optimistic)),
+        ("fn f() {let _=array[0];}", None),
+        ("fn f() {let _=0..=0;}", Some(super::Confidence::Optimistic)),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse("literal.int_decrement").unwrap(), &CfgSet::unconditional());
+        let count = if source.contains("0..=0") {
+            2
+        } else {
+            usize::from(expected.is_some())
+        };
+        assert_eq!(found.len(), count, "{source}: {found:?}");
+        for candidate in &found {
+            assert_eq!(file.slice(&candidate.span), "0");
+            assert_eq!(candidate.replacement, "-1");
+            assert_eq!(candidate.replacement_index, 3);
+            assert_eq!(Some(candidate.confidence), expected, "{source}");
+            assert_eq!(candidate.shape, super::Shape::Expr);
+        }
+        if source.contains("|| {0}") || source.contains("async {0}") {
+            assert_eq!(found[0].span.start, source.find("{0}").unwrap() + 1, "{source}");
+        }
+    }
+}
+
+#[test]
+fn skipped_parameter_kinds_do_not_hide_later_mutable_or_method_parameter_shadows() {
+    for (source, replacement, index, path) in [
+        (
+            "struct Plain; fn f((a,b):(u8,u8), plain:Plain, mut count:u32)->u32 { count }",
+            "{ let mut count: u32 = Default::default(); count }",
+            2,
+            "f",
+        ),
+        (
+            "struct Owner; impl Owner { fn f(&self, count:u32)->u32 { count } }",
+            "{ let count: u32 = Default::default(); count }",
+            1,
+            "Owner::f",
+        ),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_with(
+            &file,
+            &Selection::parse("parameter.default_shadow").unwrap(),
+            &CfgSet::unconditional(),
+            &Defaults::of(&file.ast),
+        );
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, replacement);
+        assert_eq!(found[0].replacement_index, index);
+        assert_eq!(found[0].shape, super::Shape::Block);
+        assert_eq!(found[0].confidence, super::Confidence::Proven);
+        assert_eq!(&*found[0].item_path, path);
+        assert_eq!(file.slice(&found[0].span), "{ count }");
+    }
+}
+
+#[test]
+fn fallback_and_iterator_rewrites_keep_their_exact_shape_index_and_confidence() {
+    for (source, selector, replacement, shape, confidence) in [
+        (
+            "fn f() { let _ = option.unwrap_or(9); }",
+            "fallback.unwrap_or_to_default",
+            "(option).unwrap_or_default()",
+            super::Shape::Expr,
+            super::Confidence::Proven,
+        ),
+        (
+            "fn f() { let _ = mystery.filter(|_| true); }",
+            "iter.remove_filter",
+            "mystery",
+            super::Shape::IterExpr,
+            super::Confidence::Optimistic,
+        ),
+        (
+            "fn f(xs:Vec<u8>) { let _ = xs.iter().filter(|_| true); }",
+            "iter.remove_filter",
+            "xs.iter()",
+            super::Shape::IterExpr,
+            super::Confidence::Proven,
+        ),
+        (
+            "fn f() { let _ = vec![[1].as_slice(), [2].as_slice()]; }",
+            "collection.reverse_vec",
+            "vec![[2].as_slice(), [1].as_slice()]",
+            super::Shape::Expr,
+            super::Confidence::Proven,
+        ),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::unconditional());
+        assert_eq!(found.len(), 1, "{selector}: {found:?}");
+        assert_eq!(found[0].replacement, replacement);
+        assert_eq!(found[0].replacement_index, 0);
+        assert_eq!(found[0].shape, shape);
+        assert_eq!(found[0].confidence, confidence);
+    }
+    let file = SourceFile::parse("fixture.rs", "fn f(){let _=[[1].as_slice(),[2].as_slice()];}".into()).unwrap();
+    assert!(
+        collect_in(
+            &file,
+            &Selection::parse("collection.reverse_array").unwrap(),
+            &CfgSet::unconditional()
+        )
+        .is_empty()
+    );
+    for expression in ["true", "!unknown()"] {
+        let file = SourceFile::parse("fixture.rs", format!("fn f()->bool {{ {expression} }}")).unwrap();
+        assert!(
+            collect_in(&file, &Selection::parse("bool_expr.negate").unwrap(), &CfgSet::unconditional()).is_empty(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn regex_splices_distinguish_escaping_lazy_quantifiers_and_character_class_contents() {
+    assert_eq!(
+        super::regex_mutations(r"^a?[+*?]b*?c+d\$$"),
+        [
+            ("regex.remove_start_anchor", r"a?[+*?]b*?c+d\$$".into()),
+            ("regex.remove_end_anchor", r"^a?[+*?]b*?c+d\$".into()),
+            ("regex.optional_to_required", r"^a[+*?]b*?c+d\$$".into()),
+            ("regex.negate_character_class", r"^a?[^+*?]b*?c+d\$$".into()),
+            ("regex.star_to_plus", r"^a?[+*?]b+?c+d\$$".into()),
+            ("regex.plus_to_star", r"^a?[+*?]b*?c*d\$$".into()),
+        ]
+    );
+    assert_eq!(super::regex_mutations("[^a]"), [("regex.negate_character_class", "[a]".into())]);
+    assert_eq!(super::regex_mutations("🦀a?"), [("regex.optional_to_required", "🦀a".into())]);
+    assert_eq!(super::regex_mutations(r"\\$"), [("regex.remove_end_anchor", r"\\".into())]);
+    assert_eq!(super::regex_mutations("^?a"), [("regex.optional_to_required", "^a".into())]);
+    for pattern in [r"\?\+\*", r"\$", "?a", "[a*+?]", "a{2}?"] {
+        let found = super::regex_mutations(pattern);
+        if pattern == "[a*+?]" {
+            assert_eq!(found, [("regex.negate_character_class", "[^a*+?]".into())]);
+        } else {
+            assert!(found.is_empty(), "{pattern}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn standard_unsigned_signatures_require_exact_qualifier_import_and_argument_positions() {
+    let imports = crate::HashMap::from_iter([
+        ("Clock".into(), Some(vec!["std".into(), "time".into(), "Duration".into()])),
+        ("Small".into(), Some(vec!["core".into(), "num".into(), "NonZeroU8".into()])),
+        (
+            "Atomic".into(),
+            Some(vec!["core".into(), "sync".into(), "atomic".into(), "AtomicU32".into()]),
+        ),
+        ("Foreign".into(), Some(vec!["foreign".into(), "Duration".into()])),
+        (
+            "TooLong".into(),
+            Some(vec!["std".into(), "time".into(), "nested".into(), "Duration".into()]),
+        ),
+    ]);
+    for (callee, expected) in [
+        ("std::time::Duration::new", [true, true, false]),
+        ("core::time::Duration::new", [true, true, false]),
+        ("Clock::new", [true, true, false]),
+        ("Clock::from_secs", [true, false, false]),
+        ("Clock::other", [false, false, false]),
+        ("Duration::new", [false, false, false]),
+        ("Foreign::new", [false, false, false]),
+        ("TooLong::new", [false, false, false]),
+        ("foreign::Clock::new", [false, false, false]),
+        ("std::num::NonZeroU8::new", [true, false, false]),
+        ("Small::new", [true, false, false]),
+        ("Small::other", [false, false, false]),
+        ("Atomic::new", [true, false, false]),
+        ("Atomic::other", [false, false, false]),
+        ("char::from_u32", [true, false, false]),
+        ("char::other", [false, false, false]),
+        ("foreign::char::from_u32", [false, false, false]),
+        ("single", [false, false, false]),
+        ("(Clock::new)", [false, false, false]),
+    ] {
+        let expression = syn::parse_str(callee).unwrap();
+        for (index, expected) in expected.into_iter().enumerate() {
+            assert_eq!(
+                super::standard_unsigned_argument(&expression, index, &imports),
+                expected,
+                "{callee} argument {index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn binding_evidence_undo_restores_import_provenance_and_each_unsigned_transition() {
+    let file = SourceFile::parse("fixture.rs", "use std::time::Duration as Clock; fn f() {}".into()).unwrap();
+    let selection = Selection::everything();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::of(&file.ast);
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    collector.bind_type("outer".into(), syn::parse_quote!(Clock));
+    collector.bind_inferred_unsigned("unsigned".into());
+    let original_imports = collector.binding_types["outer"].imports.clone();
+    collector.in_scope(|collector| {
+        collector.scope_path.push((77, 3));
+        collector.bind_inferred_unsigned("outer".into());
+        assert!(!collector.binding_types.contains_key("outer"));
+        assert!(collector.inferred_unsigned.contains("outer"));
+        collector.bind_type_with_trust("unsigned".into(), syn::parse_quote!(bool), false);
+        assert!(!collector.inferred_unsigned.contains("unsigned"));
+        assert!(!collector.binding_types["unsigned"].resource_trusted);
+        assert_eq!(collector.binding_types["unsigned"].scope, [(77, 3)]);
+        collector.bind_unknown_type("unsigned".into());
+        assert!(!collector.binding_types.contains_key("unsigned"));
+        assert!(!collector.inferred_unsigned.contains("unsigned"));
+        collector.bind_inferred_unsigned("unsigned".into());
+        collector.bind_unknown_type("unsigned".into());
+        assert!(!collector.inferred_unsigned.contains("unsigned"));
+        let _scope = collector.scope_path.pop();
+    });
+    assert_eq!(collector.binding_types["outer"].ty, syn::parse_quote!(Clock));
+    assert_eq!(collector.binding_types["outer"].imports, original_imports);
+    assert!(collector.binding_types["outer"].scope.is_empty());
+    assert!(collector.binding_types["outer"].resource_trusted);
+    assert!(!collector.inferred_unsigned.contains("outer"));
+    assert!(!collector.binding_types.contains_key("unsigned"));
+    assert!(collector.inferred_unsigned.contains("unsigned"));
+}
+
+#[test]
+fn noncanonical_boundary_literals_keep_exact_population_and_directional_confidence() {
+    for (literal, selector, expected) in [
+        ("0u8", "literal.int_decrement", None),
+        ("1u8", "literal.int_decrement", Some(("0", 3))),
+        ("0i8", "literal.int_decrement", Some(("-1", 3))),
+        ("0u16", "literal.int_to_zero", None),
+        ("1u16", "literal.int_to_one", None),
+        ("0f64", "literal.float_to_zero", None),
+        ("1f64", "literal.float_to_one", None),
+        ("0.0f32", "literal.float_to_zero", None),
+        ("0.0_f32", "literal.float_to_zero", None),
+        ("1.0f32", "literal.float_to_one", None),
+        ("1.0_f32", "literal.float_to_one", None),
+        ("2.0f64", "literal.float_to_zero", Some(("0.0f64", 0))),
+        ("2.0f64", "literal.float_to_one", Some(("1.0f64", 1))),
+        ("r#\"\"#", "literal.str_to_empty", None),
+        ("'\\u{0}'", "literal.char_to_nul", None),
+        ("b'\\x00'", "literal.byte_to_nul", None),
+        ("b'a'", "literal.byte_to_nul", Some(("b'\\0'", 0))),
+    ] {
+        let file = SourceFile::parse("fixture.rs", format!("fn f() {{ let _ = {literal}; }}")).unwrap();
+        let found = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::unconditional());
+        assert_eq!(found.len(), usize::from(expected.is_some()), "{literal} {selector}: {found:?}");
+        if let Some((replacement, ordinal)) = expected {
+            let candidate = &found[0];
+            assert_eq!(candidate.mutator, selector);
+            assert_eq!(file.slice(&candidate.span), literal);
+            assert_eq!(candidate.replacement, replacement);
+            assert_eq!(candidate.replacement_index, ordinal);
+            assert_eq!(candidate.confidence, Confidence::Proven);
+            assert_eq!(candidate.shape, Shape::Expr);
+            assert_eq!(candidate.identity_occurrence, Some(0));
+            assert_eq!(&*candidate.item_path, "f");
+        }
+    }
+}
+
+#[test]
+fn resource_iterator_initializers_reject_attributes_on_each_receiver_layer() {
+    let file = SourceFile::parse("fixture.rs", "fn f() {}".to_owned()).unwrap();
+    let selection = Selection::everything();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::of(&file.ast);
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    collector.bind_type("text".into(), syn::parse_quote!(&str));
+    collector.bind_type("owned".into(), syn::parse_quote!(String));
+    for text in [
+        "#[transform] text.chars().peekable()",
+        "(#[transform] text.chars()).peekable()",
+        "(#[transform] text).chars().peekable()",
+        "<Other>::text.chars().peekable()",
+    ] {
+        let expression: Expr = syn::parse_str(text).unwrap();
+        assert!(!collector.resource_iterator_initializer(&expression), "{text}");
+    }
+    for (text, expected) in [
+        ("text.chars().peekable()", true),
+        ("text.chars().peekable::<u8>()", false),
+        ("text.chars::<u8>().peekable()", false),
+        ("text.chars(1).peekable()", false),
+        ("text.chars().peekable(1)", false),
+        ("text.chars().other()", false),
+        ("text.bytes().peekable()", false),
+        ("<T>::text.chars().peekable()", false),
+        ("owned.chars().peekable()", false),
+        ("unknown.chars().peekable()", false),
+        ("module::text.chars().peekable()", false),
+        ("(text).chars().peekable()", false),
+        ("text.peekable()", false),
+        ("true", false),
+    ] {
+        assert_eq!(
+            collector.resource_iterator_initializer(&syn::parse_str(text).unwrap()),
+            expected,
+            "{text}"
+        );
+    }
+    let _inserted = collector.resource_iterators.insert("outer".into());
+    collector.in_function(&syn::parse_quote!(fn nested(item @ _: &str)), |collector| {
+        assert!(collector.resource_iterators.is_empty());
+        assert!(!collector.binding_types["item"].resource_trusted);
+        let _inserted = collector.resource_iterators.insert("inner".into());
+    });
+    assert!(collector.resource_iterators.contains("outer"));
+    assert!(!collector.resource_iterators.contains("inner"));
+}
+
+#[test]
+fn temporal_constructor_inference_checks_each_qualifier_import_and_method() {
+    let source = "use chrono::{Utc, DateTime, NaiveDateTime}; \
+                  use std::time::{Instant, SystemTime, Duration}; fn f() {}";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let selection = Selection::everything();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::of(&file.ast);
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    for (text, ty) in [
+        ("Utc::now()", Some("chrono::DateTime")),
+        ("Utc::other()", None),
+        ("DateTime::from_timestamp(1, 0)", Some("chrono::DateTime")),
+        ("NaiveDateTime::from_timestamp_opt(1, 0)", Some("chrono::NaiveDateTime")),
+        ("Instant::now()", Some("std::time::Instant")),
+        ("SystemTime::now()", Some("std::time::SystemTime")),
+        ("Duration::from_secs(1)", Some("std::time::Duration")),
+        ("Other::now()", None),
+        ("other::now()", None),
+        ("now()", None),
+        ("(factory())()", None),
+        ("1", None),
+    ] {
+        let expression = syn::parse_str(text).unwrap();
+        assert_eq!(
+            collector.inferred_expression_type(&expression),
+            ty.map(|ty| syn::parse_str(ty).unwrap()),
+            "{text}"
+        );
+        assert_eq!(collector.is_known_textual_or_temporal(&expression), ty.is_some(), "{text}");
+        assert_eq!(collector.is_known_temporal(&expression), ty.is_some(), "{text}");
+    }
+    for name in ["Utc", "DateTime", "NaiveDateTime"] {
+        let _previous = collector
+            .root_imports
+            .insert(name.into(), Some(vec!["foreign".into(), name.into()]));
+        let text = format!("{name}::now()");
+        assert_eq!(collector.inferred_expression_type(&syn::parse_str(&text).unwrap()), None, "{text}");
+    }
+}
+
+#[test]
+fn numeric_confidence_separates_exact_evidence_from_same_named_temporal_methods() {
+    let file = SourceFile::parse("fixture.rs", "const LIMIT:u32=7; fn count()->u32 {7} fn f() {}".into()).unwrap();
+    let selection = Selection::everything();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::of(&file.ast);
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    for (name, ty) in [("number", "i32"), ("text", "String"), ("duration", "std::time::Duration")] {
+        collector.bind_type(name.into(), syn::parse_str(ty).unwrap());
+    }
+    for (text, confidence) in [
+        ("(LIMIT)", Confidence::Proven),
+        ("(number)", Confidence::Proven),
+        ("-number", Confidence::Proven),
+        ("-(17)", Confidence::Proven),
+        ("-unknown", Confidence::Optimistic),
+        ("!unknown", Confidence::Optimistic),
+        ("text.len()", Confidence::Proven),
+        ("text.capacity()", Confidence::Proven),
+        ("text.unknown()", Confidence::Optimistic),
+        ("text.as_secs()", Confidence::Optimistic),
+        ("duration.as_secs()", Confidence::Proven),
+        ("duration.as_millis()", Confidence::Proven),
+        ("duration.len()", Confidence::Optimistic),
+        ("duration.unknown()", Confidence::Optimistic),
+        ("unknown.len()", Confidence::Optimistic),
+        ("u32::from(3)", Confidence::Proven),
+        ("other::from(3)", Confidence::Optimistic),
+        ("<u32>::from(3)", Confidence::Optimistic),
+        ("u32::MAX", Confidence::Proven),
+        ("LIMIT", Confidence::Proven),
+        ("unknown", Confidence::Optimistic),
+        ("<T>::LIMIT", Confidence::Optimistic),
+    ] {
+        assert_eq!(collector.numeric_confidence(&syn::parse_str(text).unwrap()), confidence, "{text}");
+    }
+    for (text, unsigned) in [
+        ("u32::from(3)", true),
+        ("count()", true),
+        ("unknown()", false),
+        ("i32::from(3)", false),
+    ] {
+        assert_eq!(collector.is_known_unsigned(&syn::parse_str(text).unwrap()), unsigned, "{text}");
+    }
+    for (text, numeric) in [("u32::MAX", true), ("LIMIT", true), ("<T>::LIMIT", false)] {
+        assert_eq!(collector.is_known_numeric(&syn::parse_str(text).unwrap()), numeric, "{text}");
+    }
+}
+
+#[test]
+fn textual_type_evidence_rejects_imported_and_local_lookalikes_independently() {
+    for source in [
+        "use foreign::{String, Option}; fn f() {}",
+        "struct String; struct Option; fn f() {}",
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let selection = Selection::everything();
+        let cfg = CfgSet::unconditional();
+        let defaults = Defaults::of(&file.ast);
+        let collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+        for text in ["String", "Option", "foreign::String", "foreign::Option", "()"] {
+            assert!(
+                !collector.is_known_textual_or_temporal_type(&syn::parse_str(text).unwrap()),
+                "{source}: {text}"
+            );
+        }
+        for text in [
+            "std::string::String",
+            "alloc::string::String",
+            "std::time::Duration",
+            "chrono::DateTime",
+        ] {
+            assert!(
+                collector.is_known_textual_or_temporal_type(&syn::parse_str(text).unwrap()),
+                "{source}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn resource_transparency_restores_after_independently_opaque_item_and_expression_scopes() {
+    for opaque in [
+        "#[transform] fn affected(n:usize) {let mut i:usize=0;while i<n {i+=1;}}",
+        "struct S; #[transform] impl S {fn affected(n:usize) {let mut i:usize=0;while i<n {i+=1;}}}",
+        "struct S; impl S { #[transform] fn affected(n:usize) {let mut i:usize=0;while i<n {i+=1;}} }",
+        "trait S { #[transform] fn affected(n:usize) {let mut i:usize=0;while i<n {i+=1;}} }",
+        "fn affected(n:usize) { let mut i:usize=0; #[transform] while i<n {i+=1;} }",
+        "#[no_implicit_prelude] mod no_prelude {fn affected(n:usize) {let mut i:usize=0;while i<n {i+=1;}}}",
+    ] {
+        let source = format!("{opaque} fn clean(n:usize) {{ let mut i:usize=0; while i<n {{i+=1;}} }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_assign").unwrap(), &CfgSet::unconditional());
+        let root_is_opaque = opaque.starts_with("#[transform] fn");
+        assert_eq!(found.len(), if root_is_opaque { 2 } else { 1 }, "{opaque}: {found:?}");
+        assert!(found[0].item_path.ends_with("affected"), "{opaque}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "i+=1;");
+        assert_eq!(found[0].replacement, "");
+        assert_eq!(found[0].replacement_index, 0);
+        assert_eq!(found[0].identity_occurrence, Some(0));
+        if root_is_opaque {
+            assert_eq!(&*found[1].item_path, "clean");
+        }
+    }
+    let file = SourceFile::parse(
+        "fixture.rs",
+        "#![no_implicit_prelude] fn affected(n:usize) {let mut i:usize=0;while i<n {i+=1;}}".into(),
+    )
+    .unwrap();
+    let found = collect_in(&file, &Selection::parse("stmt.delete_assign").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 1);
+    assert_eq!(file.slice(&found[0].span), "i+=1;");
+}
+
+#[test]
+fn capture_and_pattern_expression_boundaries_disable_proofs_without_poisoning_later_siblings() {
+    for opaque in [
+        "(||{while i<n {i+=1;}})();",
+        "async {while i<n {i+=1;}};",
+        "match option {Some(_) => {while i<n {i+=1;}}, None => ()};",
+        "for _ in values {while i<n {i+=1;}}",
+        "while let Some(_) = option {while i<n {i+=1;}}",
+    ] {
+        let source = format!("fn f(n:usize,option:Option<u8>,values:&[u8]) {{let mut i:usize=0;{opaque} while i<n {{i+=1;}}}}");
+        let file = SourceFile::parse("fixture.rs", source.clone()).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_assign").unwrap(), &CfgSet::unconditional());
+        assert_eq!(found.len(), 1, "{opaque}: {found:?}");
+        assert_eq!(found[0].span.start, source.find("i+=1;").unwrap());
+        assert_eq!(found[0].replacement, "");
+        assert_eq!(found[0].identity_occurrence, Some(0));
+    }
+}
+
+#[test]
+fn a_conservative_then_block_does_not_disable_resource_proofs_in_its_else_block() {
+    let file = SourceFile::parse(
+        "fixture.rs",
+        "fn f(ready:bool,n:usize){let mut i:usize=0;if ready{let _=0;}else{while i<n{i+=1;}}}".into(),
+    )
+    .unwrap();
+    let found = collect_in(&file, &Selection::parse("stmt.delete_assign").unwrap(), &CfgSet::unconditional());
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn module_prelude_policy_is_inherited_and_restored_for_unit_result_proofs() {
+    for (source, expected) in [
+        (
+            "#[no_implicit_prelude] mod limited{use core::default::Default;fn inner_unit(){}fn inner(){inner_unit();}} \
+             fn root_unit(){} fn root(){root_unit();}",
+            "limited::inner",
+        ),
+        (
+            "#![no_implicit_prelude] mod limited{use core::default::Default;fn inner_unit(){}fn inner(){inner_unit();}}",
+            "limited::inner",
+        ),
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse("call_result.default").unwrap(), &CfgSet::unconditional());
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(&*found[0].item_path, expected);
+        assert_eq!(file.slice(&found[0].span), "inner_unit()");
+        assert_eq!(found[0].replacement, "{ let _ = inner_unit(); Default::default() }");
+    }
+}
 
 #[test]
 fn resource_binding_and_iterator_initialization_require_exact_trusted_evidence() {
@@ -1705,11 +3065,14 @@ fn iterator_range_and_result_evidence_requires_each_structural_component() {
         ("core::iter::empty()", true),
         ("other::iter::once(1)", false),
     ] {
-        assert_eq!(
-            collector.is_iterator_receiver(&syn::parse_str::<Expr>(text).unwrap()),
-            iterator,
-            "{text}"
-        );
+        let expression = syn::parse_str::<Expr>(text).unwrap();
+        assert_eq!(collector.is_iterator_receiver(&expression), iterator, "{text}");
+        let grouped = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            expr: Box::new(expression),
+        });
+        assert_eq!(collector.is_iterator_receiver(&grouped), iterator, "grouped {text}");
     }
     for (ty, expected) in [
         ("Vec<u8>", true),

@@ -232,11 +232,20 @@ pub(super) fn cargo_message(line: &str) -> Option<CargoMessage<'_>> {
 /// answer with a previous one and quietly conclude that everything was compiled, which is the
 /// wrong answer in exactly the case this is here to catch.
 pub(super) fn compiled_sources(stdout: &str, root: &Utf8Path) -> Option<HashSet<Utf8PathBuf>> {
+    compiled_sources_with(stdout, root, dep_files, |path| fs::read_to_string(path.as_std_path()))
+}
+
+fn compiled_sources_with(
+    stdout: &str,
+    root: &Utf8Path,
+    find_dep_files: impl FnOnce(&str) -> Vec<Utf8PathBuf>,
+    mut read: impl FnMut(&Utf8Path) -> std::io::Result<String>,
+) -> Option<HashSet<Utf8PathBuf>> {
     let mut compiled: HashSet<Utf8PathBuf> = HashSet::default();
     let mut read_any = false;
 
-    for dep_file in dep_files(stdout) {
-        let Ok(text) = fs::read_to_string(dep_file.as_std_path()) else {
+    for dep_file in find_dep_files(stdout) {
+        let Ok(text) = read(&dep_file) else {
             continue;
         };
 
@@ -315,6 +324,15 @@ pub(crate) fn dependencies(list: &str) -> Vec<String> {
 /// staleness this is avoiding.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
+    dep_files_with(stdout, |directory| {
+        Ok(fs::read_dir(directory)?
+            .flatten()
+            .filter_map(|entry| Utf8PathBuf::from_path_buf(entry.path()).ok())
+            .collect())
+    })
+}
+
+fn dep_files_with(stdout: &str, mut entries: impl FnMut(&Utf8Path) -> std::io::Result<Vec<Utf8PathBuf>>) -> Vec<Utf8PathBuf> {
     let mut wanted: HashMap<Utf8PathBuf, HashSet<String>> = HashMap::default();
 
     for line in stdout.lines() {
@@ -346,15 +364,11 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
     let mut found = Vec::new();
 
     for (directory, hashes) in wanted {
-        let Ok(entries) = fs::read_dir(directory.as_std_path()) else {
+        let Ok(entries) = entries(&directory) else {
             continue;
         };
 
-        for entry in entries.flatten() {
-            let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
-                continue;
-            };
-
+        for path in entries {
             // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if path.extension() != Some("d") {
                 // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
@@ -378,4 +392,124 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
 /// Rewrites `\` to `/` so that a dep-info path compares equal to a discovered one on Windows.
 pub(crate) fn normalize_separators(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    #[test]
+    fn dep_info_rejections_do_not_discard_the_later_valid_message_or_filename() {
+        let root = Utf8Path::new("target/deps");
+        let dependency = root.join("subject-exact-hash.d");
+        let artifact = root.join("libsubject-exact-hash.rmeta");
+        let stdout = [
+            serde_json::json!({"reason":"compiler-message"}),
+            serde_json::json!({
+                "reason":"compiler-artifact",
+                "filenames":["", "unhashed.rmeta", artifact]
+            }),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+        let mut scanned = Vec::new();
+        assert_eq!(
+            dep_files_with(&stdout, |directory| {
+                scanned.push(directory.to_owned());
+                match directory.as_str() {
+                    "target/deps" => Ok(vec![
+                        root.join("subject-exact-hash.rmeta"),
+                        root.join("subject-other.d"),
+                        dependency.clone(),
+                    ]),
+                    _ => panic!("unexpected dep-info directory: {directory}"),
+                }
+            }),
+            [dependency]
+        );
+        assert_eq!(scanned, [root.to_owned()]);
+    }
+
+    #[test]
+    fn evidence_preserves_artifact_counts_and_sorted_unique_target_labels() {
+        let lines = [
+            serde_json::json!({"reason":"compiler-artifact", "fresh":true}),
+            serde_json::json!({"reason":"compiler-artifact", "target":{"name":"z", "kind":["bin"]}}),
+            serde_json::json!({"reason":"compiler-artifact", "target":{"name":"a", "kind":[]}, "profile":{"test":true}}),
+            serde_json::json!({"reason":"compiler-artifact", "target":{"name":"z", "kind":["bin"]}}),
+            serde_json::json!({"reason":"compiler-message", "target":{"name":"z", "kind":["bin"]}, "message":{"level":"warning"}}),
+            serde_json::json!({"reason":"compiler-message", "target":{"name":"b", "kind":["example","bin"]}, "message":{"level":"error"}}),
+            serde_json::json!({"reason":"compiler-message", "target":{"name":"a", "kind":["proc-macro"]}, "message":{"level":"error"}}),
+            serde_json::json!({"reason":"compiler-message", "target":{"name":"z", "kind":["lib"]}, "message":{"level":"error"}}),
+            serde_json::json!({"reason":"compiler-message", "target":{"name":"empty", "kind":[]}, "message":{"level":"error"}}),
+        ];
+        let stdout = format!(
+            "not cargo JSON\n{}",
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+        );
+        let mut expected = BuildEvidence {
+            fresh: 1,
+            rebuilt: 3,
+            rebuilt_targets: vec!["a (test)".into(), "z (bin)".into()],
+            failed_targets: vec![
+                "a (proc-macro)".into(),
+                "b (example)".into(),
+                "empty (target)".into(),
+                "z (lib)".into(),
+            ],
+        };
+        assert_eq!(build_evidence(&stdout, false), expected);
+        expected.failed_targets = vec![
+            "a (proc-macro)".into(),
+            "a (test)".into(),
+            "b (example)".into(),
+            "empty (target)".into(),
+            "z (lib)".into(),
+            "z (test)".into(),
+        ];
+        assert_eq!(build_evidence(&stdout, true), expected);
+    }
+
+    #[test]
+    fn dep_info_skips_unrelated_lines_artifacts_and_directories_without_losing_later_sources() {
+        let root = Utf8Path::new("/checkout with spaces");
+        let deps = root.join("deps");
+        let artifact = |filenames: Vec<String>| serde_json::json!({"reason":"compiler-artifact","filenames":filenames}).to_string();
+        let stdout = [
+            "not-json".to_owned(),
+            serde_json::json!({"reason":"compiler-message","filenames":[deps.join("old-999.rlib")]}).to_string(),
+            artifact(vec![deps.join("without_hash.rlib").into_string()]),
+            artifact(vec![root.join("absent/subject-123.rlib").into_string()]),
+            artifact(vec![deps.join("libsubject-123.rlib").into_string()]),
+        ]
+        .join("\n");
+        assert_eq!(
+            compiled_sources_with(
+                &stdout,
+                root,
+                |stream| dep_files_with(stream, |directory| {
+                    if directory == deps {
+                        Ok(vec![deps.join("subject-123.d"), deps.join("old-999.d")])
+                    } else {
+                        assert_eq!(directory, root.join("absent"));
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "scripted missing directory"))
+                    }
+                }),
+                |path| {
+                    assert_eq!(path, deps.join("subject-123.d"));
+                    Ok(format!(
+                        "invalid dep-info line\noutput: {} src/second.rs\n",
+                        root.join("src/first.rs").as_str().replace(' ', "\\ ")
+                    ))
+                },
+            ),
+            Some(HashSet::from_iter([
+                Utf8PathBuf::from("src/first.rs"),
+                Utf8PathBuf::from("src/second.rs")
+            ]))
+        );
+    }
 }

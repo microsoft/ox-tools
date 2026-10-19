@@ -71,6 +71,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn case_folding_size_limit_errors_name_the_individual_configured_pattern() {
+        let pattern = "[A-Z]{100000}";
+        RegexBuilder::new(pattern).case_insensitive(false).build().unwrap();
+        let error = BugLabelMatcher::new(&[pattern.to_owned()]).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("compiling bug label pattern '{pattern}'")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("size limit"), "{error}");
+    }
+
+    #[test]
     fn plain_patterns_match_anywhere_in_the_label() {
         let matcher = BugLabelMatcher::new(&["bug".to_string()]).unwrap();
 
@@ -139,5 +151,22 @@ mod tests {
         let error = BugLabelMatcher::build_pattern_set(builder.size_limit(0)).expect_err("a zero-size automaton cannot be compiled");
 
         assert!(error.to_string().contains("compiling bug label patterns"), "{error}");
+    }
+
+    #[test]
+    fn individually_valid_patterns_can_exceed_the_combined_automaton_limit() {
+        let patterns: Vec<_> = (0..64).map(|index| format!("{index}:a{{10000}}")).collect();
+        for pattern in &patterns {
+            RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .expect("each bounded repeated literal fits the individual automaton limit");
+        }
+
+        let error = BugLabelMatcher::new(&patterns).expect_err("the combined automaton exceeds the default size limit");
+
+        let error = error.to_string();
+        assert!(error.contains("compiling bug label patterns"), "{error}");
+        assert!(!error.contains("compiling bug label pattern '"), "{error}");
     }
 }

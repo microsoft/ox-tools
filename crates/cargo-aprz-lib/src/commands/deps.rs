@@ -944,6 +944,46 @@ mod tests {
     }
 
     #[test]
+    fn a_stabilized_cycle_does_not_discard_other_pending_dependencies() {
+        let root = package("root", &format!("{},{}", plain_dep("pending"), plain_dep("cycle")), "{}");
+        let pending = package("pending", "", "{}");
+        let cycle = package("cycle", &plain_dep("cycle"), "{}");
+        let packages = [&root, &pending, &cycle];
+        let all_packages = packages.iter().map(|package| (&package.id, *package)).collect();
+        let root_node = node("root", &["pending", "cycle"]);
+        let cycle_node = node("cycle", &["cycle"]);
+        let nodes = [&root_node, &cycle_node];
+        let index = nodes.iter().map(|node| (&node.id, *node)).collect();
+
+        let dependencies = build_transitive_deps(&all_packages, &index, &root.id, DependencyType::Standard);
+        let mut names: Vec<_> = dependencies.iter().map(|(reference, _)| reference.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["cycle", "pending"]);
+    }
+
+    #[test]
+    fn mixed_kind_transitive_edges_include_the_normal_dependency() {
+        let root = package("root", &plain_dep("middle"), "{}");
+        let middle = package("middle", &plain_dep("leaf"), "{}");
+        let leaf = package("leaf", "", "{}");
+        let packages = [&root, &middle, &leaf];
+        let all_packages = packages.iter().map(|package| (&package.id, *package)).collect();
+        let root_node = node("root", &["middle"]);
+        let mut middle_node = node("middle", &["leaf"]);
+        middle_node.deps[0]
+            .dep_kinds
+            .extend(node_of_kind("middle", &["leaf"], r#""dev""#).deps.remove(0).dep_kinds);
+        let nodes = [&root_node, &middle_node];
+        let index = nodes.iter().map(|node| (&node.id, *node)).collect();
+
+        let dependencies = build_transitive_deps(&all_packages, &index, &root.id, DependencyType::Standard);
+        let mut names: Vec<_> = dependencies.iter().map(|(reference, _)| reference.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["leaf", "middle"]);
+        assert!(dependencies.iter().all(|(_, kind)| *kind == DependencyType::Standard));
+    }
+
+    #[test]
     fn build_transitive_deps_respects_the_requested_first_hop_kind() {
         let normal_dep = plain_dep("normal");
         let build_dep = r#"{"name": "buildonly", "req": "^1", "kind": "build", "optional": false,

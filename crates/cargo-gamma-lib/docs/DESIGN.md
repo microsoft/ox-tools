@@ -42,8 +42,21 @@ verdicts, incremental reuse, reporting, and command dispatch.
   internal feature used by the coordinator, so published `cargo-gamma-lib`
   packages never depend on repository-relative source paths.
 - The guard census is disabled unless `--optimize-test-execution` is set.
-  Disabling it leaves exact and generalized probes active and treats missing
+  Disabling it leaves exact-hint and inferred-test probes active and treats missing
   case-level reachability as whole-binary work, never as uncovered code.
+- A reachable exact killer hint is probed before inferred tests, regardless of
+  its binary's canonical position. A confirmed later-binary kill suppresses
+  speculative inferred work but waits for earlier canonical outcomes before
+  settling. An exact probe that loses containment abandons immediately, before
+  any inferred or canonical launch. Targeted attempts are deduplicated by
+  resolved binary and test; confirmations and necessary whole-binary fallback
+  remain unchanged.
+- A direct-harness filter that excludes a hinted test makes that probe
+  inconclusive before any process starts. Inferred and canonical selection
+  remain eligible; refusing an empty selection is not a containment failure.
+- Runtime derived selections are called inferred tests. Persisted knowledge
+  retains its `generalized` schema and existing checkpoint and diagnostic
+  `generalized*` field names for compatibility.
 - The `internals` feature exists only for this crate's integration tests and
   is not a supported downstream API.
 - The private rustc-wrapper entry point preserves the wrapped compiler's

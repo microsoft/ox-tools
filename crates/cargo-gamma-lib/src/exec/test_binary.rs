@@ -1093,6 +1093,299 @@ fn is_version(fragment: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn survivor_capture(source: &str, output: &str, test: bool) -> RustcInvocation {
+        RustcInvocation {
+            crate_name: "subject".into(),
+            crate_types: vec!["bin".into()],
+            test,
+            source: source.into(),
+            out_dir: output.into(),
+            extra_filename: "-123".into(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        }
+    }
+
+    #[test]
+    fn harness_capture_requires_both_the_source_and_output_and_an_unambiguous_match() {
+        let root = Utf8Path::new("workspace");
+        let target = Utf8Path::new("src/lib.rs");
+        let matching = survivor_capture("src/lib.rs", "build", true);
+        let wrong_source = survivor_capture("src/other.rs", "build", false);
+        let wrong_output = survivor_capture("src/lib.rs", "elsewhere", false);
+        let executable = format!("build/subject-123{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(libtest_harness(&executable, target, &[], root), None);
+        assert_eq!(
+            libtest_harness(&executable, target, &[wrong_source, wrong_output, matching.clone()], root),
+            Some(true)
+        );
+        assert_eq!(libtest_harness(&executable, target, &[matching.clone(), matching], root), None);
+        let custom = survivor_capture("src/lib.rs", "build", false);
+        assert_eq!(libtest_harness(&executable, target, &[custom], root), Some(false));
+    }
+
+    #[test]
+    fn executable_capture_requires_test_source_and_output_independently_and_rejects_nameless_artifacts() {
+        let root = Utf8Path::new("workspace");
+        let source = root.join("src/lib.rs");
+        let executable = Utf8Path::new("build/subject-123");
+        for (test, input, output, expected) in [
+            (true, "src/lib.rs", "build", true),
+            (false, "src/lib.rs", "build", false),
+            (true, "src/other.rs", "build", false),
+            (true, "src/lib.rs", "elsewhere", false),
+            (false, "src/other.rs", "elsewhere", false),
+        ] {
+            let capture = survivor_capture(input, output, test);
+            assert_eq!(capture_starts_executable(&capture, executable, &source, root), expected);
+        }
+        let capture = survivor_capture("src/lib.rs", "", true);
+        for artifact in [".", ".."] {
+            assert_eq!(Utf8Path::new(artifact).parent(), Some(Utf8Path::new("")));
+            assert!(!output_matches(&capture, Utf8Path::new(artifact)));
+        }
+    }
+
+    #[test]
+    fn target_selection_keeps_later_linked_targets_sorts_them_and_uses_any_linked_mutant() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let output = root.join("out");
+        let captures = root.join("captures");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&captures).unwrap();
+        let mut messages = vec!["not JSON".to_owned(), serde_json::json!({"reason":"compiler-message"}).to_string()];
+        for name in ["unlinked", "zulu", "alpha"] {
+            let mut capture = survivor_capture(root.join(format!("tests/{name}.rs")).as_str(), output.as_str(), true);
+            capture.crate_name = name.into();
+            let mut sources = vec![capture.source.clone()];
+            if name != "unlinked" {
+                sources.push(root.join("src/lib.rs"));
+            }
+            write_dep(&capture, &sources);
+            write_capture(&captures, name, &capture);
+            let executable = output.join(format!("{name}-123{}", std::env::consts::EXE_SUFFIX));
+            let mut message: Value = serde_json::from_str(&artifact_stream(&[(name, &capture.source, &executable)])).unwrap();
+            message["target"]["kind"] = serde_json::json!(["test", "bin"]);
+            messages.push(message.to_string());
+        }
+        let stream = messages.join("\n");
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
+        let mut unrelated = plan.mutants[0].clone();
+        unrelated.file = Utf8PathBuf::from("src/unrelated.rs").into();
+        plan.mutants.push(unrelated);
+        assert_eq!(
+            linked_target_args(&stream, &root, Some(&captures), &plan),
+            Some(vec!["--test".into(), "alpha".into(), "--test".into(), "zulu".into()])
+        );
+        let binaries = test_binaries_with_linkage(&stream, &root, Some(&captures));
+        assert_eq!(binaries.len(), 3);
+        assert!(
+            binaries
+                .iter()
+                .all(|binary| binary.target_kind == "test" && binary.libtest == Some(true))
+        );
+        assert_eq!(
+            binaries.iter().map(|binary| binary.target.as_str()).collect::<Vec<_>>(),
+            ["alpha", "unlinked", "zulu"]
+        );
+    }
+
+    #[test]
+    fn individually_complete_output_captures_with_conflicting_source_sets_disable_the_actual_target_selector() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let output = root.join("out");
+        let captures = root.join("captures");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&captures).unwrap();
+        let source = root.join("tests/subject.rs");
+        let mut executables = Vec::new();
+        for suffix in ["first", "second"] {
+            let mut capture = survivor_capture(source.as_str(), output.as_str(), true);
+            capture.extra_filename = format!("-{suffix}");
+            write_dep(&capture, &[source.clone(), root.join(format!("src/{suffix}.rs"))]);
+            write_capture(&captures, suffix, &capture);
+            executables.push(output.join(format!("subject-{suffix}{}", std::env::consts::EXE_SUFFIX)));
+        }
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("src/first.rs").into();
+        let stream = artifact_stream(&[("subject", &source, &executables[0])]);
+        assert_eq!(
+            linked_target_args(&stream, &root, Some(&captures), &plan),
+            Some(vec!["--test".into(), "subject".into()])
+        );
+        let second = artifact_stream(&[("subject", &source, &executables[1])]);
+        let second_binary = test_binaries_with_linkage(&second, &root, Some(&captures));
+        assert!(
+            second_binary[0]
+                .linked_sources
+                .as_ref()
+                .unwrap()
+                .contains(Utf8Path::new("src/second.rs"))
+        );
+        let mut stream: Value = serde_json::from_str(&stream).unwrap();
+        stream["filenames"] = serde_json::json!(executables);
+        assert_eq!(linked_target_args(&stream.to_string(), &root, Some(&captures), &plan), None);
+    }
+
+    #[test]
+    fn target_selection_fails_closed_for_each_missing_field_and_each_unmatched_output() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let output = root.join("out");
+        let captures = root.join("captures");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&captures).unwrap();
+        let capture = survivor_capture(root.join("tests/subject.rs").as_str(), output.as_str(), true);
+        write_dep(&capture, &[capture.source.clone(), root.join("src/lib.rs")]);
+        write_capture(&captures, "subject", &capture);
+        let executable = output.join(format!("subject-123{}", std::env::consts::EXE_SUFFIX));
+        let message: Value = serde_json::from_str(&artifact_stream(&[("subject", &capture.source, &executable)])).unwrap();
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
+        for path in [
+            vec!["target"],
+            vec!["target", "name"],
+            vec!["target", "src_path"],
+            vec!["target", "kind"],
+            vec!["filenames"],
+        ] {
+            let mut malformed = message.clone();
+            if path.len() == 1 {
+                malformed.as_object_mut().unwrap().remove(path[0]);
+            } else {
+                malformed[path[0]].as_object_mut().unwrap().remove(path[1]);
+            }
+            assert_eq!(
+                linked_target_args(&malformed.to_string(), &root, Some(&captures), &plan),
+                None,
+                "{path:?}"
+            );
+        }
+        let mut empty = message.clone();
+        empty["filenames"] = serde_json::json!([]);
+        assert_eq!(linked_target_args(&empty.to_string(), &root, Some(&captures), &plan), None);
+        let mut unmatched = message.clone();
+        unmatched["filenames"] = serde_json::json!([executable, output.join("different-123")]);
+        assert_eq!(linked_target_args(&unmatched.to_string(), &root, Some(&captures), &plan), None);
+        let mut ordinary = message;
+        ordinary["profile"]["test"] = serde_json::json!(false);
+        let stream = format!("{ordinary}\n{{\"reason\":\"compiler-message\"}}");
+        assert_eq!(linked_target_args(&stream, &root, Some(&captures), &plan), None);
+    }
+
+    #[test]
+    fn linkage_keeps_work_after_a_registry_skip_and_after_a_previously_visited_cycle() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let output = root.join("out");
+        fs::create_dir(&output).unwrap();
+        let mut primary = survivor_capture(root.join("tests/subject.rs").as_str(), output.as_str(), true);
+        let mut later = survivor_capture(root.join("src/later.rs").as_str(), output.as_str(), false);
+        later.crate_name = "later".into();
+        write_dep(&primary, core::slice::from_ref(&primary.source));
+        write_dep(&later, core::slice::from_ref(&later.source));
+        let executable = output.join(format!("subject-123{}", std::env::consts::EXE_SUFFIX));
+        let dependency = output.join("liblater-123.rlib");
+        let registry = output.join("libregistry.rlib");
+        let origins = crate::HashMap::from_iter([(registry.clone(), ArtifactOrigin::Registry)]);
+        let expected = crate::HashSet::from_iter([Utf8PathBuf::from("tests/subject.rs"), Utf8PathBuf::from("src/later.rs")]);
+        for cycle in [false, true] {
+            primary.externs = if cycle {
+                vec![dependency.clone(), executable.clone()]
+            } else {
+                vec![registry.clone(), dependency.clone()]
+            };
+            assert_eq!(
+                linked_sources(
+                    executable.as_str(),
+                    &primary.source,
+                    &[primary.clone(), later.clone()],
+                    &origins,
+                    &root
+                ),
+                Some(expected.clone()),
+                "cycle={cycle}"
+            );
+        }
+        fs::remove_file(output.join("later-123.d")).unwrap();
+        assert_eq!(
+            linked_sources(executable.as_str(), &primary.source, &[primary.clone(), later], &origins, &root),
+            None
+        );
+        assert_eq!(dep_sources(&survivor_capture("../outside.rs", output.as_str(), true), &root), None);
+    }
+
+    #[test]
+    fn artifact_origins_skip_malformed_prefixes_and_retain_workspace_manifest_identity() {
+        let root = Utf8Path::new(if cfg!(windows) { "C:/artifact-policy" } else { "/artifact-policy" });
+        let artifact = root.join("out/subject");
+        let stream = format!(
+            "not JSON\n{}\n{}",
+            serde_json::json!({"reason":"compiler-message"}),
+            serde_json::json!({
+                "reason":"compiler-artifact",
+                "package_id":"path+file:///workspace#subject@0.0.0",
+                "manifest_path":root.join("Cargo.toml"),
+                "filenames":[artifact]
+            })
+        );
+        assert_eq!(
+            artifact_origins(&stream, root),
+            crate::HashMap::from_iter([(artifact, ArtifactOrigin::Workspace)])
+        );
+    }
+
+    #[test]
+    fn legacy_target_identity_rejects_a_bare_colon_and_unknown_binary_packages_stay_conservative() {
+        let mut legacy = binary("subject");
+        legacy.target = "subject".into();
+        legacy.target_kind.clear();
+        assert!(legacy.matches_target("subject", "subject"));
+        assert!(!legacy.matches_target("subject", ":subject"));
+        let plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        legacy.package.clear();
+        legacy.tests = Some(1);
+        let local = TestScope {
+            package_local: true,
+            ..ANY
+        };
+        assert!(reaches(&legacy, "subject", &plan, &local));
+        legacy.tests = Some(0);
+        assert!(!reaches(&legacy, "subject", &plan, &local));
+    }
+
+    #[test]
+    fn capture_reader_sorts_deduplicates_and_fails_closed_on_corrupt_json() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let first = survivor_capture("a.rs", "out", true);
+        let last = survivor_capture("z.rs", "out", true);
+        fs::write(root.join("c.json"), serde_json::to_vec(&first).unwrap()).unwrap();
+        fs::write(root.join("b.json"), serde_json::to_vec(&last).unwrap()).unwrap();
+        fs::write(root.join("a.json"), serde_json::to_vec(&first).unwrap()).unwrap();
+        fs::write(root.join("incomplete.tmp"), "invalid JSON is not a capture").unwrap();
+        assert_eq!(read_captures(root), Some(vec![first, last]));
+        fs::write(root.join("bad.json"), "invalid JSON").unwrap();
+        assert_eq!(read_captures(root), None);
+        assert_eq!(read_captures(&root.join("absent")), None);
+        fs::remove_file(root.join("bad.json")).unwrap();
+        fs::create_dir(root.join("unreadable.json")).unwrap();
+        assert_eq!(read_captures(root), None);
+    }
+
+    #[test]
+    fn version_fragments_require_a_leading_digit_and_all_release_characters_to_be_valid() {
+        for valid in ["0", "1.2.3", "1.2.3-alpha+metadata", "1+metadata"] {
+            assert!(is_version(valid), "{valid}");
+        }
+        for invalid in ["", "-alpha", "+metadata", "a1", ".1", "1a", "1.2x", " 1"] {
+            assert!(!is_version(invalid), "{invalid}");
+        }
+    }
+
     /// A scope that admits every binary, which is what most of these tests are not about.
     const ANY: TestScope<'static> = TestScope {
         packages: &[],

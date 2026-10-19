@@ -699,6 +699,280 @@ mod tests {
     /// One day, in seconds.
     const DAY: u64 = 86_400;
 
+    fn assert_schema_valid(report: &Report) {
+        let report = serde_json::to_value(report).expect("concrete report fixtures serialize");
+        crate::elements::validate_schema(&report).expect("these report fixtures are accepted by the actual input schema");
+    }
+
+    #[test]
+    fn survivor_cached_lineage_bytes_match_the_uncached_persistent_protocol() {
+        let report = report(None, 17, vec![mutant("site", 1, "Killed")]);
+        let file = &report.files["src/lib.rs"];
+        let mut cached = Lineages::default();
+        let source_identity = lineage(&[b"source", b"origin.json", file.language.as_bytes(), file.source.as_bytes()]);
+        let owned_encoding = serde_json::to_vec(&file.mutants[0]).expect("the concrete mutant serializes");
+        let verdict_identity = lineage(&[b"verdict", b"origin.json", &owned_encoding]);
+        assert_eq!(cached.source("origin.json", file), source_identity);
+        assert_eq!(cached.verdict("origin.json", &file.mutants[0]), verdict_identity);
+    }
+
+    #[test]
+    fn survivor_legacy_empty_and_retained_opaque_provenance_lineages_have_distinct_preservation_rules() {
+        for retained in [false, true] {
+            let mut report = report(None, 17, vec![mutant("site", 1, "Killed")]);
+            let source_lineage = if retained { "a".repeat(64) } else { String::new() };
+            let verdict_lineage = if retained { "b".repeat(64) } else { String::new() };
+            let mut provenance = MergeProvenance::default();
+            let _source = provenance.sources.insert(
+                "src/lib.rs".to_owned(),
+                SourceProvenance {
+                    started_at: 11,
+                    origin: "original-source.json".to_owned(),
+                    lineage: source_lineage.clone(),
+                },
+            );
+            let _verdict = provenance.verdicts.insert(
+                "site".to_owned(),
+                VerdictProvenance {
+                    started_at: 13,
+                    origin: "original-verdict.json".to_owned(),
+                    lineage: verdict_lineage.clone(),
+                },
+            );
+            report.config.as_mut().expect("fixture run metadata exists").merge_provenance = Some(provenance);
+            assert_schema_valid(&report);
+            let file = &report.files["src/lib.rs"];
+            let mut cached = Lineages::default();
+            let expected_source = if retained {
+                source_lineage
+            } else {
+                cached.source("original-source.json", file)
+            };
+            let expected_verdict = if retained {
+                verdict_lineage
+            } else {
+                cached.verdict("original-verdict.json", &file.mutants[0])
+            };
+            assert_eq!(
+                source_provenance("outer.json", &report, "src/lib.rs", file, &mut cached),
+                (11, "original-source.json", expected_source)
+            );
+            assert_eq!(
+                verdict_provenance("outer.json", &report, &file.mutants[0], &mut cached),
+                (13, "original-verdict.json", expected_verdict)
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_winning_compatible_verdicts_keep_their_newer_presentation_generation_for_later_inputs() {
+        let old = mutant("site", 1, "Killed");
+        let new = mutant("site", 2, "Survived");
+        let mut held = HashMap::default();
+        for (result, generation) in [(&old, 1), (&new, 2), (&old, 1)] {
+            retain(
+                &mut held,
+                Candidate {
+                    mutant: result,
+                    path: "src/lib.rs",
+                    tested_at: generation,
+                    origin: "run.json",
+                    lineage: generation.to_string(),
+                    compatible: true,
+                    source_rank: (generation, "run.json", generation.to_string()),
+                },
+            );
+        }
+        let retained = &held["site"];
+        assert_eq!(retained.mutant.status, "Survived");
+        assert_eq!(
+            retained
+                .presentation
+                .expect("the winning compatible presentation must remain")
+                .location
+                .start
+                .line,
+            2
+        );
+        assert_eq!(
+            retained.presentation_rank.as_ref().expect("its generation must remain tracked").0,
+            2
+        );
+    }
+
+    #[test]
+    fn survivor_language_mismatch_is_not_compatible_even_when_the_source_bytes_match() {
+        let old = report(Some((0, 2)), 10, vec![mutant("site", 1, "Killed")]);
+        let mut current = report(Some((1, 2)), 20, Vec::new());
+        current.files.get_mut("src/lib.rs").expect("fixture source exists").language = "typescript".to_owned();
+        assert_schema_valid(&old);
+        assert_schema_valid(&current);
+        let result = merge(&[("old.json".to_owned(), old), ("current.json".to_owned(), current)], 20, None);
+        assert_eq!(result.incompatible, 1);
+        assert_eq!((result.valid, result.detected), (0, 0));
+        assert!(result.report.expect("an empty merged report still exists").files.is_empty());
+    }
+
+    #[test]
+    fn survivor_flaky_diagnostics_are_sorted_independently_of_mutant_hash_iteration_order() {
+        let results = [7, 2, 5, 0, 6, 1, 4, 3]
+            .into_iter()
+            .map(|index| {
+                let mut result = mutant(&format!("case{index:02}"), 1, "Ignored");
+                result.status_reason = Some("flaky: unresolved baseline".to_owned());
+                result
+            })
+            .collect();
+        let merged = merge(&[("run.json".to_owned(), report(None, 10, results))], 10, None);
+        let expected: Vec<_> = (0..8)
+            .map(|index| format!("case{index:02} in src/lib.rs: flaky: unresolved baseline"))
+            .collect();
+        assert_eq!(merged.flaky, expected);
+    }
+
+    #[test]
+    fn survivor_equal_named_population_ranks_keep_the_first_population_but_the_last_base_document() {
+        let mut first = report(None, 10, vec![mutant("first", 1, "Killed")]);
+        let mut last = report(None, 10, vec![mutant("last", 1, "Survived")]);
+        first.framework.version = "first-version".to_owned();
+        last.framework.version = "last-version".to_owned();
+        let merged = merge(&[("same.json".to_owned(), first), ("same.json".to_owned(), last)], 10, None);
+        assert_eq!((merged.valid, merged.detected), (1, 1));
+        let document = merged.report.expect("the retained first population can be rendered");
+        assert_eq!(document.framework.version, "last-version");
+        assert_eq!(document.files["src/lib.rs"].mutants[0].id, "first");
+    }
+
+    #[test]
+    fn survivor_equal_retained_verdict_generations_do_not_replace_the_first_accepted_outcome() {
+        let mut first = report(Some((0, 2)), 10, vec![mutant("site", 1, "Killed")]);
+        let mut second = report(Some((1, 2)), 10, vec![mutant("site", 1, "Survived")]);
+        for document in [&mut first, &mut second] {
+            let mut provenance = MergeProvenance::default();
+            let _previous = provenance.verdicts.insert(
+                "site".to_owned(),
+                VerdictProvenance {
+                    started_at: 7,
+                    origin: "retained.json".to_owned(),
+                    lineage: "a".repeat(64),
+                },
+            );
+            document.config.as_mut().expect("fixture run metadata exists").merge_provenance = Some(provenance);
+            assert_schema_valid(document);
+        }
+        let merged = merge(&[("first.json".to_owned(), first), ("second.json".to_owned(), second)], 10, None);
+        assert_eq!((merged.valid, merged.detected), (1, 1));
+        assert_eq!(
+            merged.report.expect("a merged document exists").files["src/lib.rs"].mutants[0].status,
+            "Killed"
+        );
+    }
+
+    #[test]
+    fn survivor_equal_source_generations_do_not_replace_the_first_compatible_presentation() {
+        let mut first_mutant = mutant("site", 1, "Killed");
+        first_mutant.description = Some("first producer's presentation".to_owned());
+        let mut second_mutant = mutant("site", 1, "Survived");
+        second_mutant.description = Some("second producer's presentation".to_owned());
+        let first = report(Some((0, 2)), 10, vec![first_mutant]);
+        let second = report(Some((1, 2)), 20, vec![second_mutant]);
+        assert_schema_valid(&first);
+        assert_schema_valid(&second);
+        let merged = merge(&[("first.json".to_owned(), first), ("second.json".to_owned(), second)], 20, None);
+        let document = merged.report.expect("the compatible source can be rendered");
+        let retained = &document.files["src/lib.rs"].mutants[0];
+        assert_eq!(retained.status, "Survived", "the later verdict still wins");
+        assert_eq!(retained.description.as_deref(), Some("first producer's presentation"));
+    }
+
+    #[test]
+    fn survivor_maximum_schema_timestamp_is_ordered_without_incrementing_and_overflowing() {
+        let old = report(None, u64::MAX - 1, vec![mutant("site", 1, "Killed")]);
+        let current = report(None, u64::MAX, vec![mutant("site", 1, "Survived")]);
+        assert_schema_valid(&current);
+        let merged = merge(
+            &[("old.json".to_owned(), old), ("current.json".to_owned(), current)],
+            u64::MAX,
+            None,
+        );
+        assert_eq!((merged.valid, merged.detected), (1, 0));
+        let document = merged.report.expect("the newer accepted timestamp can be merged");
+        assert_eq!(document.files["src/lib.rs"].mutants[0].status, "Survived");
+        assert_eq!(document.config.expect("merged provenance is present").started_at, u64::MAX);
+    }
+
+    #[test]
+    fn survivor_cached_lineages_preserve_repeated_sources_and_reset_between_distinct_verdicts() {
+        let report = report(None, 17, vec![mutant("a", 1, "Killed"), mutant("b", 2, "Survived")]);
+        let file = &report.files["src/lib.rs"];
+        let mut cached = Lineages::default();
+        let first = cached.source("first", file);
+        assert_eq!(first.len(), 64);
+        assert_eq!(cached.source("first", file), first);
+        assert_ne!(cached.source("second", file), first);
+        let a = cached.verdict("first", &file.mutants[0]);
+        let b = cached.verdict("first", &file.mutants[1]);
+        assert_ne!(a, b);
+        assert_eq!(cached.verdict("first", &file.mutants[0]), a);
+        assert_eq!(cached.verdict("first", &file.mutants[1]), b);
+        assert_eq!(Lineages::default().verdict("first", &file.mutants[1]), b);
+    }
+
+    #[test]
+    fn survivor_missing_config_retains_unknown_metadata_and_merge_selects_the_newest_base_document() {
+        let mut unknown = report(None, 0, vec![mutant("a", 1, "Killed")]);
+        unknown.config = None;
+        let merged = merge(&[("unknown".to_owned(), unknown)], 10, None);
+        assert_eq!((merged.valid, merged.detected), (1, 1));
+        assert_eq!(merged.shard_count, None);
+        let config = merged.report.unwrap().config.unwrap();
+        assert_eq!(config.tests, None);
+        assert_eq!(config.not_built, None);
+        assert_eq!(config.started_at, 0);
+        let mut old = report(None, 0, vec![mutant("a", 1, "Killed")]);
+        let mut new = report(None, 1, vec![mutant("a", 1, "Killed")]);
+        old.framework.version = "old".into();
+        new.framework.version = "new".into();
+        let mut reports = [("z-old".into(), old), ("a-new".into(), new)];
+        for _ in 0..2 {
+            assert_eq!(merge(&reports, 2, None).report.unwrap().framework.version, "new");
+            reports.reverse();
+        }
+    }
+
+    #[test]
+    fn survivor_presentation_retention_does_not_regress_on_older_or_incompatible_candidates() {
+        let first = mutant("id", 1, "Killed");
+        let later = mutant("id", 8, "Survived");
+        let incompatible = mutant("id", 19, "Timeout");
+        let mut latest = HashMap::new();
+        for (mutant, path, tested_at, compatible, source_at) in [
+            (&first, "first.rs", 5, true, 5),
+            (&later, "later.rs", 4, true, 8),
+            (&first, "first.rs", 3, true, 5),
+            (&incompatible, "incompatible.rs", 9, false, 19),
+        ] {
+            retain(
+                &mut latest,
+                Candidate {
+                    mutant,
+                    path,
+                    tested_at,
+                    origin: "origin",
+                    lineage: "verdict".into(),
+                    compatible,
+                    source_rank: (source_at, "origin", "source".into()),
+                },
+            );
+        }
+        let held = &latest["id"];
+        assert_eq!(held.mutant.status, "Timeout");
+        assert_eq!(held.tested_at, 9);
+        assert_eq!(held.file, "later.rs");
+        assert_eq!(held.presentation.unwrap().location.start.line, 8);
+        assert_eq!(held.presentation_rank.as_ref().unwrap().0, 8);
+    }
+
     #[test]
     fn an_equal_rank_population_is_authoritative_for_withdrawals() {
         let rank = (100, "report", "lineage");

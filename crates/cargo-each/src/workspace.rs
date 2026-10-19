@@ -350,6 +350,13 @@ mod tests {
     fn metadata_doctest_capability_drives_filtering_and_composition() {
         let metadata: Metadata =
             from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture is valid");
+        let targets = &metadata
+            .packages
+            .iter()
+            .find(|package| package.name.as_str() == "enabled-lib")
+            .unwrap()
+            .targets;
+        assert_eq!(targets.iter().map(|target| target.doctest).collect::<Vec<_>>(), [true, false]);
         let workspace = Workspace::from_metadata(&metadata);
 
         let capability = workspace

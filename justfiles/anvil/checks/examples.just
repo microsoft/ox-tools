@@ -25,7 +25,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }

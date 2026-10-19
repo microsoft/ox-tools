@@ -171,6 +171,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn family_queries_accept_mixed_families_but_not_the_family_name_prefix_alone() {
+        let selection = Selection::parse("literal.bool_flip,arith.add_to_sub").unwrap();
+        assert!(selection.any_in_family("literal"));
+        assert!(selection.any_in_family("arith"));
+        assert!(!selection.any_in_family("lit"));
+        assert!(!selection.any_in_family("literal.bool_flip"));
+        assert!(!Selection::empty().any_in_family("literal"));
+    }
+
+    #[test]
     fn selector_lists_preserve_order_errors_and_preset_provenance() {
         let selection = Selection::parse(", , relational.eq_to_ne, , !relational.eq_to_ne, literal.bool_flip,").unwrap();
         assert_eq!(selection.sorted(), ["literal.bool_flip"]);

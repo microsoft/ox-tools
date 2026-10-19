@@ -3,7 +3,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::Write;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,17 +31,33 @@ pub(crate) struct RustcInvocation {
 ///
 /// Returns `None` for an ordinary cargo-gamma invocation.
 ///
-/// Coverage excludes this process-boundary entry point because it forwards a real compiler and
-/// preserves its operating-system exit status; subprocess tests exercise that contract.
+/// Coverage excludes this process-boundary adapter; forwarding and capture policy are tested with
+/// scripted process and environment collaborators.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
-    let directory = std::env::var_os(CAPTURE_DIR_VAR).filter(|directory| !directory.is_empty())?;
+    run_if_requested_with(
+        args,
+        |name| std::env::var_os(name),
+        || std::env::vars_os().map(|(name, _value)| name),
+        |command| command.status().map(|status| status.code()),
+        publish_capture,
+    )
+}
+
+fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
+    args: impl IntoIterator<Item = OsString>,
+    mut environment: impl FnMut(&str) -> Option<OsString>,
+    binary_environment: impl FnOnce() -> I,
+    run: impl FnOnce(&mut Command) -> std::io::Result<Option<i32>>,
+    publish: impl FnOnce(&camino::Utf8Path, &[u8]) -> std::io::Result<()>,
+) -> Option<ExitCode> {
+    let directory = environment(CAPTURE_DIR_VAR).filter(|directory| !directory.is_empty())?;
     let mut args = args.into_iter();
     let _self = args.next();
     let forwarded: Vec<OsString> = args.collect();
     let compiler = forwarded.first()?;
 
-    let mut command = if let Some(wrapper) = std::env::var_os(ORIGINAL_WRAPPER_VAR).filter(|path| !path.is_empty()) {
+    let mut command = if let Some(wrapper) = environment(ORIGINAL_WRAPPER_VAR).filter(|path| !path.is_empty()) {
         let mut command = Command::new(wrapper);
         let _ = command.args(&forwarded);
         command
@@ -51,25 +67,25 @@ pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<Exit
         command
     };
 
-    let Ok(status) = command.status() else {
+    let Ok(code) = run(&mut command) else {
         return Some(ExitCode::FAILURE);
     };
 
-    if status.success()
+    if code == Some(0)
         && let Some(mut invocation) = parse_invocation(&forwarded[1..])
     {
-        invocation.opaque_extern |= std::env::vars_os().any(|(name, _value)| name.to_string_lossy().starts_with("CARGO_BIN_EXE_"));
+        invocation.opaque_extern |= binary_environment()
+            .into_iter()
+            .any(|name| name.to_string_lossy().starts_with("CARGO_BIN_EXE_"));
 
         if let Ok(bytes) = serde_json::to_vec(&invocation) {
             let directory = Utf8PathBuf::from(directory.to_string_lossy().into_owned());
-            let _published = publish_capture(&directory, &bytes);
+            let _published = publish(&directory, &bytes);
         }
     }
 
     Some(
-        status
-            .code()
-            .and_then(|code| u8::try_from(code).ok())
+        code.and_then(|code| u8::try_from(code).ok())
             .map_or(ExitCode::FAILURE, ExitCode::from),
     )
 }
@@ -99,9 +115,22 @@ fn publish_capture(directory: &camino::Utf8Path, bytes: &[u8]) -> std::io::Resul
 }
 
 // Exclusive creation, flushing, hard-link publication, and cleanup are filesystem race/failure
-// boundaries covered by the wrapper subprocess tests rather than deterministic line coverage.
+// boundaries covered by publication-specific tests rather than deterministic line coverage.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn publish_capture_with(directory: &camino::Utf8Path, bytes: &[u8], mut next_stem: impl FnMut() -> String) -> std::io::Result<()> {
+fn publish_capture_with(directory: &camino::Utf8Path, bytes: &[u8], next_stem: impl FnMut() -> String) -> std::io::Result<()> {
+    publish_capture_with_io(directory, bytes, next_stem, Write::write_all, fs::File::sync_data, |from, to| {
+        fs::hard_link(from, to)
+    })
+}
+
+fn publish_capture_with_io(
+    directory: &camino::Utf8Path,
+    bytes: &[u8],
+    mut next_stem: impl FnMut() -> String,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    flush: impl FnOnce(&fs::File) -> std::io::Result<()>,
+    mut link: impl FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     fs::create_dir_all(directory.as_std_path())?;
 
     let (mut stem, temporary, mut file) = loop {
@@ -114,13 +143,13 @@ fn publish_capture_with(directory: &camino::Utf8Path, bytes: &[u8], mut next_ste
         }
     };
 
-    file.write_all(bytes)?;
-    file.sync_data()?;
+    write(&mut file, bytes)?;
+    flush(&file)?;
     drop(file);
 
     loop {
         let published = directory.join(format!("{stem}.json"));
-        match fs::hard_link(temporary.as_std_path(), published.as_std_path()) {
+        match link(temporary.as_std_path(), published.as_std_path()) {
             Ok(()) => break,
             Err(cause) if cause.kind() == std::io::ErrorKind::AlreadyExists => stem = next_stem(),
             Err(cause) => return Err(cause),
@@ -249,35 +278,16 @@ pub(crate) fn wrapper_path() -> Option<Utf8PathBuf> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::env;
+    use std::cell::Cell;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
 
     use camino::Utf8Path;
 
     use super::*;
 
-    const CHILD_SCENARIO: &str = "CARGO_GAMMA_RUSTC_WRAPPER_TEST";
-    const TEST_COMPILER: &str = "CARGO_GAMMA_RUSTC_WRAPPER_COMPILER";
-
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
-    }
-
-    fn successful_compiler(directory: &Utf8Path, name: &str) -> Utf8PathBuf {
-        #[cfg(windows)]
-        let (path, body) = (directory.join(format!("{name}.cmd")), "@exit /b 0\r\n");
-        #[cfg(unix)]
-        let (path, body) = (directory.join(name), "#!/bin/sh\nexit 0\n");
-
-        fs::write(&path, body).expect("compiler script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = fs::metadata(&path).expect("compiler script metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&path, permissions).expect("executable compiler script");
-        }
-        path
     }
 
     #[test]
@@ -415,83 +425,36 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ordinary_invocations_do_not_enter_wrapper_mode() {
-        if env::var_os(CAPTURE_DIR_VAR).is_none() {
-            assert_eq!(run_if_requested(args(&["cargo-gamma"])), None);
-        }
+        assert_wrapper_not_requested(None, &["cargo-gamma", "rustc"]);
     }
 
     #[test]
     fn an_empty_capture_marker_does_not_enter_wrapper_mode() {
-        let output = run_wrapper_child("missing-compiler", Utf8Path::new(""), None, None, false);
-
-        assert!(output.contains("wrapper-present=false"), "{output}");
+        assert_wrapper_not_requested(Some(""), &["cargo-gamma", "rustc"]);
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn wrapper_child_helper() {
-        let Ok(scenario) = env::var(CHILD_SCENARIO) else {
-            return;
-        };
-
-        let invocation = match scenario.as_str() {
-            "direct" => {
-                let compiler = env::var(TEST_COMPILER).expect("test compiler");
-                vec![
-                    OsString::from("cargo-gamma"),
-                    OsString::from(compiler),
-                    OsString::from("--crate-name=wrapped"),
-                    OsString::from("--crate-type=lib"),
-                    OsString::from("src/lib.rs"),
-                    OsString::from("--out-dir=target"),
-                    OsString::from("--extern=opaque"),
-                ]
-            }
-            "original" => args(&[
-                "cargo-gamma",
-                "ignored-rustc",
-                "--crate-name=chained",
-                "src/lib.rs",
-                "--out-dir=target",
-            ]),
-            "missing-compiler" => args(&["cargo-gamma"]),
-            "spawn-failure" => args(&["cargo-gamma", "definitely-not-a-real-rustc-wrapper-command"]),
-            other => panic!("unknown wrapper child scenario `{other}`"),
-        };
-
-        let outcome = run_if_requested(invocation);
-        println!("wrapper-present={}", outcome.is_some());
-        println!("wrapper-success={}", outcome == Some(ExitCode::SUCCESS));
+    fn a_capture_marker_without_a_compiler_does_not_enter_wrapper_mode() {
+        assert_wrapper_not_requested(Some("captures"), &["cargo-gamma"]);
+        assert_wrapper_not_requested(Some("captures"), &[]);
     }
 
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns compiler subprocesses")]
-    fn wrapper_mode_forwards_records_and_reports_failures() {
-        let directory = tempfile::tempdir().expect("capture directory");
-        let captures = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 capture path");
-        let compiler = successful_compiler(&captures, "compiler");
-
-        let direct = run_wrapper_child("direct", &captures, Some(compiler.as_str()), None, true);
-        assert!(direct.contains("wrapper-success=true"), "{direct}");
-        let recorded = read_only_capture(&captures);
-        assert_eq!(recorded.crate_name, "wrapped");
-        assert_eq!(recorded.source, Utf8PathBuf::from("src/lib.rs"));
-        assert!(recorded.opaque_extern, "a pathless extern makes dependency reach opaque");
-
-        fs::remove_file(capture_path(&captures)).expect("remove first capture");
-        let script = successful_compiler(&captures, "original");
-        let chained = run_wrapper_child("original", &captures, None, Some(script.as_str()), false);
-        assert!(chained.contains("wrapper-success=true"), "{chained}");
-        assert_eq!(read_only_capture(&captures).crate_name, "chained");
-
-        let missing = run_wrapper_child("missing-compiler", &captures, None, None, false);
-        assert!(missing.contains("wrapper-present=false"), "{missing}");
-
-        let failed = run_wrapper_child("spawn-failure", &captures, None, None, false);
-        assert!(failed.contains("wrapper-present=true"), "{failed}");
-        assert!(failed.contains("wrapper-success=false"), "{failed}");
+    fn assert_wrapper_not_requested(capture: Option<&str>, invocation: &[&str]) {
+        let mut reads = 0;
+        let result = run_if_requested_with(
+            args(invocation),
+            |name| {
+                reads += 1;
+                assert_eq!(name, CAPTURE_DIR_VAR);
+                capture.map(OsString::from)
+            },
+            || -> Vec<OsString> { panic!("no compiler invocation needs binary dependency discovery") },
+            |_| panic!("wrapper mode was not requested"),
+            |_, _| panic!("no compiler ran to publish a capture"),
+        );
+        assert_eq!(result, None);
+        assert_eq!(reads, 1);
     }
 
     #[test]
@@ -578,52 +541,262 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns a compiler subprocess")]
-    fn capture_storage_failures_do_not_change_the_compiler_result() {
-        let directory = tempfile::tempdir().expect("test directory");
-        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test path");
-        let captures = root.join("not-a-directory");
-        fs::write(&captures, "keep").expect("capture blocker");
-        let compiler = successful_compiler(&root, "compiler");
-
-        let output = run_wrapper_child("direct", &captures, Some(compiler.as_str()), None, false);
-
-        assert!(output.contains("wrapper-success=true"), "{output}");
-        assert_eq!(fs::read_to_string(&captures).expect("blocker remains"), "keep");
+    fn publication_returns_noncollision_open_errors_without_retrying_or_creating_a_capture() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let captures = Utf8Path::from_path(directory.path()).unwrap();
+        let mut calls = 0;
+        let failure = publish_capture_with(captures, b"capture", || {
+            calls += 1;
+            assert_eq!(calls, 1, "only name collisions may request another stem");
+            "invalid\0stem".into()
+        })
+        .expect_err("a NUL-containing capture name cannot be opened");
+        assert_eq!(failure.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(calls, 1);
+        assert_eq!(fs::read_dir(captures).unwrap().count(), 0);
+        let blocker = captures.join("blocker");
+        fs::write(&blocker, "not a directory").unwrap();
+        publish_capture_with(&blocker.join("captures"), b"capture", || {
+            panic!("directory creation failed before choosing a name")
+        })
+        .expect_err("a regular file cannot contain a capture directory");
+        assert_eq!(fs::read_to_string(blocker).unwrap(), "not a directory");
     }
 
-    fn run_wrapper_child(
-        scenario: &str,
-        captures: &Utf8Path,
-        compiler: Option<&str>,
-        original: Option<&str>,
-        opaque_binary: bool,
-    ) -> String {
-        let executable = env::current_exe().expect("test executable");
-        let module = module_path!();
-        let relative = module.split_once("::").map_or(module, |(_crate_name, rest)| rest);
-        let test = format!("{relative}::wrapper_child_helper");
-        let mut command = Command::new(executable);
-        let _ = command
-            .args([test.as_str(), "--exact", "--nocapture"])
-            .env(CHILD_SCENARIO, scenario)
-            .env(CAPTURE_DIR_VAR, captures);
+    #[test]
+    fn capture_publication_propagates_late_write_flush_and_noncollision_link_failures_without_publishing_partial_bytes() {
+        for stage in 0..3 {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let captures = Utf8Path::from_path(directory.path()).unwrap();
+            let blocker = captures.join("blocker");
+            fs::write(&blocker, "not a directory").unwrap();
+            let links = std::cell::Cell::new(0);
+            let failure = publish_capture_with_io(
+                captures,
+                b"complete capture bytes",
+                || "bounded".to_owned(),
+                |file, bytes| {
+                    if stage == 0 {
+                        file.write_all(&bytes[..3])?;
+                        Err(std::io::Error::other("late capture write refusal"))
+                    } else {
+                        file.write_all(bytes)
+                    }
+                },
+                |file| {
+                    assert_ne!(stage, 0, "failed writes cannot proceed to flushing");
+                    assert_eq!(file.metadata()?.len(), 22);
+                    if stage == 1 {
+                        Err(std::io::Error::other("late capture flush refusal"))
+                    } else {
+                        file.sync_data()
+                    }
+                },
+                |temporary, published| {
+                    links.set(links.get() + 1);
+                    assert_eq!(links.get(), 1, "only AlreadyExists can retry publication");
+                    assert_eq!(stage, 2, "failed writes or flushes cannot proceed to publication");
+                    assert_eq!(fs::read(temporary)?, b"complete capture bytes");
+                    assert_eq!(published, captures.join("bounded.json").as_std_path());
+                    fs::hard_link(temporary, blocker.join("child"))
+                },
+            )
+            .expect_err("each exact late publication failure must escape without unwrap or successful partial publication");
+            match stage {
+                0 => assert_eq!(failure.to_string(), "late capture write refusal"),
+                1 => assert_eq!(failure.to_string(), "late capture flush refusal"),
+                _ => assert_ne!(failure.kind(), std::io::ErrorKind::AlreadyExists),
+            }
+            assert_eq!(
+                fs::read(captures.join("bounded.tmp")).unwrap(),
+                if stage == 0 {
+                    b"com".as_slice()
+                } else {
+                    b"complete capture bytes".as_slice()
+                }
+            );
+            assert!(!captures.join("bounded.json").exists());
+            assert_eq!(fs::read_to_string(&blocker).unwrap(), "not a directory");
+        }
+    }
 
-        if let Some(compiler) = compiler {
-            let _ = command.env(TEST_COMPILER, compiler);
-        }
-        if let Some(original) = original {
-            let _ = command.env(ORIGINAL_WRAPPER_VAR, original);
-        } else {
-            let _ = command.env_remove(ORIGINAL_WRAPPER_VAR);
-        }
-        if opaque_binary {
-            let _ = command.env("CARGO_BIN_EXE_fixture", "fixture");
-        }
+    #[test]
+    #[cfg(windows)]
+    fn resetting_a_capture_generation_rejects_native_delete_denial_even_when_its_directory_still_exists() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let captures = Utf8Path::from_path(directory.path()).unwrap().join("captures");
+        fs::create_dir(&captures).unwrap();
+        let prior = captures.join("prior.json");
+        fs::write(&prior, "prior capture bytes").unwrap();
+        let locked = fs::File::options().read(true).share_mode(1).open(&prior).unwrap();
+        assert!(!reset_capture_directory(&captures));
+        assert!(
+            captures.is_dir(),
+            "directory existence cannot prove that its old generation was cleared"
+        );
+        assert_eq!(fs::read_to_string(&prior).unwrap(), "prior capture bytes");
+        drop(locked);
+        assert!(reset_capture_directory(&captures));
+        assert_eq!(fs::read_dir(&captures).unwrap().count(), 0);
+    }
 
-        let output = command.output().expect("wrapper child runs");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8(output.stdout).expect("child output is UTF-8")
+    #[test]
+    fn wrapper_boundary_keeps_the_compiler_out_of_direct_arguments_and_preserves_both_sources_of_opaque_dependencies() {
+        for original in [None, Some(""), Some("original-wrapper")] {
+            for (preopaque, binary) in [(false, false), (false, true), (true, false), (true, true)] {
+                let mut invocation = args(&[
+                    "cargo-gamma",
+                    "decoy.rs",
+                    "--crate-name=wrapped",
+                    "--crate-type=lib",
+                    "--out-dir=target",
+                    "src/real.rs",
+                ]);
+                if preopaque {
+                    invocation.push("--extern=opaque".into());
+                }
+                let expected_args = invocation[if original == Some("original-wrapper") { 1 } else { 2 }..].to_vec();
+                let mut reads = Vec::new();
+                let ran = Cell::new(false);
+                let mut published = false;
+                let result = run_if_requested_with(
+                    invocation,
+                    |name| {
+                        reads.push(name.to_owned());
+                        match name {
+                            CAPTURE_DIR_VAR => Some("captures".into()),
+                            ORIGINAL_WRAPPER_VAR => original.map(OsString::from),
+                            _ => panic!("unexpected environment read: {name}"),
+                        }
+                    },
+                    || {
+                        assert!(ran.get(), "dependency discovery follows compiler success");
+                        let mut names = args(&["NONPREFIX_CARGO_BIN_EXE_", "CARGO_BIN_EXE"]);
+                        if binary {
+                            names.push("CARGO_BIN_EXE_boundary".into());
+                        }
+                        names
+                    },
+                    |command| {
+                        assert_eq!(
+                            command.get_program(),
+                            OsStr::new(original.filter(|value| !value.is_empty()).unwrap_or("decoy.rs"))
+                        );
+                        assert_eq!(command.get_args().collect::<Vec<_>>(), expected_args);
+                        assert_eq!(command.get_current_dir(), None);
+                        assert_eq!(command.get_envs().count(), 0);
+                        ran.set(true);
+                        Ok(Some(0))
+                    },
+                    |directory, bytes| {
+                        assert_eq!(directory, Utf8Path::new("captures"));
+                        assert_eq!(
+                            serde_json::from_slice::<RustcInvocation>(bytes).unwrap(),
+                            RustcInvocation {
+                                crate_name: "wrapped".into(),
+                                crate_types: vec!["lib".into()],
+                                test: false,
+                                source: "src/real.rs".into(),
+                                out_dir: "target".into(),
+                                extra_filename: String::new(),
+                                externs: Vec::new(),
+                                opaque_extern: preopaque || binary,
+                            }
+                        );
+                        published = true;
+                        Ok(())
+                    },
+                );
+                assert_eq!(result, Some(ExitCode::SUCCESS));
+                assert_eq!(reads, [CAPTURE_DIR_VAR, ORIGINAL_WRAPPER_VAR]);
+                assert!(ran.get());
+                assert!(published);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_storage_failures_do_not_change_the_compiler_result() {
+        let mut published = false;
+        let result = run_if_requested_with(
+            args(&["cargo-gamma", "rustc", "--crate-name=wrapped", "src/lib.rs", "--out-dir=target"]),
+            wrapper_environment,
+            Vec::<OsString>::new,
+            |_| Ok(Some(0)),
+            |directory, bytes| {
+                assert_eq!(directory, Utf8Path::new("captures"));
+                assert_eq!(serde_json::from_slice::<RustcInvocation>(bytes).unwrap().crate_name, "wrapped");
+                published = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "scripted capture refusal",
+                ))
+            },
+        );
+        assert_eq!(result, Some(ExitCode::SUCCESS));
+        assert!(published);
+    }
+
+    fn wrapper_environment(name: &str) -> Option<OsString> {
+        match name {
+            CAPTURE_DIR_VAR => Some("captures".into()),
+            ORIGINAL_WRAPPER_VAR => None,
+            _ => panic!("unexpected environment read: {name}"),
+        }
+    }
+
+    #[test]
+    fn compiler_failures_preserve_exit_codes_without_discovering_or_publishing_captures() {
+        for (code, expected) in [
+            (Some(7), ExitCode::from(7)),
+            (Some(255), ExitCode::from(255)),
+            (Some(256), ExitCode::FAILURE),
+            (Some(-1), ExitCode::FAILURE),
+            (None, ExitCode::FAILURE),
+        ] {
+            assert_compiler_failure(Ok(code), expected);
+        }
+        assert_compiler_failure(
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "scripted spawn failure")),
+            ExitCode::FAILURE,
+        );
+    }
+
+    fn assert_compiler_failure(status: std::io::Result<Option<i32>>, expected: ExitCode) {
+        let mut ran = false;
+        let result = run_if_requested_with(
+            args(&["cargo-gamma", "rustc", "--crate-name=wrapped", "src/lib.rs", "--out-dir=target"]),
+            wrapper_environment,
+            || -> Vec<OsString> { panic!("a failed compiler has no dependency capture") },
+            |command| {
+                assert_eq!(command.get_program(), OsStr::new("rustc"));
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    args(&["--crate-name=wrapped", "src/lib.rs", "--out-dir=target"])
+                );
+                ran = true;
+                status
+            },
+            |_, _| panic!("a failed compiler must not publish a capture"),
+        );
+        assert_eq!(result, Some(expected));
+        assert!(ran);
+    }
+
+    #[test]
+    fn successful_noncompilation_invocations_do_not_publish_captures() {
+        let result = run_if_requested_with(
+            args(&["cargo-gamma", "rustc", "--version"]),
+            wrapper_environment,
+            || -> Vec<OsString> { panic!("an invocation without compilation identity has no dependencies") },
+            |command| {
+                assert_eq!(command.get_program(), OsStr::new("rustc"));
+                assert_eq!(command.get_args().collect::<Vec<_>>(), args(&["--version"]));
+                Ok(Some(0))
+            },
+            |_, _| panic!("an invocation without compilation identity must not publish a capture"),
+        );
+        assert_eq!(result, Some(ExitCode::SUCCESS));
     }
 
     fn capture_path(captures: &Utf8Path) -> Utf8PathBuf {

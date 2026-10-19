@@ -60,6 +60,8 @@ static WORKSPACE_PREPARATION_PAUSES: Pauses = OnceLock::new();
 thread_local! {
     /// The cache home owned by the integration-test workspace on this thread.
     static CACHE_HOME: RefCell<Option<Utf8PathBuf>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static AMBIENT_CACHE_HOME: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The environment variable inherited by nested Cargo Gamma processes in tests.
@@ -97,9 +99,30 @@ pub fn production_gamma_base(root: &Utf8Path) -> Utf8PathBuf {
 
 /// The active private cache home, when this process is executing test scaffolding.
 pub(crate) fn cache_home(root: &Utf8Path) -> Option<Utf8PathBuf> {
+    #[cfg(test)]
+    if AMBIENT_CACHE_HOME.with(Cell::get) {
+        return None;
+    }
     let active = CACHE_HOME.with(|home| home.borrow().clone());
 
     active.or_else(|| cfg!(test).then(|| owned_cache_home(root)))
+}
+
+// Only isolated subprocess fixtures with explicitly owned environment cache paths use this scope.
+#[cfg(all(test, not(miri)))]
+#[cfg_attr(loom, expect(dead_code, reason = "loom excludes the native workspace subprocess fixtures"))]
+pub(crate) fn with_ambient_cache_home<T>(operation: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            AMBIENT_CACHE_HOME.with(|active| active.set(self.0));
+        }
+    }
+
+    let previous = AMBIENT_CACHE_HOME.with(|active| active.replace(true));
+    let _restore = Restore(previous);
+    operation()
 }
 
 /// Adds the private cache home to a child command without changing this process's environment.
@@ -166,13 +189,15 @@ impl CommandPause {
     /// Waits until the command reaches the registered boundary and returns the cache-lock identity
     /// carried into that boundary.
     pub fn wait(&mut self) -> usize {
-        let observation = self
-            .reached
-            .recv_timeout(Duration::from_mins(2))
-            .expect("the command should reach its registered pause before the test budget expires");
+        self.wait_timeout(Duration::from_mins(2))
+            .expect("the command should reach its registered pause before the test budget expires")
+    }
+
+    pub(crate) fn wait_timeout(&mut self, timeout: Duration) -> Result<usize, mpsc::RecvTimeoutError> {
+        let observation = self.reached.recv_timeout(timeout)?;
         self.waiting = true;
 
-        observation
+        Ok(observation)
     }
 
     /// Allows the paused command to continue.

@@ -593,11 +593,39 @@ fn edit_files<H: Host>(
                 }
             }
         } else {
-            write!(host.results(), "{}", crate::fix::diff(&file.path, &before, &after))?;
+            write_preview(&mut host.results(), &file.path, &before, &after)?;
         }
     }
 
     Ok(())
+}
+
+fn write_preview(writer: &mut impl Write, path: &Utf8Path, before: &str, after: &str) -> std::io::Result<()> {
+    write!(writer, "{}", crate::fix::diff(path, before, after))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod preview_tests {
+    use super::*;
+
+    struct Denied;
+    impl Write for Denied {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "preview output denied"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn preview_returns_the_supplied_writer_error() {
+        let cause = write_preview(&mut Denied, Utf8Path::new("source.rs"), "old\n", "new\n").unwrap_err();
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "preview output denied");
+    }
 }
 
 /// Puts every file in `written` back the way it was, and folds what happened into `cause`.
@@ -914,6 +942,263 @@ mod tests {
             line: 1,
             mutators: core::iter::once("arith.add_to_sub".to_owned()).collect(),
             tag: "timeout",
+        }
+    }
+
+    #[cfg(feature = "system-tests")]
+    mod native_acceptance {
+        use super::*;
+
+        #[test]
+        fn survivor_suppression_reconstruction_names_invalid_identities_and_sorts_a_multi_file_ledger() {
+            let directory = crate_dir("suppress-ledger-order-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let files = ["z", "a", "q", "c", "m", "e", "r", "b"];
+            let mutants: Vec<_> = files
+                .iter()
+                .map(|name| {
+                    let file = format!("src/{name}.rs");
+                    fs::write(root.join(&file), "pub fn value() -> i32 { 42 }\n").expect("fixture is writable");
+                    recorded_mutant_in(&root, &file, "42", "", Outcome::Timeout)
+                })
+                .collect();
+            let record = record_for(&root, &mutants);
+            let (plan, stale) =
+                plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("all persisted identities still exist");
+            assert!(stale.is_empty());
+            let names: Vec<_> = plan.files.iter().map(|file| file.path.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "src/a.rs", "src/b.rs", "src/c.rs", "src/e.rs", "src/m.rs", "src/q.rs", "src/r.rs", "src/z.rs"
+                ]
+            );
+            let affected = eligible_files(&record, &[crate::fix::Eligible::Timeout]).expect("identities are persisted");
+            let unsorted = current_sources(&root, &record, &affected).expect("sources can be read");
+            assert_ne!(
+                unsorted.contents.keys().map(|path| path.as_str()).collect::<Vec<_>>(),
+                names,
+                "the fixture must not accidentally inherit lexicographic HashMap iteration"
+            );
+            let invalid = change_first_entry(&record, |entry| entry["site"]["digest"] = serde_json::json!("invalid"));
+            let (_, stale) = plan_from_record(&root, &invalid, &[crate::fix::Eligible::Timeout])
+                .expect("corrupt persisted identity is reported as stale");
+            assert_eq!(stale.len(), 1);
+            assert!(stale[0].contains("persisted source identity"), "{stale:?}");
+            assert!(stale[0].contains("is invalid; no edit was planned"), "{stale:?}");
+        }
+
+        #[test]
+        fn survivor_suppress_returns_physical_path_and_partial_testing_ledger_errors_without_panicking() {
+            let directory = crate_dir("suppress-state-errors-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let mut args = dry_args(&root, "timeout");
+            args.dir = root.join("missing-invocation-directory");
+            let failure = suppress(&mut Sink::default(), &args, When::Never, Styler::new(false))
+                .expect_err("an absent invocation directory is an ordinary path error");
+            assert_eq!(
+                failure.to_string(),
+                "could not resolve the selected workspace before validating `--cache-dir`"
+            );
+            args.dir = root.clone();
+            fs::write(root.join("testing-phase.json"), "[").expect("malformed persisted state is writable");
+            let failure = suppress(&mut Sink::default(), &args, When::Never, Styler::new(false))
+                .expect_err("an existing malformed testing ledger is not a missing ledger");
+            assert!(failure.to_string().contains("testing-phase"), "{failure}");
+        }
+
+        #[test]
+        fn survivor_suppression_rollback_respects_the_callers_real_workspace_lock_mode() {
+            let directory = crate::testing::workdir("suppress-rollback-lock-mode-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let path = root.join("source.rs");
+            let _lock = crate::exec::claim_workspace(&root).expect("the fixture workspace can be claimed");
+            for locked in [false, true] {
+                fs::write(&path, "published generation\n").expect("fixture is writable");
+                let written = vec![WrittenFile::new(
+                    path.clone(),
+                    "original generation\n".into(),
+                    "published generation\n".into(),
+                )];
+                let failure = reverted_with_lock(&root, written, error!("original failure marker"), locked);
+                assert!(failure.to_string().contains("original failure marker"));
+                assert_eq!(
+                    fs::read_to_string(&path).expect("source remains readable"),
+                    if locked {
+                        "original generation\n"
+                    } else {
+                        "published generation\n"
+                    }
+                );
+                assert_eq!(failure.to_string().contains("except 1 file"), !locked, "{failure}");
+            }
+            fs::write(&path, "published generation\n").expect("fixture is writable");
+            let failure = reverted(
+                &root,
+                vec![WrittenFile::new(
+                    path.clone(),
+                    "original generation\n".into(),
+                    "published generation\n".into(),
+                )],
+                error!("unclaimed rollback"),
+            );
+            assert!(failure.to_string().contains("except 1 file"), "{failure}");
+            assert_eq!(
+                fs::read_to_string(path).expect("a competing lock prevents publication"),
+                "published generation\n"
+            );
+        }
+
+        #[test]
+        fn survivor_suppression_edit_and_batch_compensation_forward_the_lock_mode_without_reacquiring() {
+            let directory = crate_dir("suppress-batch-lock-mode-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let original = fs::read_to_string(root.join("src/lib.rs")).expect("fixture source exists");
+            let _lock = crate::exec::claim_workspace(&root).expect("the caller owns the workspace lock");
+            let mut args = dry_args(&root, "timeout");
+            args.allow_dirty = true;
+            let plan = plan_over(&root, &["src/lib.rs", "src/missing.rs"]);
+            let edits = [edit_for("src/lib.rs"), edit_for("src/missing.rs")];
+            let failure = apply_all_with_lock(&mut Sink::default(), &args, &plan, &edits, "2026-10-01", true)
+                .expect_err("the missing second source forces compensation under the already-held lock");
+            assert!(failure.to_string().contains("missing.rs"), "{failure}");
+            assert!(failure.to_string().contains("every edit has been reverted"), "{failure}");
+            assert_eq!(
+                fs::read_to_string(root.join("src/lib.rs")).expect("the first edit was compensated"),
+                original
+            );
+            let mut written = Written::new();
+            edit_files(&mut Sink::default(), &args, &plan, &edits[..1], "2026-10-01", &mut written, false)
+                .expect_err("an unclaimed writer cannot bypass a competing workspace lock");
+            assert!(written.is_empty());
+            assert_eq!(
+                fs::read_to_string(root.join("src/lib.rs")).expect("competing lock preserves source"),
+                original
+            );
+        }
+
+        #[test]
+        fn survivor_suppression_verification_rolls_back_both_errors_and_unclean_results_under_its_existing_lock() {
+            let directory = crate::testing::workdir("suppress-verification-lock-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let path = root.join("source.rs");
+            let plan = plan_over(&root, &[]);
+            let _lock = crate::exec::claim_workspace(&root).expect("the caller owns the workspace lock");
+            for verification_error in [false, true] {
+                fs::write(&path, "published generation\n").expect("fixture is writable");
+                let verified = if verification_error {
+                    Err(error!("verification read failed"))
+                } else {
+                    Ok(crate::fix::Verification {
+                        missing: vec!["requested-mutant".into()],
+                        collateral: Vec::new(),
+                        released: Vec::new(),
+                    })
+                };
+                let written = vec![WrittenFile::new(
+                    path.clone(),
+                    "original generation\n".into(),
+                    "published generation\n".into(),
+                )];
+                let failure = finish_verification(&mut Sink::default(), &plan, 1, written, Styler::new(false), verified)
+                    .expect_err("both failed verification paths must compensate using the existing lock");
+                assert!(failure.to_string().contains("every edit has been reverted"), "{failure}");
+                assert_eq!(
+                    fs::read_to_string(&path).expect("rollback publishes the original generation"),
+                    "original generation\n"
+                );
+            }
+        }
+
+        struct ReadOnlyOutput(fs::File);
+
+        impl Host for ReadOnlyOutput {
+            fn output(&mut self) -> impl Write {
+                &mut self.0
+            }
+            fn error(&mut self) -> impl Write {
+                std::io::sink()
+            }
+            fn is_terminal(&self) -> bool {
+                false
+            }
+            fn terminal_width(&self) -> Option<u16> {
+                None
+            }
+        }
+
+        #[test]
+        fn survivor_suppression_preview_returns_a_real_read_only_writer_error_without_publishing_source() {
+            let directory = crate_dir("suppress-preview-output-error-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let original = fs::read_to_string(root.join("src/lib.rs")).expect("source exists");
+            let output = root.join("read-only-output");
+            fs::write(&output, "untouched output\n").expect("output fixture is writable");
+            let mut host = ReadOnlyOutput(fs::File::open(&output).expect("the host opens its result handle read-only"));
+            let mut args = dry_args(&root, "timeout");
+            args.apply = false;
+            let mut written = Written::new();
+            edit_files(
+                &mut host,
+                &args,
+                &plan_over(&root, &["src/lib.rs"]),
+                &[edit_for("src/lib.rs")],
+                "2026-10-01",
+                &mut written,
+                false,
+            )
+            .expect_err("native read-only output failures must propagate");
+            assert!(written.is_empty());
+            assert_eq!(fs::read_to_string(&output).expect("output remains readable"), "untouched output\n");
+            assert_eq!(
+                fs::read_to_string(root.join("src/lib.rs")).expect("the preview does not publish"),
+                original
+            );
+        }
+
+        #[cfg(any(unix, windows))]
+        #[test]
+        fn survivor_suppression_batch_returns_an_external_native_directory_link_error_before_any_edit() {
+            let directory = crate::testing::workdir("suppress-junction-workspace-");
+            let external = crate::testing::workdir("suppress-junction-outside-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let outside = Utf8PathBuf::from_path_buf(external.path().to_owned()).expect("fixture paths are UTF-8");
+            let source = "pub fn value() -> i32 { 42 }\n";
+            fs::write(outside.join("source.rs"), source).expect("external fixture is writable");
+            let link = root.join("linked");
+            #[cfg(windows)]
+            {
+                let output = Command::new("cmd.exe")
+                    .args(["/c", "mklink", "/J"])
+                    .arg(link.as_str().replace('/', "\\"))
+                    .arg(outside.as_str().replace('/', "\\"))
+                    .output()
+                    .expect("Windows supplies cmd.exe");
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&outside, &link).expect("the native directory link can be created");
+            let mut args = dry_args(&root, "timeout");
+            args.allow_dirty = true;
+            let failure = apply_all_with_lock(
+                &mut Sink::default(),
+                &args,
+                &plan_over(&root, &["linked/source.rs"]),
+                &[edit_for("linked/source.rs")],
+                "2026-10-01",
+                false,
+            )
+            .expect_err("the bulk source guard must return external-link errors instead of panicking");
+            assert!(failure.to_string().contains("a source edit"), "{failure}");
+            assert!(failure.to_string().contains("outside"), "{failure}");
+            assert_eq!(
+                fs::read_to_string(outside.join("source.rs")).expect("external source is untouched"),
+                source
+            );
+            #[cfg(windows)]
+            fs::remove_dir(&link).expect("remove only the junction");
+            #[cfg(unix)]
+            fs::remove_file(&link).expect("remove only the symbolic link");
         }
     }
 

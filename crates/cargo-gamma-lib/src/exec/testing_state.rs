@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead as _, BufReader, Read as _, Seek as _, Write as _};
+use std::io::{BufRead, BufReader, Read, Seek as _, Write as _};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_engine::ops::collect::Confidence;
@@ -204,15 +204,33 @@ struct Committed {
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Utf8Path) -> Result<T> {
+    read_json_with_limit(path, MAX_STATE_BYTES)
+}
+
+fn read_json_with_limit<T: serde::de::DeserializeOwned>(path: &Utf8Path, limit: u64) -> Result<T> {
     let file = File::open(path).map_err(|cause| error!("could not read testing state `{path}`; start a new campaign").caused_by(cause))?;
+    read_json_from(path, file, limit)
+}
+
+fn read_json_from<T: serde::de::DeserializeOwned>(path: &Utf8Path, reader: impl Read, limit: u64) -> Result<T> {
     let mut bytes = Vec::new();
-    file.take(MAX_STATE_BYTES + 1)
+    reader
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|cause| error!("could not read testing state `{path}`").caused_by(cause))?;
-    if bytes.len() as u64 > MAX_STATE_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(error!("testing state `{path}` exceeds the supported size; start a new campaign"));
     }
     serde_json::from_slice(&bytes).map_err(|cause| error!("testing state `{path}` is invalid; start a new campaign").caused_by(cause))
+}
+
+fn read_verdict_line(path: &Utf8Path, reader: &mut impl BufRead, line: &mut Vec<u8>, limit: u64) -> Result<usize> {
+    let length = reader
+        .by_ref()
+        .take(limit + 1)
+        .read_until(b'\n', line)
+        .map_err(|cause| error!("could not read testing verdicts `{path}`").caused_by(cause))?;
+    Ok(length)
 }
 
 fn phase(base: &Utf8Path) -> Result<Option<Phase>> {
@@ -317,6 +335,10 @@ impl TestingState {
     }
 
     fn read_checkpoint(base: &Utf8Path) -> Result<(Self, u64)> {
+        Self::read_checkpoint_with_limit(base, MAX_STATE_BYTES)
+    }
+
+    fn read_checkpoint_with_limit(base: &Utf8Path, limit: u64) -> Result<(Self, u64)> {
         let status: Status = read_json(&base.join(PHASE))?;
         if status.snapshot.as_deref() != Some(fingerprint(&base.join(SNAPSHOT))?.as_str()) {
             return Err(error!(
@@ -367,15 +389,11 @@ impl TestingState {
         let mut line = Vec::new();
         loop {
             line.clear();
-            let length = reader
-                .by_ref()
-                .take(MAX_STATE_BYTES + 1)
-                .read_until(b'\n', &mut line)
-                .map_err(|cause| error!("could not read testing verdicts `{path}`").caused_by(cause))?;
+            let length = read_verdict_line(&path, &mut reader, &mut line, limit)?;
             if length == 0 {
                 break;
             }
-            if length as u64 > MAX_STATE_BYTES {
+            if length as u64 > limit {
                 return Err(error!("testing verdict in `{path}` exceeds the supported size"));
             }
             // An interrupted append has no committed newline. Only that final fragment is ignored.
@@ -445,6 +463,11 @@ impl TestingState {
 }
 
 impl TestingJournal {
+    #[cfg(test)]
+    pub(super) fn replace_writer_for_test(&mut self, file: File) {
+        self.file = file;
+    }
+
     pub(super) fn open(base: &Utf8Path, valid_bytes: Option<u64>) -> Result<Self> {
         let path = base.join(JOURNAL);
         if let Some(length) = valid_bytes {
@@ -570,6 +593,13 @@ fn append_checkpoint(
 }
 
 fn capture_artifacts(built: &Built) -> Result<Vec<Artifact>> {
+    capture_artifacts_with(built, |directory| fs::read_dir(directory))
+}
+
+fn capture_artifacts_with<I: IntoIterator<Item = std::io::Result<fs::DirEntry>>>(
+    built: &Built,
+    mut enumerate: impl FnMut(&Utf8Path) -> std::io::Result<I>,
+) -> Result<Vec<Artifact>> {
     let roots = built.work.testing_roots()?;
     let output = built.work.root.join("target");
     let mut paths = tree_paths(&roots, &output)?;
@@ -581,7 +611,7 @@ fn capture_artifacts(built: &Built) -> Result<Vec<Artifact>> {
         if !directory.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(directory).map_err(|cause| error!("could not inspect test libraries `{directory}`").caused_by(cause))? {
+        for entry in enumerate(directory).map_err(|cause| error!("could not inspect test libraries `{directory}`").caused_by(cause))? {
             let entry = entry.map_err(|cause| error!("could not inspect test libraries `{directory}`").caused_by(cause))?;
             let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|_path| error!("test library path is not UTF-8"))?;
             if matches!(path.extension(), Some("dll" | "so" | "dylib")) && path.is_file() {
@@ -618,6 +648,14 @@ fn generated_output(path: &Utf8Path, output: &Utf8Path, roots: &[Utf8PathBuf]) -
 }
 
 fn tree_paths(roots: &[Utf8PathBuf], output: &Utf8Path) -> Result<crate::HashSet<Utf8PathBuf>> {
+    tree_paths_with_entries(roots, output, core::convert::identity)
+}
+
+fn tree_paths_with_entries<E: std::error::Error + Send + Sync + 'static>(
+    roots: &[Utf8PathBuf],
+    output: &Utf8Path,
+    mut inspect_entry: impl FnMut(walkdir::Result<walkdir::DirEntry>) -> std::result::Result<walkdir::DirEntry, E>,
+) -> Result<crate::HashSet<Utf8PathBuf>> {
     let mut paths = crate::HashSet::default();
     for root in roots {
         let metadata =
@@ -632,7 +670,8 @@ fn tree_paths(roots: &[Utf8PathBuf], output: &Utf8Path) -> Result<crate::HashSet
             .into_iter()
             .filter_entry(|entry| Utf8Path::from_path(entry.path()).is_none_or(|path| !generated_output(path, output, roots)))
         {
-            let entry = entry.map_err(|cause| error!("could not inspect prepared testing tree `{root}`").caused_by(cause))?;
+            let entry =
+                inspect_entry(entry).map_err(|cause| error!("could not inspect prepared testing tree `{root}`").caused_by(cause))?;
             if entry.file_type().is_file() || entry.file_type().is_symlink() {
                 let path = Utf8PathBuf::from_path_buf(entry.into_path())
                     .map_err(|_path| error!("prepared testing tree `{root}` contains a non-UTF-8 path"))?;
@@ -682,12 +721,16 @@ fn artifact_metadata_matches(expected: Option<&ArtifactMetadata>, actual: &Artif
 }
 
 fn fingerprint(path: &Utf8Path) -> Result<String> {
-    let mut file = File::open(path)
+    let file = File::open(path)
         .map_err(|cause| error!("could not read prepared artifact `{path}`; restore it or start a new campaign").caused_by(cause))?;
+    fingerprint_from(path, file)
+}
+
+fn fingerprint_from(path: &Utf8Path, mut reader: impl Read) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
-        let length = file
+        let length = reader
             .read(&mut buffer)
             .map_err(|cause| error!("could not read prepared artifact `{path}`").caused_by(cause))?;
         if length == 0 {
@@ -701,11 +744,19 @@ fn fingerprint(path: &Utf8Path) -> Result<String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::error::Error as _;
     use core::time::Duration;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
 
+    use super::super::census::CensusSelection;
     use super::*;
     use crate::discover::TargetFile;
-    use crate::exec::{CensusStatus, OrderingHints, Phases};
+    use crate::exec::{CensusStatus, OrderingHints, Phases, Workspace};
     use crate::fixtures;
 
     #[test]
@@ -726,6 +777,55 @@ mod tests {
         let legacy: TestingSettings = serde_json::from_value(encoded).unwrap();
         assert_eq!(legacy.jobs, 7);
         assert!(legacy.mutators.is_none());
+    }
+
+    #[test]
+    fn artifact_capture_includes_binary_and_dynamic_library_bytes_but_excludes_nonlibraries_and_generated_output() {
+        let (_directory, state) = fixture();
+        let root = state.plan.root.join("prepared");
+        let libraries = state.plan.root.join("outside-libraries");
+        fs::create_dir_all(root.join("gamma-rt")).unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::create_dir_all(libraries.join("directory.dll")).unwrap();
+        fs::write(root.join("source.rs"), "source").unwrap();
+        fs::write(root.join("gamma-rt/lib.rs"), "runtime").unwrap();
+        fs::write(root.join("target/debug/object"), "generated").unwrap();
+        for name in ["first.dll", "second.so", "third.dylib", "ignored.txt"] {
+            fs::write(libraries.join(name), name).unwrap();
+        }
+        let binary = state.plan.root.join("test-binary");
+        fs::write(&binary, "executable").unwrap();
+        let mut work = Workspace::adopt(root.clone(), state.plan.root.join("cargo-target"));
+        work.libraries = vec![state.plan.root.join("missing-libraries"), libraries.clone()];
+        let mut session = state.session;
+        session.binaries = vec![
+            crate::testing::test_binary(binary.as_str()),
+            crate::testing::test_binary(binary.as_str()),
+        ];
+        let built = Built {
+            work,
+            session,
+            oracle: state.oracle,
+        };
+        let artifacts = capture_artifacts(&built).unwrap();
+        let mut expected = [
+            root.join("source.rs"),
+            root.join("gamma-rt/lib.rs"),
+            binary,
+            libraries.join("first.dll"),
+            libraries.join("second.so"),
+            libraries.join("third.dylib"),
+        ];
+        expected.sort();
+        assert_eq!(
+            artifacts.iter().map(|artifact| &artifact.path).collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+        for artifact in artifacts {
+            let bytes = fs::read(&artifact.path).unwrap();
+            assert_eq!(artifact.digest, blake3::hash(&bytes).to_hex().to_string());
+            assert!(artifact.metadata.is_some());
+        }
     }
 
     #[test]
@@ -952,6 +1052,168 @@ mod tests {
         set_phase(&state.record.base, Phase::Testing).unwrap();
     }
 
+    fn native_non_utf8_name() -> std::ffi::OsString {
+        #[cfg(unix)]
+        {
+            std::ffi::OsString::from_vec(vec![b'n', 0xff, b'.', b's', b'o'])
+        }
+        #[cfg(windows)]
+        {
+            std::ffi::OsString::from_wide(&[0xd800, u16::from(b'.'), u16::from(b'd'), u16::from(b'l'), u16::from(b'l')])
+        }
+    }
+
+    fn prepared_start() -> (tempfile::TempDir, TestingState, Built) {
+        let (directory, state) = fixture();
+        let root = state.plan.root.join("prepared");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir(root.join("gamma-rt")).unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join("src/lib.rs"), "a").unwrap();
+        let binary = super::super::test_binary::TestBinary {
+            path: root.join("target/subject"),
+            package: "subject".into(),
+            tests: Some(4),
+            ..crate::testing::test_binary("subject")
+        };
+        fs::write(&binary.path, "prepared executable bytes").unwrap();
+        let mut session = state.session.clone();
+        session.binaries.push(binary);
+        let built = Built {
+            work: Workspace::adopt(root.clone(), root.join("target")),
+            session,
+            oracle: state.oracle.clone(),
+        };
+        fs::write(state.record.base.join(".cargo-gamma-owner"), state.plan.root.as_str()).unwrap();
+        set_phase(&state.record.base, Phase::Preparing).unwrap();
+        (directory, state, built)
+    }
+
+    #[test]
+    fn start_rejects_non_utf8_runtime_artifacts_after_serializing_the_native_environment() {
+        let (_directory, state, mut built) = prepared_start();
+        built.work.set_test_environment("subject", "OUT_DIR", native_non_utf8_name());
+        built
+            .work
+            .testing_snapshot()
+            .expect("OsString values serialize losslessly before testing_paths validates UTF-8");
+        let Err(failure) = TestingState::start(
+            &state.plan,
+            &built,
+            Census::default(),
+            Killers::default(),
+            state.settings,
+            &state.record,
+            (&[], &[]),
+        ) else {
+            panic!("an unrepresentable runtime artifact must stop campaign preparation")
+        };
+        assert_eq!(failure.message(), "a prepared test artifact has a non-UTF-8 path");
+        assert_eq!(phase(&state.record.base).unwrap(), Some(Phase::Preparing));
+    }
+
+    #[test]
+    fn starting_testing_freezes_nondefault_census_killers_and_artifacts_before_opening_an_empty_journal() {
+        let (_directory, state, built) = prepared_start();
+        let binary = &built.session.binaries[0];
+        let ordinal = state.plan.mutants[0].ordinal;
+        let census = Census::examined(&binary.path, ordinal, 1, 4);
+        let mut killers = Killers::default();
+        let killer = crate::discover::Killer {
+            package: binary.package.clone(),
+            target: binary.killer_target(),
+            test: "historical-test".into(),
+        };
+        killers.record(state.plan.mutants[0].id.clone(), killer.clone());
+        fs::write(state.record.base.join(JOURNAL), "old journal must be replaced").unwrap();
+        let started = TestingState::start(
+            &state.plan,
+            &built,
+            census,
+            killers,
+            state.settings,
+            &state.record,
+            (&["stuck package".into()], &["dropped package".into()]),
+        )
+        .unwrap();
+        assert_eq!(fs::read(state.record.base.join(JOURNAL)).unwrap(), b"");
+        assert_eq!(phase(&state.record.base).unwrap(), Some(Phase::Testing));
+        assert_eq!(started.killers.hint(&state.plan.mutants[0].id), Some(&killer));
+        assert!(matches!(started.census.selection(binary, ordinal), CensusSelection::Selected(names) if names == ["tests::t0"]));
+        assert_eq!(started.stuck, ["stuck package"]);
+        assert_eq!(started.dropped, ["dropped package"]);
+        assert!(started.artifacts.iter().any(
+            |artifact| artifact.path == binary.path && artifact.digest == blake3::hash(b"prepared executable bytes").to_hex().as_str()
+        ));
+        let (loaded, valid_bytes) = TestingState::load(&state.record.base).unwrap();
+        assert_eq!(valid_bytes, 0);
+        assert_eq!(loaded.killers.hint(&state.plan.mutants[0].id), Some(&killer));
+        assert!(matches!(loaded.census.selection(binary, ordinal), CensusSelection::Selected(names) if names == ["tests::t0"]));
+    }
+
+    #[test]
+    fn start_failures_preserve_preparing_phase_at_each_independent_persistence_boundary() {
+        for stage in ["artifacts", "snapshot", "journal", "location"] {
+            let (_directory, state, built) = prepared_start();
+            let path = state.record.base.join(if stage == "snapshot" { SNAPSHOT } else { JOURNAL });
+            match stage {
+                "artifacts" => fs::remove_file(&built.session.binaries[0].path).unwrap(),
+                "snapshot" | "journal" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                "location" => fs::remove_file(state.record.base.join(".cargo-gamma-owner")).unwrap(),
+                _ => unreachable!("the boundary matrix is closed"),
+            }
+            let Err(failure) = TestingState::start(
+                &state.plan,
+                &built,
+                Census::default(),
+                Killers::default(),
+                state.settings,
+                &state.record,
+                (&[], &[]),
+            ) else {
+                panic!("{stage} failure must not open the testing phase")
+            };
+            if stage == "artifacts" {
+                assert!(failure.message().starts_with("could not inspect prepared artifact"), "{failure}");
+            } else if stage == "location" {
+                assert_eq!(
+                    failure.message(),
+                    "could not publish the campaign location; testing has not started"
+                );
+            } else {
+                assert_eq!(failure.message(), format!("could not write `{path}`"));
+            }
+            assert_eq!(phase(&state.record.base).unwrap(), Some(Phase::Preparing));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn starting_testing_propagates_the_final_phase_replacement_failure() {
+        const SHARE_READ: u32 = 1;
+        let (_directory, state, built) = prepared_start();
+        let path = state.record.base.join(PHASE);
+        let lock = OpenOptions::new().read(true).share_mode(SHARE_READ).open(&path).unwrap();
+        let Err(failure) = TestingState::start(
+            &state.plan,
+            &built,
+            Census::default(),
+            Killers::default(),
+            state.settings,
+            &state.record,
+            (&[], &[]),
+        ) else {
+            panic!("successful snapshot and journal publication do not hide the final phase failure")
+        };
+        assert_eq!(failure.message(), format!("could not write `{path}`"));
+        drop(lock);
+        assert_eq!(phase(&state.record.base).unwrap(), Some(Phase::Preparing));
+        assert_eq!(fs::read(state.record.base.join(JOURNAL)).unwrap(), b"");
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -965,7 +1227,6 @@ mod tests {
         use super::super::stall::Stall;
         use super::super::sweep::{self, Judgement, Sweep};
         use super::super::test_binary::{Reachability, TestScope};
-        use super::super::workspace::Workspace;
 
         fn waiters(receiver: &mpsc::Receiver<std::thread::ThreadId>, active: std::thread::ThreadId) {
             let mut waiting = crate::HashSet::default();
@@ -1115,6 +1376,470 @@ mod tests {
             Ok(_) => panic!("invalid state was accepted"),
             Err(failure) => failure.to_string(),
         }
+    }
+
+    #[test]
+    fn checkpoint_identity_and_source_paths_are_validated_independently() {
+        for case in [
+            "jobs",
+            "relative-root",
+            "foreign-base",
+            "duplicate-id",
+            "duplicate-ordinal",
+            "pending-zero",
+        ] {
+            let (_directory, mut state) = fixture();
+            let base = state.record.base.clone();
+            match case {
+                "jobs" => state.settings.jobs = 0,
+                "relative-root" => state.plan.root = "relative".into(),
+                "foreign-base" => state.record.base = state.plan.root.join("foreign"),
+                "duplicate-id" => state.plan.mutants[1].id = state.plan.mutants[0].id.clone(),
+                "duplicate-ordinal" => state.plan.mutants[1].ordinal = state.plan.mutants[0].ordinal,
+                "pending-zero" => state.plan.mutants[0].ordinal = 0,
+                _ => unreachable!(),
+            }
+            publication::write(&base.join(SNAPSHOT), &serde_json::to_string(&state).unwrap()).unwrap();
+            set_phase(&base, Phase::Testing).unwrap();
+            let category = if case.starts_with("duplicate") || case == "pending-zero" {
+                "ambiguous mutant identities"
+            } else {
+                "invalid campaign identity or settings"
+            };
+            assert_eq!(
+                failure(&base),
+                format!("testing state at `{base}` has {category}; start a new campaign"),
+                "{case}"
+            );
+        }
+        for invalid in ["", "../outside.rs", "src/../../outside.rs"] {
+            for mutant_path in [false, true] {
+                let (_directory, mut state) = fixture();
+                if mutant_path {
+                    state.plan.mutants[1].file = Utf8PathBuf::from(invalid).into();
+                } else {
+                    let mut valid = state.plan.files[0].clone();
+                    valid.path = invalid.into();
+                    state.plan.files.push(valid);
+                }
+                save(&state);
+                assert_eq!(
+                    failure(&state.record.base),
+                    format!(
+                        "testing state at `{}` contains a source path outside the workspace",
+                        state.record.base
+                    ),
+                    "{invalid:?}, mutant={mutant_path}"
+                );
+            }
+        }
+        let (_directory, mut state) = fixture();
+        let mut ignored = state.plan.mutants[2].clone();
+        ignored.id = "another-ignored".into();
+        state.plan.mutants.push(ignored);
+        save(&state);
+        assert_eq!(TestingState::load(&state.record.base).unwrap().0.plan.mutants.len(), 4);
+    }
+
+    #[test]
+    fn journal_replay_restores_all_verdict_fields_and_rejects_unfinished_commits() {
+        let (_directory, state) = fixture();
+        let mut mutant = state.plan.mutants[0].clone();
+        mutant.outcome = Outcome::Killed;
+        mutant.elapsed_ms = 731;
+        mutant.killed_by = Some("suite::regression".into());
+        mutant.killer = Some(crate::model::KillerIdentity {
+            package: "subject".into(),
+            target: "lib:subject".into(),
+            test: "suite::regression".into(),
+        });
+        mutant.note = Some("retained evidence".into());
+        let journal = TestingJournal::open(&state.record.base, None).unwrap();
+        journal.publish(&mutant, &state.killers).unwrap();
+        let bytes = fs::read(state.record.base.join(JOURNAL)).unwrap();
+        let (loaded, valid) = TestingState::load(&state.record.base).unwrap();
+        assert_eq!(valid, bytes.len() as u64);
+        let restored = &loaded.plan.mutants[0];
+        assert_eq!(restored.outcome, Outcome::Killed);
+        assert_eq!(restored.elapsed_ms, 731);
+        assert_eq!(restored.killed_by, mutant.killed_by);
+        assert_eq!(restored.killer, mutant.killer);
+        assert_eq!(restored.note, mutant.note);
+        drop(journal);
+        mutant.outcome = Outcome::Pending;
+        let verdict = Settled {
+            mutant,
+            probe: None,
+            sweep: None,
+        };
+        let encoded = serde_json::to_vec(&verdict).unwrap();
+        let mut bytes = serde_json::to_vec(&Committed {
+            verdict,
+            checksum: blake3::hash(&encoded).to_hex().to_string(),
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        fs::write(state.record.base.join(JOURNAL), bytes).unwrap();
+        assert_eq!(
+            failure(&state.record.base),
+            format!(
+                "testing verdicts `{}` contain conflicting or unfinished outcomes",
+                state.record.base.join(JOURNAL)
+            )
+        );
+    }
+
+    #[test]
+    fn partial_records_refuse_input_snapshots_that_do_not_contain_the_retained_sources() {
+        let (_directory, mut state) = fixture();
+        let mut inputs = serde_json::to_value(&state.record.inputs).unwrap();
+        inputs["files"] = serde_json::json!([]);
+        state.record.inputs = serde_json::from_value(inputs).unwrap();
+        save(&state);
+        let Err(failure) = partial_testing_record(&state.record.base) else {
+            panic!("partial evidence cannot pair source outcomes with a missing source generation")
+        };
+        assert_eq!(
+            failure.message(),
+            format!(
+                "could not construct partial campaign evidence from `{}`; start a new campaign",
+                state.record.base
+            )
+        );
+    }
+
+    #[test]
+    fn prepared_tree_roots_include_later_directories_and_propagate_late_walk_failures() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let standalone = root.join("standalone");
+        let nested = root.join("nested");
+        fs::write(&standalone, "first file").unwrap();
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("later"), "later file").unwrap();
+        let output = root.join("target");
+        let paths = tree_paths(&[standalone.clone(), nested.clone()], &output).unwrap();
+        assert_eq!(paths, crate::HashSet::from_iter([standalone.clone(), nested.join("later")]));
+        let mut file_walks = 0;
+        let paths = tree_paths_with_entries(core::slice::from_ref(&standalone), &output, |_entry| {
+            file_walks += 1;
+            Err::<walkdir::DirEntry, _>(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unnecessary file reinspection",
+            ))
+        })
+        .expect("an already inspected file root does not need a second, fallible tree traversal");
+        assert_eq!(file_walks, 0);
+        assert_eq!(paths, crate::HashSet::from_iter([standalone]));
+        let mut entries = 0;
+        let failure = tree_paths_with_entries(core::slice::from_ref(&nested), &output, |entry| {
+            entries += 1;
+            let entry = entry.map_err(std::io::Error::other)?;
+            if entry.depth() == 1 {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "late walk denial"))
+            } else {
+                Ok(entry)
+            }
+        })
+        .expect_err("the root was inspected successfully before its child enumeration failed");
+        assert_eq!(entries, 2);
+        assert_eq!(failure.message(), format!("could not inspect prepared testing tree `{nested}`"));
+        assert_eq!(fs::read_to_string(nested.join("later")).unwrap(), "later file");
+        let missing = root.join("missing-artifact-root");
+        let failure =
+            tree_paths(core::slice::from_ref(&missing), &output).expect_err("the tree collector cannot inspect a missing artifact root");
+        assert_eq!(failure.message(), format!("could not inspect prepared testing tree `{missing}`"));
+    }
+
+    #[test]
+    fn artifact_capture_propagates_both_library_directory_and_late_entry_failures() {
+        for entry_failure in [false, true] {
+            let (_directory, state, mut built) = prepared_start();
+            let libraries = state.plan.root.join("libraries");
+            fs::create_dir(&libraries).unwrap();
+            built.work.libraries = vec![libraries.clone()];
+            let mut calls = 0;
+            let Err(failure) = capture_artifacts_with(&built, |directory| {
+                calls += 1;
+                assert_eq!(directory, libraries.as_path());
+                let failure = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "scripted library enumeration");
+                if entry_failure { Ok(vec![Err(failure)]) } else { Err(failure) }
+            }) else {
+                panic!("an incomplete dynamic-library inventory cannot become a resumable campaign")
+            };
+            assert_eq!(calls, 1);
+            assert_eq!(failure.message(), format!("could not inspect test libraries `{libraries}`"));
+        }
+    }
+
+    #[test]
+    fn prepared_tree_and_external_library_inventory_reject_native_non_utf8_names() {
+        let name = native_non_utf8_name();
+        let (_directory, state, mut built) = prepared_start();
+        let libraries = state.plan.root.join("external-libraries");
+        fs::create_dir(&libraries).unwrap();
+        fs::write(libraries.as_std_path().join(&name), "library").unwrap();
+        built.work.libraries = vec![libraries.clone()];
+        let Err(failure) = capture_artifacts(&built) else {
+            panic!("native library names must be representable in the persisted UTF-8 inventory")
+        };
+        assert_eq!(failure.message(), "test library path is not UTF-8");
+        let failure = tree_paths(core::slice::from_ref(&libraries), &built.work.root.join("target"))
+            .expect_err("prepared source names must also be representable in the persisted inventory");
+        assert_eq!(
+            failure.message(),
+            format!("prepared testing tree `{libraries}` contains a non-UTF-8 path")
+        );
+    }
+
+    #[test]
+    fn state_readers_preserve_the_first_failure_and_never_read_past_the_size_sentinel() {
+        struct FailsAtEnd(std::io::Cursor<&'static [u8]>);
+        impl Read for FailsAtEnd {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.position() == u64::try_from(self.0.get_ref().len()).unwrap() {
+                    Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "scripted terminal read"))
+                } else {
+                    self.0.read(buf)
+                }
+            }
+        }
+        let path = Utf8Path::new("bounded-state.json");
+        let failure = read_json_from::<serde_json::Value>(path, FailsAtEnd(std::io::Cursor::new(b"null")), 3)
+            .expect_err("the first excess byte proves oversize without requesting another byte");
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{path}` exceeds the supported size; start a new campaign")
+        );
+        let failure = read_json_from::<serde_json::Value>(path, FailsAtEnd(std::io::Cursor::new(b"null")), 5)
+            .expect_err("the terminal reader failure occurs before reaching the sentinel");
+        assert_eq!(failure.message(), format!("could not read testing state `{path}`"));
+        let failure = fingerprint_from(path, FailsAtEnd(std::io::Cursor::new(b"artifact")))
+            .expect_err("an incomplete artifact hash must not be returned after an I/O error");
+        assert_eq!(failure.message(), format!("could not read prepared artifact `{path}`"));
+        assert_eq!(
+            fingerprint_from(path, std::io::Cursor::new(b"artifact")).unwrap(),
+            blake3::hash(b"artifact").to_hex().to_string()
+        );
+        let mut reader = BufReader::with_capacity(4, FailsAtEnd(std::io::Cursor::new(b"null")));
+        let mut line = Vec::new();
+        assert_eq!(read_verdict_line(path, &mut reader, &mut line, 3).unwrap(), 4);
+        assert_eq!(line, b"null");
+        let mut reader = BufReader::with_capacity(4, FailsAtEnd(std::io::Cursor::new(b"null")));
+        line.clear();
+        let failure =
+            read_verdict_line(path, &mut reader, &mut line, 5).expect_err("the incomplete journal line terminates with a real read error");
+        assert_eq!(failure.message(), format!("could not read testing verdicts `{path}`"));
+    }
+
+    #[test]
+    fn finishing_a_record_changes_only_the_finished_testing_phase_and_preserves_phase_errors() {
+        for (initial, expected) in [
+            (Phase::Preparing, Phase::Preparing),
+            (Phase::Testing, Phase::Testing),
+            (Phase::FinishedTesting, Phase::Completed),
+            (Phase::Completed, Phase::Completed),
+        ] {
+            let (_directory, state) = fixture();
+            let base = &state.record.base;
+            set_phase(base, initial).unwrap();
+            let snapshot = fs::read(base.join(SNAPSHOT)).unwrap();
+            finish_testing_record(base).unwrap();
+            assert_eq!(phase(base).unwrap(), Some(expected));
+            assert_eq!(fs::read(base.join(SNAPSHOT)).unwrap(), snapshot);
+        }
+        let (_directory, state) = fixture();
+        let base = &state.record.base;
+        fs::write(base.join(PHASE), "not JSON").unwrap();
+        let failure = finish_testing_record(base).expect_err("a corrupt phase must not be overwritten by completion");
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{}` is invalid; start a new campaign", base.join(PHASE))
+        );
+        let Err(failure) = TestingState::load(base) else {
+            panic!("loading must preserve the corrupt phase error")
+        };
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{}` is invalid; start a new campaign", base.join(PHASE))
+        );
+        fs::remove_file(base.join(SNAPSHOT)).unwrap();
+        fs::create_dir(base.join(SNAPSHOT)).unwrap();
+        let failure = set_phase(base, Phase::Testing).expect_err("a directory cannot be fingerprinted as a snapshot");
+        assert!(
+            failure
+                .message()
+                .starts_with(&format!("could not read prepared artifact `{}`", base.join(SNAPSHOT))),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_and_partial_record_loaders_propagate_invalid_phase_and_snapshot_documents() {
+        let (_directory, state) = fixture();
+        let base = &state.record.base;
+        fs::write(base.join(PHASE), "not JSON").unwrap();
+        let Err(failure) = TestingState::read_checkpoint(base) else {
+            panic!("checkpoint recovery must parse its phase")
+        };
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{}` is invalid; start a new campaign", base.join(PHASE))
+        );
+        fs::write(base.join(SNAPSHOT), "not JSON").unwrap();
+        set_phase(base, Phase::Testing).unwrap();
+        let Err(failure) = TestingState::read_checkpoint(base) else {
+            panic!("a matching checksum does not make malformed JSON valid")
+        };
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{}` is invalid; start a new campaign", base.join(SNAPSHOT))
+        );
+        let Err(failure) = partial_testing_record(base) else {
+            panic!("partial reporting must propagate snapshot recovery failure")
+        };
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{}` is invalid; start a new campaign", base.join(SNAPSHOT))
+        );
+    }
+
+    #[test]
+    fn journal_recovery_distinguishes_unknown_ordinals_empty_records_and_invalid_repair_lengths() {
+        let (_directory, state) = fixture();
+        let base = &state.record.base;
+        let path = base.join(JOURNAL);
+        let mut unknown = state.plan.mutants[0].clone();
+        unknown.ordinal = 99;
+        unknown.outcome = Outcome::Survived;
+        let journal = TestingJournal::open(base, None).unwrap();
+        journal.publish(&unknown, &state.killers).unwrap();
+        drop(journal);
+        let Err(failure) = TestingState::read_checkpoint(base) else {
+            panic!("a checksummed verdict cannot invent a new ordinal")
+        };
+        assert_eq!(failure.message(), format!("testing verdicts `{path}` name an unknown mutant"));
+        fs::write(&path, "\n").unwrap();
+        let Err(failure) = TestingState::read_checkpoint(base) else {
+            panic!("an empty committed line is not end-of-file")
+        };
+        assert_eq!(
+            failure.message(),
+            format!("testing verdicts `{path}` are corrupt; start a new campaign")
+        );
+        fs::write(&path, "unchanged").unwrap();
+        let failure = TestingJournal::open(base, Some(u64::MAX)).expect_err("u64::MAX cannot be represented as a native file length");
+        assert_eq!(failure.message(), format!("could not discard the interrupted verdict in `{path}`"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "unchanged");
+        fs::remove_file(&path).unwrap();
+        for repair in [None, Some(0)] {
+            let failure = TestingJournal::open(base, repair).expect_err("recovery does not invent a missing journal");
+            assert_eq!(
+                failure.message(),
+                if repair.is_some() {
+                    format!("could not reopen testing verdicts `{path}` for recovery")
+                } else {
+                    format!("could not open testing verdicts `{path}`")
+                }
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finishing_a_record_preserves_the_finished_phase_when_its_replacement_is_denied() {
+        const SHARE_READ: u32 = 1;
+        let (_directory, state) = fixture();
+        let base = &state.record.base;
+        set_phase(base, Phase::FinishedTesting).unwrap();
+        let path = base.join(PHASE);
+        let lock = OpenOptions::new().read(true).share_mode(SHARE_READ).open(&path).unwrap();
+        let failure = finish_testing_record(base).expect_err("reading succeeds but replacing the phase is denied by the shared handle");
+        assert_eq!(failure.message(), format!("could not write `{path}`"));
+        drop(lock);
+        assert_eq!(phase(base).unwrap(), Some(Phase::FinishedTesting));
+    }
+
+    #[test]
+    fn bounded_json_accepts_exact_capacity_but_rejects_a_valid_prefix_with_one_excess_byte() {
+        let path = Utf8Path::new("bounded.json");
+        assert_eq!(read_json_from::<u32>(path, std::io::Cursor::new(b"123"), 3).unwrap(), 123);
+        assert_eq!(read_json_from::<u32>(path, std::io::Cursor::new(b"123"), 4).unwrap(), 123);
+        for bytes in [b"123 ".as_slice(), b"1234".as_slice()] {
+            let failure = read_json_from::<u32>(path, std::io::Cursor::new(bytes), 3).unwrap_err();
+            assert_eq!(
+                failure.message(),
+                format!("testing state `{path}` exceeds the supported size; start a new campaign")
+            );
+        }
+        let failure = read_json_from::<u32>(path, std::io::Cursor::new(b"0"), 0).unwrap_err();
+        assert_eq!(
+            failure.message(),
+            format!("testing state `{path}` exceeds the supported size; start a new campaign")
+        );
+        assert_eq!(read_json_from::<u32>(path, std::io::Cursor::new(b"0"), 1).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_native_json_reader_rejects_a_directory() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let path = Utf8Path::from_path(directory.path()).unwrap().join("bounded.json");
+        let failure = read_json_with_limit::<u32>(path.parent().unwrap(), 3).expect_err("a directory cannot be read as a JSON state file");
+        assert!(failure.message().starts_with("could not read testing state"));
+    }
+
+    #[test]
+    fn journal_line_limit_counts_the_committing_newline_and_rejects_oversized_uncommitted_prefixes() {
+        let (_directory, state) = fixture();
+        let base = &state.record.base;
+        let mut mutant = state.plan.mutants[0].clone();
+        mutant.outcome = Outcome::Survived;
+        let journal = TestingJournal::open(base, None).unwrap();
+        journal.publish(&mutant, &state.killers).unwrap();
+        drop(journal);
+        let bytes = fs::read(base.join(JOURNAL)).unwrap();
+        let limit = bytes.len() as u64;
+        let (loaded, valid) = TestingState::read_checkpoint_with_limit(base, limit).unwrap();
+        assert_eq!(valid, limit);
+        assert_eq!(loaded.plan.mutants[0].outcome, Outcome::Survived);
+        let failure = TestingState::read_checkpoint_with_limit(base, limit - 1).err().unwrap();
+        assert_eq!(
+            failure.message(),
+            format!("testing verdict in `{}` exceeds the supported size", base.join(JOURNAL))
+        );
+        fs::write(base.join(JOURNAL), b"1234").unwrap();
+        let failure = TestingState::read_checkpoint_with_limit(base, 3).err().unwrap();
+        assert_eq!(
+            failure.message(),
+            format!("testing verdict in `{}` exceeds the supported size", base.join(JOURNAL))
+        );
+    }
+
+    #[test]
+    fn phase_io_failures_are_not_misclassified_as_missing_campaigns() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8Path::from_path(directory.path()).unwrap();
+        assert_eq!(phase(base).unwrap(), None);
+        fs::write(base.join(PHASE), "invalid").unwrap();
+        assert!(phase(base).unwrap_err().message().contains("is invalid"));
+        fs::remove_file(base.join(PHASE)).unwrap();
+        let invalid_base = base.join("invalid\0parent");
+        let invalid_phase = invalid_base.join(PHASE);
+        assert_eq!(
+            fs::symlink_metadata(&invalid_phase).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let failure = phase(&invalid_base).expect_err("an invalid phase path is an I/O error, not a missing campaign");
+        assert_eq!(failure.message(), format!("could not inspect testing phase `{invalid_phase}`"));
+        assert_eq!(
+            failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let failure = set_phase(base, Phase::Testing).expect_err("a testing phase requires a prepared snapshot");
+        assert!(failure.message().contains("testing-session.json"));
+        let failure = read_json::<serde_json::Value>(&base.join("missing")).expect_err("a missing state file cannot be read");
+        assert!(failure.message().starts_with("could not read testing state"));
     }
 
     #[test]
@@ -1503,7 +2228,6 @@ mod tests {
         use super::super::stall::Stall;
         use super::super::sweep::{self, Judgement, Sweep};
         use super::super::test_binary::{Reachability, TestScope};
-        use super::super::workspace::Workspace;
 
         let work = Workspace::adopt(state.plan.root.clone(), state.plan.root.join("target"));
         let binaries = [crate::testing::test_binary("scripted-test-binary")];

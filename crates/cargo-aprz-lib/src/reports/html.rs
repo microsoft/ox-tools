@@ -2462,21 +2462,32 @@ mod tests {
             extractor: |_| None,
             default_value: || None,
         };
-        struct FailOnValue;
+        struct FailOnValue<'a>(&'a str);
 
-        impl Write for FailOnValue {
+        impl Write for FailOnValue<'_> {
             fn write_str(&mut self, s: &str) -> fmt::Result {
-                if s == "visible" { Err(fmt::Error) } else { Ok(()) }
+                if s == self.0 { Err(fmt::Error) } else { Ok(()) }
             }
         }
 
-        let metrics = [Metric::with_value(&PLAIN_DEF, MetricValue::String("visible".into()))];
-        let mut metrics_by_category = HashMap::default();
-        let _ = metrics_by_category.insert(MetricCategory::Metadata, vec![PLAIN_DEF.name]);
-        let mut metric_map = HashMap::default();
-        let _ = metric_map.insert(PLAIN_DEF.name, &metrics[0]);
+        for (value, escaped) in [("visible", "visible"), ("visible & important", "visible &amp; important")] {
+            let metrics = [Metric::with_value(&PLAIN_DEF, MetricValue::String(value.into()))];
+            let mut metrics_by_category = HashMap::default();
+            let _ = metrics_by_category.insert(MetricCategory::Metadata, vec![PLAIN_DEF.name]);
+            let mut metric_map = HashMap::default();
+            let _ = metric_map.insert(PLAIN_DEF.name, &metrics[0]);
 
-        assert!(write_metrics_category(&mut FailOnValue, MetricCategory::Metadata, &metrics_by_category, &metric_map).is_err());
+            assert!(
+                write_metrics_category(
+                    &mut FailOnValue(escaped),
+                    MetricCategory::Metadata,
+                    &metrics_by_category,
+                    &metric_map
+                )
+                .is_err(),
+                "writing the plain metric value {value:?} must return the writer error"
+            );
+        }
     }
 
     #[test]

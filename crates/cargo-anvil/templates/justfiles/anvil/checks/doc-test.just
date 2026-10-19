@@ -22,12 +22,12 @@
 [script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $selection = @(if ($include) { -split $include } else { '--workspace' })
-    $capableText = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-doctest-packages)
+    $capableText = (& "{{ just_executable() }}" _anvil-impact-doctest-packages)
     $capabilityExit = $LASTEXITCODE
     if ($capabilityExit -ne 0) { exit $capabilityExit }
     $docPackages = [System.Collections.Generic.Dictionary[string, bool]]::new(

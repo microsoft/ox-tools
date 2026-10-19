@@ -48,16 +48,24 @@ impl Diff {
     /// when another path cannot be opened, read, or decoded as UTF-8. Inputs larger than
     /// [`input::MAX_BYTES`] are refused before they can exhaust the process's memory.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub fn read_from(path: &Utf8Path, mut input: impl Read) -> Result<Self> {
+    pub fn read_from(path: &Utf8Path, input: impl Read) -> Result<Self> {
+        Self::read_from_with(path, input, |path| File::open(path))
+    }
+
+    fn read_from_with<R: Read>(path: &Utf8Path, mut input: impl Read, open: impl FnOnce(&Utf8Path) -> std::io::Result<R>) -> Result<Self> {
         // #[gamma::skip(cond.always_true, tag = "timeout", reason = "routing file inputs through standard input blocked waiting for input in the campaign")]
         let text = if path == "-" {
             input::text(&mut input).map_err(|cause| error!("could not read a diff from standard input").caused_by(cause))?
         } else {
-            let file = File::open(path).map_err(|cause| error!("could not read the diff `{path}`").caused_by(cause))?;
+            let file = open(path).map_err(|cause| error!("could not read the diff `{path}`").caused_by(cause))?;
 
             input::text(file).map_err(|cause| error!("could not read the diff `{path}`").caused_by(cause))?
         };
 
+        Self::from_retained(text)
+    }
+
+    fn from_retained(text: Option<String>) -> Result<Self> {
         let Some(text) = text else {
             return Err(error!("the diff is larger than the {} bytes cargo-gamma will retain", input::MAX_BYTES).usage());
         };
@@ -368,6 +376,17 @@ fn split_first_segment(path: &str) -> Option<(&str, &str)> {
 /// Finds the workspace file a diff path refers to, if any.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf8Path>, candidates: &[Utf8PathBuf]) -> Option<Utf8PathBuf> {
+    locate_with(path, raw, root, known, candidates, Utf8Path::is_file)
+}
+
+fn locate_with(
+    path: &Utf8Path,
+    raw: &Utf8Path,
+    root: &Utf8Path,
+    known: &HashSet<&Utf8Path>,
+    candidates: &[Utf8PathBuf],
+    mut is_file: impl FnMut(&Utf8Path) -> bool,
+) -> Option<Utf8PathBuf> {
     for candidate in [path, raw] {
         if candidate.is_absolute() {
             if let Ok(relative) = candidate.strip_prefix(root) {
@@ -375,7 +394,7 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
                     return Some(relative.to_owned());
                 }
 
-                if safe_relative(relative) && relative.extension() != Some("rs") && root.join(relative).is_file() {
+                if safe_relative(relative) && relative.extension() != Some("rs") && is_file(&root.join(relative)) {
                     return Some(relative.to_owned());
                 }
             }
@@ -428,7 +447,7 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
         (Some(_ambiguous), Some(_)) => None,
         (None, _) => [path, raw]
             .into_iter()
-            .find(|candidate| safe_relative(candidate) && candidate.extension() != Some("rs") && root.join(candidate).is_file())
+            .find(|candidate| safe_relative(candidate) && candidate.extension() != Some("rs") && is_file(&root.join(candidate)))
             .map(ToOwned::to_owned),
     }
 }
@@ -472,6 +491,45 @@ fn parse_range(field: &str) -> Option<(u32, u32)> {
     let (start, count) = field.split_once(',').unwrap_or((field, "1"));
 
     Some((start.parse().ok()?, count.parse().ok()?))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests {
+    use super::*;
+
+    #[test]
+    fn survivor_malformed_hunk_ranges_are_ignored_without_panicking() {
+        for input in ["", "-", "-1", "-1 x2", "-x +2", "-1 +x", "-1,wat +2", "-1 +2,wat", "-1  +2"] {
+            assert_eq!(hunk_header(input), None, "{input:?}");
+        }
+        assert_eq!(hunk_header("-0,0 +12,2 @@ heading"), Some((12, 0, 2)));
+        assert_eq!(hunk_header("-1 +9 @@"), Some((9, 1, 1)));
+        for input in ["", "x", "1,x", "x,1", "4294967296", "1,4294967296"] {
+            assert_eq!(parse_range(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn survivor_raw_path_fallback_is_checked_after_an_unsafe_stripped_candidate() {
+        let candidates = [Utf8PathBuf::from("src/lib.rs")];
+        let known = candidates.iter().map(Utf8PathBuf::as_path).collect();
+        assert_eq!(
+            locate(
+                Utf8Path::new("../unsafe.rs"),
+                Utf8Path::new("prefix/src/lib.rs"),
+                Utf8Path::new("."),
+                &known,
+                &candidates
+            ),
+            Some(Utf8PathBuf::from("src/lib.rs"))
+        );
+        let mut diff = Diff::parse(
+            "--- missing_a.txt\n+++ missing_a.txt\n@@ -1 +1 @@\n+new\n--- missing_b.txt\n+++ missing_b.txt\n@@ -1 +1 @@\n+new\n",
+        );
+        let failure = diff.resolve(Utf8Path::new("."), &[]).unwrap_err();
+        assert!(failure.to_string().contains("missing_a.txt, missing_b.txt"));
+    }
 }
 
 #[cfg(test)]
@@ -1271,4 +1329,67 @@ diff --git before/old.rs next/a.rs
             "a hunk-body line was read as a file header"
         );
     }
+}
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn survivor_diff_returns_file_decoding_and_retention_limit_failures_without_panicking_or_accepting_empty_work() {
+    let path = Utf8Path::new("invalid.diff");
+    let error = Diff::read_from_with(path, std::io::empty(), |requested| {
+        assert_eq!(requested, path);
+        Ok(std::io::Cursor::new([0xff]))
+    })
+    .expect_err("a file-backed invalid encoding is an ordinary read error");
+    assert_eq!(error.message(), "could not read the diff `invalid.diff`");
+    let cause = std::error::Error::source(&error)
+        .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+        .expect("invalid file bytes retain the decoding I/O error");
+    assert_eq!(cause.kind(), std::io::ErrorKind::InvalidData);
+    let error = Diff::from_retained(None).expect_err("the bounded input reader's refusal is not an empty successful diff");
+    assert!(error.is_usage());
+    assert_eq!(
+        error.to_string(),
+        format!("the diff is larger than the {} bytes cargo-gamma will retain", input::MAX_BYTES)
+    );
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn survivor_unresolved_diff_paths_keep_the_sorted_comma_delimited_rust_and_nonrust_diagnostics() {
+    let directory = crate::testing::workdir("diff-unresolved-list-");
+    let root = Utf8Path::from_path(directory.path()).expect("fixture paths are UTF-8");
+    for (first, second) in [("a.rs", "z.rs"), ("a.md", "z.md")] {
+        let text = format!("+++ b/{second}\n@@ -0,0 +1 @@\n+new\n+++ b/{first}\n@@ -0,0 +1 @@\n+new\n");
+        let error = Diff::parse(&text)
+            .resolve(root, &[])
+            .expect_err("neither referenced file exists in this actual workspace");
+        assert!(error.to_string().contains(&format!("(b/{first}, b/{second})")), "{error}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn survivor_absolute_nonrust_diff_paths_cannot_escape_through_a_lexical_parent_component() {
+    let root = Utf8Path::new(if cfg!(windows) { "C:/workspace" } else { "/workspace" });
+    let escaped = root.join("../outside.md");
+    let queried = std::cell::Cell::new(false);
+    assert_eq!(
+        locate_with(&escaped, &escaped, root, &HashSet::default(), &[], |path| {
+            assert_eq!(path, escaped);
+            queried.set(true);
+            true
+        }),
+        None
+    );
+    assert!(
+        !queried.get(),
+        "lexical traversal must be refused before consulting filesystem existence"
+    );
+    let existing = root.join("inside.md");
+    assert_eq!(
+        locate_with(&existing, &existing, root, &HashSet::default(), &[], |path| {
+            assert_eq!(path, existing);
+            true
+        }),
+        Some(Utf8PathBuf::from("inside.md"))
+    );
 }

@@ -829,6 +829,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unrelated_import_bindings_preserve_standard_default_and_later_where_bounds() {
+        for text in ["use core as root;", "use foreign::Other;", "use core::default as defaults;"] {
+            let paths = DefaultPaths::of(&parse_file(text).unwrap());
+            assert!(paths.is_standard_trait(&parse_quote!(Default)), "{text}");
+            assert!(paths.is_standard_default_callee(&parse_quote!(Default::default)), "{text}");
+        }
+        let item: syn::ItemFn = parse_quote!(
+            fn f<'a, const N: usize, T, U, V>()
+            where
+                'a: 'static,
+                (T,): Clone,
+                T::Item: Clone,
+                U: Clone + Default,
+                V: Default,
+            {
+            }
+        );
+        assert_eq!(
+            standard_defaulted_parameters(&item.sig.generics, &DefaultPaths::default()),
+            ["U", "V"]
+        );
+        let index = Defaults::of(&parse_file("#[derive(Default)] struct Ready;").unwrap());
+        assert!(index.has_default(&parse_quote!(Ready)));
+        assert!(!index.has_default(&parse_quote!(<T>::Ready)));
+    }
+
+    #[test]
+    fn generic_default_declarations_require_generic_unambiguous_repeated_evidence() {
+        let repeated = Defaults::of(
+            &parse_file(
+                "#[derive(Default)] struct Plain; #[derive(Default)] struct Plain; \
+             #[derive(Default)] struct Generic<T>(T); #[derive(Default)] struct Generic<T>(T);",
+            )
+            .unwrap(),
+        );
+        assert!(repeated.has_default_name("Plain"));
+        assert!(!repeated.declares_generic_default_name("Plain"));
+        assert!(repeated.declares_generic_default_name("Generic"));
+        let conflicting = Defaults::of(&parse_file("#[derive(Default)] struct Generic<T>(T); struct Generic<T>(T);").unwrap());
+        assert!(!conflicting.declares_generic_default_name("Generic"));
+        let mut combined = repeated;
+        combined.absorb(conflicting);
+        assert!(!combined.declares_generic_default_name("Generic"));
+        assert!(combined.has_default_name("Plain"));
+    }
+
+    #[test]
     fn default_path_matrix_separates_prelude_aliases_modules_and_custom_shadows() {
         for (source, trait_path, standard, fallback, derive) in [
             ("", "Default", true, true, true),

@@ -141,6 +141,8 @@ cargo-gamma-attrs = { workspace = true }
 insta = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+tick = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 
 # Every integration test reaches into the crate through the `internals` facade, directly or

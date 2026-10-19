@@ -194,6 +194,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_equal_frontiers_do_not_lose_a_two_edit_alignment_between_three_distinct_lines() {
+        assert_eq!(
+            script(&["a", "c"], &["b", "a"]),
+            [Step::Added("b"), Step::Kept("a"), Step::Removed("c")]
+        );
+        assert_eq!(
+            diff(Utf8Path::new("source.rs"), "a\nc\n", "b\na\n"),
+            "--- source.rs\n+++ source.rs\n+b\n a\n-c\n"
+        );
+    }
+
+    #[test]
+    fn survivor_edit_scripts_replay_both_sides_with_minimal_edits_for_repeated_lines() {
+        let words: &[&[&str]] = &[
+            &[],
+            &["a"],
+            &["b"],
+            &["a", "a"],
+            &["a", "b"],
+            &["b", "a"],
+            &["b", "b"],
+            &["a", "b", "a"],
+            &["b", "a", "b"],
+            &["a", "a", "b"],
+            &["b", "b", "a"],
+        ];
+        for old in words {
+            for new in words {
+                let steps = script(old, new);
+                let recovered_old: Vec<_> = steps
+                    .iter()
+                    .filter_map(|step| match step {
+                        Step::Kept(line) | Step::Removed(line) => Some(*line),
+                        Step::Added(_) => None,
+                    })
+                    .collect();
+                let recovered_new: Vec<_> = steps
+                    .iter()
+                    .filter_map(|step| match step {
+                        Step::Kept(line) | Step::Added(line) => Some(*line),
+                        Step::Removed(_) => None,
+                    })
+                    .collect();
+                assert_eq!(&recovered_old, old, "{old:?} -> {new:?}");
+                assert_eq!(&recovered_new, new, "{old:?} -> {new:?}");
+                assert_eq!(
+                    steps.iter().filter(|step| !matches!(step, Step::Kept(_))).count(),
+                    insertion_deletion_distance(old, new),
+                    "{old:?} -> {new:?}"
+                );
+            }
+        }
+        assert_eq!(diff(Utf8Path::new("x.rs"), "a\nb\n", "b\na\n"), "--- x.rs\n+++ x.rs\n-a\n b\n+a\n");
+    }
+
+    /// Independent quadratic prefix-distance oracle (the insertion/deletion variant of
+    /// <https://en.wikipedia.org/wiki/Edit_distance#Computation>).
+    /// Empty prefixes cost their length; matches take the free diagonal, otherwise insert/delete
+    /// costs one from the left/upper prefix. Unit-cost substitutions are deliberately unavailable.
+    fn insertion_deletion_distance(old: &[&str], new: &[&str]) -> usize {
+        let mut distance = vec![vec![0; new.len() + 1]; old.len() + 1];
+        for (index, row) in distance.iter_mut().enumerate() {
+            row[0] = index;
+        }
+        for (column, value) in distance[0].iter_mut().enumerate() {
+            *value = column;
+        }
+        for row in 1..=old.len() {
+            for column in 1..=new.len() {
+                distance[row][column] = if old[row - 1] == new[column - 1] {
+                    distance[row - 1][column - 1]
+                } else {
+                    1 + distance[row - 1][column].min(distance[row][column - 1])
+                };
+            }
+        }
+        distance[old.len()][new.len()]
+    }
+
+    #[test]
+    fn survivor_diff_limit_boundary_retains_common_context_until_the_limit_is_exceeded() {
+        // Equal sides reach the combined cap; identical inputs above it still retain context,
+        // while adding one line to the changed side exceeds the cap and triggers fallback.
+        let old = vec!["common"; 1_000];
+        let mut new = old.clone();
+        new[999] = "changed";
+        let steps = script(&old, &new);
+        assert_eq!(steps.iter().filter(|step| matches!(step, Step::Kept(_))).count(), 999);
+        let unchanged = vec!["same"; 1_001];
+        assert!(script(&unchanged, &unchanged).iter().all(|step| matches!(step, Step::Kept("same"))));
+        new.push("extra");
+        let steps = script(&old, &new);
+        assert_eq!(steps.len(), 2_001);
+        assert!(steps[..1_000].iter().all(|step| matches!(step, Step::Removed("common"))));
+        assert_eq!(steps.last(), Some(&Step::Added("extra")));
+    }
+
+    #[test]
     fn large_unrelated_inputs_use_the_bounded_fallback_without_claiming_context() {
         let old: Vec<String> = (0..=DIFF_LIMIT).map(|index| format!("old {index}")).collect();
         let new: Vec<String> = (0..=DIFF_LIMIT).map(|index| format!("new {index}")).collect();

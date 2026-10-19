@@ -122,6 +122,22 @@ mod tests {
     use crate::ops::registry::Selection;
 
     #[test]
+    fn externally_supplied_unreserved_candidates_start_each_site_family_at_zero() {
+        let file = SourceFile::parse("fixture.rs", "fn f() { alpha(); alpha(); beta(); }".into()).unwrap();
+        let mut candidates = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::unconditional());
+        for candidate in &mut candidates {
+            candidate.identity_occurrence = None;
+        }
+        let definitions = into_definitions(&file, candidates);
+        assert_eq!(definitions.iter().map(|value| value.occurrence).collect::<Vec<_>>(), [0, 1, 0]);
+        assert_eq!(
+            definitions.iter().map(MutantDefinition::original).collect::<Vec<_>>(),
+            ["alpha();", "alpha();", "beta();"]
+        );
+        assert_ne!(definitions[0].id, definitions[1].id);
+    }
+
+    #[test]
     fn reserved_occurrences_advance_unreserved_sites_and_share_same_span() {
         let file = SourceFile::parse("fixture.rs", "fn f() { a(); a(); a(); a(); }".to_owned()).unwrap();
         let selection = Selection::parse("stmt.delete_call").unwrap();

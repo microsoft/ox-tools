@@ -50,7 +50,7 @@
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $stableArgs = {{_anvil_stable_toolchain_args}}
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     $commentFile = 'target/anvil/comments/semver.md'
@@ -123,7 +123,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
+    $base = (& "{{just_executable()}}" _anvil-base-ref)
     $base = $base.Trim()
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {

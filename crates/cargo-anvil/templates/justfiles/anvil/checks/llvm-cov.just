@@ -17,7 +17,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {

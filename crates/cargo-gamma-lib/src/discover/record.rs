@@ -1166,6 +1166,11 @@ fn safe_relative_path(path: &Utf8Path) -> bool {
     !path.as_str().is_empty() && path.components().all(|component| matches!(component, Utf8Component::Normal(_)))
 }
 
+fn normalize_compilation_roots(roots: &mut Vec<Utf8PathBuf>) {
+    roots.sort();
+    roots.dedup();
+}
+
 impl RunRecord {
     /// Captures the workspace before it is copied or executed.
     #[cfg(test)]
@@ -1681,8 +1686,7 @@ impl RunRecord {
                 .filter_map(|dependency| plan.specs.get(dependency).map(|(root, _version)| root.clone()))
                 .collect();
 
-            roots.sort();
-            roots.dedup();
+            normalize_compilation_roots(&mut roots);
             let _previous = compilation_roots.insert(package.clone(), roots);
         }
 
@@ -2889,6 +2893,66 @@ mod tests {
             hints.reach[0].test_set = 1;
             assert!(hints.supported().is_none());
         }
+    }
+
+    #[test]
+    fn survivor_identical_test_bytes_at_a_different_current_source_path_cannot_revalidate_a_recorded_kill() {
+        let root = Utf8PathBuf::from("workspace");
+        let body = "#[test] fn caught() {}\n";
+        let original = root.join("src/tests.rs");
+        let original_index = Killers::scan_complete_with(core::slice::from_ref(&original), true, |path| {
+            assert_eq!(path, original);
+            Ok(body.as_bytes().to_vec())
+        });
+        let relocated = root.join("src/relocated_tests.rs");
+        let inputs: WorkspaceSnapshot = serde_json::from_value(serde_json::json!({
+            "complete": true,
+            "files": [
+                {"path": "src/lib.rs", "digest": digest(b"pub fn answer() {}\n"), "size": 19},
+                {"path": "src/relocated_tests.rs", "digest": digest(body.as_bytes()), "size": body.len()},
+                {"path": "src/tests.rs", "digest": digest(body.as_bytes()), "size": body.len()},
+            ]
+        }))
+        .expect("controlled source generations form a complete snapshot");
+        let context = context_in(&plain(), None, &[]).expect("the scripted toolchain gives a context");
+        let record = RunRecord::from_snapshot_with_roots(
+            &root,
+            &[killed("relocated-killer", Some("caught"))],
+            &context,
+            inputs.clone(),
+            &original_index,
+            HashMap::default(),
+            false,
+        )
+        .expect("the original killer is bound to the controlled source generation");
+        let entry = record
+            .files
+            .iter()
+            .flat_map(|file| &file.mutants)
+            .find(|entry| entry.id.as_str() == "relocated-killer")
+            .expect("the recorded mutant exists");
+        let recorded_files = record.files.iter().map(|file| (file.path.as_path(), file)).collect();
+        assert!(still_killed(entry, &original_index, &recorded_files, &root, &inputs));
+        let relocated_index = Killers::scan_complete_with(std::slice::from_ref(&relocated), true, |path| {
+            assert_eq!(path, relocated);
+            Ok(body.as_bytes().to_vec())
+        });
+        assert_eq!(
+            relocated_index.file_digest(&relocated),
+            original_index.file_digest(&root.join("src/tests.rs")),
+            "content equality alone must not erase source identity",
+        );
+        assert!(!still_killed(entry, &relocated_index, &recorded_files, &root, &inputs));
+    }
+
+    #[test]
+    fn survivor_compilation_root_normalization_sorts_interleaved_paths_before_deduplicating() {
+        let root = Utf8Path::new("workspace");
+        let first = root.join("crates/a");
+        let second = root.join("crates/b");
+        let mut roots = vec![second.clone(), first.clone(), second.clone(), first.clone()];
+        normalize_compilation_roots(&mut roots);
+        assert_eq!(roots, [first, second]);
     }
 
     #[test]

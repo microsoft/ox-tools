@@ -10,11 +10,11 @@
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
-    $toolchainOutput = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable msrv | Out-String
+    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }
     $toolchain = $toolchainOutput.Trim()
@@ -37,14 +37,14 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install":
-    & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable install-msrv
+    & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
-    $toolchainOutput = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable msrv | Out-String
+    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }
     $toolchain = $toolchainOutput.Trim()

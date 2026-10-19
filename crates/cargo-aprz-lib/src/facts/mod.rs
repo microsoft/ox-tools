@@ -39,6 +39,7 @@ pub mod docs;
 pub mod endpoints;
 pub mod hosting;
 mod path_utils;
+pub(crate) mod process;
 mod progress;
 mod provider_result;
 mod repo_spec;

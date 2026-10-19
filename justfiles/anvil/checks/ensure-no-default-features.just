@@ -12,7 +12,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-default-features: no modified packages; skipping'; exit 0 }

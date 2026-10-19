@@ -70,13 +70,21 @@ impl Killers {
     /// successfully.
     #[must_use]
     pub(super) fn scan_complete(files: &[Utf8PathBuf], complete: bool) -> Self {
+        Self::scan_complete_with(files, complete, |path| std::fs::read(path))
+    }
+
+    pub(super) fn scan_complete_with(
+        files: &[Utf8PathBuf],
+        complete: bool,
+        mut read: impl FnMut(&Utf8Path) -> std::io::Result<Vec<u8>>,
+    ) -> Self {
         let mut found = Self {
             complete,
             ..Self::default()
         };
 
         for file in files {
-            let Ok(bytes) = std::fs::read(file.as_std_path()) else {
+            let Ok(bytes) = read(file) else {
                 found.complete = false;
                 continue;
             };
@@ -249,6 +257,46 @@ mod tests {
         std::fs::write(file.as_std_path(), text).expect("fixture");
 
         Killers::scan(&[file])
+    }
+
+    #[test]
+    fn survivor_incomplete_scan_continues_indexing_but_never_certifies_a_cached_verdict() {
+        let root = Utf8Path::new("workspace");
+        let invalid = root.join("invalid.rs");
+        let syntax = root.join("syntax.rs");
+        let valid = root.join("valid.rs");
+        let body = b"mod outer { mod inner { #[test] fn caught() {} } }";
+        let read = |path: &Utf8Path| {
+            if path == root.join("absent.rs") {
+                Err(std::io::ErrorKind::NotFound.into())
+            } else if path == invalid {
+                Ok(vec![0xff])
+            } else if path == syntax {
+                Ok(b"fn {".to_vec())
+            } else if path == valid {
+                Ok(body.to_vec())
+            } else {
+                panic!("unexpected source read: {path}");
+            }
+        };
+        for complete in [false, true] {
+            let found = Killers::scan_complete_with(
+                &[root.join("absent.rs"), invalid.clone(), syntax.clone(), valid.clone()],
+                complete,
+                read,
+            );
+            assert!(!found.is_complete());
+            assert!(found.still_there("outer::inner::caught"));
+            assert_eq!(found.file_digest(&valid), Some(digest(body).as_str()));
+            assert_eq!(found.file_digest(&invalid), Some(digest(&[0xff]).as_str()));
+            assert_eq!(found.file_digest(&syntax), Some(digest(b"fn {").as_str()));
+            assert_eq!(found.file_digest(&root.join("absent.rs")), None);
+            assert_eq!(found.verdict_file_for("outer::inner::caught"), None);
+        }
+        let found = Killers::scan_complete_with(core::slice::from_ref(&valid), true, read);
+        assert_eq!(found.verdict_file_for("pkg::lib$outer::inner::caught"), Some(valid.as_path()));
+        assert_eq!(found.verdict_file_for("caught"), None);
+        assert_eq!(found.verdict_file_for(""), None);
     }
 
     /// The shape the check is for: a test that was there is deleted, and its kill must not survive.

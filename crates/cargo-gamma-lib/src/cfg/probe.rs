@@ -15,19 +15,21 @@ pub(crate) fn for_build(build: &Build) -> Result<CfgSet> {
     }
 
     let program = rustc_program(|name| std::env::var(name));
-    for_build_with(build, &program)
+    for_build_with(build, &program, Command::output)
 }
 
 fn rustc_program(mut get: impl FnMut(&str) -> std::result::Result<String, std::env::VarError>) -> String {
     get("RUSTC").unwrap_or_else(|_| "rustc".to_owned())
 }
 
-fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result<CfgSet> {
+fn for_build_with(
+    build: &Build,
+    program: impl AsRef<std::ffi::OsStr>,
+    run: impl FnOnce(&mut Command) -> std::io::Result<std::process::Output>,
+) -> Result<CfgSet> {
     let mut command = Command::new(program);
     let _builder = command.args(build.probe_args());
-    let output = command
-        .output()
-        .map_err(|cause| error!("could not run `rustc --print cfg`").caused_by(cause))?;
+    let output = run(&mut command).map_err(|cause| error!("could not run `rustc --print cfg`").caused_by(cause))?;
 
     if !output.status.success() {
         return Err(error!(
@@ -50,15 +52,43 @@ fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::RefCell;
+    use std::error::Error as _;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
 
     use super::*;
 
     #[test]
-    fn a_rustc_probe_failure_is_reported() {
-        let executable = std::env::current_exe().expect("the test executable has a path");
-        let error = for_build_with(&Build::default(), executable).expect_err("libtest rejects rustc's arguments");
+    fn survivor_missing_native_compiler_is_a_returned_launch_error_not_a_panic() {
+        let build = Build::default();
+        let failure = for_build_with(&build, "scripted-rustc", |command| {
+            assert_eq!(command.get_program(), "scripted-rustc");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                build.probe_args().iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
+            );
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "scripted compiler missing"))
+        })
+        .expect_err("a scripted launch failure is returned without spawning a compiler");
+        assert_eq!(failure.message(), "could not run `rustc --print cfg`");
+        let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(cause.to_string(), "scripted compiler missing");
+    }
 
-        assert!(error.to_string().contains("`rustc --print cfg` failed"), "{error}");
+    #[test]
+    fn a_rustc_probe_failure_is_reported() {
+        let error = for_build_with(&Build::default(), "scripted-rustc", |_| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: Vec::new(),
+                stderr: b"scripted compiler failure\n".to_vec(),
+            })
+        })
+        .expect_err("an unsuccessful compiler status is returned");
+        assert_eq!(error.message(), "`rustc --print cfg` failed: scripted compiler failure");
     }
 
     #[test]

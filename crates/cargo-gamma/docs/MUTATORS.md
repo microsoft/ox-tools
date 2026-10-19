@@ -289,6 +289,9 @@ if !order.is_expedited() { apply_rush_fee(order) }
 
 The same three condition mutants — negate, always true, always false — applied to a match arm's `if` guard rather than an `if` statement. A surviving mutant means no test distinguishes an arm reached because its guard held from one reached despite it, or exercises the guard's false branch (falling through to a later arm) at all.
 
+Expressions inside a match guard also receive their usual mutations, including
+`relational` changes to comparisons. Pattern literals remain ineligible.
+
 ```rust
 // original
 match shipment {

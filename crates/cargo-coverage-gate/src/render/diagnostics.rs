@@ -153,6 +153,34 @@ mod tests {
     }
 
     #[test]
+    fn the_last_diagnostic_slot_is_filled_after_an_empty_entry() {
+        let diagnostics = [
+            LineDiagnostic {
+                path: "first.rs".into(),
+                lines: (1..=99).collect(),
+            },
+            LineDiagnostic {
+                path: "empty.rs".into(),
+                lines: Vec::new(),
+            },
+            LineDiagnostic {
+                path: "last.rs".into(),
+                lines: vec![100, 101],
+            },
+        ];
+
+        let displayed = displayed_diagnostics_from(&diagnostics);
+
+        assert_eq!(
+            displayed,
+            vec![
+                (std::path::Path::new("first.rs"), diagnostics[0].lines.as_slice()),
+                (std::path::Path::new("last.rs"), &[100_u32][..]),
+            ]
+        );
+    }
+
+    #[test]
     fn displayed_diagnostics_use_the_remaining_partial_budget_once() {
         let mut outcome = outcome(Status::Fail);
         outcome.diagnostics = vec![

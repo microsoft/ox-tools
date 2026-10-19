@@ -8,10 +8,10 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use owo_colors::OwoColorize as _;
+use tick::{Clock, Stopwatch};
 use tokio::task::JoinHandle;
 
 use crate::facts::Progress;
@@ -36,10 +36,11 @@ const DETERMINATE_TEMPLATE: &str = "{prefix:>12} [{bar:25}] {msg}";
 const INDETERMINATE_TEMPLATE: &str = "{prefix:>12} [{spinner}] {msg}";
 
 struct DelayedProgressState {
-    visible_after: Instant,
+    visible_after: Duration,
+    started: Stopwatch,
     visible: AtomicBool,
     is_indeterminate: AtomicBool,
-    phase_start_time: Mutex<Instant>,
+    phase_start_time: Mutex<Stopwatch>,
     #[cfg(test)]
     refreshes: AtomicUsize,
 }
@@ -49,9 +50,10 @@ impl Debug for DelayedProgressState {
         let mut debug = f.debug_struct("DelayedProgressState");
         debug
             .field("visible_after", &self.visible_after)
+            .field("started", &"<Stopwatch>")
             .field("visible", &self.visible)
             .field("is_indeterminate", &self.is_indeterminate)
-            .field("phase_start_time", &"<Instant>");
+            .field("phase_start_time", &"<Stopwatch>");
         #[cfg(test)]
         debug.field("refreshes", &self.refreshes);
         debug.finish()
@@ -64,12 +66,20 @@ pub struct ProgressReporter {
     bar: ProgressBar,
     state: Arc<DelayedProgressState>,
     message_callback: Arc<Mutex<ProgressCallback>>,
-    refresh_task: Arc<JoinHandle<()>>,
+    refresh_task: Option<Arc<JoinHandle<()>>>,
+    #[cfg(test)]
+    make_draw_target: Arc<dyn Fn() -> ProgressDrawTarget + Send + Sync>,
+    clock: Clock,
     line_sink: LineSink,
     use_colors: bool,
 }
 
 impl ProgressReporter {
+    #[cfg(test)]
+    pub(super) fn rendered_prefix(&self) -> String {
+        self.bar.prefix()
+    }
+
     /// Create a new progress reporter.
     ///
     /// The progress bar will only become visible if operations continue beyond the delay threshold.
@@ -86,26 +96,43 @@ impl ProgressReporter {
     }
 
     fn with_draw_target_and_line_sink(delay: Duration, use_colors: bool, make_draw_target: DrawTargetFactory, line_sink: LineSink) -> Self {
+        Self::with_clock(delay, use_colors, make_draw_target, line_sink, Clock::new_tokio(), true)
+    }
+
+    fn with_clock(
+        delay: Duration,
+        use_colors: bool,
+        make_draw_target: DrawTargetFactory,
+        line_sink: LineSink,
+        clock: Clock,
+        automatic_refresh: bool,
+    ) -> Self {
         let bar = ProgressBar::hidden();
 
         let state = Arc::new(DelayedProgressState {
-            visible_after: Instant::now() + delay,
+            visible_after: delay,
+            started: clock.stopwatch(),
             visible: AtomicBool::new(false),
             is_indeterminate: AtomicBool::new(false),
-            phase_start_time: Mutex::new(Instant::now()),
+            phase_start_time: Mutex::new(clock.stopwatch()),
             #[cfg(test)]
             refreshes: AtomicUsize::new(0),
         });
 
         let message_callback = Arc::new(Mutex::new(Box::new(|| (0u64, 0u64, String::new())) as ProgressCallback));
-
+        let make_draw_target: Arc<dyn Fn() -> ProgressDrawTarget + Send + Sync> = Arc::from(make_draw_target);
         Self {
-            refresh_task: Arc::new(tokio::spawn(refresh_task(
-                bar.clone(),
-                Arc::clone(&state),
-                Arc::clone(&message_callback),
-                make_draw_target,
-            ))),
+            refresh_task: automatic_refresh.then(|| {
+                Arc::new(tokio::spawn(refresh_task(
+                    bar.clone(),
+                    Arc::clone(&state),
+                    Arc::clone(&message_callback),
+                    Arc::clone(&make_draw_target),
+                )))
+            }),
+            #[cfg(test)]
+            make_draw_target,
+            clock,
             bar,
             state,
             message_callback,
@@ -113,13 +140,30 @@ impl ProgressReporter {
             use_colors,
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn controlled(delay: Duration, use_colors: bool, clock: Clock) -> Self {
+        Self::with_clock(
+            delay,
+            use_colors,
+            Box::new(ProgressDrawTarget::hidden),
+            Arc::new(|_| panic!("no diagnostic lines are scripted")),
+            clock,
+            false,
+        )
+    }
+
+    #[cfg(test)]
+    fn refresh(&self) {
+        refresh_frame(&self.bar, &self.state, &self.message_callback, &*self.make_draw_target);
+    }
 }
 
 impl Progress for ProgressReporter {
     /// Set the prefix label for the progress bar (e.g., "Preparing", "Collecting").
     fn set_phase(&self, phase: &str) {
         self.bar.set_prefix(phase_prefix(phase, self.use_colors));
-        *self.state.phase_start_time.lock().expect("lock poisoned") = Instant::now();
+        *self.state.phase_start_time.lock().expect("lock poisoned") = self.clock.stopwatch();
     }
 
     /// Configure determinate progress reporting with a (total, current, message) callback.
@@ -137,7 +181,7 @@ impl Progress for ProgressReporter {
             let message = callback();
             (0, 0, message)
         });
-        *self.state.phase_start_time.lock().expect("lock poisoned") = Instant::now();
+        *self.state.phase_start_time.lock().expect("lock poisoned") = self.clock.stopwatch();
         self.state.is_indeterminate.store(true, Ordering::Relaxed);
 
         self.bar.set_style(indeterminate_style());
@@ -151,7 +195,9 @@ impl Progress for ProgressReporter {
 
     /// Finish and clear the progress indicator.
     fn done(&self) {
-        self.refresh_task.abort();
+        if let Some(task) = &self.refresh_task {
+            task.abort();
+        }
         if self.state.visible.load(Ordering::Relaxed) {
             self.bar.finish_and_clear();
         }
@@ -250,6 +296,8 @@ impl Debug for ProgressReporter {
             .field("state", &self.state)
             .field("message_callback", &"<callback>")
             .field("refresh_task", &"<task>")
+            .field("make_draw_target", &"<callback>")
+            .field("clock", &"<Clock>")
             .field("line_sink", &"<callback>")
             .field("use_colors", &self.use_colors)
             .finish()
@@ -277,43 +325,51 @@ async fn refresh_task(
     bar: ProgressBar,
     state: Arc<DelayedProgressState>,
     callback: Arc<Mutex<ProgressCallback>>,
-    make_draw_target: DrawTargetFactory,
+    make_draw_target: Arc<dyn Fn() -> ProgressDrawTarget + Send + Sync>,
 ) {
     let mut interval = tokio::time::interval(refresh_interval());
     #[expect(clippy::infinite_loop, reason = "task runs until aborted")]
     loop {
         let _ = interval.tick().await;
 
-        // #[gamma::skip(relational.le_to_lt, tag = "trivial", reason = "equality between two independently sampled monotonic instants is not controllable or observably distinct from the next refresh tick")]
-        if !state.visible.load(Ordering::Relaxed) && state.visible_after <= Instant::now() {
-            state.visible.store(true, Ordering::Relaxed);
-            bar.set_draw_target(make_draw_target());
-        }
+        refresh_frame(&bar, &state, &callback, &*make_draw_target);
+    }
+}
 
-        if state.visible.load(Ordering::Relaxed) {
-            let (length, position, mut message) = {
-                let callback_guard = callback.lock().expect("lock poisoned");
-                callback_guard()
+fn refresh_frame(
+    bar: &ProgressBar,
+    state: &DelayedProgressState,
+    callback: &Mutex<ProgressCallback>,
+    make_draw_target: &dyn Fn() -> ProgressDrawTarget,
+) {
+    if !state.visible.load(Ordering::Relaxed) && state.visible_after <= state.started.elapsed() {
+        state.visible.store(true, Ordering::Relaxed);
+        bar.set_draw_target(make_draw_target());
+    }
+
+    if state.visible.load(Ordering::Relaxed) {
+        let (length, position, mut message) = {
+            let callback_guard = callback.lock().expect("lock poisoned");
+            callback_guard()
+        };
+
+        // In indeterminate mode, prepend elapsed seconds to the message
+        if state.is_indeterminate.load(Ordering::Relaxed) {
+            bar.tick();
+            let elapsed_secs = {
+                let start_time = state.phase_start_time.lock().expect("lock poisoned");
+                start_time.elapsed().as_secs()
             };
-
-            // In indeterminate mode, prepend elapsed seconds to the message
-            if state.is_indeterminate.load(Ordering::Relaxed) {
-                bar.tick();
-                let elapsed_secs = {
-                    let start_time = state.phase_start_time.lock().expect("lock poisoned");
-                    start_time.elapsed().as_secs()
-                };
-                message = format!("{elapsed_secs}s: {message}");
-            }
-
-            if length > 0 {
-                bar.set_length(length);
-                bar.set_position(position);
-            }
-            bar.set_message(message);
-            #[cfg(test)]
-            state.refreshes.fetch_add(1, Ordering::Relaxed);
+            message = format!("{elapsed_secs}s: {message}");
         }
+
+        if length > 0 {
+            bar.set_length(length);
+            bar.set_position(position);
+        }
+        bar.set_message(message);
+        #[cfg(test)]
+        state.refreshes.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -347,10 +403,10 @@ mod tests {
     use std::io;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
 
     use indicatif::{ProgressBar, ProgressDrawTarget, TermLike};
     use owo_colors::OwoColorize as _;
+    use tick::ClockControl;
     use tokio::time::sleep;
 
     use super::{DrawTargetFactory, ProgressReporter, determinate_style, indeterminate_style, phase_prefix, refresh_interval};
@@ -424,7 +480,10 @@ mod tests {
     async fn reporter_starts_hidden() {
         let reporter = hidden_reporter(Duration::from_hours(1), false);
         assert!(reporter.bar.is_hidden());
+        // Construction initializes both flags before returning; these loads publish no other state.
+        // Relaxed is sufficient for observing their independent initial values.
         assert!(!reporter.state.visible.load(Ordering::Relaxed));
+        assert!(!reporter.state.is_indeterminate.load(Ordering::Relaxed));
         reporter.done();
     }
 
@@ -446,18 +505,21 @@ mod tests {
 
     #[tokio::test]
     async fn phase_changes_reset_elapsed_time() {
-        let reporter = hidden_reporter(Duration::from_hours(1), false);
-        *reporter.state.phase_start_time.lock().expect("lock is not poisoned") = Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .expect("the current instant is more than ten seconds after the monotonic clock epoch");
+        let control = ClockControl::new();
+        let reporter = ProgressReporter::controlled(Duration::from_hours(1), false, control.to_clock());
+        control.advance(Duration::from_secs(10));
         reporter.set_phase("new phase");
-        assert!(reporter.state.phase_start_time.lock().expect("lock is not poisoned").elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            reporter.state.phase_start_time.lock().expect("lock is not poisoned").elapsed(),
+            Duration::ZERO
+        );
 
-        *reporter.state.phase_start_time.lock().expect("lock is not poisoned") = Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .expect("the current instant is more than ten seconds after the monotonic clock epoch");
+        control.advance(Duration::from_secs(10));
         reporter.set_indeterminate(Box::new(|| "working".to_owned()));
-        assert!(reporter.state.phase_start_time.lock().expect("lock is not poisoned").elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            reporter.state.phase_start_time.lock().expect("lock is not poisoned").elapsed(),
+            Duration::ZERO
+        );
         reporter.done();
     }
 
@@ -568,30 +630,44 @@ mod tests {
     #[tokio::test]
     async fn refresh_loop_advances_only_indeterminate_animation() {
         let term = CaptureTerm::default();
-        let reporter = ProgressReporter::with_draw_target(
+        let control = ClockControl::new();
+        let reporter = ProgressReporter::with_clock(
             Duration::ZERO,
             false,
             Box::new({
                 let term = term.clone();
                 move || ProgressDrawTarget::term_like(Box::new(term.clone()))
             }),
+            Arc::new(|_| panic!("no diagnostic lines are scripted")),
+            control.to_clock(),
+            false,
         );
         reporter.set_indeterminate(Box::new(|| "working".to_owned()));
-        assert!(wait_until(&reporter, |_| term.contents().contains("working")).await);
-        let first_frame = term.contents();
-        assert!(
-            wait_until(&reporter, |_| term.contents() != first_frame).await,
-            "the indeterminate spinner did not advance"
-        );
+        reporter.refresh();
+        assert_eq!(reporter.bar.message(), "0s: working");
+        let spinner = |frame: String| {
+            frame
+                .split_once('[')
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .expect("the indeterminate template contains a bracketed spinner")
+                .0
+                .to_owned()
+        };
+        let first_spinner = spinner(term.contents());
+        control.advance(refresh_interval());
+        reporter.refresh();
+        assert_ne!(spinner(term.contents()), first_spinner, "the indeterminate spinner did not advance");
 
         reporter.set_determinate(Box::new(|| (10, 4, "steady".to_owned())));
-        assert!(wait_until(&reporter, |_| term.contents().contains("steady")).await);
+        reporter.refresh();
+        assert_eq!(reporter.bar.message(), "steady");
         let determinate_frame = term.contents();
         let completed = reporter.state.refreshes.load(Ordering::Relaxed);
-        assert!(
-            wait_until(&reporter, |r| r.state.refreshes.load(Ordering::Relaxed) >= completed + 2).await,
-            "two determinate refreshes did not complete"
-        );
+        for _ in 0..2 {
+            control.advance(refresh_interval());
+            reporter.refresh();
+        }
+        assert_eq!(reporter.state.refreshes.load(Ordering::Relaxed), completed + 2);
         assert_eq!(term.contents(), determinate_frame, "determinate progress kept animating");
         reporter.done();
     }
@@ -732,11 +808,11 @@ mod tests {
         let reporter = hidden_reporter(Duration::ZERO, true);
         reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
         assert!(wait_until(&reporter, |r| r.state.visible.load(Ordering::Relaxed)).await);
-        assert!(!reporter.refresh_task.is_finished());
+        assert!(!reporter.refresh_task.as_ref().unwrap().is_finished());
 
         reporter.done();
 
-        assert!(wait_until(&reporter, |r| r.refresh_task.is_finished()).await);
+        assert!(wait_until(&reporter, |r| r.refresh_task.as_ref().unwrap().is_finished()).await);
         assert!(reporter.bar.is_finished(), "a visible bar is finished and cleared");
     }
 

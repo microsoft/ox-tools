@@ -68,7 +68,7 @@ pub struct Stats {
     /// Test-binary subprocesses launched while evaluating mutants.
     pub launches: usize,
 
-    /// Exact and generalized hint probes that killed their mutant.
+    /// Exact-hint and inferred-test probes that killed their mutant.
     pub successful_hints: usize,
 }
 
@@ -398,6 +398,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn survivor_all_summary_helpers_keep_requested_color_and_skipped_writer_failures() {
+        let mut population = plan();
+        population.mutants = [
+            Outcome::Survived,
+            Outcome::Timeout,
+            Outcome::OutOfMemory,
+            Outcome::Flaky,
+            Outcome::Killed,
+            Outcome::CompileError,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, outcome)| mutant(index + 1, outcome))
+        .collect();
+        let blocks = outcome_blocks(
+            &population,
+            Styler::new(true),
+            Listings {
+                killed: true,
+                unviable: true,
+                ..Listings::default()
+            },
+        );
+        assert_eq!(blocks.len(), 6);
+        for ((label, _), expected) in blocks.iter().take(5).zip(["SURVIVED", "TIMEOUT", "OUTOFMEM", "FLAKY", "killed"]) {
+            assert!(label.contains("\u{1b}["), "{label:?}");
+            assert!(label.contains(expected), "{label:?}");
+        }
+        assert_eq!(blocks[5].0, "    unviable", "this outcome deliberately has no color style");
+        population.skipped = vec!["a.rs: nests deeper".to_owned(), "b.rs: incomplete\nsource".to_owned()];
+        let mut host = Sink::default();
+        skipped(&mut host, &population, Styler::new(true)).expect("the warning renders");
+        assert!(host.err().contains("\u{1b}["));
+        assert!(
+            host.err()
+                .contains("2 files could not be analyzed:\n  a.rs: nests deeper\n  b.rs: incomplete\\nsource\n")
+        );
+        fails_at_every_line(3, |host| skipped(host, &population, Styler::new(false)));
+    }
+
+    #[test]
+    fn survivor_session_notes_keep_the_zero_one_many_filtered_target_boundary_and_color() {
+        for widened in [false, true] {
+            for filtered in [0, 1, 3] {
+                let mut session = session(widened);
+                session.filtered = filtered;
+                let mut host = Sink::default();
+                session_notes(&mut host, &session, false, false, Styler::new(true)).expect("notes render");
+                assert_eq!(host.err().contains("Oracle"), filtered > 0);
+                assert_eq!(host.err().contains("Scope"), widened);
+                if filtered > 0 {
+                    assert!(host.err().contains(&format!("{} not consulted", quantity(filtered, "test target"))));
+                }
+                assert_eq!(host.err().contains("\u{1b}["), widened || filtered > 0);
+            }
+        }
+    }
+
     fn plan() -> Plan {
         Plan {
             skipped: Vec::new(),
@@ -450,6 +509,55 @@ mod tests {
         summarize(&mut host, plan, Styler::new(false), listings).expect("summarize");
 
         String::from_utf8(host.out).expect("utf-8")
+    }
+
+    #[test]
+    fn survivor_outcome_blocks_keep_diagnostic_and_optional_listing_order_without_empty_sections() {
+        let mut population = plan();
+        population.mutants = [
+            Outcome::CompileError,
+            Outcome::Killed,
+            Outcome::Flaky,
+            Outcome::OutOfMemory,
+            Outcome::Timeout,
+            Outcome::Survived,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, outcome)| mutant(index + 1, outcome))
+        .collect();
+        for announced in [false, true] {
+            let listings = Listings {
+                killed: true,
+                unviable: true,
+                announced,
+                ..Listings::default()
+            };
+            let blocks = outcome_blocks(&population, Styler::new(false), listings);
+            let expected: &[&str] = if announced {
+                &["FLAKY", "killed", "unviable"]
+            } else {
+                &["SURVIVED", "TIMEOUT", "OUTOFMEM", "FLAKY", "killed", "unviable"]
+            };
+            assert!(
+                blocks.iter().map(|(label, _)| label.trim()).eq(expected.iter().copied()),
+                "{blocks:?}: expected {expected:?}"
+            );
+            assert!(blocks.iter().all(|(_, rows)| rows.len() == 1));
+        }
+        population.mutants.clear();
+        assert!(
+            outcome_blocks(
+                &population,
+                Styler::new(false),
+                Listings {
+                    killed: true,
+                    unviable: true,
+                    ..Listings::default()
+                }
+            )
+            .is_empty()
+        );
     }
 
     #[test]

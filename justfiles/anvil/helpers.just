@@ -38,7 +38,7 @@
 # target/anvil/impact cache) and captures its category's scope into a local
 # variable by calling the shared resolver:
 #
-#   $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include <tier>)
+#   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
 #
 # _anvil-impact-include reads that cache both locally and in cloud workflows
 # (where the group job downloaded the target/anvil/impact artifact), so the
@@ -121,7 +121,7 @@ _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutant
 #   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
 #   4. origin/main, then origin/master -- local / non-PR fallback.
 # Prints ONLY the resolved ref to stdout so callers can capture it:
-#   pwsh : $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
+#   pwsh : $base = (& "{{ just_executable() }}" _anvil-base-ref)
 #   bash : base="$(just _anvil-base-ref)"
 [script("pwsh", "-NoProfile")]
 _anvil-base-ref:

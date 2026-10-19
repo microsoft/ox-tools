@@ -1022,6 +1022,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_default_selection_names_the_current_directory_instead_of_an_empty_or_invented_path() {
+        assert_eq!(SelectArgs::default().dir, camino::Utf8Path::new("."));
+    }
+
+    #[test]
     fn shard_index_must_be_in_range() {
         let args = SelectArgs {
             shard_count: Some(4),

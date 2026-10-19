@@ -501,6 +501,260 @@ mod tests {
     }
 
     #[test]
+    fn proof_budget_and_whole_loop_edits_have_inclusive_boundaries() {
+        for (length, admitted) in [(4095, true), (4096, true), (4097, false)] {
+            let text = format!("loop {{ /*{}*/ break; }}", " ".repeat(length - "loop { /**/ break; }".len()));
+            assert_eq!(text.len(), length);
+            let expression: Expr = syn::parse_str(&text).unwrap();
+            let proof = LoopProof::new(&expression, HashMap::default(), true);
+            assert_eq!(proof.is_some(), admitted, "length {length}");
+            if let Some(proof) = proof {
+                assert!(proof.omits(&text, &(0..length), "loop {}"));
+                assert!(!proof.omits(&text, &(0..length), "loop { break; }"));
+                assert!(!proof.omits(&text, &(0..length), "\"not a loop\""));
+            }
+        }
+        let text = "prefix loop { break; } suffix";
+        let mut proof = scalar_proof();
+        proof.span = 7..22;
+        assert!(!proof.omits(text, &(6..8), ""));
+        assert!(!proof.omits(text, &(21..23), ""));
+        assert!(!proof.omits("short", &(7..8), "x"));
+    }
+
+    #[test]
+    fn attributed_and_labelled_proof_nodes_never_supply_unconditional_evidence() {
+        let proof = scalar_proof();
+        for text in [
+            "#[cfg(any())] loop {}",
+            "#[cfg(any())] while true {}",
+            "loop { #[cfg(any())] continue; }",
+            "loop { continue 'outer; }",
+            "loop { #[cfg(any())] {} }",
+            "loop { 'inner: {} }",
+            "loop { { break; } }",
+            "loop { #[cfg(any())] if true {} }",
+            "loop { if false {} else { #[cfg(any())] {} } }",
+            "loop { if false {} else { 'inner: {} } }",
+            "loop { if false {} else { break; } }",
+            "loop { if 1 {} }",
+            "loop { if ready {} }",
+        ] {
+            assert_eq!(proof.proves(&syn::parse_str(text).unwrap()), None, "{text}");
+        }
+        for text in [
+            "loop { {} s.push('x'); }",
+            "loop { if true {} s.push('x'); }",
+            "loop { if false {} else {} s.push('x'); }",
+            "loop { if false {} else { s.push('x'); } }",
+            "loop { { s.push('x'); continue; } }",
+            "loop { if true { s.push('x'); continue; } }",
+        ] {
+            assert_eq!(
+                proof.proves(&syn::parse_str(text).unwrap()),
+                Some(Hazard::UnboundedGrowth),
+                "{text}"
+            );
+        }
+        for text in [
+            "loop { { continue; } break; }",
+            "loop { if true { continue; } break; }",
+            "loop { if false {} else { continue; } break; }",
+            "loop { if false { s.push('x'); } }",
+        ] {
+            assert_eq!(proof.proves(&syn::parse_str(text).unwrap()), Some(Hazard::Nontermination), "{text}");
+        }
+    }
+
+    #[test]
+    fn scalar_proof_rejects_effectful_or_attributed_syntax_at_every_layer() {
+        let proof = scalar_proof();
+        for (text, scalar, preserving) in [
+            ("((ready))", Some(Binding::Bool), Some(false)),
+            ("(0)", Some(Binding::Integer), Some(false)),
+            ("true", Some(Binding::Bool), Some(false)),
+            ("false", Some(Binding::Bool), Some(false)),
+            ("7", Some(Binding::Integer), Some(false)),
+            ("!ready", Some(Binding::Bool), Some(false)),
+            ("!i", None, None),
+            ("ready && true", Some(Binding::Bool), Some(false)),
+            ("ready || false", Some(Binding::Bool), Some(false)),
+            ("i == n", Some(Binding::Bool), Some(false)),
+            ("i < n", Some(Binding::Bool), Some(false)),
+            ("i + n", None, None),
+            ("ready && i", None, None),
+            ("i || ready", None, None),
+            ("i == ready", None, None),
+            ("-ready", None, None),
+            ("unknown", None, None),
+            ("module::i", None, None),
+            ("<T as Trait>::i", None, None),
+            ("s", None, None),
+            ("i = i", None, Some(false)),
+            ("s = s", None, None),
+            ("i = n", None, None),
+            ("unknown = unknown", None, None),
+            ("s.field = s.field", None, None),
+            ("s.field += 0", None, None),
+            ("s.field.push('x')", None, None),
+            ("s += 0", None, None),
+            ("i *= 0", None, None),
+            ("s.push_str(#[cfg(any())] \"x\")", None, None),
+        ] {
+            let expression: Expr = syn::parse_str(text).unwrap();
+            assert_eq!(proof.scalar(&expression), scalar, "{text}");
+            assert_eq!(proof.preserves(&expression), preserving, "{text}");
+        }
+        for text in [
+            "(ready)",
+            "ready",
+            "true",
+            "!ready",
+            "ready == true",
+            "i = i",
+            "i += 0",
+            "s.push('x')",
+        ] {
+            let expression: Expr = syn::parse_str(&format!("#[cfg(any())] {text}")).unwrap();
+            assert_eq!(proof.scalar(&expression), None, "{text}");
+            assert_eq!(proof.preserves(&expression), None, "{text}");
+        }
+        for text in ["#[cfg(any())] (i)", "#[cfg(any())] i", "<T as Trait>::i", "i + 1"] {
+            assert_eq!(bare_name(&syn::parse_str(text).unwrap()), None, "{text}");
+        }
+        for text in ["#[cfg(any())] (0)", "#[cfg(any())] 0", "1", "true", "i"] {
+            assert!(!integer_zero(&syn::parse_str(text).unwrap()), "{text}");
+        }
+        for text in ["#[cfg(any())] (false)", "#[cfg(any())] false", "0", "ready"] {
+            assert_eq!(literal_bool(&syn::parse_str(text).unwrap()), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn exhausted_iterator_evidence_rejects_each_independent_unknown_effect() {
+        let proof = scalar_proof();
+        for text in [
+            "chars.peek().is_none::<u8>()",
+            "#[cfg(any())] chars.peek().is_none()",
+            "(#[cfg(any())] chars.peek()).is_none()",
+            "chars.peek::<u8>().is_none()",
+            "chars.peek(1).is_none()",
+            "chars.next().is_none()",
+            "chars.peek().is_some(1)",
+            "(s.field).peek().is_none()",
+            "s.peek().is_none()",
+            "chars.peek().is_some_and(async |c| c.is_whitespace())",
+            "chars.peek().is_some_and(|c, d| c.is_whitespace())",
+            "chars.peek().is_some_and(|c @ _| c.is_whitespace())",
+            "chars.peek().is_some_and(|ref c| c.is_whitespace())",
+            "chars.peek().is_some_and(|c| -c.is_whitespace())",
+            "chars.peek().is_some_and(|c| c.is_whitespace(1))",
+            "chars.peek().is_some_and(|c| c.is_whitespace::<u8>())",
+            "-chars.peek().is_none()",
+            "#[cfg(any())] (chars.peek().is_none())",
+            "#[cfg(any())] !chars.peek().is_none()",
+        ] {
+            let expression: Expr = syn::parse_str(text).unwrap();
+            assert_eq!(proof.at_eof(&expression, "chars"), None, "{text}");
+        }
+        for condition in ["chars.peek().is_none()", "!chars.peek().is_some()"] {
+            for body in [
+                "chars.next(); break;",
+                "let item = chars.next();",
+                "#[cfg(any())] let _ = chars.next();",
+                "let _;",
+                "let _ = chars.next() else { break; };",
+                "chars.next::<u8>();",
+                "chars.next(1);",
+                "unknown.next();",
+                "chars.peek();",
+            ] {
+                let text = format!("while {condition} {{ {body} }}");
+                assert_eq!(proof.proves(&syn::parse_str(&text).unwrap()), None, "{text}");
+            }
+            let text = format!("while {condition} {{ chars.next(); s.push('x'); }}");
+            assert_eq!(
+                proof.proves(&syn::parse_str(&text).unwrap()),
+                Some(Hazard::UnboundedGrowth),
+                "{text}"
+            );
+        }
+        for method in ["is_whitespace", "is_ascii_whitespace", "is_ascii_digit"] {
+            let text = format!("chars.peek().is_some_and(char::{method})");
+            assert_eq!(proof.at_eof(&syn::parse_str(&text).unwrap(), "chars"), Some(false));
+        }
+        let mut shadowed_char = scalar_proof();
+        shadowed_char.standard_char = false;
+        assert_eq!(
+            shadowed_char.at_eof(&syn::parse_quote!(chars.peek().is_some_and(char::is_whitespace)), "chars"),
+            None
+        );
+    }
+
+    #[test]
+    fn resource_leaf_evidence_preserves_primitive_values_and_rejects_independent_effects() {
+        let proof = scalar_proof();
+        for (text, expected) in [
+            ("i += (0)", Some(false)),
+            ("i -= 0", Some(false)),
+            ("i += 1", None),
+            ("i -= unknown", None),
+            ("s.push_str(\"\")", Some(false)),
+            ("s.push_str(\"nonempty\")", Some(true)),
+            ("s.push('x', 'y')", None),
+            ("s.push_str()", None),
+            ("s.push(unknown)", None),
+            ("s.push_str(unknown)", None),
+            ("s.reserve(0)", None),
+        ] {
+            assert_eq!(proof.preserves(&syn::parse_str(text).unwrap()), expected, "{text}");
+        }
+        for text in ["0", "(0)", "((0u8))"] {
+            assert!(integer_zero(&syn::parse_str(text).unwrap()), "{text}");
+        }
+        for text in ["1", "(1)", "340282366920938463463374607431768211456"] {
+            assert!(!integer_zero(&syn::parse_str(text).unwrap()), "{text}");
+        }
+        for (text, expected) in [("true", true), ("(false)", false), ("((true))", true)] {
+            assert_eq!(literal_bool(&syn::parse_str(text).unwrap()), Some(expected), "{text}");
+        }
+        for text in ["i", "(i)", "((i))"] {
+            assert_eq!(bare_name(&syn::parse_str(text).unwrap()).as_deref(), Some("i"));
+        }
+        for text in [
+            "chars.peek().is_some_and(|c| c.is_whitespace())",
+            "chars.peek().is_some_and(|c| !c.is_whitespace())",
+        ] {
+            let expression: Expr = syn::parse_str(text).unwrap();
+            assert_eq!(proof.at_eof(&expression, "chars"), Some(false));
+            assert_eq!(proof.at_eof(&expression, "other"), None);
+        }
+        for text in [
+            "chars.peek().is_some_and(#[transform] |c| c.is_whitespace())",
+            "chars.peek().is_some_and(|c| #[transform] !c.is_whitespace())",
+            "chars.peek().is_some_and(|c| #[transform] c.is_whitespace())",
+            "chars.peek().is_some_and(|c| other.is_whitespace())",
+            "chars.peek().is_some_and(#[transform] char::is_whitespace)",
+            "chars.peek().is_some_and(char::<u8>::is_whitespace)",
+            "chars.peek().is_some_and(char::is_whitespace::<u8>)",
+            "chars.peek().is_some_and(char::unknown)",
+        ] {
+            assert_eq!(proof.at_eof(&syn::parse_str(text).unwrap(), "chars"), None, "{text}");
+        }
+        for text in ["#[transform] chars.peek().is_none()", "(#[transform] chars.peek()).is_none()"] {
+            assert_eq!(proof.at_eof(&syn::parse_str(text).unwrap(), "chars"), None, "{text}");
+        }
+        let expression: Expr = syn::parse_quote!(while chars.peek().is_none() {
+            let _ = chars.next();
+        });
+        assert_eq!(proof.proves(&expression), Some(Hazard::Nontermination));
+        let expression: Expr = syn::parse_quote!(while chars.peek().is_some() {
+            chars.next();
+        });
+        assert_eq!(proof.proves(&expression), None);
+    }
+
+    #[test]
     fn scalar_and_preserving_operations_require_exact_binding_evidence() {
         let proof = scalar_proof();
         for (text, expected) in [

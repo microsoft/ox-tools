@@ -1936,7 +1936,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
@@ -1989,7 +1989,7 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $IsLinux) {
@@ -2091,7 +2091,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 [script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
@@ -2177,7 +2177,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 [script("pwsh", "-NoProfile")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include required)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-hack: no affected packages; skipping'; exit 0 }
@@ -2214,7 +2214,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-sort: no modified packages; skipping'; exit 0 }
@@ -2247,7 +2247,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-check-all-targets: no affected packages; skipping'; exit 0 }
@@ -2291,7 +2291,7 @@ anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvi
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
@@ -2352,7 +2352,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include required)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
@@ -2398,12 +2398,12 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $selection = @(if ($include) { -split $include } else { '--workspace' })
-    $capableText = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-doctest-packages)
+    $capableText = (& "{{ just_executable() }}" _anvil-impact-doctest-packages)
     $capabilityExit = $LASTEXITCODE
     if ($capabilityExit -ne 0) { exit $capabilityExit }
     $docPackages = [System.Collections.Generic.Dictionary[string, bool]]::new(
@@ -2461,7 +2461,7 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-cyclic-deps: no modified packages; skipping'; exit 0 }
@@ -2491,7 +2491,7 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-default-features: no modified packages; skipping'; exit 0 }
@@ -2534,7 +2534,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
@@ -2669,7 +2669,7 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
@@ -2772,7 +2772,7 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 [script("pwsh", "-NoProfile")]
 anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
@@ -2817,7 +2817,7 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anv
 [script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include modified)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-license-headers: no modified packages; skipping'; exit 0 }
@@ -2852,7 +2852,7 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 [script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
@@ -3145,7 +3145,7 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 [script("pwsh", "-NoProfile")]
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
@@ -3399,7 +3399,7 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         exit 2
     }
 
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') {
@@ -3701,11 +3701,11 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
-    $toolchainOutput = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable msrv | Out-String
+    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }
     $toolchain = $toolchainOutput.Trim()
@@ -3728,14 +3728,14 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install":
-    & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable install-msrv
+    & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
-    $toolchainOutput = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable msrv | Out-String
+    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }
     $toolchain = $toolchainOutput.Trim()
@@ -3785,7 +3785,7 @@ anvil-msrv-test-validate-prereqs:
 [script("pwsh", "-NoProfile")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
@@ -3798,7 +3798,7 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     }
     # Resolve the diff base via the shared resolver (single source of truth
     # across the impact steps and this recipe; see _anvil-base-ref).
-    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
+    $base = (& "{{just_executable()}}" _anvil-base-ref)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # cargo-mutants --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
@@ -4128,7 +4128,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $stableArgs = {{_anvil_stable_toolchain_args}}
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     $commentFile = 'target/anvil/comments/semver.md'
@@ -4201,7 +4201,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
+    $base = (& "{{just_executable()}}" _anvil-base-ref)
     $base = $base.Trim()
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -4418,7 +4418,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include required)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
@@ -6128,7 +6128,7 @@ anvil-scheduled-test-validate-prereqs: \
 # target/anvil/impact cache) and captures its category's scope into a local
 # variable by calling the shared resolver:
 #
-#   $include = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-include <tier>)
+#   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
 #
 # _anvil-impact-include reads that cache both locally and in cloud workflows
 # (where the group job downloaded the target/anvil/impact artifact), so the
@@ -6211,7 +6211,7 @@ _anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutant
 #   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
 #   4. origin/main, then origin/master -- local / non-PR fallback.
 # Prints ONLY the resolved ref to stdout so callers can capture it:
-#   pwsh : $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
+#   pwsh : $base = (& "{{ just_executable() }}" _anvil-base-ref)
 #   bash : base="$(just _anvil-base-ref)"
 [script("pwsh", "-NoProfile")]
 _anvil-base-ref:
@@ -6428,7 +6428,7 @@ _anvil-impact-snapshot:
     $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
         ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
     $baseSha = $null
-    $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref 2>$null)
+    $base = (& "{{ just_executable() }}" _anvil-base-ref 2>$null)
     if (($LASTEXITCODE -eq 0) -and $base) {
         $base = ($base | Select-Object -First 1).Trim()
         git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
@@ -6459,7 +6459,7 @@ _anvil-impact-snapshot:
     # `just anvil-<group>` still fails fast if it is missing; keeping it off
     # anvil-impact's dependency line is what lets the no-op paths stay
     # tool-agnostic.
-    & '{{ replace(just_executable(), "'", "''") }}' anvil-tool-cargo-delta-validate-prereqs
+    & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
 
@@ -6469,7 +6469,7 @@ _anvil-impact-snapshot:
     # NOT `git fetch`: mutating git state as a side effect of a build check is
     # surprising and can race the user's own git operations.
     if (-not $baseSha) {
-        $base = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-base-ref)
+        $base = (& "{{ just_executable() }}" _anvil-base-ref)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $base = $base.Trim()
         git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
@@ -6750,7 +6750,7 @@ anvil-impact: _anvil-impact-snapshot
     # package-name translation live there, used identically by the cloud
     # impact steps).
     foreach ($tier in @('modified', 'affected', 'required')) {
-        $value = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-format $tier $impactJson)
+        $value = (& "{{ just_executable() }}" _anvil-impact-format $tier $impactJson)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Set-Content -LiteralPath (Join-Path $impactDir "include_$tier.txt") -Value $value.Trim() -Encoding UTF8 -NoNewline
         Write-Host "anvil-impact: $tier -> $($value.Trim())"
@@ -6788,7 +6788,7 @@ anvil-impact: _anvil-impact-snapshot
 # Working with objects sidesteps that entire class of bug.
 #
 # Usage:
-#   pwsh : $val = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-impact-format affected $impactJson)
+#   pwsh : $val = (& "{{ just_executable() }}" _anvil-impact-format affected $impactJson)
 [script("pwsh", "-NoProfile")]
 _anvil-impact-format tier impactJson:
     $ErrorActionPreference = 'Stop'
@@ -7370,7 +7370,7 @@ anvil-tool-rustc-validate-prereqs:
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
         exit 1
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable validate-workspace-msrv
+    & "{{ just_executable() }}" _anvil-resolve-stable validate-workspace-msrv
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -7701,7 +7701,7 @@ _install-tool-core name version installer source_prereq="":
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
     if ($sourcePrereq) {
-        & '{{ replace(just_executable(), "'", "''") }}' $sourcePrereq
+        & "{{just_executable()}}" $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"
@@ -8133,7 +8133,7 @@ anvil-tool-cargo-bolero-install installer="install": anvil-toolchain-stable-inst
         Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
+    & "{{ just_executable() }}" _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-bolero` tool is available.
@@ -8144,7 +8144,7 @@ anvil-tool-cargo-bolero-validate-prereqs:
         Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _check-tool cargo-bolero {{cargo_bolero_version}}
+    & "{{ just_executable() }}" _check-tool cargo-bolero {{cargo_bolero_version}}
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-careful` tool.
@@ -8258,7 +8258,7 @@ anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-ins
         Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
+    & "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-mutants` tool is available.
@@ -8269,7 +8269,7 @@ anvil-tool-cargo-mutants-validate-prereqs:
         Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _check-tool cargo-mutants {{cargo_mutants_version}}
+    & "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-nextest` tool.

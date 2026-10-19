@@ -165,6 +165,27 @@ pub(super) fn runtime_startup_failure(text: &[u8]) -> bool {
         .any(|marker| text.windows(marker.len()).any(|window| window == marker))
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    #[test]
+    fn consecutive_announcements_replace_the_name_without_concatenation_or_stale_suffixes() {
+        let mut progress = Progress::new(Watch::Libtest);
+        progress.heard("running 3 tests");
+        progress.heard("test suite::long_name ... ok");
+        progress.heard("test x ... ok");
+        assert_eq!(progress.test.as_deref(), Some("x"));
+        progress.heard("test y ... FAILED");
+        assert_eq!(progress.test.as_deref(), Some("y"));
+        assert_eq!(progress.failed.as_deref(), Some("y"));
+        progress.note("");
+        assert_eq!(progress.failures, ["y"]);
+        assert_eq!(progress.tests, Some(3));
+    }
+}
+
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {

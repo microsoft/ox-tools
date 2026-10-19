@@ -536,6 +536,25 @@ mod tests {
     }
 
     #[test]
+    fn array_entry_templates_cannot_escape_into_other_top_level_keys() {
+        for body in [
+            "\"managed\",\n]\nforeign = [\n\"unmanaged\",",
+            "\"managed\",\n]\n[foreign]\nvalues = [\n\"unmanaged\",",
+        ] {
+            let source = format!("entries = [\n{body}\n]");
+            let parsed = source.parse::<DocumentMut>().unwrap();
+            assert_eq!(parsed.as_table().len(), 2);
+            assert_eq!(parsed["entries"].as_array().unwrap().get(0).unwrap().as_str(), Some("managed"));
+            let refusal = body_array(body).unwrap_err();
+            assert_eq!(refusal.reason.to_string(), "the region must contain only array entries");
+            assert_eq!(refusal.remedy, RefusalRemedy::InvalidGeneratedToml);
+            let mut template = spec();
+            template.region.body = body.to_owned();
+            assert!(validate_spec(&template).is_err());
+        }
+    }
+
+    #[test]
     fn array_splice_maps_only_unchanged_bytes_at_both_boundaries() {
         let map = splice_offset_map("α[old]ω", "α[newer]ω");
         assert_eq!(

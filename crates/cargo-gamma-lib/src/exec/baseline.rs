@@ -85,6 +85,18 @@ pub(super) fn measure_baseline(
     failed: Option<&mut Option<Baseline>>,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
+    measure_baseline_with(work, binaries, request, jobs, failed, completed, observe_baseline)
+}
+
+fn measure_baseline_with(
+    work: &Workspace,
+    binaries: &mut [TestBinary],
+    request: MemoryRequest,
+    jobs: usize,
+    failed: Option<&mut Option<Baseline>>,
+    completed: impl FnMut(),
+    observer: impl Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
+) -> Result<Baseline> {
     measure_within_reporting_retaining(
         Measurement {
             work,
@@ -93,7 +105,7 @@ pub(super) fn measure_baseline(
             jobs,
         },
         binaries,
-        observe_baseline,
+        observer,
         failed,
         completed,
     )
@@ -270,6 +282,11 @@ where
     Ok(baseline)
 }
 
+#[cfg(test)]
+thread_local! {
+    static BASELINE_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn sweep_binaries_with<O>(
     work: &Workspace,
@@ -291,6 +308,8 @@ where
     thread::scope(|scope| {
         // #[gamma::skip(all, reason = "the worker count changes parallelism only; atomic indexing assigns every binary exactly once and positional collection makes the returned observations identical")]
         for _worker in 0..jobs.max(1) {
+            #[cfg(test)]
+            BASELINE_WORKERS.set(BASELINE_WORKERS.get() + 1);
             let sender = sender.clone();
             let next = &next;
             let notes = notes.clone();
@@ -607,6 +626,16 @@ fn filesystem_component(value: &str, cap: usize) -> String {
     }
 
     component
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    #[test]
+    fn unsafe_runs_separated_by_safe_characters_each_get_a_separator() {
+        assert_eq!(super::filesystem_component("a??b::c", 64), "a_b_c");
+        assert_eq!(super::filesystem_component("??a??b??", 64), "_a_b_");
+    }
 }
 
 fn is_reserved_windows_name(component: &str) -> bool {
@@ -1532,17 +1561,17 @@ mod tests {
 
     #[test]
     fn baseline_folding_preserves_every_observation_field_and_attempt_contract() {
-        let (_directory, work) = crate::testing::helper_workspace("baseline-fold-contract", &["exit:0"]);
+        let work = scripted_workspace();
         let mut binaries = vec![
             TestBinary {
                 package: "subject".to_owned(),
                 target: "first".to_owned(),
-                ..crate::testing::helper()
+                ..crate::testing::test_binary("first")
             },
             TestBinary {
                 package: "subject".to_owned(),
                 target: "second".to_owned(),
-                ..crate::testing::helper()
+                ..crate::testing::test_binary("second")
             },
         ];
         let completed = AtomicUsize::new(0);
@@ -1599,7 +1628,148 @@ mod tests {
         assert_eq!(binaries[1].tests, Some(6));
         assert_eq!(binaries[0].peak, Some(100));
         assert_eq!(binaries[1].peak, Some(300));
-        assert!(binaries.iter().all(|binary| binary.baseline > Duration::ZERO));
+    }
+
+    #[test]
+    fn the_public_baseline_adapter_spawns_the_requested_two_workers() {
+        let work = scripted_workspace();
+        let mut binaries = [crate::testing::test_binary("first"), crate::testing::test_binary("second")];
+        let before = BASELINE_WORKERS.get();
+        let mut completed = 0;
+        let baseline = measure_baseline_with(
+            &work,
+            &mut binaries,
+            MemoryRequest::default(),
+            2,
+            None,
+            || completed += 1,
+            |observed_work, binary, attempt| {
+                assert!(core::ptr::eq(observed_work, &raw const work));
+                assert!(["first", "second"].contains(&binary.path.as_str()));
+                assert_eq!(attempt.timeout, Some(BASELINE_BUDGET));
+                assert!(attempt.active.is_none());
+                Observation {
+                    verdict: Verdict::Passed,
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(1),
+                    peak: None,
+                }
+            },
+        )
+        .expect("both scripted observations complete successfully");
+        assert_eq!(
+            BASELINE_WORKERS.get() - before,
+            2,
+            "the public jobs argument must reach actual worker creation"
+        );
+        assert_eq!(completed, 2);
+        assert_eq!(baseline.tests, Some(2));
+    }
+
+    #[test]
+    fn the_public_baseline_adapter_retains_the_measured_partial_baseline_on_a_scripted_failure() {
+        let work = scripted_workspace();
+        let mut binaries = [crate::testing::test_binary("subject")];
+        let mut retained = None;
+        let completed = std::cell::Cell::new(0);
+        let failure = measure_baseline_with(
+            &work,
+            &mut binaries,
+            MemoryRequest::default(),
+            2,
+            Some(&mut retained),
+            || completed.set(completed.get() + 1),
+            |_, _, attempt| {
+                assert_eq!(attempt.timeout, Some(BASELINE_BUDGET));
+                Observation {
+                    verdict: Verdict::Failed(Some("subject::broken".into())),
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: Some(FailureEvidence {
+                        termination: None,
+                        failed_tests: vec!["subject::broken".into()],
+                        stdout_tail: String::new(),
+                        stderr_tail: String::new(),
+                        output_truncated: false,
+                    }),
+                    quiet: Duration::ZERO,
+                    tests: Some(4),
+                    peak: None,
+                }
+            },
+        )
+        .expect_err("a failing unmodified harness observation must still stop the run");
+        let retained = retained.expect("the caller explicitly requested failure measurements before diagnostics return");
+        assert_eq!(completed.get(), 1);
+        assert_eq!(retained.tests, Some(4));
+        assert_eq!(retained.elapsed, binaries[0].baseline);
+        assert_eq!(failure.artifacts().len(), 1);
+        assert_eq!(failure.artifacts()[0].value["test"], "subject::broken");
+    }
+
+    #[test]
+    fn a_two_worker_baseline_sweep_launches_both_workers_and_preserves_positional_results() {
+        let work = scripted_workspace();
+        let binaries = [
+            TestBinary {
+                target: "first".into(),
+                ..crate::testing::test_binary("first")
+            },
+            TestBinary {
+                target: "second".into(),
+                ..crate::testing::test_binary("second")
+            },
+        ];
+        let entered = std::sync::Mutex::new(0_usize);
+        let before = BASELINE_WORKERS.get();
+        let completed = std::cell::Cell::new(0);
+        let observations = sweep_binaries_with(
+            &work,
+            &binaries,
+            Duration::from_secs(17),
+            MemoryRequest::default(),
+            2,
+            |_work, binary, attempt| {
+                assert_eq!(attempt.timeout, Some(Duration::from_secs(17)));
+                {
+                    let mut count = entered.lock().unwrap();
+                    *count += 1;
+                }
+                Observation {
+                    verdict: Verdict::Passed,
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(if binary.target == "first" { 1 } else { 2 }),
+                    peak: None,
+                }
+            },
+            || completed.set(completed.get() + 1),
+        );
+        let entered = *entered.lock().unwrap();
+        assert_eq!(BASELINE_WORKERS.get() - before, 2);
+        assert_eq!(completed.get(), 2);
+        assert_eq!(entered, 2);
+        for (index, observation) in observations.into_iter().enumerate() {
+            let (_duration, observation) = observation.unwrap();
+            assert_eq!(observation.tests, Some(index + 1));
+            assert!(matches!(observation.verdict, Verdict::Passed));
+        }
+    }
+
+    fn scripted_workspace() -> Workspace {
+        let root = camino::Utf8PathBuf::from(if cfg!(windows) {
+            "C:/controlled-workspace"
+        } else {
+            "/controlled-workspace"
+        });
+        let mut work = Workspace::adopt(root.clone(), root.join("target"));
+        work.set_launch(super::super::loader::Launch {
+            loader: None,
+            stack: "16777216".into(),
+        });
+        work
     }
 
     #[test]

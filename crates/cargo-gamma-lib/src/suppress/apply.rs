@@ -62,3 +62,30 @@ pub fn suppress(mutants: &mut [Mutant], found: &[Directive]) -> usize {
 
     count
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests {
+    use super::*;
+    use crate::model::Channel;
+
+    #[test]
+    fn survivor_an_earlier_non_timing_directive_cannot_hide_a_later_multiplier() {
+        let directive = |multiplier| Directive {
+            intent: None,
+            selection: crate::ops::Selection::everything(),
+            selectors: String::new(),
+            reason: None,
+            tag: None,
+            test_timeout_multiplier: multiplier,
+            channel: Channel::Attribute,
+            line: 1,
+            scope: 0..10,
+        };
+        let mut mutants = [crate::fixtures::mutant()];
+        assert_eq!(suppress(&mut mutants, &[directive(None), directive(Some(2.0))]), 0);
+        assert_eq!(mutants[0].test_timeout_multiplier, Some(2.0));
+        assert_eq!(mutants[0].outcome, Outcome::Killed);
+        assert!(mutants[0].suppression.is_none());
+    }
+}

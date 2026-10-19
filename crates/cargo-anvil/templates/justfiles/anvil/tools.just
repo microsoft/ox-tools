@@ -143,7 +143,7 @@ anvil-tool-rustc-validate-prereqs:
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
         exit 1
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable validate-workspace-msrv
+    & "{{ just_executable() }}" _anvil-resolve-stable validate-workspace-msrv
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -474,7 +474,7 @@ _install-tool-core name version installer source_prereq="":
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
     if ($sourcePrereq) {
-        & '{{ replace(just_executable(), "'", "''") }}' $sourcePrereq
+        & "{{just_executable()}}" $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"
@@ -906,7 +906,7 @@ anvil-tool-cargo-bolero-install installer="install": anvil-toolchain-stable-inst
         Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
+    & "{{ just_executable() }}" _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-bolero` tool is available.
@@ -917,7 +917,7 @@ anvil-tool-cargo-bolero-validate-prereqs:
         Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _check-tool cargo-bolero {{cargo_bolero_version}}
+    & "{{ just_executable() }}" _check-tool cargo-bolero {{cargo_bolero_version}}
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-careful` tool.
@@ -1031,7 +1031,7 @@ anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-ins
         Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
+    & "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-mutants` tool is available.
@@ -1042,7 +1042,7 @@ anvil-tool-cargo-mutants-validate-prereqs:
         Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & '{{ replace(just_executable(), "'", "''") }}' _check-tool cargo-mutants {{cargo_mutants_version}}
+    & "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-nextest` tool.

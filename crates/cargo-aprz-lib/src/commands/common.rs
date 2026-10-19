@@ -7,7 +7,7 @@ use core::fmt::Write as _;
 use core::time::Duration;
 use std::fs;
 use std::io::{IsTerminal, Write, stderr, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -230,6 +230,84 @@ pub struct Common<'a, H: super::Host> {
     json: Option<Utf8PathBuf>,
 }
 
+trait Initialization {
+    fn workspace(&mut self, args: &CommonArgs) -> Result<(Metadata, Config)>;
+    fn cache_dir(&mut self, path: Option<&Utf8Path>) -> Result<PathBuf>;
+    fn diagnostic_terminal(&mut self) -> bool;
+    fn progress(&mut self, delay: Duration, use_colors: bool) -> ProgressReporter;
+    fn progress_created(&mut self, _progress: &ProgressReporter) {}
+    async fn credentials(&mut self, args: &CommonArgs, endpoints: &Endpoints) -> Option<GitHubToken>;
+    async fn collector(
+        &mut self,
+        args: &CommonArgs,
+        config: &Config,
+        cache_dir: &Path,
+        progress: ProgressReporter,
+        endpoints: &Endpoints,
+        token: Option<&GitHubToken>,
+    ) -> Result<Collector>;
+}
+
+struct SystemInitialization<F> {
+    configure: Option<F>,
+}
+
+impl<F: FnOnce(&mut MetadataCommand)> Initialization for SystemInitialization<F> {
+    fn workspace(&mut self, args: &CommonArgs) -> Result<(Metadata, Config)> {
+        let mut command = MetadataCommand::new();
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "deleting the manifest path turns the deterministic missing-manifest error test into real workspace collector initialization and external cache or download work")]
+        let _ = command.manifest_path(&args.manifest_path);
+        self.configure.take().expect("initialization loads the workspace exactly once")(&mut command);
+        let metadata = command.exec().into_app_err("retrieving workspace metadata")?;
+        let config = Config::load(&metadata.workspace_root, args.config.as_ref())?;
+        Ok((metadata, config))
+    }
+
+    fn cache_dir(&mut self, path: Option<&Utf8Path>) -> Result<PathBuf> {
+        resolve_cache_dir(path)
+    }
+
+    fn diagnostic_terminal(&mut self) -> bool {
+        stderr().is_terminal()
+    }
+
+    fn progress(&mut self, delay: Duration, use_colors: bool) -> ProgressReporter {
+        ProgressReporter::new(delay, use_colors)
+    }
+
+    async fn credentials(&mut self, args: &CommonArgs, endpoints: &Endpoints) -> Option<GitHubToken> {
+        discover(args.github_token.as_ref(), args.github_token_from_gh, endpoints).await
+    }
+
+    async fn collector(
+        &mut self,
+        args: &CommonArgs,
+        config: &Config,
+        cache_dir: &Path,
+        progress: ProgressReporter,
+        endpoints: &Endpoints,
+        token: Option<&GitHubToken>,
+    ) -> Result<Collector> {
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Config::load already compiled these unchanged patterns in validate; defaults are compiled from the validated embedded config, so repeating the deterministic compilation cannot newly return an error")]
+        let bug_label_matcher = config.bug_label_matcher()?;
+        Collector::new(
+            token.map(GitHubToken::expose_secret),
+            args.codeberg_token.as_deref(),
+            cache_dir,
+            config.crates_cache_ttl,
+            config.hosting_cache_ttl,
+            config.codebase_cache_ttl,
+            config.coverage_cache_ttl,
+            config.advisories_cache_ttl,
+            args.ignore_cached,
+            bug_label_matcher.into(),
+            progress,
+            endpoints,
+        )
+        .await
+    }
+}
+
 impl<'a, H: super::Host> Common<'a, H> {
     /// Create a new Common processor with logger, collector, and config
     ///
@@ -246,51 +324,35 @@ impl<'a, H: super::Host> Common<'a, H> {
         configure: impl FnOnce(&mut MetadataCommand),
     ) -> Result<(Self, Metadata)> {
         Self::init_logging(args.log_level);
+        Self::new_with_initialization(
+            host,
+            args,
+            &mut SystemInitialization {
+                configure: Some(configure),
+            },
+        )
+        .await
+    }
 
-        // Create metadata command for workspace operations
-        let mut metadata_cmd = MetadataCommand::new();
-        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "deleting the manifest path turns the deterministic missing-manifest error test into real workspace collector initialization and external cache or download work")]
-        let _ = metadata_cmd.manifest_path(&args.manifest_path);
-        configure(&mut metadata_cmd);
-
-        // Execute metadata command once and use it for both cache and config paths
-        let metadata = metadata_cmd.exec().into_app_err("retrieving workspace metadata")?;
-
-        // Use workspace_root for config base path
-        let config_base_path = metadata.workspace_root.clone();
-
-        // Load config from the determined base path first (we need the cache TTL)
-        let config = Config::load(&config_base_path, args.config.as_ref())?;
-
-        // Determine cache directory: use provided path or default cache directory for the platform
-        let cache_dir = Self::resolve_cache_dir(args.cache_dir.as_deref())?;
-
+    // Resolves the cache before creating progress; observes progress immediately after creation,
+    // before credential discovery and collector initialization in the ordinary initialization path.
+    async fn new_with_initialization(
+        host: &'a mut H,
+        args: &CommonArgs,
+        initialization: &mut impl Initialization,
+    ) -> Result<(Self, Metadata)> {
+        let (metadata, config) = initialization.workspace(args)?;
+        let cache_dir = initialization.cache_dir(args.cache_dir.as_deref())?;
         let delay = progress_delay(args.log_level);
-
-        let use_colors_for_progress = output_uses_colors(args.color, stderr().is_terminal());
-
-        let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
+        let use_colors_for_progress = output_uses_colors(args.color, initialization.diagnostic_terminal());
+        let progress_reporter = initialization.progress(delay, use_colors_for_progress);
+        initialization.progress_created(&progress_reporter);
 
         let endpoints = args.endpoints();
-        let github_token = discover(args.github_token.as_ref(), args.github_token_from_gh, &endpoints).await;
-
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Config::load already compiled these unchanged patterns in validate; defaults are compiled from the validated embedded config, so repeating the deterministic compilation cannot newly return an error")]
-        let bug_label_matcher = config.bug_label_matcher()?;
-        let collector = Collector::new(
-            github_token.as_ref().map(GitHubToken::expose_secret),
-            args.codeberg_token.as_deref(),
-            &cache_dir,
-            config.crates_cache_ttl,
-            config.hosting_cache_ttl,
-            config.codebase_cache_ttl,
-            config.coverage_cache_ttl,
-            config.advisories_cache_ttl,
-            args.ignore_cached,
-            bug_label_matcher.into(),
-            progress_reporter,
-            &endpoints,
-        )
-        .await?;
+        let github_token = initialization.credentials(args, &endpoints).await;
+        let collector = initialization
+            .collector(args, &config, &cache_dir, progress_reporter, &endpoints, github_token.as_ref())
+            .await?;
 
         let console = args.console.as_ref().map(|sections| ConsoleOutputMode {
             appraisal: sections.contains(&ConsoleSection::Appraisal),
@@ -314,14 +376,6 @@ impl<'a, H: super::Host> Common<'a, H> {
             },
             metadata,
         ))
-    }
-
-    fn resolve_cache_dir(cache_dir: Option<&Utf8Path>) -> Result<PathBuf> {
-        if let Some(cache_path) = cache_dir {
-            Ok(cache_path.as_std_path().to_path_buf())
-        } else {
-            cache_dir_from_platform(platform_cache_dir())
-        }
     }
 
     /// Initialize logger based on log level
@@ -487,6 +541,14 @@ const fn output_uses_colors(color: ColorMode, stream_is_terminal: bool) -> bool 
         ColorMode::Always => true,
         ColorMode::Never => false,
         ColorMode::Auto => stream_is_terminal,
+    }
+}
+
+fn resolve_cache_dir(cache_dir: Option<&Utf8Path>) -> Result<PathBuf> {
+    if let Some(cache_path) = cache_dir {
+        Ok(cache_path.as_std_path().to_path_buf())
+    } else {
+        cache_dir_from_platform(platform_cache_dir())
     }
 }
 
@@ -763,14 +825,13 @@ mod tests {
     fn cache_directory_uses_the_override_or_platform_default() {
         let override_path = Utf8Path::new("custom-cache");
         assert_eq!(
-            Common::<crate::commands::host::TestHost>::resolve_cache_dir(Some(override_path))
-                .expect("an explicit cache path is always usable"),
+            resolve_cache_dir(Some(override_path)).expect("an explicit cache path is always usable"),
             override_path.as_std_path()
         );
 
         // The default depends on the environment, so both answers it can give are accepted: a
         // stripped environment legitimately has no cache location and must ask for `--cache-dir`.
-        let resolved = Common::<crate::commands::host::TestHost>::resolve_cache_dir(None);
+        let resolved = resolve_cache_dir(None);
         let platform = platform_cache_dir();
         assert_eq!(resolved.ok(), platform.map(|cache_dir| cache_dir.join("cargo-aprz")));
     }
@@ -978,6 +1039,128 @@ mod tests {
             .err()
             .expect("an invalid bug-label expression must be returned");
         assert!(error.to_string().contains('('), "unexpected configuration error: {error}");
+    }
+
+    struct ScriptedInitialization {
+        terminal: Option<bool>,
+        expected_colors: Option<bool>,
+        calls: Vec<&'static str>,
+    }
+
+    impl Initialization for ScriptedInitialization {
+        fn workspace(&mut self, args: &CommonArgs) -> Result<(Metadata, Config)> {
+            assert_eq!(args.manifest_path, Utf8Path::new("Cargo.toml"));
+            self.calls.push("workspace");
+            let metadata = serde_json::from_value(serde_json::json!({
+                "packages": [], "workspace_members": [], "workspace_default_members": [],
+                "workspace_root": "/controlled", "target_directory": "/controlled/target",
+                "version": 1, "metadata": null, "resolve": null
+            }))
+            .unwrap();
+            Ok((metadata, Config::default()))
+        }
+
+        fn cache_dir(&mut self, path: Option<&Utf8Path>) -> Result<PathBuf> {
+            assert!(path.is_none());
+            self.calls.push("cache");
+            if self.expected_colors.is_none() {
+                cache_dir_from_platform(None)
+            } else {
+                Ok(PathBuf::from("scripted-cache"))
+            }
+        }
+
+        fn diagnostic_terminal(&mut self) -> bool {
+            self.calls.push("terminal");
+            self.terminal.expect("only color scenarios may query terminal capabilities")
+        }
+
+        fn progress(&mut self, delay: Duration, use_colors: bool) -> ProgressReporter {
+            ProgressReporter::controlled(delay, use_colors, tick::Clock::new_frozen())
+        }
+
+        fn progress_created(&mut self, reporter: &ProgressReporter) {
+            self.calls.push("progress");
+            crate::facts::Progress::set_phase(reporter, "Preparing");
+            assert_eq!(
+                reporter.rendered_prefix(),
+                if self.expected_colors.unwrap() {
+                    "\x1b[36m\x1b[1mPreparing\x1b[0m\x1b[39m"
+                } else {
+                    "Preparing"
+                }
+            );
+        }
+
+        async fn credentials(&mut self, _args: &CommonArgs, _endpoints: &Endpoints) -> Option<GitHubToken> {
+            self.calls.push("credentials");
+            Some("controlled-token".parse().unwrap())
+        }
+
+        async fn collector(
+            &mut self,
+            _args: &CommonArgs,
+            _config: &Config,
+            cache_dir: &Path,
+            progress: ProgressReporter,
+            _endpoints: &Endpoints,
+            token: Option<&GitHubToken>,
+        ) -> Result<Collector> {
+            self.calls.push("collector");
+            assert_eq!(cache_dir, Path::new("scripted-cache"));
+            assert_eq!(token.unwrap().expose_secret(), "controlled-token");
+            assert_eq!(crate::facts::Progress::use_colors(&progress), self.expected_colors.unwrap());
+            crate::facts::Progress::done(&progress);
+            Err(Error::new(ErrorKind::PermissionDenied, "scripted collector failure")).into_app_err("creating collector")
+        }
+    }
+
+    #[tokio::test]
+    async fn common_initialization_returns_platform_cache_resolution_failures() {
+        let args = ArgsHarness::parse_from(["aprz"]).common;
+        let mut host = TestHost::new();
+        let mut initialization = ScriptedInitialization {
+            terminal: None,
+            expected_colors: None,
+            calls: Vec::new(),
+        };
+        let error = Common::new_with_initialization(&mut host, &args, &mut initialization)
+            .await
+            .err()
+            .expect("an unavailable platform cache directory must remain a recoverable error");
+        assert_eq!(error.to_string(), cache_dir_from_platform(None).unwrap_err().to_string());
+        assert_eq!(initialization.calls, ["workspace", "cache"]);
+    }
+
+    #[tokio::test]
+    async fn common_initialization_applies_each_color_mode_to_the_progress_renderer() {
+        for (mode, terminal, expected) in [
+            (ColorMode::Always, false, true),
+            (ColorMode::Always, true, true),
+            (ColorMode::Never, false, false),
+            (ColorMode::Never, true, false),
+            (ColorMode::Auto, false, false),
+            (ColorMode::Auto, true, true),
+        ] {
+            let mut args = ArgsHarness::parse_from(["aprz"]).common;
+            args.color = mode;
+            let mut host = TestHost::new();
+            let mut initialization = ScriptedInitialization {
+                terminal: Some(terminal),
+                expected_colors: Some(expected),
+                calls: Vec::new(),
+            };
+            let error = Common::new_with_initialization(&mut host, &args, &mut initialization)
+                .await
+                .err()
+                .expect("the scripted collector must stop initialization");
+            assert_eq!(error.message(), "scripted collector failure");
+            assert_eq!(error.find_source::<Error>().unwrap().kind(), ErrorKind::PermissionDenied);
+            assert_eq!(
+                initialization.calls,
+                ["workspace", "cache", "terminal", "progress", "credentials", "collector"]
+            );
+        }
     }
 
     #[test]

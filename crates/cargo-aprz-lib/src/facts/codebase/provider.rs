@@ -263,34 +263,67 @@ impl Provider {
     }
 
     async fn fetch_repo_data_core(&self, repo_spec: &RepoSpec, repo_path: &Path) -> Result<RepoData> {
-        let root_manifest = repo_path.join("Cargo.toml");
-        if !root_manifest.exists() {
-            return Err(app_err!("could not find Cargo.toml in root of repository '{repo_spec}'"));
-        }
+        Self::fetch_repo_data_with(
+            repo_spec,
+            repo_path,
+            Path::exists,
+            |manifest| self.load_repo_metadata(repo_spec, manifest),
+            || async {
+                tokio::join!(
+                    git::count_contributors(repo_path, self.timeouts.git_command),
+                    git::get_commit_stats(repo_path, &[90, 180, 365], self.timeouts.git_command),
+                )
+            },
+            |path| async move {
+                spawn_blocking(move || sniff_github_workflows(&path))
+                    .await
+                    .expect("task must not panic")
+            },
+        )
+        .await
+    }
 
-        log::debug!(target: LOG_TARGET, "Running cargo metadata for repository '{repo_spec}'");
+    async fn load_repo_metadata(&self, repo_spec: &RepoSpec, root_manifest: PathBuf) -> Result<Metadata> {
         let timeout_result = tokio::time::timeout(
             self.timeouts.metadata,
             spawn_blocking(move || MetadataCommand::new().manifest_path(&root_manifest).exec()),
         )
         .await;
-
-        let metadata = match timeout_result {
+        match timeout_result {
             Err(_) => {
                 let timeout_secs = self.timeouts.metadata.as_secs();
-                return Err(app_err!(
+                Err(app_err!(
                     "cargo metadata timed out after {timeout_secs} seconds for repository '{repo_spec}' - workspace may be too large or Cargo.toml is corrupted"
-                ));
+                ))
             }
-            Ok(join_result) => classify_metadata_result(join_result, repo_spec)?,
-        };
+            Ok(join_result) => classify_metadata_result(join_result, repo_spec),
+        }
+    }
+
+    async fn fetch_repo_data_with<M, S, W>(
+        repo_spec: &RepoSpec,
+        repo_path: &Path,
+        manifest_exists: impl FnOnce(&Path) -> bool,
+        metadata: impl FnOnce(PathBuf) -> M,
+        statistics: impl FnOnce() -> S,
+        workflows: impl FnOnce(PathBuf) -> W,
+    ) -> Result<RepoData>
+    where
+        M: Future<Output = Result<Metadata>>,
+        S: Future<Output = (Result<u64>, Result<git::CommitStats>)>,
+        W: Future<Output = Result<GitHubWorkflowInfo>>,
+    {
+        let root_manifest = repo_path.join("Cargo.toml");
+        if !manifest_exists(&root_manifest) {
+            return Err(app_err!("could not find Cargo.toml in root of repository '{repo_spec}'"));
+        }
+
+        log::debug!(target: LOG_TARGET, "Running cargo metadata for repository '{repo_spec}'");
+        let metadata = metadata(root_manifest).await?;
 
         log::debug!(target: LOG_TARGET, "Gathering commit statistics for repository '{repo_spec}'");
 
-        let (contributor_count, commit_stats) = tokio::join!(
-            git::count_contributors(repo_path, self.timeouts.git_command),
-            git::get_commit_stats(repo_path, &[90, 180, 365], self.timeouts.git_command),
-        );
+        let (contributor_count, commit_stats) = statistics().await;
 
         let contributor_count = match contributor_count {
             Ok(count) => count,
@@ -315,10 +348,8 @@ impl Provider {
 
         log::debug!(target: LOG_TARGET, "Detecting workflows in repository '{repo_spec}'");
 
-        let repo_path_owned = repo_path.to_path_buf();
-        let workflows = spawn_blocking(move || sniff_github_workflows(&repo_path_owned))
+        let workflows = workflows(repo_path.to_path_buf())
             .await
-            .expect("task must not panic")
             .into_app_err_with(|| format!("analyzing GitHub workflows in repository '{repo_spec}'"))?;
 
         log::debug!(target: LOG_TARGET, "Analyzed repository '{repo_spec}', found {} packages", metadata.packages.len());
@@ -469,37 +500,19 @@ impl Provider {
         ) {
             let chunk = chunk.to_vec();
 
-            let task = spawn_blocking(move || {
-                chunk
-                    .into_iter()
-                    .map(|path| {
-                        let content =
-                            fs::read_to_string(&path).into_app_err_with(|| format!("reading source file '{}'", path.display()))?;
-                        Ok(source_file_analyzer::analyze_source_file(&content))
-                    })
-                    .collect()
-            });
+            let task = spawn_blocking(move || analyze_source_chunk(chunk, |path| fs::read_to_string(path)));
 
             analysis_tasks.push(task);
         }
 
         let results = join_all(analysis_tasks).await;
 
-        for file_stats in results
-            .into_iter()
-            .flat_map(|task_result| task_result.expect("tasks must not panic"))
-            .filter_map(filter_source_result)
-        {
-            codebase_data.source_files_analyzed += 1;
-            codebase_data.production_lines += file_stats.production_lines;
-            codebase_data.test_lines += file_stats.test_lines;
-            codebase_data.comment_lines += file_stats.comment_lines;
-            codebase_data.unsafe_count += file_stats.unsafe_count;
-
-            if file_stats.has_errors {
-                codebase_data.source_files_with_errors += 1;
-            }
-        }
+        accumulate_source_results(
+            results
+                .into_iter()
+                .flat_map(|task_result| task_result.expect("tasks must not panic")),
+            codebase_data,
+        );
     }
 
     /// Get the sanitized host/owner/repo path components for a repository.
@@ -610,7 +623,40 @@ fn filter_walk_entry(entry: walkdir::Result<walkdir::DirEntry>) -> Option<walkdi
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn is_rust_source_entry(entry: &walkdir::DirEntry) -> bool {
-    entry.file_type().is_file() && entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs")
+    is_rust_source(entry.path(), entry.file_type().is_file(), entry.path_is_symlink())
+}
+
+fn is_rust_source(path: &Path, is_file: bool, is_link: bool) -> bool {
+    is_file && !is_link && path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+fn analyze_source_chunk(
+    paths: impl IntoIterator<Item = PathBuf>,
+    mut read: impl FnMut(&Path) -> std::io::Result<String>,
+) -> Vec<Result<source_file_analyzer::SourceFileInfo>> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let content = read(&path).into_app_err_with(|| format!("reading source file '{}'", path.display()))?;
+            Ok(source_file_analyzer::analyze_source_file(&content))
+        })
+        .collect()
+}
+
+fn accumulate_source_results(
+    results: impl IntoIterator<Item = Result<source_file_analyzer::SourceFileInfo>>,
+    codebase_data: &mut CodebaseData,
+) {
+    for file_stats in results.into_iter().filter_map(filter_source_result) {
+        codebase_data.source_files_analyzed += 1;
+        codebase_data.production_lines += file_stats.production_lines;
+        codebase_data.test_lines += file_stats.test_lines;
+        codebase_data.comment_lines += file_stats.comment_lines;
+        codebase_data.unsafe_count += file_stats.unsafe_count;
+        if file_stats.has_errors {
+            codebase_data.source_files_with_errors += 1;
+        }
+    }
 }
 
 fn filter_source_entry(entry: &walkdir::DirEntry, max_file_size: u64) -> Option<PathBuf> {
@@ -1696,6 +1742,30 @@ jobs:
     }
 
     #[test]
+    fn source_analysis_excludes_directory_junction_entries() {
+        let entries = [
+            (PathBuf::from("src/lib.rs"), true, false),
+            (PathBuf::from("src/junction.rs"), false, true),
+            (PathBuf::from("src/symlink.rs"), true, true),
+            (PathBuf::from("src/directory.rs"), false, false),
+        ];
+        let paths: Vec<_> = entries
+            .into_iter()
+            .filter(|(path, file, link)| is_rust_source(path, *file, *link))
+            .map(|(path, _, _)| path)
+            .collect();
+        assert_eq!(paths, [PathBuf::from("src/lib.rs")]);
+        let results = analyze_source_chunk(paths, |path| {
+            assert_eq!(path, Path::new("src/lib.rs"));
+            Ok("pub fn local() {}\n".to_owned())
+        });
+        let mut data = empty_codebase_data();
+        accumulate_source_results(results, &mut data);
+        assert_eq!(data.source_files_analyzed, 1);
+        assert_eq!(data.production_lines, 1);
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "spawns the capturing helper as a subprocess, which Miri cannot execute")]
     fn test_analyze_source_files_does_not_log_limit_before_limit() {
         let logs = run_ignored_helper("helper_capture_source_file_limit_log_before_limit");
@@ -1762,6 +1832,32 @@ jobs:
             .expect("cargo metadata --no-deps");
         assert!(no_deps.resolve.is_none());
         assert_eq!(Provider::count_transitive_dependencies(&package.id, &no_deps), 0);
+    }
+
+    #[test]
+    fn transitive_dependency_counts_include_grandchildren_once() {
+        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+            "packages": [],
+            "workspace_members": [],
+            "workspace_default_members": [],
+            "workspace_root": "/fixture",
+            "target_directory": "/fixture/target",
+            "version": 1,
+            "metadata": null,
+            "resolve": {
+                "root": "root",
+                "nodes": [
+                    {"id": "root", "dependencies": ["middle", "shared"], "deps": [], "features": []},
+                    {"id": "middle", "dependencies": ["leaf", "shared"], "deps": [], "features": []},
+                    {"id": "leaf", "dependencies": ["middle"], "deps": [], "features": []},
+                    {"id": "shared", "dependencies": [], "deps": [], "features": []}
+                ]
+            }
+        }))
+        .expect("the fixture supplies the required Cargo metadata fields");
+        let root = PackageId { repr: "root".into() };
+
+        assert_eq!(Provider::count_transitive_dependencies(&root, &metadata), 3);
     }
 
     #[tokio::test]
@@ -1856,6 +1952,107 @@ jobs:
             .await
             .expect_err("an unreadable workflow file must fail the analysis");
         assert!(format!("{error:#}").contains("analyzing GitHub workflows"));
+    }
+
+    #[tokio::test]
+    async fn exclusively_locked_workflows_return_repository_analysis_errors() {
+        let repo_spec = repo_spec_for_url(&Url::parse("https://github.com/fixture/repository").unwrap());
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = Provider::fetch_repo_data_with(
+            &repo_spec,
+            Path::new("repository"),
+            |path| {
+                assert_eq!(path, Path::new("repository/Cargo.toml"));
+                calls.borrow_mut().push("exists");
+                true
+            },
+            |path| {
+                assert_eq!(path, Path::new("repository/Cargo.toml"));
+                calls.borrow_mut().push("metadata");
+                std::future::ready(Ok(serde_json::from_value(serde_json::json!({
+                    "packages": [], "workspace_members": [], "workspace_default_members": [],
+                    "workspace_root": "/controlled", "target_directory": "/controlled/target",
+                    "version": 1, "metadata": null, "resolve": null
+                }))
+                .unwrap()))
+            },
+            || {
+                calls.borrow_mut().push("statistics");
+                std::future::ready((
+                    Ok(2),
+                    Ok(git::CommitStats {
+                        commit_count: 3,
+                        first_commit_at: DateTime::UNIX_EPOCH,
+                        last_commit_at: DateTime::UNIX_EPOCH,
+                        commits_per_window: vec![1, 2, 3],
+                    }),
+                ))
+            },
+            |path| {
+                assert_eq!(path, Path::new("repository"));
+                calls.borrow_mut().push("workflows");
+                std::future::ready(
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "scripted sharing violation",
+                    ))
+                    .into_app_err("opening workflow file 'repository/.github/workflows/ci.yml'"),
+                )
+            },
+        )
+        .await
+        .expect_err("a sharing violation must return the workflow error instead of panicking");
+        assert_eq!(calls.into_inner(), ["exists", "metadata", "statistics", "workflows"]);
+        assert_eq!(error.message(), "scripted sharing violation");
+        assert_eq!(
+            error.find_source::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let contexts: Vec<_> = error
+            .to_string()
+            .lines()
+            .skip(1)
+            .map(|line| line.split_once(" (at ").unwrap().0.to_owned())
+            .collect();
+        assert_eq!(
+            contexts,
+            [
+                "> opening workflow file 'repository/.github/workflows/ci.yml'",
+                "> analyzing GitHub workflows in repository 'https://github.com/fixture/repository'",
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_source_files_do_not_panic_the_analysis_worker() {
+        let mut reads = [
+            (
+                PathBuf::from("src/invalid.rs"),
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UTF-8")),
+            ),
+            (PathBuf::from("src/valid.rs"), Ok("pub fn valid() {}\n".to_owned())),
+        ]
+        .into_iter();
+        let results = analyze_source_chunk([PathBuf::from("src/invalid.rs"), PathBuf::from("src/valid.rs")], |path| {
+            let (expected, result) = reads.next().expect("only two source reads are scripted");
+            assert_eq!(path, expected);
+            result
+        });
+        assert!(reads.next().is_none());
+        let error = results[0].as_ref().unwrap_err();
+        assert_eq!(
+            error.find_source::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(error.message(), "invalid UTF-8");
+        let mut data = empty_codebase_data();
+        accumulate_source_results(results, &mut data);
+        assert_eq!(data.source_files_analyzed, 1);
+        assert_eq!(data.production_lines, 1);
+        assert_eq!(data.source_files_with_errors, 0);
+        assert_eq!(data.test_lines, 0);
+        assert_eq!(data.comment_lines, 0);
+        assert_eq!(data.unsafe_count, 0);
     }
 
     #[cfg(unix)]
