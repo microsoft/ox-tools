@@ -1495,6 +1495,8 @@ mod tests {
 
     use super::*;
 
+    const RELEASED_AND_TEST_ONLY_SOURCE: &str = include_str!("../tests/fixtures/released-and-test-only-source.rs");
+
     struct FixtureSource {
         released: bool,
         analysis: SourceAnalysis,
@@ -1847,6 +1849,7 @@ mod tests {
             Some(PathBuf::from("../shared.rs"))
         );
         assert_eq!(relative_path(Path::new(r"C:\workspace\member"), Path::new(r"D:\shared.rs")), None);
+        assert_eq!(relative_path(Path::new("member"), Path::new("shared.rs")), None);
     }
 
     #[test]
@@ -1867,7 +1870,12 @@ mod tests {
         ];
         for (surface, role) in cases {
             let mut indexed = IndexedSource {
-                analysis: analyze(Path::new("fixture.rs"), "pub fn fixture() {}\n"),
+                analysis: SourceAnalysis {
+                    syntax: None,
+                    line_count: 0,
+                    line_starts: vec![0],
+                    test_only_lines: BTreeSet::new(),
+                },
                 edition: Edition::Edition2024,
                 released_path: None,
                 test_only_lines: BTreeSet::new(),
@@ -2264,6 +2272,31 @@ mod tests {
              pub fn helper() {}\n",
         );
         assert_eq!(crate_inner.test_only_lines, BTreeSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn checked_in_source_fixture_filters_to_exact_released_lcov() {
+        let source_path = Path::new("released-and-test-only-source.rs");
+        let analysis = analyze(source_path, RELEASED_AND_TEST_ONLY_SOURCE);
+        let filtered = filter_report_with(
+            parse_lcov("TN:\nSF:released-and-test-only-source.rs\nDA:4,1\nDA:5,1\nDA:6,1\nend_of_record\n"),
+            |_| {
+                Ok(SourceDisposition::Include {
+                    source_file: source_path.to_path_buf(),
+                    line_count: analysis.line_count,
+                    test_only_lines: &analysis.test_only_lines,
+                })
+            },
+        )
+        .expect("checked-in fixture filters");
+        assert_eq!(
+            filtered,
+            "TN:\nSF:released-and-test-only-source.rs\nDA:4,1\nLF:1\nLH:1\nend_of_record\n"
+        );
     }
 
     #[test]

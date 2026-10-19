@@ -24,8 +24,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 const RELEASED_SOURCE: &str = include_str!("fixtures/released-source.rs");
-const RELEASED_AND_TEST_ONLY_SOURCE: &str = include_str!("fixtures/released-and-test-only-source.rs");
-// Both checked-in source fixtures start executable lines after the license header.
+// The checked-in source fixture starts executable lines after the license header.
 const RELEASED_SOURCE_LINE_OFFSET: u32 = 3;
 
 /// Write a workspace at `dir` containing the given members. Each
@@ -99,28 +98,6 @@ fn write_lcov(dir: &Path, files: &[(&str, u32, u32)]) -> String {
     let path = dir.join("lcov.info");
     fs::write(&path, make_coverage_lcov(dir, files)).expect("write lcov.info");
     path.to_string_lossy().into_owned()
-}
-
-fn assert_published_filtered_lcov(path: &Path, workspace: &Path) {
-    let published = fs::read_to_string(path).expect("read filtered LCOV");
-    let report = lcov::Report::from_reader(lcov::Reader::new(published.as_bytes())).expect("published filtered LCOV parses");
-    let actual = report
-        .sections
-        .iter()
-        .map(|(key, section)| {
-            assert_eq!(key.test_name, "");
-            assert!(section.functions.is_empty());
-            assert!(section.branches.is_empty());
-            assert_eq!(section.lines.len(), 1);
-            let (line, value) = section.lines.iter().next().expect("one retained line");
-            (key.source_file.clone(), (line.line, value.count, value.checksum.clone()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let expected = ["alpha", "beta"]
-        .map(|package| (workspace.join(package).join("src/lib.rs"), (4, 1, None)))
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(actual, expected);
 }
 
 /// Construct a `cargo coverage-gate` invocation scoped to `dir`.
@@ -738,12 +715,7 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     let tmp = TempDir::new().expect("tempdir");
     // alpha is deliberately opted out of gating but must still be passed to
     // cargo-llvm-cov because its tests can cover beta.
-    make_workspace_with_source(
-        tmp.path(),
-        &[("alpha", Some("0")), ("beta", Some("100"))],
-        None,
-        RELEASED_AND_TEST_ONLY_SOURCE,
-    );
+    make_workspace(tmp.path(), &[("alpha", Some("0")), ("beta", Some("100"))], None);
 
     let object_dir = tmp.path().join("objects with spaces");
     fs::create_dir_all(&object_dir).expect("create object directory");
@@ -790,10 +762,6 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
             .starts_with("TN:"),
         "successful collection must write the requested stable artifact"
     );
-    for configuration in ["all-features", "no-default"] {
-        assert_published_filtered_lcov(&coverage_dir.join(format!("lcov-{configuration}.info")), tmp.path());
-    }
-
     let log = fs::read_to_string(tool_log).expect("read fake tool log");
     assert!(!log.contains("cargo\tllvm-cov\tclean"), "{log}");
     assert_eq!(log.matches("cargo\tllvm-cov\tnextest\t--no-report").count(), 2, "{log}");
