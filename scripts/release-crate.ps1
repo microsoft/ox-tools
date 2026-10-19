@@ -115,7 +115,7 @@ $script:LinkedReleaseRegex = [regex]'(?:^|:\s*)(Release [a-zA-Z0-9_-]+ \d+\.\d+\
 
 # Changelog-only maintenance commits must not add themselves to the generated
 # release section on every same-version refresh.
-$script:GeneratedReleaseNotesRegex = [regex]'^(?:refresh|finalize|regenerate).*(?:release )?notes$'
+$script:GeneratedReleaseNotesRegex = [regex]'^(?:refresh|finalize|regenerate).*(?:release )?notes(?:\s+\(#\d+\))?$'
 
 # Pattern for semantic version format: major.minor.patch
 $script:SemanticVersionRegex = [regex]'^\d+\.\d+\.\d+$'
