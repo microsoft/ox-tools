@@ -32,11 +32,22 @@ targets. Test, example, bench, build-script, and other non-release target
 sources are removed. Within a released source file, only items whose `cfg`
 semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
 removed; feature-gated `test-util` APIs remain measured when they can compile
-in a non-test build.
+in a non-test build. Cargo target `required-features` are treated as enabled
+at the target root, so code that requires one of those features to be absent
+is not part of that target’s released surface.
 Numeric failures show exact covered/coverable counts and uncovered ranges;
 `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 and `NO DATA` explains that no records were attributed. Location lists are
 bounded, with an exact count of omitted locations.
+
+### 0.7 migration
+
+Version 0.7 intentionally changes [`evaluate`][__link1], [`evaluate_many`][__link2], and
+[`evaluate_many_for_target`][__link3] to evaluate the released Cargo surface rather
+than every attributed LCOV line. Existing callers that deliberately include
+tests or other non-release targets should migrate to the corresponding
+`evaluate_unfiltered*` function. The released-surface APIs also treat each
+target’s Cargo `required-features` as enabled when classifying its source.
 
 ### Configuration
 
@@ -231,15 +242,15 @@ let code = report.verdict().as_exit_code();
 
 ### Public API
 
-[`filter_lcov`][__link1] and [`filter_lcov_many`][__link2] produce released-surface LCOV
-artifacts without evaluating policy. [`evaluate`][__link3], [`evaluate_many`][__link4], and
-[`evaluate_many_for_target`][__link5] apply that filtering before evaluating policy.
+[`filter_lcov`][__link4] and [`filter_lcov_many`][__link5] produce released-surface LCOV
+artifacts without evaluating policy. [`evaluate`][__link6], [`evaluate_many`][__link7], and
+[`evaluate_many_for_target`][__link8] apply that filtering before evaluating policy.
 Callers that intentionally need unfiltered attribution use the explicitly
 named `evaluate_unfiltered*` functions.
-Evaluation returns an [`EvaluatedReport`][__link6], which renders as plain
-text via [`EvaluatedReport::render_text`][__link7] or GitHub-flavored Markdown via
-[`EvaluatedReport::render_markdown`][__link8] and reduces to a [`Verdict`][__link9] via
-[`EvaluatedReport::verdict`][__link10]. The accompanying binary loads tracefiles from
+Evaluation returns an [`EvaluatedReport`][__link9], which renders as plain
+text via [`EvaluatedReport::render_text`][__link10] or GitHub-flavored Markdown via
+[`EvaluatedReport::render_markdown`][__link11] and reduces to a [`Verdict`][__link12] via
+[`EvaluatedReport::verdict`][__link13]. The accompanying binary loads tracefiles from
 disk or collects it, then orchestrates rendering plus the appropriate exit
 code.
 
@@ -249,15 +260,18 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbjhKDRVsI_GsbwKJr3jm-DEUbqaNA07Eb2ecbn7mA27Tk66xhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbfobCM6T-IC8b4-1XR7QPFM4bxuebJw4aBtgbMY913-_N1R5hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.filter_lcov.html
- [__link10]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
- [__link2]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.filter_lcov_many.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link7]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link8]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link9]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/enum.Verdict.html
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate.html
+ [__link10]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link11]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link12]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/enum.Verdict.html
+ [__link13]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.filter_lcov.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.filter_lcov_many.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate.html
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link9]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/struct.EvaluatedReport.html

@@ -31,6 +31,15 @@
 //! and `NO DATA` explains that no records were attributed. Location lists are
 //! bounded, with an exact count of omitted locations.
 //!
+//! ## 0.7 migration
+//!
+//! Version 0.7 intentionally changes [`evaluate`], [`evaluate_many`], and
+//! [`evaluate_many_for_target`] to evaluate the released Cargo surface rather
+//! than every attributed LCOV line. Existing callers that deliberately include
+//! tests or other non-release targets should migrate to the corresponding
+//! `evaluate_unfiltered*` function. The released-surface APIs also treat each
+//! target's Cargo `required-features` as enabled when classifying its source.
+//!
 //! ## Configuration
 //!
 //! ### Numeric thresholds
