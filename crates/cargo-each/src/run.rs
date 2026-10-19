@@ -48,11 +48,18 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
         return run_json(args);
     }
+    run_cargo_with(args, Workspace::load, execute)
+}
 
+fn run_cargo_with(
+    args: &EachArgs,
+    load_workspace: impl FnOnce(Option<&std::path::Path>) -> Result<Workspace, crate::error::EachError>,
+    execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
+) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
 
     let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
-    let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
+    let workspace = load_workspace(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
     apply_filters(&mut members, args)?;
@@ -112,7 +119,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    execute(&plan, args.keep_going, args.jobs, args.timeout)
+    execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
 }
 
 fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
@@ -986,7 +993,7 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::{Cell, RefCell};
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, HashSet, VecDeque};
     use std::io::{Read as _, Seek as _};
     use std::num::NonZeroUsize;
     #[cfg(unix)]
@@ -1000,7 +1007,9 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::{env, fs, io, thread};
 
+    use cargo_metadata::TargetKind;
     use clap::Parser as _;
+    use serde_json::Value;
     use tempfile::NamedTempFile;
 
     use super::{
@@ -1011,11 +1020,38 @@ mod tests {
         add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
         effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
-        parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
-        validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
+        parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_cargo_with, run_streamed,
+        run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with,
+        terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker,
+        wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
+    use crate::workspace::{Member, MemberTarget, Workspace};
+
+    fn target_requirement_workspace() -> Workspace {
+        let member = |name: &str, features: &[&str], targets: Vec<MemberTarget>| Member {
+            name: name.to_owned(),
+            version: "0.1.0".to_owned(),
+            rust_version: Some("1.70.0".parse().expect("valid Rust version")),
+            manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
+            publishable: true,
+            doctest: true,
+            features: features.iter().map(|feature| (*feature).to_owned()).collect(),
+            targets,
+            dependencies: BTreeSet::new(),
+            metadata: Value::Null,
+        };
+        let alpha_target = MemberTarget {
+            name: "loom-test".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: std::iter::once("loom".to_owned()).collect(),
+        };
+        Workspace {
+            members: vec![member("alpha", &["loom"], vec![alpha_target]), member("beta", &[], Vec::new())],
+            default_member_names: HashSet::new(),
+            root_manifest_path: PathBuf::from("/ws/Cargo.toml"),
+        }
+    }
 
     #[test]
     fn json_mode_names_each_conflicting_option_and_preserves_precedence() {
@@ -1059,6 +1095,84 @@ mod tests {
             let error = validate_json_mode(&args).expect_err("conflict priority is deterministic");
             assert!(error.to_string().contains("with `--package`"), "{error}");
         }
+    }
+
+    #[test]
+    fn target_requirement_preflight_prevents_execution() {
+        let CargoCli::Each(args) = CargoCli::try_parse_from([
+            "cargo",
+            "each",
+            "-p",
+            "alpha",
+            "-p",
+            "beta",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "required-feature:loom",
+            "--require-target-per-package",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .expect("target requirement arguments are valid");
+        let executed = Cell::new(false);
+        let error = run_cargo_with(
+            &args,
+            |manifest| {
+                assert_eq!(manifest, None);
+                Ok(target_requirement_workspace())
+            },
+            |_plan, _keep_going, _jobs, _timeout| {
+                executed.set(true);
+                Ok(ExitCode::SUCCESS)
+            },
+        )
+        .expect_err("beta has no matching target");
+        assert!(!executed.get(), "plan-wide preflight must finish before execution");
+        let rendered = error.to_string();
+        let normalized = rendered
+            .rsplit_once(" (at ")
+            .map(|(message, _location)| message)
+            .expect("AppError context always includes its captured source location");
+        assert_eq!(
+            normalized,
+            "`--require-target-per-package` found selected packages without a matching target: beta@0.1.0\n> failed to build command plan"
+        );
+    }
+
+    #[test]
+    fn package_filter_narrows_target_requirement_before_execution() {
+        let CargoCli::Each(args) = CargoCli::try_parse_from([
+            "cargo",
+            "each",
+            "--workspace",
+            "--filter",
+            "feature:loom",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "required-feature:loom",
+            "--require-target-per-package",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .expect("filtered target requirement arguments are valid");
+        let executed = Cell::new(false);
+        let result = run_cargo_with(
+            &args,
+            |_manifest| Ok(target_requirement_workspace()),
+            |plan, _keep_going, _jobs, _timeout| {
+                executed.set(true);
+                assert_eq!(plan.invocations.len(), 1);
+                assert_eq!(plan.invocations[0].argv, ["echo", "alpha::loom-test"]);
+                Ok(ExitCode::SUCCESS)
+            },
+        )
+        .expect("package filtering removes beta from requirement scope");
+        assert_eq!(result, ExitCode::SUCCESS);
+        assert!(executed.get(), "the validated plan is passed to the injected executor");
     }
 
     #[test]

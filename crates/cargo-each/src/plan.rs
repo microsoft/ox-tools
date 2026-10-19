@@ -770,7 +770,40 @@ mod tests {
             },
         )
         .expect_err("both selected members lack matching targets");
-        assert!(error.to_string().contains("beta@1.2.3, alpha@1.2.3"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "`--require-target-per-package` found selected packages without a matching target: beta@1.2.3, alpha@1.2.3"
+        );
+    }
+
+    #[test]
+    fn target_filter_can_make_an_otherwise_matching_member_fail_the_requirement() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "alpha-test".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let kinds = std::iter::once(TargetKind::Test).collect();
+        let filters = [TargetPredicate::parse("name:no-such-target").expect("target filter")];
+        let error = Plan::is_empty(
+            &[&a],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_filters: &filters,
+                require_target_per_package: true,
+                workspace_rust_version: None,
+            },
+        )
+        .expect_err("target filtering removes the otherwise matching target");
+        assert_eq!(
+            error.to_string(),
+            "`--require-target-per-package` found selected packages without a matching target: alpha@1.2.3"
+        );
     }
 
     #[test]
