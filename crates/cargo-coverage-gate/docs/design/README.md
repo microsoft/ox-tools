@@ -661,18 +661,20 @@ remains the identity used for workspace ownership. Visits are deduplicated by
 canonical identity, source role, module-resolution location, and composed
 `cfg` guard so distinct released contexts for the same file are preserved.
 
-For each retained `SF:` path, the tool canonicalizes the source and determines
-which workspace member owns it by **longest-prefix match** against canonical
-workspace-member directories. It then writes the path relative to the owning
-member's directory as reported by `cargo metadata`, so the filtered LCOV and
-policy attribution use the same path namespace. A file under
-`workspace_root/crates/alpha/src/lib.rs` belongs to the member whose
-manifest is `workspace_root/crates/alpha/Cargo.toml`.
+For each retained `SF:` path, the tool canonicalizes the source. Sources under
+a workspace member use **longest-prefix match** against canonical member
+directories, so a nested member wins over an enclosing member. A released Cargo
+target or module may also live outside its package directory (for example,
+`[lib] path = "../shared.rs"`); that source remains owned by the package whose
+target graph reached it and is written relative to that package's reported
+manifest directory. The resulting `..` path still resolves to the original
+source while preserving package attribution for evaluation and uploads.
 
-During Cargo-target/module graph construction, every released source is
-validated against workspace-member directories even if no tracefile mentions
-it. Released files outside every member are rejected because the package policy
-they should affect cannot be determined safely. Separately, upstream
+One canonical released source cannot be attributed through different package
+path namespaces; that ambiguity fails explicitly. A source on a different
+filesystem root from its owning package also fails because no relative LCOV
+path can preserve both its real location and package ownership. Separately,
+upstream
 cargo-llvm-cov filename exclusions should keep dependency/sysroot sources out
 of the report; if one leaks through without a supported graph edge, the gate
 fails loudly with the offending path.

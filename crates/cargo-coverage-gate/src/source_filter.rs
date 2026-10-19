@@ -13,7 +13,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use cargo_metadata::{Edition as CargoEdition, Metadata, TargetKind};
 use ra_ap_syntax::ast::{self, HasAttrs, HasName, LiteralKind};
@@ -21,11 +21,11 @@ use ra_ap_syntax::{AstNode, AstToken, Edition, SourceFile, SyntaxKind, SyntaxNod
 
 use crate::CoverageGateError;
 use crate::error::{
-    AmbiguousModuleSourceError, ConditionalModulePathError, ConflictingSourceEditionError, CoverageLineOutOfRangeError,
-    InspectCoverageSourceError, InvalidModulePathAttributeError, InvalidTestAttributePathError, InvalidTestAttributesValueError,
-    NormalizedSourceChecksumError, PackageScopedTestAttributesError, ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError,
-    ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError, UnsupportedSourceEditionError,
-    UnsupportedSourceInclusionError,
+    AmbiguousModuleSourceError, ConditionalModulePathError, ConflictingReleasedSourceAttributionError, ConflictingSourceEditionError,
+    CoverageLineOutOfRangeError, InspectCoverageSourceError, InvalidModulePathAttributeError, InvalidTestAttributePathError,
+    InvalidTestAttributesValueError, NormalizedSourceChecksumError, PackageScopedTestAttributesError, ParseCoverageSourceError,
+    ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError,
+    UnsupportedSourceEditionError, UnsupportedSourceInclusionError,
 };
 
 const LINE_RELEASED: u8 = 1;
@@ -45,6 +45,12 @@ enum SourceRole {
     IncludedSource,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MemberDirectory {
+    canonical: PathBuf,
+    reported: PathBuf,
+}
+
 /// One traversal of a canonical source file through a particular declaration
 /// path and cfg guard.
 ///
@@ -58,6 +64,7 @@ struct PendingSource {
     surface: Surface,
     role: SourceRole,
     guard: CfgFormula,
+    owning_member: MemberDirectory,
 }
 
 /// A discovered child source together with the guard under which it exists.
@@ -98,7 +105,7 @@ struct IndexedSource {
     edition: Edition,
     released_path: Option<PathBuf>,
     test_only_lines: BTreeSet<u32>,
-    visit_contexts: BTreeSet<(Surface, SourceRole, PathBuf, CfgFormula)>,
+    visit_contexts: BTreeSet<(Surface, SourceRole, PathBuf, PathBuf, CfgFormula)>,
 }
 
 impl IndexedSource {
@@ -107,20 +114,33 @@ impl IndexedSource {
             pending.surface,
             pending.role,
             pending.resolution_path.clone(),
+            pending.owning_member.canonical.clone(),
             pending.guard.clone(),
         ))
     }
 
-    fn add_visit(&mut self, pending: &PendingSource, released_path: Option<PathBuf>) {
+    fn add_visit(&mut self, pending: &PendingSource, released_path: Option<PathBuf>) -> Result<(), CoverageGateError> {
+        if let (Some(first), Some(second)) = (&self.released_path, &released_path)
+            && first != second
+        {
+            return Err(ConflictingReleasedSourceAttributionError::new(
+                diagnostic_path(&pending.canonical_path),
+                diagnostic_path(first),
+                diagnostic_path(second),
+            )
+            .into());
+        }
         let _ = self.visit_contexts.insert((
             pending.surface,
             pending.role,
             pending.resolution_path.clone(),
+            pending.owning_member.canonical.clone(),
             pending.guard.clone(),
         ));
         if let Some(path) = released_path {
             let _ = self.released_path.get_or_insert(path);
         }
+        Ok(())
     }
 
     fn merge_released_test_only_lines(&mut self, current: BTreeSet<u32>) {
@@ -228,44 +248,7 @@ impl SourceIndex {
     ) -> Result<Self, CoverageGateError> {
         let test_attributes = configured_test_attributes(metadata)?;
         let workspace_root = resolve_source(metadata.workspace_root.as_std_path())?;
-        let mut reported_by_canonical = BTreeMap::new();
-        for package in metadata.workspace_packages() {
-            let directory = package
-                .manifest_path
-                .parent()
-                .expect("cargo metadata always reports a manifest path with a parent directory");
-            let canonical = resolve_source(directory.as_std_path())?;
-            let _ = reported_by_canonical
-                .entry(canonical)
-                .or_insert_with(|| directory.as_std_path().to_path_buf());
-        }
-        let member_dirs = MemberDirectories { reported_by_canonical };
-
-        let mut queue = VecDeque::new();
-        for package in metadata.workspace_packages() {
-            for target in &package.targets {
-                let edition = syntax_edition(target.edition, target.src_path.as_std_path())?;
-                let canonical_path = resolve_source(target.src_path.as_std_path())?;
-                let resolution_path = resolve_module_resolution_path(target.src_path.as_std_path())?;
-                queue.push_back(PendingSource {
-                    canonical_path,
-                    resolution_path,
-                    edition,
-                    surface: if target_is_released(&target.kind) {
-                        Surface::Released
-                    } else {
-                        Surface::NonReleased
-                    },
-                    role: SourceRole::CrateRoot,
-                    guard: CfgFormula::all(
-                        target
-                            .required_features
-                            .iter()
-                            .map(|feature| CfgFormula::Atom(format!("feature={feature}"))),
-                    ),
-                });
-            }
-        }
+        let (member_dirs, mut queue) = source_roots(metadata, resolve_source)?;
 
         let mut files: BTreeMap<PathBuf, IndexedSource> = BTreeMap::new();
         while let Some(pending) = queue.pop_front() {
@@ -273,7 +256,14 @@ impl SourceIndex {
                 let Some(declarations) = Self::revisit_indexed_source(indexed, &pending, &member_dirs, &test_attributes)? else {
                     continue;
                 };
-                enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
+                enqueue_declarations_with_source_resolver(
+                    &mut queue,
+                    declarations,
+                    pending.edition,
+                    pending.surface,
+                    &pending.owning_member,
+                    resolve_source,
+                )?;
                 continue;
             }
 
@@ -305,9 +295,16 @@ impl SourceIndex {
                 test_only_lines,
                 visit_contexts: BTreeSet::new(),
             };
-            indexed.add_visit(&pending, released_path);
+            indexed.add_visit(&pending, released_path)?;
             let _ = files.insert(pending.canonical_path.clone(), indexed);
-            enqueue_declarations_with_source_resolver(&mut queue, declarations, pending.edition, pending.surface, resolve_source)?;
+            enqueue_declarations_with_source_resolver(
+                &mut queue,
+                declarations,
+                pending.edition,
+                pending.surface,
+                &pending.owning_member,
+                resolve_source,
+            )?;
         }
 
         Ok(Self { workspace_root, files })
@@ -338,7 +335,7 @@ impl SourceIndex {
             let current = test_only_lines_for_guard(&indexed.analysis, &pending.guard, test_attributes);
             indexed.merge_released_test_only_lines(current);
         }
-        indexed.add_visit(pending, released_path);
+        indexed.add_visit(pending, released_path)?;
         if pending.role != SourceRole::IncludedSource {
             reject_unsupported_released_includes(
                 &pending.resolution_path,
@@ -373,6 +370,58 @@ impl SourceIndex {
     }
 }
 
+fn source_roots(
+    metadata: &Metadata,
+    resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
+) -> Result<(MemberDirectories, VecDeque<PendingSource>), CoverageGateError> {
+    let mut reported_by_canonical = BTreeMap::new();
+    let workspace_packages = metadata.workspace_packages();
+    let mut owning_members = Vec::with_capacity(workspace_packages.len());
+    for package in &workspace_packages {
+        let directory = package
+            .manifest_path
+            .parent()
+            .expect("cargo metadata always reports a manifest path with a parent directory");
+        let canonical = resolve_source(directory.as_std_path())?;
+        let _ = reported_by_canonical
+            .entry(canonical.clone())
+            .or_insert_with(|| directory.as_std_path().to_path_buf());
+        owning_members.push(MemberDirectory {
+            canonical,
+            reported: directory.as_std_path().to_path_buf(),
+        });
+    }
+    let member_dirs = MemberDirectories { reported_by_canonical };
+
+    let mut queue = VecDeque::new();
+    for (package, owning_member) in workspace_packages.into_iter().zip(owning_members) {
+        for target in &package.targets {
+            let edition = syntax_edition(target.edition, target.src_path.as_std_path())?;
+            let canonical_path = resolve_source(target.src_path.as_std_path())?;
+            let resolution_path = resolve_module_resolution_path(target.src_path.as_std_path())?;
+            queue.push_back(PendingSource {
+                canonical_path,
+                resolution_path,
+                edition,
+                surface: if target_is_released(&target.kind) {
+                    Surface::Released
+                } else {
+                    Surface::NonReleased
+                },
+                role: SourceRole::CrateRoot,
+                guard: CfgFormula::all(
+                    target
+                        .required_features
+                        .iter()
+                        .map(|feature| CfgFormula::Atom(format!("feature={feature}"))),
+                ),
+                owning_member: owning_member.clone(),
+            });
+        }
+    }
+    Ok((member_dirs, queue))
+}
+
 fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathBuf> {
     path.ancestors().find_map(|ancestor| {
         let reported = member_dirs.reported_by_canonical.get(ancestor)?;
@@ -381,10 +430,40 @@ fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathB
     })
 }
 
+fn relative_path(from: &Path, to: &Path) -> Option<PathBuf> {
+    let from = from.components().collect::<Vec<_>>();
+    let to = to.components().collect::<Vec<_>>();
+    let common = from.iter().zip(&to).take_while(|(left, right)| left == right).count();
+    if common == 0
+        || matches!(from.first(), Some(Component::Prefix(_) | Component::RootDir))
+            != matches!(to.first(), Some(Component::Prefix(_) | Component::RootDir))
+    {
+        return None;
+    }
+
+    let mut relative = PathBuf::new();
+    for component in &from[common..] {
+        match component {
+            Component::Normal(_) => relative.push(".."),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return None,
+        }
+    }
+    for component in &to[common..] {
+        relative.push(component.as_os_str());
+    }
+    Some(relative)
+}
+
+fn owning_member_attributed_path(member: &MemberDirectory, path: &Path) -> Option<PathBuf> {
+    relative_path(&member.canonical, path).map(|relative| member.reported.join(relative))
+}
+
 fn released_source_attributed_path(member_dirs: &MemberDirectories, pending: &PendingSource) -> Result<Option<PathBuf>, CoverageGateError> {
     match pending.surface {
         Surface::NonReleased => Ok(None),
         Surface::Released => attributed_path(member_dirs, &pending.canonical_path)
+            .or_else(|| owning_member_attributed_path(&pending.owning_member, &pending.canonical_path))
             .map(Some)
             .ok_or_else(|| UnattributableReleasedSourceError::new(diagnostic_path(&pending.canonical_path)).into()),
     }
@@ -395,6 +474,7 @@ fn enqueue_declarations_with_source_resolver(
     declarations: Vec<ModuleDeclaration>,
     edition: Edition,
     parent_surface: Surface,
+    owning_member: &MemberDirectory,
     resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
 ) -> Result<(), CoverageGateError> {
     for declaration in declarations {
@@ -411,6 +491,7 @@ fn enqueue_declarations_with_source_resolver(
             },
             role: declaration.role,
             guard: declaration.guard,
+            owning_member: owning_member.clone(),
         });
     }
     Ok(())
@@ -1538,6 +1619,10 @@ mod tests {
             surface,
             role,
             guard,
+            owning_member: MemberDirectory {
+                canonical: PathBuf::from("/workspace"),
+                reported: PathBuf::from("/workspace"),
+            },
         }
     }
 
@@ -1696,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn released_sources_require_workspace_member_attribution() {
+    fn released_sources_use_member_or_owning_target_attribution() {
         let member_dirs = MemberDirectories {
             reported_by_canonical: BTreeMap::from([(PathBuf::from("/workspace/member"), PathBuf::from("/workspace/member"))]),
         };
@@ -1707,6 +1792,10 @@ mod tests {
             surface: Surface::Released,
             role: SourceRole::CrateRoot,
             guard: CfgFormula::Value(true),
+            owning_member: MemberDirectory {
+                canonical: PathBuf::from("/workspace/member"),
+                reported: PathBuf::from("/workspace/member"),
+            },
         };
         assert_eq!(
             released_source_attributed_path(&member_dirs, &inside).expect("member source is attributable"),
@@ -1720,11 +1809,15 @@ mod tests {
             surface: Surface::Released,
             role: SourceRole::PathModule,
             guard: CfgFormula::Value(true),
+            owning_member: MemberDirectory {
+                canonical: PathBuf::from("/workspace/member"),
+                reported: PathBuf::from("/workspace/member"),
+            },
         };
-        let error = released_source_attributed_path(&member_dirs, &outside)
-            .expect_err("released source outside every member must fail")
-            .to_string();
-        assert!(error.contains("outside every workspace member"), "{error}");
+        assert_eq!(
+            released_source_attributed_path(&member_dirs, &outside).expect("external target source is attributable"),
+            Some(PathBuf::from("/workspace/member/../shared.rs"))
+        );
 
         let non_release = PendingSource {
             surface: Surface::NonReleased,
@@ -1734,6 +1827,11 @@ mod tests {
             released_source_attributed_path(&member_dirs, &non_release).expect("non-release sources need no package attribution"),
             None
         );
+        assert_eq!(
+            relative_path(Path::new("/workspace/member"), Path::new("/workspace/shared.rs")),
+            Some(PathBuf::from("../shared.rs"))
+        );
+        assert_eq!(relative_path(Path::new(r"C:\workspace\member"), Path::new(r"D:\shared.rs")), None);
     }
 
     #[test]
@@ -1764,23 +1862,58 @@ mod tests {
             let first = pending_source(surface, role, first_context, CfgFormula::Value(true));
             assert!(!indexed.has_visit(&first));
             let first_path = (surface == Surface::Released).then(|| PathBuf::from("first.rs"));
-            indexed.add_visit(&first, first_path.clone());
+            indexed.add_visit(&first, first_path.clone()).expect("first visit is valid");
             assert!(indexed.has_visit(&first));
             let second = pending_source(surface, role, Path::new("/workspace/second.rs"), CfgFormula::Value(true));
             assert!(!indexed.has_visit(&second));
             assert_eq!(indexed.released_path, first_path);
-            let second_path = (surface == Surface::Released).then(|| PathBuf::from("second.rs"));
-            indexed.add_visit(&second, second_path);
+            let second_path = first_path.clone();
+            indexed.add_visit(&second, second_path).expect("second visit is valid");
             assert!(indexed.has_visit(&second));
             let guarded = pending_source(surface, role, first_context, CfgFormula::Value(false));
             assert!(!indexed.has_visit(&guarded));
-            indexed.add_visit(&guarded, None);
+            indexed.add_visit(&guarded, None).expect("guarded visit is valid");
             assert!(indexed.has_visit(&guarded));
             assert_eq!(
                 indexed.released_path,
                 (surface == Surface::Released).then(|| PathBuf::from("first.rs"))
             );
         }
+    }
+
+    #[test]
+    fn conflicting_released_package_attribution_fails() {
+        let mut indexed = IndexedSource {
+            analysis: analyze(Path::new("fixture.rs"), "pub fn fixture() {}\n"),
+            edition: Edition::Edition2024,
+            released_path: None,
+            test_only_lines: BTreeSet::new(),
+            visit_contexts: BTreeSet::new(),
+        };
+        let mut first = pending_source(
+            Surface::Released,
+            SourceRole::CrateRoot,
+            Path::new("/workspace/shared.rs"),
+            CfgFormula::Value(true),
+        );
+        first.owning_member = MemberDirectory {
+            canonical: PathBuf::from("/workspace/alpha"),
+            reported: PathBuf::from("/workspace/alpha"),
+        };
+        indexed
+            .add_visit(&first, Some(PathBuf::from("/workspace/alpha/../shared.rs")))
+            .expect("first attribution is valid");
+
+        let mut second = first.clone();
+        second.owning_member = MemberDirectory {
+            canonical: PathBuf::from("/workspace/beta"),
+            reported: PathBuf::from("/workspace/beta"),
+        };
+        let error = indexed
+            .add_visit(&second, Some(PathBuf::from("/workspace/beta/../shared.rs")))
+            .expect_err("one canonical source cannot be attributed to two packages")
+            .to_string();
+        assert!(error.contains("shared by workspace packages"), "{error}");
     }
 
     #[test]
@@ -1800,12 +1933,17 @@ mod tests {
                 guard: CfgFormula::Value(false),
             },
         ];
+        let owning_member = MemberDirectory {
+            canonical: root.join("member"),
+            reported: root.join("member"),
+        };
         let mut queue = VecDeque::new();
         enqueue_declarations_with_source_resolver(
             &mut queue,
             declarations.clone(),
             Edition::Edition2024,
             Surface::Released,
+            &owning_member,
             &mut resolve_source_path,
         )
         .expect("released declarations enqueue");
@@ -1820,6 +1958,7 @@ mod tests {
             declarations,
             Edition::Edition2024,
             Surface::NonReleased,
+            &owning_member,
             &mut resolve_source_path,
         )
         .expect("non-release declarations enqueue");
@@ -2160,7 +2299,7 @@ mod tests {
             indexed
                 .visit_contexts
                 .iter()
-                .filter(|(surface, role, _, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
+                .filter(|(surface, role, _, _, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
                 .count(),
             2
         );
@@ -2176,6 +2315,35 @@ mod tests {
         let report = parse_lcov(&filtered[0]);
         let (_, section) = report.sections.iter().next().expect("released lines remain");
         assert_eq!(section.lines.keys().map(|line| line.line).collect::<Vec<_>>(), [4, 5]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn released_target_roots_outside_the_package_remain_attributable() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("external-lib.rs").to_string_lossy().into_owned().into();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 100}});
+
+        let index = SourceIndex::from_metadata(&metadata).expect("external target root is attributable");
+        let external = fs::canonicalize(root.join("external-lib.rs")).expect("canonical external target");
+        let indexed = index.files.get(&external).expect("external target indexed");
+        let attributed = root.join("member").join("..").join("external-lib.rs");
+        assert_eq!(indexed.released_path.as_deref(), Some(attributed.as_path()));
+
+        let filtered = filter_reports_with_metadata(vec![parse_lcov("TN:\nSF:external-lib.rs\nDA:4,1\nend_of_record\n")], &metadata)
+            .expect("external target report filters");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.keys().next().expect("one section").source_file, attributed);
+
+        let evaluated = crate::evaluate_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:external-lib.rs\nDA:4,1\nend_of_record\n")],
+            &metadata,
+            &[],
+            None,
+        )
+        .expect("external target report evaluates");
+        assert_eq!(evaluated.verdict(), crate::Verdict::Pass);
     }
 
     #[test]
@@ -2219,13 +2387,13 @@ mod tests {
             indexed
                 .visit_contexts
                 .iter()
-                .any(|(surface, role, _, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
+                .any(|(surface, role, _, _, _)| *surface == Surface::Released && *role == SourceRole::PathModule)
         );
         assert!(
             indexed
                 .visit_contexts
                 .iter()
-                .any(|(surface, role, _, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
+                .any(|(surface, role, _, _, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
         );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
         let error = index
@@ -2310,6 +2478,7 @@ mod tests {
             Surface::Released,
             SourceRole::CrateRoot,
             resolution_path,
+            fs::canonicalize(root.join("member")).expect("canonical member directory"),
             CfgFormula::Value(true),
         )));
     }
@@ -2411,7 +2580,7 @@ mod tests {
             indexed
                 .visit_contexts
                 .iter()
-                .filter(|(_, role, _, _)| *role == SourceRole::IncludedSource)
+                .filter(|(_, role, _, _, _)| *role == SourceRole::IncludedSource)
                 .count(),
             3
         );
@@ -2432,7 +2601,7 @@ mod tests {
             indexed_expression
                 .visit_contexts
                 .iter()
-                .filter(|(_, role, _, _)| *role == SourceRole::IncludedSource)
+                .filter(|(_, role, _, _, _)| *role == SourceRole::IncludedSource)
                 .count(),
             1
         );
@@ -2503,7 +2672,7 @@ mod tests {
             index.files[&lib]
                 .visit_contexts
                 .iter()
-                .filter(|(surface, role, _, _)| *surface == Surface::Released && *role == SourceRole::CrateRoot)
+                .filter(|(surface, role, _, _, _)| *surface == Surface::Released && *role == SourceRole::CrateRoot)
                 .count(),
             1
         );

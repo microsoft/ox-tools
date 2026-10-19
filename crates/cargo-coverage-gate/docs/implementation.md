@@ -148,8 +148,10 @@ the workspace discovered from the invocation directory.
    reachability wins when a test target also shares the file. When multiple
    released guards reach the same file, a line is test-only only if every
    released visit proves it unavailable with `test = false`.
-   Every released source is validated against workspace-member directories
-   during this walk, even when no LCOV section mentions it.
+   Sources beneath workspace members use longest-prefix ownership. A target or
+   module outside every member directory retains the package that introduced
+   its graph edge and is emitted through a package-relative `..` path. Conflicting
+   package ownership or cross-filesystem paths fail explicitly.
 3. rust-analyzer syntax identifies test-only item ranges. Compiler-owned
    `test`/`bench` attributes are intrinsic; qualified framework attributes are
    matched against the exact workspace `test-attributes` policy. A `cfg` is test-only

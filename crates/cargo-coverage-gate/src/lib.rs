@@ -23,7 +23,9 @@
 //! sources are removed. Within a released source file, only items whose `cfg`
 //! semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
 //! removed; feature-gated `test-util` APIs remain measured when they can compile
-//! in a non-test build.
+//! in a non-test build. Cargo target `required-features` are treated as enabled
+//! at the target root, so code that requires one of those features to be absent
+//! is not part of that target's released surface.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are

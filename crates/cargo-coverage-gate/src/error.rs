@@ -63,6 +63,7 @@ use serde_json::Value;
     PackageScopedTestAttributesError,
     UnownedCoverageSourceError,
     UnattributableReleasedSourceError,
+    ConflictingReleasedSourceAttributionError,
     NormalizedSourceChecksumError,
     MergedSourceChecksumError,
     CoverageLineOutOfRangeError,
@@ -382,15 +383,28 @@ pub(crate) struct UnownedCoverageSourceError {
     pub path: String,
 }
 
-/// A released target reached a source file outside every workspace member
-/// directory, which the package-attribution layer cannot classify safely.
+/// A released target reached a source that cannot be expressed relative to
+/// its owning package directory.
 #[ohno::error]
 #[display(
-    "released Rust source `{path}` is outside every workspace member directory; \
-     move it under its owning package or use a package-local module path"
+    "released Rust source `{path}` cannot be attributed to its owning workspace package; \
+     keep the package and source on the same filesystem root"
 )]
 pub(crate) struct UnattributableReleasedSourceError {
     pub path: String,
+}
+
+/// Two released workspace packages reached the same canonical source but
+/// would attribute its counters to different package path namespaces.
+#[ohno::error]
+#[display(
+    "released Rust source `{path}` is shared by workspace packages as both `{first}` and `{second}`; \
+     give each package its own source file or use the unfiltered API"
+)]
+pub(crate) struct ConflictingReleasedSourceAttributionError {
+    pub path: String,
+    pub first: String,
+    pub second: String,
 }
 
 /// Two LCOV sections became the same key after source-path normalization but
