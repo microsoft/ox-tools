@@ -356,6 +356,45 @@ mod tests {
         }
     }
 
+    async fn wait_for_partial_write(destination: &Path, prefix: &[u8]) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let file = fs::read_dir(destination)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.is_file())
+                    .expect("the downloader creates its attempt file before polling the body");
+                if tokio::fs::read(file).await.unwrap() == prefix {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .into_app_err("timed out waiting for the expected partial archive write")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_write_observation_is_bounded_for_missing_or_incorrect_bytes() {
+        for contents in [b"".as_slice(), b"wrong prefix".as_slice()] {
+            let destination = tempfile::tempdir().unwrap();
+            fs::write(destination.path().join("attempt"), contents).unwrap();
+            let observation = wait_for_partial_write(destination.path(), b"partial archive data");
+            let mut observation = std::pin::pin!(observation);
+            assert!(futures_util::poll!(&mut observation).is_pending());
+
+            tokio::time::advance(Duration::from_secs(10)).await;
+            let error = observation.await.expect_err("absent or incorrect bytes must not wait indefinitely");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("timed out waiting for the expected partial archive write"),
+                "{error}"
+            );
+        }
+    }
+
     impl DbFetcher for ScriptedArchiveFetcher {
         async fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
             const BODY_FAILED: usize = 1;
@@ -385,17 +424,9 @@ mod tests {
                     futures_util::stream::once(async move {
                         // The stream is polled again only after write_all. Wait for Tokio's
                         // buffered filesystem write to reach disk before failing or stalling.
-                        loop {
-                            let file = fs::read_dir(&destination)
-                                .unwrap()
-                                .map(|entry| entry.unwrap().path())
-                                .find(|path| path.is_file())
-                                .expect("the downloader creates its attempt file before polling the body");
-                            if tokio::fs::read(file).await.unwrap() == prefix.as_slice() {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
-                        }
+                        wait_for_partial_write(&destination, prefix)
+                            .await
+                            .expect("each attempt must write the expected prefix before the scripted body fails or stalls");
                         written.fetch_add(1, Ordering::SeqCst);
                         if stall {
                             event.store(BODY_STALLED, Ordering::SeqCst);
