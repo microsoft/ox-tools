@@ -816,6 +816,10 @@ yanked = \"deny\"
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain the exhaustive TOML adoption matrix; focused adoption tests preserve Miri coverage"
+    )]
     #[test]
     fn review_ordinary_toml_adoption_preserves_residue_and_generated_marker_data() {
         for newline in ["\n", "\r\n"] {

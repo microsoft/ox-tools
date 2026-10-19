@@ -1395,8 +1395,9 @@ mod tests {
     #[test]
     fn update_returns_a_late_manifest_read_error_before_publishing_any_changes() {
         let root = Path::new("workspace");
+        let catalog = empty_catalog();
         let error = run_update_with(
-            &Catalog::anvil(),
+            &catalog,
             &local_only(),
             root,
             |start| {
@@ -1417,6 +1418,12 @@ mod tests {
         assert!(error.to_string().contains("injected late manifest read failure"), "{error}");
     }
 
+    /// Minimal identity for tests that exercise catalog mechanics rather than
+    /// the built-in catalog's full embedded artifact set.
+    fn test_cli() -> CliMeta {
+        CliMeta::new("anvil")
+    }
+
     fn array_catalog(ordinary: Option<RegionSpec>, array_first: bool) -> Catalog {
         let array = crate::catalog::TomlArrayRegionSpec {
             region: RegionSpec {
@@ -1427,7 +1434,7 @@ mod tests {
             },
             path: vec!["plugins".to_owned(), "default".to_owned()],
         };
-        let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+        let mut builder = Catalog::builder(test_cli());
         if array_first {
             builder = builder.with_toml_array_region(array.clone());
         }
@@ -1525,7 +1532,7 @@ mod tests {
 
     #[test]
     fn toml_array_preflight_leaves_live_ordinary_hosts_alone() {
-        let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+        let catalog = Catalog::builder(test_cli())
             .with_artifact(Artifact::region(RegionSpec {
                 host: HostSelector::Path("config.toml".to_owned()),
                 id: RegionId::new("settings"),
@@ -1560,7 +1567,7 @@ mod tests {
         let source = "[plugins]\ndefault = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n";
         let mut manifest = Manifest::default();
         manifest.set_region("config.toml", "entries", checksum_str("\"required\",\n"));
-        let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
+        let empty = Catalog::builder(test_cli()).build().unwrap();
         let refusal = crate::emit::toml_array_region::existing_array_paths(source).unwrap_err();
         assert_eq!(
             array_plan(source, &manifest, &empty).unwrap_err().to_string(),
@@ -1762,7 +1769,7 @@ mod tests {
             );
         }
         // Both regions retiring must not rebind the remaining user array either.
-        let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
+        let empty = Catalog::builder(test_cli()).build().unwrap();
         assert_eq!(
             array_plan(&format!("{header}{entries}"), &manifest, &empty)
                 .unwrap_err()
@@ -1791,7 +1798,7 @@ mod tests {
         let source = "text = '''\n# >>> anvil-managed: entries\nnot ownership\n# <<< anvil-managed: entries\n'''\n[plugins]\ndefault = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n\"user\"]\n";
         let mut manifest = Manifest::default();
         manifest.set_region("config.toml", "entries", checksum_str("\"required\",\n"));
-        let empty = Catalog::builder(Catalog::anvil().cli().clone()).build().unwrap();
+        let empty = Catalog::builder(test_cli()).build().unwrap();
         let plan = array_plan(source, &manifest, &empty).unwrap();
         assert_eq!(plan.items().len(), 1);
         assert_eq!(
@@ -1838,7 +1845,7 @@ mod tests {
             };
             let mut literal = spec.clone();
             literal.host = HostSelector::Path("Cargo.toml".to_owned());
-            let catalog = Catalog::builder(Catalog::anvil().cli().clone())
+            let catalog = Catalog::builder(test_cli())
                 .with_artifact(Artifact::region(literal))
                 .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
                     region: spec,
@@ -1890,7 +1897,7 @@ mod tests {
                         body: String::new(),
                         syntax: CommentSyntax::SlashSlash,
                     });
-                    let builder = Catalog::builder(Catalog::anvil().cli().clone());
+                    let builder = Catalog::builder(test_cli());
                     let catalog = if reverse {
                         builder.with_artifact(ordinary).with_toml_array_region(array)
                     } else {
@@ -1926,7 +1933,7 @@ mod tests {
             ("a//config.toml", "a/config.toml"),
         ] {
             for owned_first in [false, true] {
-                let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+                let mut builder = Catalog::builder(test_cli());
                 if owned_first {
                     builder = builder.with_artifact(Artifact::owned_file(owned_path, "other = true\n"));
                 }
@@ -1964,10 +1971,7 @@ mod tests {
                     error.to_string(),
                     format!("a TOML array host cannot also be an owned file: {owned_path}")
                 );
-                let catalog = Catalog::builder(Catalog::anvil().cli().clone())
-                    .with_toml_array_region(array)
-                    .build()
-                    .unwrap();
+                let catalog = Catalog::builder(test_cli()).with_toml_array_region(array).build().unwrap();
                 let mut manifest = Manifest::default();
                 manifest.files.insert(owned_path.to_owned(), checksum_str("other = true\n"));
                 let error = build_plan_with_hosts(root, &workspace, &manifest, &[], &catalog, &mut hosts).unwrap_err();
@@ -1981,7 +1985,7 @@ mod tests {
 
     #[test]
     fn toml_array_plan_rejects_absent_case_aliases() {
-        let mut builder = Catalog::builder(Catalog::anvil().cli().clone());
+        let mut builder = Catalog::builder(test_cli());
         for (host, id) in [("config.toml", "one"), ("CONFIG.toml", "two")] {
             builder = builder.with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
                 region: RegionSpec {
@@ -3000,7 +3004,7 @@ mod tests {
     }
 
     fn empty_catalog() -> Catalog {
-        Catalog::builder(CliMeta::new("anvil")).build().unwrap()
+        Catalog::builder(test_cli()).build().unwrap()
     }
 
     fn campaign_region(host: &str, id: &'static str, body: &str) -> RegionSpec {

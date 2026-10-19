@@ -328,6 +328,10 @@ mod tests {
         })
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_just_template_includes_all_catalog_checks() {
         let checks = all_check_bodies();
@@ -348,6 +352,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_fail_closed_and_preserve_opted_out_tests() {
         let checks = all_check_bodies();
@@ -418,6 +426,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn impact_scoped_checks_propagate_scope_resolution_failures() {
         const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
@@ -506,6 +518,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn every_check_matches_its_declared_impact_policy() {
         // Single source of truth for each check's impact policy. The catalog
@@ -822,6 +838,10 @@ mod tests {
         assert!(!TOOLS_JUST.contains("rustup target add --toolchain"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn setup_graph_owns_stable_toolchain_provisioning() {
         assert!(
@@ -879,6 +899,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_do_not_invoke_an_implicit_default_cargo() {
         for (path, body) in CHECK_FILES {
@@ -944,6 +968,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_just_has_no_floating_nightly_invocations() {
         let checks = all_check_bodies();

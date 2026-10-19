@@ -440,6 +440,10 @@ mod tests {
         assert!(!RECIPE.contains("anvil.toml"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn recipe_exposes_the_documented_surface() {
         for expected in [
@@ -734,6 +738,10 @@ mod tests {
         assert!(RECIPE.contains("Anvil-RunEnv returned an empty value for"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn cache_volumes_never_mask_the_images_tools() {
         // An engine seeds a named volume from the image only on first
@@ -782,6 +790,10 @@ mod tests {
         assert!(RECIPE.contains("$runArgs += @('-e', 'HOME=/tmp')"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn a_host_token_is_resolved_as_the_recipe_does_and_forwarded_by_name() {
         // anvil-aprz is in scheduled-advisories, and unauthenticated it does not merely
@@ -807,6 +819,10 @@ mod tests {
         assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn the_whole_recipe_tree_defines_the_image() {
         // `just anvil-setup` reaches the install recipes through the tier,
@@ -836,6 +852,10 @@ mod tests {
         assert!(!RECIPE.contains("-cne 'justfiles/anvil/container.just'"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn the_recipe_contract_inputs_cross_the_boundary() {
         // A check that reads one of these natively must read the same value in
@@ -890,6 +910,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn a_derived_token_is_scoped_to_a_command_that_reads_it() {
         // Forwarding an exported GITHUB_TOKEN is exact parity: natively it is
@@ -976,6 +1000,10 @@ mod tests {
         assert!(RECIPE.contains("@(Anvil-RunEnv | Where-Object { $_ }) | Select-Object -Last 1"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn the_working_directory_is_mapped_from_a_native_path() {
         // `invocation_directory()` reports a Cygwin-style path when cygpath is
@@ -1013,6 +1041,10 @@ mod tests {
         assert!(!DOCKERIGNORE.contains("!justfiles\n!rust-toolchain.toml"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn a_redirected_checkout_can_reach_its_git_directory() {
         // A checkout whose .git is a file names a host path outside the mount,
