@@ -239,6 +239,12 @@ fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Resul
     {
         log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", previous.display());
     }
+    let legacy = cache.dir().join("repo");
+    if let Err(error) = std::fs::remove_dir_all(&legacy)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", legacy.display());
+    }
     Ok(())
 }
 
@@ -269,6 +275,9 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::sync::Mutex;
+    use std::task::Poll;
+
+    use futures_util::StreamExt;
 
     use super::*;
 
@@ -319,6 +328,107 @@ mod tests {
     impl DbFetcher for NoOpFetcher {
         async fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedArchiveFetcher {
+        failures: usize,
+        stall: bool,
+        calls: Arc<AtomicUsize>,
+        written: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedArchiveFetcher {
+        fn new(failures: usize, stall: bool) -> Self {
+            Self {
+                failures,
+                stall,
+                calls: Arc::new(AtomicUsize::new(0)),
+                written: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl DbFetcher for ScriptedArchiveFetcher {
+        async fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
+            const BODY_FAILED: usize = 1;
+            const BODY_STALLED: usize = 2;
+
+            let destination = repo_path.to_path_buf();
+            let failures = self.failures;
+            let stall = self.stall;
+            let calls = Arc::clone(&self.calls);
+            let written = Arc::clone(&self.written);
+            let event = Arc::new(AtomicUsize::new(0));
+            let body_event = Arc::clone(&event);
+            let handler = fetch::fake::FakeHandler::from_fn(move |_| {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                if attempt >= failures {
+                    return fetch::HttpResponseBuilder::new_fake()
+                        .bytes(bytes::Bytes::from_static(include_bytes!(
+                            "../../../tests/fixtures/advisories/root.tar.gz"
+                        )))
+                        .build();
+                }
+                let destination = destination.clone();
+                let written = Arc::clone(&written);
+                let event = Arc::clone(&body_event);
+                let prefix = b"partial archive data";
+                let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from_static(prefix).into()) }).chain(
+                    futures_util::stream::once(async move {
+                        // The stream is polled again only after write_all. Wait for Tokio's
+                        // buffered filesystem write to reach disk before failing or stalling.
+                        loop {
+                            let file = fs::read_dir(&destination)
+                                .unwrap()
+                                .map(|entry| entry.unwrap().path())
+                                .find(|path| path.is_file())
+                                .expect("the downloader creates its attempt file before polling the body");
+                            if tokio::fs::read(file).await.unwrap() == prefix.as_slice() {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        written.fetch_add(1, Ordering::SeqCst);
+                        if stall {
+                            event.store(BODY_STALLED, Ordering::SeqCst);
+                            return std::future::pending().await;
+                        }
+                        event.store(BODY_FAILED, Ordering::SeqCst);
+                        Err(fetch::HttpError::from(std::io::Error::other("scripted body failure")))
+                    }),
+                );
+                fetch::HttpResponseBuilder::new_fake().stream(stream).build()
+            });
+            let control = tick::ClockControl::new();
+            let clock = control.to_clock();
+            let client = fetch::HttpClient::builder_fake(handler, &clock).minimal_pipeline().build();
+
+            let download = super::super::archive::download_with_clock(repo_path, database_url, DATABASE_FETCH_TIMEOUT, client, clock);
+            let mut download = std::pin::pin!(download);
+            let mut timed_out = false;
+            std::future::poll_fn(|cx| {
+                let result = download.as_mut().poll(cx);
+                if result.is_pending() {
+                    // Advance only after the partial write is observed, never during filesystem I/O.
+                    match event.swap(0, Ordering::SeqCst) {
+                        BODY_STALLED => {
+                            control.advance(DATABASE_FETCH_TIMEOUT + Duration::from_secs(1));
+                            timed_out = true;
+                        }
+                        BODY_FAILED => control.advance(Duration::from_secs(10)),
+                        _ if timed_out => {
+                            control.advance(Duration::from_secs(10));
+                            timed_out = false;
+                        }
+                        _ => return Poll::Pending,
+                    }
+                    cx.waker().wake_by_ref();
+                }
+                result
+            })
+            .await
         }
     }
 
@@ -459,6 +569,7 @@ mod tests {
     fn marker_publication_failure_removes_the_unpublished_snapshot() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("last_synced.bin")).unwrap();
+        write_advisory(&root.path().join("repo"), "legacy-crate", "RUSTSEC-2020-0001", None);
         let cache = Cache::new(root.path(), Duration::MAX, false);
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let snapshot = stage.path().to_path_buf();
@@ -468,6 +579,151 @@ mod tests {
 
         assert!(error.to_string().contains("publishing the advisory cache"), "{error}");
         assert_eq!((snapshot.exists(), root.path().join("last_synced.bin").is_dir()), (false, true));
+        assert_eq!(Database::open(&root.path().join("repo")).unwrap().iter().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_archive_migration_removes_the_legacy_git_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        write_advisory(&root.path().join("repo"), "legacy-crate", "RUSTSEC-2020-0001", None);
+        cache.save("last_synced.bin", &()).unwrap();
+
+        let provider = Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.test/database.tar.gz",
+            Arc::new(FixtureFetcher::default()),
+        )
+        .await
+        .expect("a legacy marker must be replaced by a validated archive snapshot");
+
+        assert!(!root.path().join("repo").exists());
+        assert_eq!(provider.database.iter().next().unwrap().metadata.package.as_str(), "fetched-crate");
+        assert!(matches!(
+            cache.load::<(String, String)>("last_synced.bin"),
+            CacheResult::Data((_, directory)) if directory.starts_with(".advisories-")
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_archive_migration_preserves_the_legacy_git_checkout_and_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        write_advisory(&root.path().join("repo"), "legacy-crate", "RUSTSEC-2020-0001", None);
+        cache.save("last_synced.bin", &()).unwrap();
+        let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
+
+        Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.test/database.tar.gz",
+            Arc::new(NoOpFetcher),
+        )
+        .await
+        .expect_err("a missing staged database cannot replace the legacy checkout");
+
+        assert_eq!(fs::read(root.path().join("last_synced.bin")).unwrap(), marker);
+        assert_eq!(Database::open(&root.path().join("repo")).unwrap().iter().count(), 1);
+    }
+
+    #[test]
+    fn legacy_checkout_cleanup_failure_does_not_undo_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        fs::write(root.path().join("repo"), "not a directory").unwrap();
+        cache.save("last_synced.bin", &()).unwrap();
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
+
+        publish_snapshot(&cache, stage, "new-url").expect("legacy cleanup is best-effort after publication");
+
+        let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
+            panic!("cleanup failures must not discard the new marker");
+        };
+        assert_eq!(marker, ("new-url".to_owned(), name));
+    }
+
+    #[tokio::test]
+    async fn archive_body_error_retries_from_a_clean_file_before_publication() {
+        assert_archive_body_retry(false).await;
+    }
+
+    #[tokio::test]
+    async fn archive_body_timeout_retries_from_a_clean_file_before_publication() {
+        assert_archive_body_retry(true).await;
+    }
+
+    async fn assert_archive_body_retry(stall: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let fetcher = Arc::new(ScriptedArchiveFetcher::new(1, stall));
+
+        let provider = Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.test/database.tar.gz",
+            Arc::clone(&fetcher),
+        )
+        .await
+        .expect("a complete retry must replace the partial attempt");
+
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fetcher.written.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.database.iter().next().unwrap().metadata.package.as_str(), "archive-crate");
+        let CacheResult::Data((_, directory)) = cache.load::<(String, String)>("last_synced.bin") else {
+            panic!("the validated retry must publish a marker");
+        };
+        let snapshot = root.path().join(directory);
+        assert_eq!(Database::open(&snapshot).unwrap().iter().count(), 1);
+        assert_eq!(
+            fs::read_dir(snapshot)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            ["crates"]
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_archive_body_retries_preserve_the_previous_database_and_marker() {
+        for stall in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = Cache::new(root.path(), Duration::MAX, false);
+            let old_name = ".advisories-old";
+            let previous = root.path().join(old_name);
+            write_advisory(&previous, "previous-crate", "RUSTSEC-2020-0001", None);
+            cache.save("last_synced.bin", &("old-url", old_name)).unwrap();
+            let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
+            let advisory_path = previous.join("crates").join("previous-crate").join("RUSTSEC-2020-0001.md");
+            let advisory = fs::read(&advisory_path).unwrap();
+            let fetcher = Arc::new(ScriptedArchiveFetcher::new(usize::MAX, stall));
+
+            let error = Provider::with_fetcher(
+                &cache,
+                Arc::new(RecordingProgress::default()),
+                "https://example.test/database.tar.gz",
+                Arc::clone(&fetcher),
+            )
+            .await
+            .expect_err("four incomplete transfers must exhaust body retries");
+
+            let message = if stall { "download timed out" } else { "scripted body failure" };
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(fetcher.calls.load(Ordering::SeqCst), 4);
+            assert_eq!(fetcher.written.load(Ordering::SeqCst), 4);
+            assert_eq!(fs::read(root.path().join("last_synced.bin")).unwrap(), marker);
+            assert_eq!(fs::read(advisory_path).unwrap(), advisory);
+            assert_eq!(Database::open(&previous).unwrap().iter().count(), 1);
+            assert_eq!(
+                fs::read_dir(root.path())
+                    .unwrap()
+                    .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+                    .count(),
+                1,
+                "failed attempts must leave no staging directories"
+            );
+        }
     }
 
     #[test]

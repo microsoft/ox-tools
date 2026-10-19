@@ -21,22 +21,38 @@ const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
 
 pub(super) async fn download(destination: &Path, url: &str, timeout: Duration, client: fetch::HttpClient) -> Result<()> {
+    download_with_clock(destination, url, timeout, client, tick::Clock::new_tokio()).await
+}
+
+pub(super) async fn download_with_clock(
+    destination: &Path,
+    url: &str,
+    timeout: Duration,
+    client: fetch::HttpClient,
+    clock: tick::Clock,
+) -> Result<()> {
     let url = url.to_owned();
     let destination = destination.to_path_buf();
-    let archive_file = resilient_http::resilient_download(
+    let archive_file = resilient_http::resilient_download_with_clock(
         "advisory_archive",
         (destination.clone(), url, client),
         Some(timeout),
         |(destination, url, client)| async move {
-            let response = resilient_http::resilient_get(&client, &url).await?;
+            // Request resilience is already exhausted; only body failures need a whole-transfer retry.
+            let response = match resilient_http::resilient_get(&client, &url).await {
+                Ok(response) => response,
+                Err(error) => return Ok(Err(error)),
+            };
             if !response.status().is_success() {
-                bail!(
+                return Ok(Err(ohno::app_err!(
                     "unable to download advisory archive: HTTP {}; configure a .tar.gz endpoint with --advisory-archive-url",
                     response.status()
-                );
+                )));
             }
-            if let Some(size) = resilient_http::content_length(&response) {
-                check_download_size(size)?;
+            if let Some(size) = resilient_http::content_length(&response)
+                && let Err(error) = check_download_size(size)
+            {
+                return Ok(Err(error));
             }
             let (archive_file, output) = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
                 let archive_file = tempfile::NamedTempFile::new_in(destination)?;
@@ -50,15 +66,18 @@ pub(super) async fn download(destination: &Path, url: &str, timeout: Duration, c
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
                 downloaded += chunk.len() as u64;
-                check_download_size(downloaded)?;
+                if let Err(error) = check_download_size(downloaded) {
+                    return Ok(Err(error));
+                }
                 output.write_all(&chunk).await?;
             }
             output.flush().await?;
             drop(output);
-            Ok(archive_file)
+            Ok(Ok(archive_file))
         },
+        clock,
     )
-    .await?;
+    .await??;
     tokio::task::spawn_blocking(move || {
         extract(archive_file.path(), &destination)?;
         archive_file.close()?;
@@ -156,6 +175,9 @@ fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
 
     fn extract_fixture(name: &str) -> Result<rustsec::database::Database> {
@@ -234,12 +256,15 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_oversized_content_length_before_reading_the_body() {
-        let response = fetch::HttpResponseBuilder::new_fake()
-            .status(fetch::StatusCode::OK)
-            .header("content-length", "67108865")
-            .build()
-            .expect("the fake response has valid headers");
-        let client = fetch::HttpClient::new_fake(response);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&calls);
+        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn(move |_| {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            fetch::HttpResponseBuilder::new_fake()
+                .status(fetch::StatusCode::OK)
+                .header("content-length", "67108865")
+                .build()
+        }));
         let destination = tempfile::tempdir().unwrap();
 
         let error = download(
@@ -252,6 +277,85 @@ mod tests {
         .expect_err("the advertised size must be checked before parsing an empty body");
 
         assert!(error.to_string().contains("compressed size limit"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn http_status_failures_do_not_restart_the_whole_transfer() {
+        for status in [fetch::StatusCode::NOT_FOUND, fetch::StatusCode::INTERNAL_SERVER_ERROR] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let recorded = Arc::clone(&calls);
+            let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn(move |_| {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                fetch::HttpResponseBuilder::new_fake().status(status).build()
+            }));
+            let destination = tempfile::tempdir().unwrap();
+
+            let error = download(
+                destination.path(),
+                "https://example.test/database.tar.gz",
+                Duration::from_mins(1),
+                client,
+            )
+            .await
+            .expect_err("HTTP failures must be returned without an outer retry");
+
+            assert!(error.to_string().contains(&format!("HTTP {status}")), "{error}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_request_errors_do_not_restart_the_whole_transfer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&calls);
+        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_error_fn(move |_| {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            fetch::HttpError::from(std::io::Error::other("request resilience exhausted"))
+        }));
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = download(
+            destination.path(),
+            "https://example.test/database.tar.gz",
+            Duration::from_mins(1),
+            client,
+        )
+        .await
+        .expect_err("request failures have already exhausted native resilience");
+
+        assert!(format!("{error:#}").contains("request resilience exhausted"), "{error:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn streamed_compressed_size_violations_are_not_retried() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&calls);
+        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn(move |_| {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            fetch::HttpResponseBuilder::new_fake()
+                .stream(futures_util::stream::iter(
+                    (0..65).map(|_| Ok(bytes::Bytes::from(vec![0_u8; 1024 * 1024]).into())),
+                ))
+                .build()
+        }));
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = download(
+            destination.path(),
+            "https://example.test/database.tar.gz",
+            Duration::from_mins(1),
+            client,
+        )
+        .await
+        .expect_err("streaming must enforce the limit without a content-length header");
+
+        assert!(error.to_string().contains("compressed size limit"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
     }
 
     #[test]

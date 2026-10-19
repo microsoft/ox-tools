@@ -72,7 +72,6 @@ pub fn response_stream(response: HttpResponse) -> impl Stream<Item = Result<Byte
 }
 
 async fn get_following_redirects(client: &HttpClient, mut url: Url, authorization: Option<HeaderValue>) -> crate::Result<HttpResponse> {
-    // Match the previous transport's default redirect limit.
     const MAX_REDIRECTS: usize = 10;
     let mut authorization = authorization;
     let mut redirects = 0;
@@ -210,7 +209,22 @@ where
     Fut: Future<Output = crate::Result<Out>> + Send,
     F: Fn(In) -> Fut + Send + Sync + Clone + 'static,
 {
-    let clock = Clock::new_tokio();
+    resilient_download_with_clock(name, input, timeout, download_fn, Clock::new_tokio()).await
+}
+
+pub(crate) async fn resilient_download_with_clock<In, Out, Fut, F>(
+    name: &'static str,
+    input: In,
+    timeout: Option<Duration>,
+    download_fn: F,
+    clock: Clock,
+) -> crate::Result<Out>
+where
+    In: Clone + Send + Sync + 'static,
+    Out: Send + 'static,
+    Fut: Future<Output = crate::Result<Out>> + Send,
+    F: Fn(In) -> Fut + Send + Sync + Clone + 'static,
+{
     let context = ResilienceContext::new(&clock).name(name);
     let timeout_duration = timeout.unwrap_or(DEFAULT_DOWNLOAD_TIMEOUT);
 

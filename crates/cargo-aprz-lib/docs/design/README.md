@@ -31,6 +31,7 @@ their prerequisites disappear.
 ## HTTP and advisory acquisition
 
 HTTP requests use the public `fetch` crate's Tokio transport with native TLS.
+Connections are direct; environment HTTP proxy settings are not consumed.
 Windows and macOS use their platform TLS implementations; Linux builds require
 supported, patched OpenSSL 3 development packages, dynamically linked. The
 Fetch request pipeline configures native retry and timeout middleware:
@@ -56,11 +57,14 @@ Extraction accepts only regular files and directories, refuses paths outside
 the destination and filesystem links, and imposes entry-count and uncompressed
 size limits. A staged database must parse successfully before it is published.
 Each transfer attempt uses its own temporary file so a timed-out write cannot
-corrupt a retry. Failed downloads or extraction never replace the last usable
-database or mark the refresh successful. Cache identity includes the archive URL so changing
-mirrors does not reuse another endpoint's freshness marker. RustSec is used only
-for parsing and queries, with its Git features disabled; advisory collection
-requires neither a Git executable nor RustSec's HTTP transports.
+corrupt a retry. Advisory HTTP failures that exhaust request resilience and
+compressed-size violations do not trigger whole-transfer retries. Failed
+downloads or extraction never replace the last usable database or mark the
+refresh successful. Cache identity includes the archive URL so changing mirrors
+does not reuse another endpoint's freshness marker. Successful publication also
+removes the legacy Git checkout; failed refreshes leave it intact. RustSec is
+used only for parsing and queries, with its Git features disabled; advisory
+collection requires neither a Git executable nor RustSec's HTTP transports.
 
 ## Progress styling
 

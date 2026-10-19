@@ -653,7 +653,7 @@ async fn archive_http_errors_include_the_status_and_do_not_publish_a_marker() {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .respond_with(wiremock::ResponseTemplate::new(404))
-        .expect(4)
+        .expect(1)
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
