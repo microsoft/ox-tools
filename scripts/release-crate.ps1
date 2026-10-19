@@ -360,9 +360,6 @@ function Format-ConventionalCommits {
             $scope = $conventionalMatch.Groups[2].Value
             $isBreaking = $conventionalMatch.Groups[3].Value -eq '!'
             $description = $conventionalMatch.Groups[4].Value
-            if (-not [string]::IsNullOrWhiteSpace($scope)) {
-                $description = "${scope}: $description"
-            }
             $isConventional = $true
         }
 
@@ -372,6 +369,10 @@ function Format-ConventionalCommits {
 
         if ($linkedReleases -ccontains $description) {
             continue
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($scope)) {
+            $description = "${scope}: $description"
         }
 
         if (-not [string]::IsNullOrEmpty($prBaseUrl)) {
@@ -601,9 +602,21 @@ function Write-Changelog {
 
     # A newly introduced crate may have shipped before its first release tag was created. Its
     # introduction belongs to that initial version, not to the next release generated from HEAD.
+    $hasEarlierReleaseSection = $false
+    if (Test-Path $changelogFile) {
+        $existingVersions = [regex]::Matches((Get-Content $changelogFile -Raw), '(?m)^## \[(\d+\.\d+\.\d+)\]')
+        $hasEarlierReleaseSection = $null -ne (
+            $existingVersions |
+                Where-Object { [version]$_.Groups[1].Value -lt [version]$newVersion } |
+                Select-Object -First 1
+        )
+    }
+
     $range = if ($latestTag) {
         "$latestTag..HEAD"
-    } elseif ($initialCommit -and $oldVersion -ne "0.0.0" -and $oldVersion -ne $newVersion) {
+    } elseif ($initialCommit -and
+              $oldVersion -ne "0.0.0" -and
+              ($oldVersion -ne $newVersion -or $hasEarlierReleaseSection)) {
         "$initialCommit..HEAD"
     } else {
         "HEAD"
