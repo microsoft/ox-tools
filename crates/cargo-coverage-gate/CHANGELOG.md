@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-10-16
+## [0.7.0] - 2026-10-19
+
+- ⚠️ Breaking
+
+  - document 0.7 migration
 
 - ✨ Features
 
@@ -11,6 +15,7 @@
 
 - 🐛 Bug Fixes
 
+  - attribute external target roots
   - honor target feature contracts
   - satisfy CI and review contracts
   - allow same-version metadata refresh
@@ -45,6 +50,7 @@
 
 - ✔️ Tasks
 
+  - finalize 0.7 release notes
   - refresh 0.7 release notes
   - prepare 0.7.0 release
   - defer Anvil rollout until release
