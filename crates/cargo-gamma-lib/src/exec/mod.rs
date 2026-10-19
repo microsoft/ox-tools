@@ -89,8 +89,6 @@ pub(crate) use testing_state::{RecordPreparation, TestingState, finish_testing_r
 pub use verdict::READERS;
 #[cfg(loom)]
 pub(crate) use verdict::run_loom_models;
-#[cfg(test)]
-pub(crate) use workspace::mark_cache_owned_for_test;
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::production_campaign_base;
 pub(crate) use workspace::{
@@ -101,3 +99,5 @@ pub(crate) use workspace::{
 pub use workspace::{Workspace, campaign_base, clean_cache, footprint, gamma_base, scratch_tree};
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
+#[cfg(test)]
+pub(crate) use workspace::{create_private_dir_all_for_test, mark_cache_owned_for_test};

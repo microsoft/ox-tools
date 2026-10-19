@@ -2281,9 +2281,9 @@ mod tests {
         }
 
         fn survivor_resume_checkpoint() -> (tempfile::TempDir, RunArgs, serde_json::Value) {
-            let directory = workdir("resumed-command-checkpoint-");
-            let root = crate::paths::physical(Utf8Path::from_path(directory.path()).expect("fixture roots are UTF-8"))
-                .expect("fixture roots can be normalized");
+            let directory = private_system_tempdir("resumed-command-checkpoint-");
+            let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).expect("fixture roots can be normalized"))
+                .expect("fixture roots are UTF-8");
             let mut plan = plan_at(root.clone());
             let text = fs::read_to_string(root.join("src/lib.rs")).expect("actual fixture source exists");
             let parsed = crate::parse::SourceFile::parse("src/lib.rs", text).expect("actual fixture source parses");
@@ -2307,7 +2307,7 @@ mod tests {
                 .expect("the fixture campaign uses normalized native path components");
             let prepared = base.join("workspace");
             let runtime = base.join("rt");
-            fs::create_dir_all(&runtime).expect("runtime fixture directory can be created");
+            crate::exec::create_private_dir_all_for_test(&runtime);
             fs::create_dir_all(base.join("target")).expect("compiled-output fixture directory can be created");
             for file in ["Cargo.toml", "src/lib.rs"] {
                 let destination = prepared.join(file);
