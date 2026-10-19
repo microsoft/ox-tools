@@ -15,6 +15,7 @@
 
 - 🐛 Bug Fixes
 
+  - coverage-gate: model implicit dependency features
   - coverage-gate: distinguish dependency features
   - coverage-gate: attribute external target roots
   - coverage-gate: honor target feature contracts
