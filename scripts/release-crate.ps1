@@ -31,8 +31,9 @@
 
 .PARAMETER BackfillVersion
     [Optional] Reconstructs the changelog section for an existing tagged version without updating
-    crate versions or README files. The commit range is derived from the preceding semantic-version
-    tag and the requested version's tag. This parameter is mutually exclusive with --version and --bump.
+    crate versions or README files. The first semantic version uses the crate's complete history
+    through that tag; later versions use the preceding semantic-version tag as the lower bound.
+    This parameter is mutually exclusive with --version and --bump.
 
 .EXAMPLE
     # Increment the minor version for 'my-crate' (default behavior)
@@ -521,17 +522,14 @@ function Write-BackfilledChangelogVersion {
         Write-Error "Cannot backfill version '$version': tag '$targetTag' does not exist." -ErrorAction Stop
     }
 
-    if ($targetIndex -eq 0) {
-        Write-Error "Cannot backfill version '$version': tag '$targetTag' has no preceding semantic-version tag." -ErrorAction Stop
-    }
-
-    $previousTag = $releaseTags[$targetIndex - 1]
+    $previousTag = if ($targetIndex -gt 0) { $releaseTags[$targetIndex - 1] } else { $null }
+    $range = if ($previousTag) { "$previousTag..$targetTag" } else { $targetTag }
     $rawCommits = @(
-        Invoke-GitCommand -Command "log $previousTag..$targetTag --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for '$previousTag..$targetTag'"
+        Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for '$range'"
     )
     $formattedCommits = Format-ConventionalCommits -rawCommitMessages $rawCommits -prBaseUrl $prBaseUrl
     if (-not $formattedCommits) {
-        Write-Error "No relevant commits found for '$previousTag..$targetTag'." -ErrorAction Stop
+        Write-Error "No relevant commits found for '$range'." -ErrorAction Stop
     }
 
     $releaseCommit = Invoke-GitCommand -Command "rev-list -n 1 $targetTag" -ErrorMessage "Failed to resolve release commit for '$targetTag'"
