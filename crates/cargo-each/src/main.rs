@@ -64,8 +64,6 @@
 //! metadata query only; it does not change child commands. Use the same
 //! toolchain as an aggregate consumer that compares literal metadata IDs.
 //! Without it, the inherited Cargo/toolchain selection is unchanged.
-//! Cargo older than 1.71 does not report default members; use an explicit
-//! selection with that metadata toolchain rather than relying on defaults.
 //!
 //! Selection remains workspace-only, even when a registry dependency has the
 //! same name and version. Existing `-p name@version` and `--package-file`

@@ -24,8 +24,8 @@ pub(crate) struct Workspace {
     pub(crate) members: Vec<Member>,
     /// Names of the workspace's default members (cargo's `default-members`,
     /// or every member when unset). Used to resolve a selection that names
-    /// no packages. Absent in metadata from Cargo before 1.71.
-    pub(crate) default_member_names: Option<HashSet<String>>,
+    /// no packages.
+    pub(crate) default_member_names: HashSet<String>,
     /// Absolute path to the workspace root manifest.
     pub(crate) root_manifest_path: PathBuf,
 }
@@ -154,13 +154,11 @@ impl Workspace {
             .collect();
         members.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let default_member_names = metadata.workspace_default_members.is_available().then(|| {
-            metadata
-                .workspace_default_packages()
-                .iter()
-                .map(|pkg| pkg.name.to_string())
-                .collect()
-        });
+        let default_member_names = metadata
+            .workspace_default_packages()
+            .iter()
+            .map(|pkg| pkg.name.to_string())
+            .collect();
         let root_manifest_path = metadata.workspace_root.join("Cargo.toml").into_std_path_buf();
 
         Self {
@@ -333,7 +331,7 @@ mod tests {
     fn workspace(root_manifest_path: PathBuf, members: Vec<Member>) -> Workspace {
         Workspace {
             members,
-            default_member_names: Some(HashSet::new()),
+            default_member_names: HashSet::new(),
             root_manifest_path,
         }
     }
@@ -608,23 +606,6 @@ mod tests {
             assert_eq!(members[0].manifest_path, path);
             assert_eq!(members[0].cargo_spec(), format!("{source}#enabled-lib@0.1.0"));
         }
-    }
-
-    #[test]
-    fn metadata_without_default_members_requires_an_explicit_selection() {
-        let mut value: Value = serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("metadata fixture");
-        value.as_object_mut().expect("metadata object").remove("workspace_default_members");
-        let metadata: Metadata = serde_json::from_value(value).expect("legacy metadata");
-        let workspace = Workspace::from_metadata(&metadata);
-        let selected = crate::select::Selection {
-            packages: vec!["enabled-lib@0.1.0".to_owned()],
-            ..Default::default()
-        };
-        assert_eq!(selected.resolve(&workspace).expect("explicit selection").len(), 1);
-        let error = crate::select::Selection::default()
-            .resolve(&workspace)
-            .expect_err("missing defaults must not be guessed");
-        assert!(error.to_string().contains("select explicitly"), "{error}");
     }
 
     #[test]

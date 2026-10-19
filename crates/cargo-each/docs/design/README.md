@@ -179,9 +179,6 @@ It conflicts with execution options, command arguments, and JSON-record input.
 query only. Without this option, discovery preserves inherited Cargo selection.
 It applies to execution and listing, but not JSON-record mode. Consumers that
 compare metadata IDs must query with the same toolchain.
-Metadata from Cargo before 1.71 lacks default-member information. Explicit
-selection still works; implicit defaults produce an actionable error, not a
-panic or a guessed workspace-wide selection.
 
 `{cargo-spec}` is a per-package/per-target placeholder with the form
 `file:///...#name@version`. Its URL-encoded source is the absolute manifest

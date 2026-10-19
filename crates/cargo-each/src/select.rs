@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 
 use cargo_metadata::semver::Version;
 
-use crate::error::{
-    EachError, InvalidPackageFileLineError, MissingDefaultMembersError, PackageFileReadError, PackageFileUtf8Error, UnknownSelectorError,
-};
+use crate::error::{EachError, InvalidPackageFileLineError, PackageFileReadError, PackageFileUtf8Error, UnknownSelectorError};
 use crate::workspace::{Member, Workspace};
 
 /// A parsed package selection, before it is resolved against a workspace.
@@ -107,11 +105,11 @@ impl Selection {
         } else if self.package_file_supplied {
             Vec::new()
         } else {
-            let defaults = workspace
-                .default_member_names
-                .as_ref()
-                .ok_or_else(MissingDefaultMembersError::new)?;
-            workspace.members.iter().filter(|m| defaults.contains(&m.name)).collect()
+            workspace
+                .members
+                .iter()
+                .filter(|m| workspace.default_member_names.contains(&m.name))
+                .collect()
         };
 
         let excluded: HashSet<&str> = resolve_selectors(workspace, &self.exclude)?
@@ -344,7 +342,7 @@ mod tests {
     fn workspace(defaults: &[&str]) -> Workspace {
         Workspace {
             members: vec![member("alpha"), member("beta"), member("gamma")],
-            default_member_names: Some(defaults.iter().map(|s| (*s).to_owned()).collect()),
+            default_member_names: defaults.iter().map(|s| (*s).to_owned()).collect(),
             root_manifest_path: PathBuf::from("/ws/Cargo.toml"),
         }
     }

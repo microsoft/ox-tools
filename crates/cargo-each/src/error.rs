@@ -28,7 +28,6 @@
 #[ohno::error]
 #[from(
     LoadMetadataError,
-    MissingDefaultMembersError,
     UnknownSelectorError,
     InvalidFilterExpressionError,
     InvalidTargetKindError,
@@ -55,13 +54,6 @@ pub(crate) struct EachError;
 #[display("failed to load workspace metadata")]
 #[from(cargo_metadata::Error)]
 pub(crate) struct LoadMetadataError;
-
-/// Legacy Cargo metadata cannot identify the workspace's default selection.
-#[ohno::error]
-#[display(
-    "Cargo metadata does not report workspace default members (requires Cargo 1.71 or newer); select explicitly with --package, --package-file, --workspace, or --none"
-)]
-pub(crate) struct MissingDefaultMembersError;
 
 /// A `-p` / `--package` (or `--exclude`) selector matched no workspace
 /// member. Surfaced loudly so typos fail rather than silently skipping.
