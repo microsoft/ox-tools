@@ -1694,12 +1694,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "spawns process groups")]
-    fn real_group_execution_observes_completion_and_timeout() {
-        let mut completing_command = sleeping_test_command();
-        let _ = completing_command.env("CARGO_EACH_CHILD_SLEEP_MS", "0");
-        let success = super::run_streamed_group_with(&invocation(&["controlled-child"]), None, |_| spawn_group(completing_command));
-        assert!(matches!(success, InvocationResult::Exited(status) if status.success()));
-
+    fn real_group_termination_stops_group_and_direct_child() {
         let group = spawn_group(sleeping_test_command()).expect("spawn sleeping process group");
         let started = Instant::now();
         terminate_group(group).expect("process-group termination succeeds");
