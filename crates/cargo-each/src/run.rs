@@ -1695,7 +1695,9 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "spawns process groups")]
     fn real_group_execution_observes_completion_and_timeout() {
-        let success = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(5));
+        let mut completing_command = sleeping_test_command();
+        let _ = completing_command.env("CARGO_EACH_CHILD_SLEEP_MS", "0");
+        let success = super::run_streamed_group_with(&invocation(&["controlled-child"]), None, |_| spawn_group(completing_command));
         assert!(matches!(success, InvocationResult::Exited(status) if status.success()));
 
         let group = spawn_group(sleeping_test_command()).expect("spawn sleeping process group");
