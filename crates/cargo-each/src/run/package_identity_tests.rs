@@ -5,12 +5,13 @@
 
 #![cfg_attr(coverage_nightly, coverage(off))]
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 use cargo_metadata::Metadata;
 use clap::Parser as _;
 use clap::error::ErrorKind;
-use serde_json::{Value, json};
+use serde_json::{Value, from_str, from_value, json};
 
 use super::*;
 use crate::cli::CargoCli;
@@ -19,6 +20,7 @@ fn checkout_path(checkout: &str) -> PathBuf {
     PathBuf::from(if cfg!(windows) { r"C:\checkouts" } else { "/checkouts" }).join(checkout)
 }
 
+/// Construct expected selectors independently of production URL conversion.
 fn expected_selector(checkout: &str, package: &str) -> String {
     let prefix = if cfg!(windows) {
         "file:///C:/checkouts"
@@ -49,14 +51,14 @@ fn expected_invocation(checkout: &str, package: &str) -> Invocation {
 }
 
 fn workspace(checkout: &str, member_id: &str) -> Workspace {
-    let metadata: Metadata = serde_json::from_value(workspace_metadata(checkout, member_id)).expect("controlled collision metadata");
+    let metadata: Metadata = from_value(workspace_metadata(checkout, member_id)).expect("controlled collision metadata");
     Workspace::from_metadata(&metadata)
 }
 
+/// Model a local/registry collision, an actual root default member, and a custom library target.
 fn workspace_metadata(checkout: &str, member_id: &str) -> Value {
     let root = checkout_path(checkout);
-    let mut metadata: Value =
-        serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture");
+    let mut metadata: Value = from_str(include_str!("../../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture");
     let mut local = metadata["packages"][0].clone();
     local["name"] = json!("alpha");
     local["id"] = json!(member_id);
@@ -102,7 +104,7 @@ fn args(options: &[&str]) -> EachArgs {
     args
 }
 
-fn selection_without_files(args: &EachArgs) -> Result<Selection, crate::error::EachError> {
+fn selection_without_files(args: &EachArgs) -> Result<Selection, EachError> {
     Selection::from_sources_with_reader(
         &args.packages,
         &args.package_files,
@@ -113,6 +115,7 @@ fn selection_without_files(args: &EachArgs) -> Result<Selection, crate::error::E
     )
 }
 
+/// Capture the production selection and planning path without executing child commands.
 fn dispatch(checkout: &str, options: &[&str]) -> Vec<Invocation> {
     let mut options = options.to_vec();
     options.extend(["--", "cargo", "check", "--offline", "-p", "{cargo-spec}", "legacy={spec}"]);
@@ -247,12 +250,9 @@ fn explicit_root_selection_does_not_dispatch_other_default_members() {
             assert_eq!(manifest, None);
             let mut metadata = workspace_metadata(checkout, "literal-local-id");
             metadata["workspace_default_members"] = json!(["literal-local-id"]);
-            let metadata: Metadata = serde_json::from_value(metadata).expect("controlled root-package metadata");
+            let metadata: Metadata = from_value(metadata).expect("controlled root-package metadata");
             let workspace = Workspace::from_metadata(&metadata);
-            assert_eq!(
-                workspace.default_member_names,
-                std::collections::HashSet::from(["alpha".to_owned()])
-            );
+            assert_eq!(workspace.default_member_names, HashSet::from(["alpha".to_owned()]));
             assert_eq!(
                 workspace
                     .members

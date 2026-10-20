@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
+use std::path::Path;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -20,7 +21,7 @@ use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
-use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
+use crate::error::{EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
 use crate::filter::Predicate;
 use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
@@ -51,10 +52,11 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     run_workspace_with(args, build_selection, Workspace::load, execute)
 }
 
+/// Share workspace orchestration between production and tests, with controlled input, discovery, and execution.
 fn run_workspace_with(
     args: &EachArgs,
-    load_selection: impl FnOnce(&EachArgs) -> Result<Selection, crate::error::EachError>,
-    load_workspace: impl FnOnce(Option<&std::path::Path>) -> Result<Workspace, crate::error::EachError>,
+    load_selection: impl FnOnce(&EachArgs) -> Result<Selection, EachError>,
+    load_workspace: impl FnOnce(Option<&Path>) -> Result<Workspace, EachError>,
     execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
 ) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
@@ -1002,7 +1004,6 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 }
 
 #[cfg(test)]
-#[path = "package_identity_tests.rs"]
 mod package_identity_tests;
 
 #[cfg(test)]

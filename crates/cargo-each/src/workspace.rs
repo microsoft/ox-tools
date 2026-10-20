@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use cargo_metadata::semver::Version;
 use cargo_metadata::{Metadata, MetadataCommand, TargetKind};
 use serde_json::Value;
+use url::Url;
 
 use crate::error::{EachError, LoadMetadataError, WorkspaceManifestParseError, WorkspaceManifestReadError, WorkspaceRustVersionError};
 
@@ -74,8 +75,7 @@ impl Member {
     /// A source-qualified Cargo selector, independent of metadata ID syntax.
     #[must_use]
     pub(crate) fn cargo_spec(&self) -> String {
-        let source =
-            url::Url::from_file_path(self.manifest_dir()).expect("Cargo metadata manifest directories are absolute filesystem paths");
+        let source = Url::from_file_path(self.manifest_dir()).expect("Cargo metadata manifest directories are absolute filesystem paths");
         format!("{source}#{}", self.spec())
     }
 
@@ -298,10 +298,11 @@ pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
 mod tests {
     use std::fs;
 
-    use serde_json::from_str;
+    use serde_json::{from_str, from_value, json};
 
     use super::*;
     use crate::filter::Predicate;
+    use crate::select::Selection;
 
     fn member(name: &str, manifest_path: PathBuf, rust_version: &str) -> Member {
         Member {
@@ -542,36 +543,36 @@ mod tests {
 
     #[test]
     fn selectors_do_not_parse_legacy_or_modern_metadata_ids() {
-        let mut fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("metadata fixture");
+        let mut fixture: Value = from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("metadata fixture");
         let path = PathBuf::from(if cfg!(windows) { r"C:\checkouts" } else { "/checkouts" })
             .join("checkout with spaces")
             .join("enabled-lib")
             .join("Cargo.toml");
         let packages = fixture["packages"].as_array_mut().expect("packages array");
         let original_id = packages[0]["id"].clone();
-        packages[0]["manifest_path"] = serde_json::json!(path);
+        packages[0]["manifest_path"] = json!(path);
         let mut registry = packages[0].clone();
-        registry["id"] = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index#enabled-lib@0.1.0");
-        registry["source"] = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index");
+        registry["id"] = json!("registry+https://github.com/rust-lang/crates.io-index#enabled-lib@0.1.0");
+        registry["source"] = json!("registry+https://github.com/rust-lang/crates.io-index");
         packages.push(registry);
-        let source = url::Url::from_file_path(path.parent().expect("manifest parent")).expect("absolute fixture path");
+        let source = Url::from_file_path(path.parent().expect("manifest parent")).expect("absolute fixture path");
         for id in [
             "enabled-lib 0.1.0 (path+file:///old/checkout)",
             "path+file:///old/checkout#enabled-lib@0.1.0",
             "opaque future metadata ID",
         ] {
             let mut value = fixture.clone();
-            value["packages"][0]["id"] = serde_json::json!(id);
+            value["packages"][0]["id"] = json!(id);
             for field in ["workspace_members", "workspace_default_members"] {
                 for entry in value[field].as_array_mut().expect("member IDs") {
                     if *entry == original_id {
-                        *entry = serde_json::json!(id);
+                        *entry = json!(id);
                     }
                 }
             }
-            let metadata: Metadata = serde_json::from_value(value.clone()).expect("metadata");
+            let metadata: Metadata = from_value(value.clone()).expect("metadata");
             let workspace = Workspace::from_metadata(&metadata);
-            let selected = crate::select::Selection {
+            let selected = Selection {
                 packages: vec!["enabled-lib@0.1.0".to_owned()],
                 ..Default::default()
             };

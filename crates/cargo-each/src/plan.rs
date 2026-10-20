@@ -145,6 +145,8 @@ impl Plan {
             workspace_rust_version,
         } = options;
 
+        let uses_cargo_spec = command.iter().any(|arg| arg.contains("{cargo-spec}"));
+
         // #[gamma::skip(try.propagate_to_unwrap, reason = "is_empty already ran validate_build on this same immutable command and mode; every substitute repeats only that validated placeholder check, so all collected results and direct substitutions are Ok")]
         let invocations = match mode {
             Mode::PerPackage => members
@@ -153,7 +155,7 @@ impl Plan {
                     let placeholders = Placeholders::Package {
                         name: m.name.clone(),
                         spec: m.spec(),
-                        cargo_spec: m.cargo_spec(),
+                        cargo_spec: if uses_cargo_spec { m.cargo_spec() } else { String::new() },
                         version: m.version.clone(),
                         manifest: m.manifest_path.display().to_string(),
                         workspace_rust_version: workspace_rust_version.map(str::to_owned),
@@ -176,7 +178,7 @@ impl Plan {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
                                 spec: member.spec(),
-                                cargo_spec: member.cargo_spec(),
+                                cargo_spec: if uses_cargo_spec { member.cargo_spec() } else { String::new() },
                                 version: member.version.clone(),
                                 manifest: member.manifest_path.display().to_string(),
                                 target: target.name.clone(),
@@ -331,6 +333,38 @@ mod tests {
         )
         .expect("build");
         assert!(plan.invocations.is_empty());
+    }
+
+    #[test]
+    fn unused_cargo_spec_does_not_require_a_source_url() {
+        let mut member = member("alpha");
+        // A relative sentinel cannot become a file URL, exposing eager selector construction.
+        member.manifest_path = PathBuf::from("alpha").join("Cargo.toml");
+        member.targets.push(MemberTarget {
+            name: "custom_library".to_owned(),
+            kinds: BTreeSet::from([TargetKind::Lib]),
+            required_features: BTreeSet::new(),
+        });
+        for mode in [Mode::PerPackage, Mode::PerTarget] {
+            let plan = Plan::build(
+                &[&member],
+                &cmd(&["cargo", "fmt", "--manifest-path", "{manifest}"]),
+                BuildOptions {
+                    mode,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &BTreeSet::from([TargetKind::Lib]),
+                    target_required_features: &BTreeSet::new(),
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("a template without cargo-spec does not need a source URL");
+            assert_eq!(plan.invocations.len(), 1);
+            assert_eq!(
+                plan.invocations[0].argv,
+                ["cargo", "fmt", "--manifest-path", &member.manifest_path.display().to_string()]
+            );
+        }
     }
 
     #[test]

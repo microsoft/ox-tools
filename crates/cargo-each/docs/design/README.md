@@ -171,8 +171,9 @@ arbitrary-command + metadata-filter spine do not overlap.
 `{cargo-spec}` is a per-package/per-target placeholder with the form
 `file:///...#name@version`. Its URL-encoded source is the absolute manifest
 directory; name and version come from structured package metadata. Metadata IDs
-are opaque and are never parsed or exposed. `{spec}` and `{packages}` retain
-their existing expansions for compatibility.
+are opaque and are never parsed or exposed. `{spec}` and `{packages}` are
+not source-qualified. Selector construction runs only for templates containing
+`{cargo-spec}`.
 
 All selections resolve against workspace members only, not registry packages or
 target names. Existing `-p` and `--package-file` inputs suffice for portable

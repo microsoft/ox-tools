@@ -126,7 +126,7 @@ Substituted inside each command argument:
 * `{cargo-spec}` — source-qualified `file:///...#name@version` Cargo
   selector (per-package and per-target). Paths are URL-encoded, so spaces
   remain part of one argv element. Built from the manifest directory,
-  package name, and version, never by parsing a metadata ID.
+  package name, and version.
 * `{version}` — package version (per-package and per-target).
 * `{manifest}` — absolute member `Cargo.toml` path (per-package and
   per-target).
@@ -134,8 +134,7 @@ Substituted inside each command argument:
 * `{packages}` — the cargo selection flags for the resolved set
   (`--workspace` for the whole workspace, else `--package name@version …`);
   valid only in `--once` mode and only as a standalone argument.
-  Like `{spec}`, this existing expansion is unchanged and is not
-  source-qualified.
+  Like `{spec}`, this expansion is not source-qualified.
 * `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
   or root `[package].rust-version` in a single-package repository; valid in
   Cargo-backed per-package, per-target, and `--once` modes. Expands to an
