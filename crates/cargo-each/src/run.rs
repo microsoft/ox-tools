@@ -478,24 +478,38 @@ fn run_streamed_group_with(
     timeout: Option<Duration>,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
+    let started = Instant::now();
+    run_streamed_group_control_with(
+        invocation,
+        timeout,
+        spawn,
+        |process| process.inner().try_wait(),
+        terminate_group,
+        || started.elapsed(),
+        thread::sleep,
+    )
+}
+
+fn run_streamed_group_control_with<T>(
+    invocation: &Invocation,
+    timeout: Option<Duration>,
+    spawn: impl FnOnce(Command) -> Result<T, String>,
+    observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    terminate: impl FnOnce(T) -> io::Result<()>,
+    elapsed: impl FnMut() -> Duration,
+    sleep: impl FnMut(Duration),
+) -> InvocationResult {
     let (program, command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return InvocationResult::Infrastructure(message),
     };
-    let tree = match spawn(command) {
-        Ok(tree) => tree,
+    let process = match spawn(command) {
+        Ok(process) => process,
         Err(error) => {
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
-    wait_for_process(
-        tree,
-        timeout,
-        |process| process.inner().try_wait(),
-        terminate_group,
-        CHILD_LEADER_OBSERVATION,
-    )
-    .result
+    wait_for_process_with(process, timeout, observe, terminate, CHILD_LEADER_OBSERVATION, elapsed, sleep).result
 }
 
 fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedOutcome {
@@ -1002,9 +1016,10 @@ mod tests {
         add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
         effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
-        record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
-        validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
+        record_emitted_failure, run, run_captured, run_captured_with, run_streamed, run_streamed_group_control_with,
+        run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with,
+        terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker,
+        wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
 
@@ -1690,6 +1705,27 @@ mod tests {
         );
         assert!(matches!(outcome.result, InvocationResult::Exited(status) if status.success()));
         assert_eq!(*pauses.borrow(), [Duration::from_millis(10)]);
+    }
+
+    #[test]
+    fn streamed_group_runner_observes_success_before_its_deadline_in_process() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let process = FakeProcess {
+            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
+            termination: None,
+        };
+
+        let result = run_streamed_group_control_with(
+            &invocation(&["controlled-program"]),
+            Some(Duration::from_millis(25)),
+            |_| Ok(process),
+            FakeProcess::observe,
+            FakeProcess::terminate,
+            || elapsed.get(),
+            |pause| elapsed.set(elapsed.get() + pause),
+        );
+
+        assert!(matches!(result, InvocationResult::Exited(status) if status.success()));
     }
 
     #[test]
