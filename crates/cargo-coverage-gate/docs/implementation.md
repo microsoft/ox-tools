@@ -154,13 +154,17 @@ the workspace discovered from the invocation directory.
    package ownership or cross-filesystem paths fail explicitly.
 3. rust-analyzer syntax identifies test-only item ranges. Compiler-owned
    `test`/`bench` attributes are intrinsic; qualified framework attributes are
-   matched against the exact workspace `test-attributes` policy. A `cfg` is test-only
+   matched against the exact workspace `test-attributes` policy. Configuration
+   paths accept any supported Rust edition and normalize raw identifiers;
+   source parsing still uses each target's edition. A `cfg` is test-only
    only when it cannot hold with `test = false`. All `cfg` and `cfg_attr`
    effects on the same syntax owner are conjoined with enclosing owner,
    declaring-module, source-file, and local Cargo target `required-features`
    guards. Dependency selectors also add an implicit local dependency feature
-   only when that feature appears in Cargo metadata; weak and `dep:` selectors
-   do not. Those composed guards propagate through inline and out-of-line modules.
+   only when Cargo's dependency metadata identifies the dependency as optional
+   (using its alias when renamed) and the local feature exists. A same-named
+   feature alone is insufficient; weak and `dep:` selectors do not create
+   local feature atoms. Those composed guards propagate through inline and out-of-line modules.
    Correlations among at most twelve distinct non-`test` atoms are compiled
    once and evaluated by bounded assignment enumeration; larger or unsupported
    shapes use the conservative truth-value approximation.

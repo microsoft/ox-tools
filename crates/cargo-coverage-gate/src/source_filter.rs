@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use cargo_metadata::{Edition as CargoEdition, Metadata, TargetKind};
+use cargo_metadata::{Dependency, Edition as CargoEdition, Metadata, TargetKind};
 use ra_ap_syntax::ast::{self, HasAttrs, HasName, LiteralKind};
 use ra_ap_syntax::{AstNode, AstToken, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
 
@@ -219,9 +219,20 @@ fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<B
 }
 
 fn parse_configured_test_attribute(value: &str) -> Option<String> {
+    [
+        Edition::Edition2024,
+        Edition::Edition2021,
+        Edition::Edition2018,
+        Edition::Edition2015,
+    ]
+    .into_iter()
+    .find_map(|edition| parse_configured_test_attribute_for_edition(value, edition))
+}
+
+fn parse_configured_test_attribute_for_edition(value: &str, edition: Edition) -> Option<String> {
     let expected_attribute = format!("#[{value}]");
     let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
-    let parse = SourceFile::parse(&source, Edition::CURRENT);
+    let parse = SourceFile::parse(&source, edition);
     if !parse.errors().is_empty() {
         return None;
     }
@@ -409,7 +420,7 @@ fn source_roots(
                     Surface::NonReleased
                 },
                 role: SourceRole::CrateRoot,
-                guard: target_required_features_guard(&target.required_features, &package.features),
+                guard: target_required_features_guard(&target.required_features, &package.features, &package.dependencies),
                 owning_member: owning_member.clone(),
             });
         }
@@ -425,13 +436,25 @@ fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathB
     })
 }
 
-fn target_required_features_guard(required_features: &[String], package_features: &BTreeMap<String, Vec<String>>) -> CfgFormula {
+fn target_required_features_guard(
+    required_features: &[String],
+    package_features: &BTreeMap<String, Vec<String>>,
+    dependencies: &[Dependency],
+) -> CfgFormula {
     CfgFormula::all(required_features.iter().filter_map(|selector| {
         if selector.starts_with("dep:") {
             return None;
         }
         let local_feature = match selector.split_once('/') {
-            Some((dependency, _)) if !dependency.ends_with('?') && package_features.contains_key(dependency) => dependency,
+            Some((dependency, _))
+                if !dependency.ends_with('?')
+                    && package_features.contains_key(dependency)
+                    && dependencies
+                        .iter()
+                        .any(|dep| dep.optional && dep.rename.as_deref().unwrap_or(&dep.name) == dependency) =>
+            {
+                dependency
+            }
             Some(_) => return None,
             None => selector,
         };
@@ -2437,16 +2460,64 @@ mod tests {
     #[test]
     fn dependency_required_feature_guards_follow_cargo_metadata() {
         let implicit = BTreeMap::from([("dep".to_owned(), vec!["dep:dep".to_owned()])]);
+        let mut dependency: Dependency = serde_json::from_value(json!({
+            "name": "dep",
+            "source": null,
+            "req": "*",
+            "kind": null,
+            "rename": null,
+            "optional": true,
+            "uses_default_features": true,
+            "features": [],
+            "target": null,
+            "registry": null
+        }))
+        .expect("dependency metadata parses");
         assert_eq!(
-            target_required_features_guard(&["dep/x".to_owned()], &implicit),
+            target_required_features_guard(&["dep/x".to_owned()], &implicit, std::slice::from_ref(&dependency)),
             CfgFormula::Atom("feature=dep".to_owned())
         );
         assert_eq!(
-            target_required_features_guard(&["dep/x".to_owned()], &BTreeMap::new()),
+            target_required_features_guard(&["dep/x".to_owned()], &BTreeMap::new(), std::slice::from_ref(&dependency)),
             CfgFormula::Value(true)
         );
         assert_eq!(
-            target_required_features_guard(&["dep?/x".to_owned(), "dep:dep".to_owned()], &implicit),
+            target_required_features_guard(
+                &["dep?/x".to_owned(), "dep:dep".to_owned()],
+                &implicit,
+                std::slice::from_ref(&dependency),
+            ),
+            CfgFormula::Value(true)
+        );
+        assert_eq!(
+            target_required_features_guard(&["dep/x".to_owned()], &implicit, &[]),
+            CfgFormula::Value(true)
+        );
+
+        dependency.optional = false;
+        let unrelated_local = BTreeMap::from([("dep".to_owned(), Vec::new())]);
+        assert_eq!(
+            target_required_features_guard(&["dep/x".to_owned()], &unrelated_local, std::slice::from_ref(&dependency)),
+            CfgFormula::Value(true)
+        );
+        assert_eq!(
+            target_required_features_guard(&["dep".to_owned()], &unrelated_local, std::slice::from_ref(&dependency)),
+            CfgFormula::Atom("feature=dep".to_owned())
+        );
+
+        dependency.optional = true;
+        dependency.rename = Some("alias".to_owned());
+        let renamed = BTreeMap::from([("alias".to_owned(), vec!["dep:alias".to_owned()])]);
+        assert_eq!(
+            target_required_features_guard(&["alias/x".to_owned()], &renamed, std::slice::from_ref(&dependency)),
+            CfgFormula::Atom("feature=alias".to_owned())
+        );
+        assert_eq!(
+            target_required_features_guard(&["dep/x".to_owned()], &implicit, std::slice::from_ref(&dependency)),
+            CfgFormula::Value(true)
+        );
+        assert_eq!(
+            target_required_features_guard(&["alias?/x".to_owned(), "dep:alias".to_owned()], &renamed, &[dependency]),
             CfgFormula::Value(true)
         );
     }
@@ -2477,21 +2548,39 @@ mod tests {
             .into();
         metadata.packages[0].targets[0].required_features = vec!["dep/x".to_owned()];
 
-        let index = SourceIndex::from_metadata(&metadata).expect("dependency-required feature source index builds");
         let source = fs::canonicalize(root.join("member/src/dependency-required-feature-root.rs"))
             .expect("canonical dependency-required feature source");
-        assert_eq!(index.files[&source].test_only_lines, BTreeSet::from([7, 8]));
+        for (optional, renamed, exposes_feature, selector, enables_local) in [
+            (true, false, true, "dep/x", true),
+            (false, false, true, "dep/x", false),
+            (true, true, true, "dep/x", true),
+            (true, false, true, "dep?/x", false),
+            (true, false, false, "dep:dep", false),
+            (true, false, false, "dep/x", false),
+        ] {
+            metadata.packages[0].dependencies[0].optional = optional;
+            metadata.packages[0].dependencies[0].name = if renamed { "original-package" } else { "dep" }.to_owned();
+            metadata.packages[0].dependencies[0].rename = renamed.then(|| "dep".to_owned());
+            metadata.packages[0].features = if exposes_feature {
+                let members = if optional { vec!["dep:dep".to_owned()] } else { Vec::new() };
+                BTreeMap::from([("dep".to_owned(), members)])
+            } else {
+                BTreeMap::from([("activate".to_owned(), vec!["dep:dep".to_owned()])])
+            };
+            metadata.packages[0].targets[0].required_features = vec![selector.to_owned()];
+            let index = SourceIndex::from_metadata(&metadata).expect("dependency-required feature source index builds");
+            let expected_removed = if enables_local { BTreeSet::from([7, 8]) } else { BTreeSet::new() };
+            assert_eq!(index.files[&source].test_only_lines, expected_removed, "{selector}");
 
-        let filtered = filter_reports_with_metadata(
-            vec![parse_lcov(
-                "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nDA:7,0\nDA:8,0\nend_of_record\n",
-            )],
-            &metadata,
-        )
-        .expect("dependency-required feature report filters");
-        let report = parse_lcov(&filtered[0]);
-        assert_eq!(
-            report
+            let filtered = filter_reports_with_metadata(
+                vec![parse_lcov(
+                    "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nDA:7,0\nDA:8,0\nend_of_record\n",
+                )],
+                &metadata,
+            )
+            .expect("dependency-required feature report filters");
+            let report = parse_lcov(&filtered[0]);
+            let retained = report
                 .sections
                 .values()
                 .next()
@@ -2499,9 +2588,40 @@ mod tests {
                 .lines
                 .keys()
                 .map(|line| line.line)
-                .collect::<Vec<_>>(),
-            [4, 5]
-        );
+                .collect::<Vec<_>>();
+            assert_eq!(retained, if enables_local { vec![4, 5] } else { vec![4, 5, 7, 8] }, "{selector}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn configured_test_attributes_work_across_target_editions() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.workspace_metadata = json!({"coverage-gate": {"test-attributes": ["framework::gen"]}});
+        for (target, edition, filename) in [
+            (0, CargoEdition::E2021, "edition-2021.rs"),
+            (1, CargoEdition::E2024, "edition-2024.rs"),
+        ] {
+            metadata.packages[0].targets[target].edition = edition;
+            metadata.packages[0].targets[target].kind = vec![TargetKind::Bin];
+            metadata.packages[0].targets[target].src_path = root.join("member/src").join(filename).to_string_lossy().into_owned().into();
+        }
+
+        assert!(parse_configured_test_attribute_for_edition("framework::gen", Edition::Edition2024).is_none());
+        assert_eq!(parse_configured_test_attribute("framework::gen").as_deref(), Some("framework::gen"));
+        let index = SourceIndex::from_metadata(&metadata).expect("mixed-edition source index builds");
+        for filename in ["edition-2021.rs", "edition-2024.rs"] {
+            let source = fs::canonicalize(root.join("member/src").join(filename)).expect("canonical edition fixture");
+            assert_eq!(index.files[&source].test_only_lines, BTreeSet::from([1, 2, 3, 4, 5]));
+            let report = format!("TN:\nSF:member/src/{filename}\nDA:4,0\nDA:5,0\nDA:7,1\nend_of_record\n");
+            let filtered = filter_reports_with_metadata(vec![parse_lcov(&report)], &metadata).expect("mixed-edition report filters");
+            let expected_path = root.join("member").join("src").join(filename);
+            assert_eq!(
+                filtered,
+                [format!("TN:\nSF:{}\nDA:7,1\nLF:1\nLH:1\nend_of_record\n", expected_path.display())]
+            );
+        }
     }
 
     #[test]
