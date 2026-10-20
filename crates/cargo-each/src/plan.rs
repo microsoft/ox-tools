@@ -247,7 +247,6 @@ mod tests {
 
     fn member(name: &str) -> Member {
         Member {
-            id: format!("literal-{name}"),
             name: name.to_owned(),
             version: "1.2.3".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),

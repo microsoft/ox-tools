@@ -33,18 +33,19 @@ fn expected_selector(checkout: &str, package: &str) -> String {
     }
 }
 
-fn expected_record(checkout: &str, package: &str, id: &str) -> Value {
-    let directory = match package {
-        "alpha" => checkout_path(checkout).join("local alpha"),
-        "root-package" => checkout_path(checkout),
-        unexpected => panic!("unexpected package: {unexpected}"),
-    };
-    json!({
-        "manifest_path": directory.join("Cargo.toml"),
-        "name": package,
-        "cargo_spec": expected_selector(checkout, package),
-        "id": id,
-    })
+fn expected_invocation(checkout: &str, package: &str) -> Invocation {
+    Invocation {
+        label: Some(package.to_owned()),
+        argv: vec![
+            "cargo".to_owned(),
+            "check".to_owned(),
+            "--offline".to_owned(),
+            "-p".to_owned(),
+            expected_selector(checkout, package),
+            format!("legacy={package}@0.1.0"),
+        ],
+        work_dir: None,
+    }
 }
 
 fn workspace(checkout: &str, member_id: &str) -> Workspace {
@@ -112,50 +113,55 @@ fn selection_without_files(args: &EachArgs) -> Result<Selection, crate::error::E
     )
 }
 
-fn list(checkout: &str, options: &[&str]) -> Value {
+fn dispatch(checkout: &str, options: &[&str]) -> Vec<Invocation> {
     let mut options = options.to_vec();
-    options.push("--list-json");
+    options.extend(["--", "cargo", "check", "--offline", "-p", "{cargo-spec}", "legacy={spec}"]);
     let args = args(&options);
-    let mut output = Vec::new();
+    let mut invocations = Vec::new();
     let code = run_workspace_with(
         &args,
         selection_without_files,
-        |manifest, toolchain| {
+        |manifest| {
             assert_eq!(manifest, None);
-            assert_eq!(toolchain, None);
             Ok(workspace(checkout, "literal-local-id"))
         },
-        &mut output,
-        |_, _, _, _| panic!("listing must not execute a child command"),
+        |plan, keep_going, jobs, timeout| {
+            assert!(!keep_going);
+            assert_eq!(jobs.get(), 1);
+            assert_eq!(timeout, None);
+            invocations.clone_from(&plan.invocations);
+            Ok(ExitCode::SUCCESS)
+        },
     )
-    .expect("listing");
+    .expect("scripted dispatch");
     assert_eq!(code, ExitCode::SUCCESS);
-    assert_eq!(output.last(), Some(&b'\n'));
-    serde_json::from_slice(&output).expect("structured selection")
+    invocations
 }
 
 #[test]
-fn listing_resolves_only_workspace_packages_and_applies_existing_filters() {
+fn dispatch_resolves_only_workspace_packages_and_applies_existing_filters() {
     let checkout = "checkout with spaces";
-    let alpha = expected_record(checkout, "alpha", "literal-local-id");
-    let root = expected_record(checkout, "root-package", "literal-root-id");
     for (options, expected) in [
-        (vec!["-p", "alpha@0.1.0"], json!([alpha])),
-        (vec![], json!([root])),
-        (vec!["--workspace"], json!([alpha, root])),
-        (vec!["--workspace", "--filter", "not dep:alpha"], json!([alpha])),
-        (vec!["--workspace", "--exclude", "root-package"], json!([alpha])),
-        (vec!["--none"], json!([])),
-        (vec!["--workspace", "--filter", "bin"], json!([])),
+        (vec!["-p", "alpha@0.1.0"], vec!["alpha"]),
+        (vec![], vec!["root-package"]),
+        (vec!["--workspace"], vec!["alpha", "root-package"]),
+        (vec!["--workspace", "--filter", "not dep:alpha"], vec!["alpha"]),
+        (vec!["--workspace", "--exclude", "root-package"], vec!["alpha"]),
+        (vec!["--none"], vec![]),
+        (vec!["--workspace", "--filter", "bin"], vec![]),
     ] {
-        assert_eq!(list(checkout, &options), expected, "{options:?}");
+        let expected = expected
+            .iter()
+            .map(|package| expected_invocation(checkout, package))
+            .collect::<Vec<_>>();
+        assert_eq!(dispatch(checkout, &options), expected, "{options:?}");
     }
 }
 
 #[test]
 fn target_names_do_not_select_packages() {
     let workspace = workspace("checkout with spaces", "literal-local-id");
-    let selection = selection_without_files(&args(&["-p", "custom_library_name", "--list-json"])).expect("selection");
+    let selection = selection_without_files(&args(&["-p", "custom_library_name", "--", "cargo", "check"])).expect("selection");
     let error = selection.resolve(&workspace).expect_err("a target name is not a package selector");
     assert_eq!(
         error.to_string(),
@@ -180,16 +186,14 @@ fn command_dispatch_is_source_qualified_in_both_package_modes() {
             "target={name}",
         ]);
         let args = args(&options);
-        let mut output = Vec::new();
         let mut executions = 0;
         let code = run_workspace_with(
             &args,
             selection_without_files,
-            |manifest, toolchain| {
-                assert_eq!((manifest, toolchain), (None, None));
+            |manifest| {
+                assert_eq!(manifest, None);
                 Ok(workspace(checkout, "literal-local-id"))
             },
-            &mut output,
             |plan, keep_going, jobs, timeout| {
                 executions += 1;
                 assert!(keep_going);
@@ -219,7 +223,6 @@ fn command_dispatch_is_source_qualified_in_both_package_modes() {
         .expect("scripted command dispatch");
         assert_eq!(executions, 1);
         assert_eq!(code, ExitCode::from(17));
-        assert_eq!(output, b"");
     }
 }
 
@@ -236,13 +239,12 @@ fn explicit_root_selection_does_not_dispatch_other_default_members() {
         "-p",
         "{cargo-spec}",
     ]);
-    let mut output = Vec::new();
     let mut executions = 0;
     let code = run_workspace_with(
         &args,
         selection_without_files,
-        |manifest, toolchain| {
-            assert_eq!((manifest, toolchain), (None, None));
+        |manifest| {
+            assert_eq!(manifest, None);
             let mut metadata = workspace_metadata(checkout, "literal-local-id");
             metadata["workspace_default_members"] = json!(["literal-local-id"]);
             let metadata: Metadata = serde_json::from_value(metadata).expect("controlled root-package metadata");
@@ -262,7 +264,6 @@ fn explicit_root_selection_does_not_dispatch_other_default_members() {
             );
             Ok(workspace)
         },
-        &mut output,
         |plan, keep_going, jobs, timeout| {
             executions += 1;
             assert!(!keep_going);
@@ -290,7 +291,6 @@ fn explicit_root_selection_does_not_dispatch_other_default_members() {
     .expect("explicit root-package dispatch");
     assert_eq!(executions, 1);
     assert_eq!(code, ExitCode::SUCCESS);
-    assert_eq!(output, b"");
 }
 
 #[test]
@@ -305,10 +305,17 @@ fn portable_package_file_resolves_against_each_checkout_without_filesystem_mutat
             manifest.to_str().expect("synthetic UTF-8 path"),
             "--package-file",
             "selection.txt",
-            "--list-json",
+            "--",
+            "cargo",
+            "check",
+            "--offline",
+            "-p",
+            "{cargo-spec}",
+            "--manifest-path",
+            "{manifest}",
         ]);
         let mut reads = 0;
-        let mut output = Vec::new();
+        let mut executions = 0;
         let code = run_workspace_with(
             &args,
             |args| {
@@ -325,77 +332,47 @@ fn portable_package_file_resolves_against_each_checkout_without_filesystem_mutat
                     },
                 )
             },
-            |path, toolchain| {
+            |path| {
                 assert_eq!(path, Some(manifest.as_path()));
-                assert_eq!(toolchain, None);
                 Ok(workspace(checkout, id))
             },
-            &mut output,
-            |_, _, _, _| panic!("listing must not execute commands"),
+            |plan, _, _, _| {
+                executions += 1;
+                assert_eq!(
+                    plan,
+                    &Plan {
+                        invocations: vec![Invocation {
+                            label: Some("alpha".to_owned()),
+                            argv: vec![
+                                "cargo".to_owned(),
+                                "check".to_owned(),
+                                "--offline".to_owned(),
+                                "-p".to_owned(),
+                                expected_selector(checkout, "alpha"),
+                                "--manifest-path".to_owned(),
+                                checkout_path(checkout).join("local alpha").join("Cargo.toml").display().to_string(),
+                            ],
+                            work_dir: None,
+                        }],
+                    }
+                );
+                Ok(ExitCode::SUCCESS)
+            },
         )
         .expect("relocated selection");
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(reads, 1);
-        let actual: Value = serde_json::from_slice(&output).expect("listing JSON");
-        assert_eq!(actual, json!([expected_record(checkout, "alpha", id)]));
+        assert_eq!(executions, 1);
     }
 }
 
 #[test]
-fn explicit_metadata_toolchain_preserves_its_exact_literal_id() {
-    let checkout = "checkout with spaces";
-    for (toolchain, id) in [
-        ("metadata-toolchain-a", "alpha 0.1.0 (path+file:///opaque/source)"),
-        ("metadata-toolchain-b", "opaque metadata ID with no parseable selector"),
-    ] {
-        let args = args(&["-p", "alpha", "--metadata-toolchain", toolchain, "--list-json"]);
-        let mut output = Vec::new();
-        let code = run_workspace_with(
-            &args,
-            selection_without_files,
-            |manifest, selected_toolchain| {
-                assert_eq!(manifest, None);
-                assert_eq!(selected_toolchain, Some(toolchain));
-                Ok(workspace(checkout, id))
-            },
-            &mut output,
-            |_, _, _, _| panic!("listing must not execute commands"),
-        )
-        .expect("toolchain-specific listing");
-        assert_eq!(code, ExitCode::SUCCESS);
-        let actual: Value = serde_json::from_slice(&output).expect("listing JSON");
-        assert_eq!(actual, json!([expected_record(checkout, "alpha", id)]));
+fn aggregate_selection_options_are_not_exposed() {
+    for option in ["--list-json", "--metadata-toolchain"] {
+        let error = CargoCli::try_parse_from(["cargo", "each", option, "--", "cargo", "check"])
+            .expect_err("aggregate selection APIs are outside the CLI surface");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{option}");
     }
-}
-
-#[test]
-fn listing_rejects_execution_and_json_record_options_in_process() {
-    for options in [
-        vec!["--", "echo"],
-        vec!["--once"],
-        vec!["--dry-run"],
-        vec!["--each-target", "lib"],
-        vec!["--chdir"],
-        vec!["--keep-going"],
-        vec!["--timeout", "3s"],
-        vec!["--jobs", "2"],
-        vec!["--json-lines", "{}"],
-        vec!["--json-lines-file", "input.jsonl"],
-    ] {
-        let error = CargoCli::try_parse_from(["cargo", "each", "--list-json"].into_iter().chain(options.iter().copied()))
-            .expect_err("listing conflicts with execution and JSON-record input");
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{options:?}");
-    }
-    let error = CargoCli::try_parse_from([
-        "cargo",
-        "each",
-        "--json-lines",
-        "{}",
-        "--metadata-toolchain",
-        "fixture",
-        "--",
-        "echo",
-    ])
-    .expect_err("JSON-record mode does not query metadata");
-    assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    let error = CargoCli::try_parse_from(["cargo", "each"]).expect_err("execution requires a command");
+    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
 }

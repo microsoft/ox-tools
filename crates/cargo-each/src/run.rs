@@ -48,29 +48,22 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
         return run_json(args);
     }
-    run_workspace_with(args, build_selection, Workspace::load, &mut io::stdout(), execute)
+    run_workspace_with(args, build_selection, Workspace::load, execute)
 }
 
 fn run_workspace_with(
     args: &EachArgs,
     load_selection: impl FnOnce(&EachArgs) -> Result<Selection, crate::error::EachError>,
-    load_workspace: impl FnOnce(Option<&std::path::Path>, Option<&str>) -> Result<Workspace, crate::error::EachError>,
-    output: &mut impl io::Write,
+    load_workspace: impl FnOnce(Option<&std::path::Path>) -> Result<Workspace, crate::error::EachError>,
     execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
 ) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
 
     let selection = load_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
-    let workspace =
-        load_workspace(args.manifest_path.as_deref(), args.metadata_toolchain.as_deref()).into_app_err("failed to load workspace")?;
+    let workspace = load_workspace(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
     apply_filters(&mut members, args)?;
-
-    if args.list_json {
-        write_selection(&members, output)?;
-        return Ok(ExitCode::SUCCESS);
-    }
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.
@@ -127,25 +120,6 @@ fn run_workspace_with(
     }
 
     execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
-}
-
-fn write_selection(members: &[&Member], output: &mut impl io::Write) -> Result<(), AppError> {
-    let records = members
-        .iter()
-        .map(|member| {
-            serde_json::json!({
-                "manifest_path": member.manifest_path,
-                "name": member.name,
-                "cargo_spec": member.cargo_spec(),
-                "id": member.id,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_writer(&mut *output, &records).into_app_err("failed to write package selection")?;
-    output
-        .write_all(b"\n")
-        .and_then(|()| output.flush())
-        .into_app_err("failed to write package selection")
 }
 
 fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {

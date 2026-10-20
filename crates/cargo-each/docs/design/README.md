@@ -166,40 +166,27 @@ arbitrary-command + metadata-filter spine do not overlap.
 
 ## 4. CLI surface
 
-### Package identity and structured selection
-
-`--list-json` resolves the existing workspace selection and filters without a
-child command. It prints one JSON array in package-name order, including `[]`
-for an empty selection. Each object contains exactly these string fields:
-`manifest_path` (absolute member manifest path), `name` (package name),
-`cargo_spec` (source-qualified Cargo selector), and `id` (literal metadata ID).
-It conflicts with execution options, command arguments, and JSON-record input.
-
-`--metadata-toolchain <TOOLCHAIN>` selects the rustup toolchain for the metadata
-query only. Without this option, discovery preserves inherited Cargo selection.
-It applies to execution and listing, but not JSON-record mode. Consumers that
-compare metadata IDs must query with the same toolchain.
-Explicit toolchains resolve through `rustup which --toolchain <TOOLCHAIN> cargo`;
-the metadata command uses that absolute executable rather than `cargo` on `PATH`
-or an inherited `CARGO`. A resolution failure is reported, without fallback.
+### Source-qualified per-package selection
 
 `{cargo-spec}` is a per-package/per-target placeholder with the form
 `file:///...#name@version`. Its URL-encoded source is the absolute manifest
 directory; name and version come from structured package metadata. Metadata IDs
-are opaque and are never parsed or rewritten. `{spec}` and `{packages}` retain
+are opaque and are never parsed or exposed. `{spec}` and `{packages}` retain
 their existing expansions for compatibility.
 
 All selections resolve against workspace members only, not registry packages or
 target names. Existing `-p` and `--package-file` inputs suffice for portable
 name/version selections; no cargo-delta dependency or record parser is involved.
-Paths, selectors, and literal IDs in the output belong to the current checkout.
-Resolve the portable selection again after relocation rather than reusing this
-output as a portable artifact.
+Selectors belong to the current checkout and are reconstructed from its
+metadata after relocation. Discovery preserves inherited Cargo/toolchain
+selection; it does not resolve a separate metadata toolchain.
 
-Aggregate `cargo build`/`cargo test` consumers may resolve once with `--list-json`
-and repeat `--package <cargo_spec>` in a single Cargo invocation; they need not
-use cargo-each's executor. Unscoped Cargo commands need no resolver. This keeps
-the existing cargo-delta selection format and Cargo's aggregate execution model.
+Aggregate `cargo build`/`cargo test` consumers can use ordinary Cargo
+`--workspace --exclude ...` selection without cargo-each. Cargo resolves that
+selection against workspace members, avoiding registry collisions and
+checkout-local selectors. Callers must skip explicitly empty selections:
+excluding every member is an error, not a Cargo no-op. Aggregate selection
+output and literal metadata-ID adapters are outside cargo-each's scope.
 
 ```
 cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]

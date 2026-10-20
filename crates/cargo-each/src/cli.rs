@@ -120,22 +120,9 @@ pub(crate) struct EachArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) manifest_path: Option<PathBuf>,
 
-    /// Select the rustup toolchain used for Cargo metadata only.
-    #[arg(long, value_name = "TOOLCHAIN", value_parser = clap::builder::NonEmptyStringValueParser::new(),
-        conflicts_with_all = ["json_lines", "json_lines_files"])]
-    pub(crate) metadata_toolchain: Option<String>,
-
-    /// Print selected members as a JSON array instead of running a command.
-    /// Fields: `manifest_path`, `name`, `cargo_spec`, `id` (literal metadata ID).
-    #[arg(long, conflicts_with_all = [
-        "command", "once", "each_targets", "chdir", "jobs", "timeout",
-        "dry_run", "keep_going", "json_lines", "json_lines_files"
-    ])]
-    pub(crate) list_json: bool,
-
     /// The command to run, after `--`. Placeholders are substituted per the
     /// selected mode.
-    #[arg(last = true, required_unless_present = "list_json", value_name = "COMMAND")]
+    #[arg(last = true, required = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
 }
 
