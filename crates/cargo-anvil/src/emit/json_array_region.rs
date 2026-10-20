@@ -314,7 +314,7 @@ pub(crate) fn validated_regions(text: &str) -> Result<Vec<Region<'_>>, ManagedRe
             };
             let region = find_region_in_lines(text, id, CommentSyntax::SlashSlash, [start, line].into_iter())
                 .map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?
-                .expect("the exact opener and closer supplied above form a usable region");
+                .ok_or_else(|| refusal("unusable sentinel lines", RefusalRemedy::MalformedMarkers))?;
             regions.push(region);
         }
     }
@@ -450,6 +450,9 @@ fn contains_interior(span: &Range<usize>, offset: usize) -> bool {
 pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<String>]) -> Result<(), ManagedRegionRefusal> {
     let original = parse(before)?;
     let updated = parse(after).map_err(|refusal| ManagedRegionRefusal::new(refusal.reason, RefusalRemedy::BetweenManagedRegions))?;
+    if let Some(root) = &updated.value {
+        validate_unique_properties(root)?;
+    }
     let map_offset = splice_offset_map(before, after);
     for path in paths {
         let Some(original_array) = original
@@ -481,6 +484,27 @@ pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<S
     Ok(())
 }
 
+fn validate_unique_properties(value: &Value<'_>) -> Result<(), ManagedRegionRefusal> {
+    if let Some(object) = value.as_object() {
+        let mut names = BTreeSet::new();
+        for property in &object.properties {
+            let name = property.name.as_str();
+            if !names.insert(name) {
+                return Err(refusal(
+                    format!("JSON object property {name:?} occurs more than once, so array ownership is ambiguous"),
+                    RefusalRemedy::ArrayShape,
+                ));
+            }
+            validate_unique_properties(&property.value)?;
+        }
+    } else if let Some(array) = value.as_array() {
+        for element in &array.elements {
+            validate_unique_properties(element)?;
+        }
+    }
+    Ok(())
+}
+
 /// Recover selectors from existing array-contained markers.
 pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, ManagedRegionRefusal> {
     fn visit(
@@ -495,15 +519,8 @@ pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, Manag
             paths.push(path.clone());
         }
         if let Some(object) = value.as_object() {
-            let mut names = BTreeSet::new();
             for property in &object.properties {
                 let name = property.name.as_str();
-                if !names.insert(name) {
-                    return Err(refusal(
-                        format!("JSON object property {name:?} occurs more than once, so array ownership is ambiguous"),
-                        RefusalRemedy::ArrayShape,
-                    ));
-                }
                 path.push(name.to_owned());
                 visit(&property.value, path, markers, paths)?;
                 path.pop();
@@ -512,6 +529,9 @@ pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, Manag
         Ok(())
     }
     let parsed = parse(text)?;
+    if let Some(root) = &parsed.value {
+        validate_unique_properties(root)?;
+    }
     let markers: Vec<_> = json_comment_lines(text)
         .filter_map(|line| {
             let comment = text[line.start..line.end].trim();
@@ -930,6 +950,7 @@ mod tests {
                 "// >>> anvil-managed: one\n",
                 "// <<< anvil-managed: one\n",
             ),
+            "// >>> anvil-managed:one\n// <<< anvil-managed:one\n",
         ] {
             assert_eq!(validated_regions(source).unwrap_err().remedy, RefusalRemedy::MalformedMarkers);
         }
@@ -1068,6 +1089,16 @@ mod tests {
                 .unwrap_err()
                 .remedy,
             RefusalRemedy::ArrayDependency
+        );
+        assert_eq!(
+            validate_neighbor_splice(
+                r#"{"entries":[],"old":true,"flag":false}"#,
+                r#"{"entries":[],"flag":true,"flag":false}"#,
+                std::slice::from_ref(&path),
+            )
+            .unwrap_err()
+            .remedy,
+            RefusalRemedy::ArrayShape
         );
         validate_neighbor_splice(
             r#"{"entries":[],"other":1}"#,

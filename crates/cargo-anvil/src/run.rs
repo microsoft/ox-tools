@@ -2007,6 +2007,39 @@ mod tests {
     }
 
     #[test]
+    fn json_array_plan_refuses_neighbor_that_introduces_duplicate_properties() {
+        let catalog = json_array_catalog()
+            .into_builder()
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("CloudBuild.json".to_owned()),
+                id: RegionId::new("settings"),
+                body: "\"flag\": true,\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  \"EnlistmentRootPaths\": {\"SourceRootDirs\": []},\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"old\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  \"flag\": false\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("CloudBuild.json", "settings", checksum_str("  \"old\": true,\n"));
+
+        let error = json_array_plan(source, &manifest, &catalog).unwrap_err().to_string();
+
+        assert!(
+            error.contains("JSON object property \"flag\" occurs more than once, so array ownership is ambiguous"),
+            "{error}"
+        );
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
     fn json_array_plan_refuses_existing_whole_file_ownership() {
         let source = "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[]}}\n";
         let mut manifest = Manifest::default();
