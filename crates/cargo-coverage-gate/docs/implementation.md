@@ -160,14 +160,18 @@ the workspace discovered from the invocation directory.
    only when it cannot hold with `test = false`. All `cfg` and `cfg_attr`
    effects on the same syntax owner are conjoined with enclosing owner,
    declaring-module, source-file, and local Cargo target `required-features`
-   guards. Dependency selectors also add an implicit local dependency feature
-   only when Cargo's dependency metadata identifies the dependency as optional
-   (using its alias when renamed) and the local feature exists. A same-named
-   feature alone is insufficient; weak and `dep:` selectors do not create
-   local feature atoms. Those composed guards propagate through inline and out-of-line modules.
+   guards. Dependency-qualified requirements establish dependency-feature
+   availability, not local-feature activation: optional dependencies and aliases
+   can be activated through another feature's `dep:` entry. Qualified, weak,
+   and `dep:` selectors therefore add no local feature atoms, regardless of
+   dependency optionality or same-named package features. Those composed guards
+   propagate through inline and out-of-line modules.
    Correlations among at most twelve distinct non-`test` atoms are compiled
    once and evaluated by bounded assignment enumeration; larger or unsupported
    shapes use the conservative truth-value approximation.
+   CRLF is normalized to LF before parsing and deriving line offsets, keeping
+   leading-comment attachment and line classification independent of checkout
+   line endings without changing LCOV line numbers.
    Overlapping test-only syntax ranges are merged, then source-ordered tokens
    are classified with a single advancing range cursor. Line records inside
    excluded ranges are removed.

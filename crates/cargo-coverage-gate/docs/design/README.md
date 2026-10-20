@@ -565,13 +565,15 @@ the released Cargo surface:
   conjoined with shared assignments. A Cargo target's local
   `required-features` are also true at its root, so code that can exist only
   when a required feature is absent is not counted as released.
-  A dependency-qualified selector such as `dep/feature` also enables the
-  local `dep` feature only when Cargo dependency metadata identifies `dep`
-  as optional and the feature map exposes it. Renamed dependencies use
-  their alias, not their package name. A non-optional dependency does not
-  enable an unrelated same-named local feature. Weak selectors
-  (`dep?/feature`) and explicit `dep:dep`
-  activations do not create local cfg atoms. Correlated occurrences of up to
+  Dependency-qualified selectors such as `dep/feature` check resolved
+  dependency-feature availability, not local-feature activation. Even when
+  metadata identifies an optional dependency (including a renamed alias)
+  and exposes a same-named local feature, another feature such as
+  `bundle = ["dep:dep"]` can activate that dependency without the local
+  feature. Qualified selectors, weak selectors (`dep?/feature`), and
+  explicit `dep:dep` activations therefore create no local cfg atoms.
+  Non-optional dependencies likewise imply no same-named local feature.
+  Correlated occurrences of up to
   twelve distinct non-`test` cfg atoms are evaluated exactly; larger or
   unsupported predicate shapes fall back to conservative retention rather
   than hiding released code.
@@ -580,6 +582,11 @@ Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted
 entirely because the proof is line-granular. A source/path/parse state the tool
 cannot classify safely is exit `2`, not a silent exclusion.
+
+Rust source CRLF line endings are normalized to LF before syntax parsing and
+line-offset mapping, so leading-comment attachment and test-only line
+classification do not depend on checkout line endings. LCOV line numbers are
+unchanged.
 
 For each remaining `SF:` section the tool counts:
 
