@@ -979,7 +979,6 @@ fn labeled_issue_ratio(labeled: u64, issue_count: u64) -> u32 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use core::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     use semver::Version;
@@ -1049,17 +1048,32 @@ mod tests {
         Cache::new("test_cache", Duration::from_hours(1), false)
     }
 
-    static NEXT_CACHE_DIR_ID: AtomicU64 = AtomicU64::new(0);
+    fn test_cache_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(name)
+            .tempdir()
+            .expect("each test must get a new, empty cache directory")
+    }
 
-    fn test_cache_dir(name: &str) -> std::path::PathBuf {
-        let id = NEXT_CACHE_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::current_dir()
-            .expect("tests run with a current directory")
-            .join("target")
-            .join("cargo-aprz-lib-hosting-tests")
-            .join(format!("{name}-{}-{id}", std::process::id()));
-        std::fs::create_dir_all(&path).expect("test cache directory is creatable under target");
-        path
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot create temporary directories")]
+    fn test_caches_are_isolated_and_removed_after_use() {
+        let first = test_cache_dir("repository-rate-limit");
+        let first_path = first.path().to_path_buf();
+        let filename = Provider::get_cache_filename("github.com", "owner", "repo");
+        Cache::new(first.path(), Duration::from_hours(1), false)
+            .save(&filename, &repo(Vec::new()))
+            .unwrap();
+        let second = test_cache_dir("repository-rate-limit");
+
+        assert_ne!(first.path(), second.path());
+        assert!(matches!(
+            Cache::new(second.path(), Duration::from_hours(1), false).load::<CachedRepo>(&filename),
+            CacheResult::Miss
+        ));
+
+        drop(first);
+        assert!(!first_path.exists(), "test cache contents must not survive a test run");
     }
 
     /// Test reporter that captures tracker fallback messages; all other callbacks are inert.
@@ -2004,7 +2018,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn unsupported_host_miss_is_saved_as_negative_cache_entry() {
         let cache_dir = test_cache_dir("unsupported-host");
-        let cache = Cache::new(cache_dir.as_path(), Duration::from_hours(1), false);
+        let cache = Cache::new(cache_dir.path(), Duration::from_hours(1), false);
         let provider = Provider::new(
             None,
             None,
@@ -2062,7 +2076,7 @@ mod tests {
             .await;
 
         let cache_dir = test_cache_dir("issue-pagination");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
 
         let (_, client) = github_client(&provider);
         let now = DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
@@ -2104,7 +2118,7 @@ mod tests {
             .await;
 
         let cache_dir = test_cache_dir("empty-pagination-page");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
         let (_, client) = github_client(&provider);
 
         let (raw_issues, _) = expect_api_success(provider.get_issues_and_pulls(client, "owner", "repo").await);
@@ -2148,7 +2162,7 @@ mod tests {
             .await;
 
         let cache_dir = test_cache_dir("pagination-rate-limit");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
         let (_, client) = github_client(&provider);
 
         let (raw_issues, rate_limit) = expect_api_success(provider.get_issues_and_pulls(client, "owner", "repo").await);
@@ -2185,7 +2199,7 @@ mod tests {
             .await;
 
         let cache_dir = test_cache_dir("missing-issues-endpoint");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
         let (host, client) = github_client(&provider);
         let repo_spec = github_repo_spec();
 
@@ -2216,7 +2230,7 @@ mod tests {
             .await;
 
         let cache_dir = test_cache_dir("successful-repository-fetch");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
         let (host, client) = github_client(&provider);
         let repo_spec = github_repo_spec();
 
@@ -2249,6 +2263,7 @@ mod tests {
                         "subscribers_count": 3
                     })),
             )
+            .expect(1)
             .mount(&server)
             .await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -2259,15 +2274,21 @@ mod tests {
                     .insert_header("x-ratelimit-reset", "1704067200")
                     .set_body_json(serde_json::json!([])),
             )
+            .expect(1)
             .mount(&server)
             .await;
 
         let cache_dir = test_cache_dir("repository-rate-limit");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
         let (host, client) = github_client(&provider);
 
         let result = provider.fetch_hosting_data_for_repo(client, host, &github_repo_spec()).await;
 
+        assert!(
+            matches!(result.result, ProviderResult::Found(_)),
+            "both mocked API calls must succeed"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
         assert_eq!(
             result
                 .rate_limit
@@ -2281,7 +2302,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
     async fn begin_rate_limit_pause_pauses_the_throttler() {
         let cache_dir = test_cache_dir("begin-rate-limit-pause");
-        let provider = test_provider(&cache_dir, "http://127.0.0.1:1");
+        let provider = test_provider(cache_dir.path(), "http://127.0.0.1:1");
         let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
         let now = Utc::now();
 
@@ -2349,7 +2370,7 @@ mod tests {
             .mount(&server)
             .await;
         let cache_dir = test_cache_dir("completed-fetch");
-        let provider = test_provider(&cache_dir, &server.uri());
+        let provider = test_provider(cache_dir.path(), &server.uri());
         let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
         tracker.add_requests(TrackedTopic::Repos, 1);
         let (host, client) = github_client(&provider);
