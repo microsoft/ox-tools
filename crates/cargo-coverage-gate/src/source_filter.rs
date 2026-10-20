@@ -2574,6 +2574,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
     fn configured_test_attribute_classification_is_independent_of_line_endings() {
         let attributes = BTreeSet::from(["framework::gen".to_owned()]);
         for (edition, fixture) in [
