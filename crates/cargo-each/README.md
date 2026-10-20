@@ -74,12 +74,22 @@ be combined with `--list-json`.
 metadata query only; it does not change child commands. Use the same
 toolchain as an aggregate consumer that compares literal metadata IDs.
 Without it, the inherited Cargo/toolchain selection is unchanged.
+With it, cargo-each resolves the absolute Cargo executable using
+`rustup which --toolchain <TOOLCHAIN> cargo`, even when `PATH` or `CARGO`
+points directly to another toolchain. Resolution failure is an error.
 
 Selection remains workspace-only, even when a registry dependency has the
 same name and version. Existing `-p name@version` and `--package-file`
 inputs resolve in the current checkout; no cargo-delta record format is
 required. Output paths, selectors, and IDs are checkout-local: resolve
 portable selections again after moving a checkout.
+
+Ordinary `cargo build` and `cargo test` commands do not need to run through
+cargo-each's executor. For a scoped aggregate command, resolve the selection
+once with `--list-json`, then pass each record's `cargo_spec` as a separate
+`--package` argument to one Cargo invocation. Unscoped commands stay unchanged.
+This preserves Cargo's aggregate build/test behavior without a new cargo-delta
+format or a per-package execution loop.
 
 ### Filters
 
@@ -255,4 +265,3 @@ cargo each --workspace --each-target test --target-required-feature loom -- \
 <sub>
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each">source code</a>.
 </sub>
-

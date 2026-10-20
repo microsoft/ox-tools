@@ -28,6 +28,7 @@
 #[ohno::error]
 #[from(
     LoadMetadataError,
+    MetadataCargoResolutionError,
     UnknownSelectorError,
     InvalidFilterExpressionError,
     InvalidTargetKindError,
@@ -54,6 +55,14 @@ pub(crate) struct EachError;
 #[display("failed to load workspace metadata")]
 #[from(cargo_metadata::Error)]
 pub(crate) struct LoadMetadataError;
+
+/// Rustup could not resolve an absolute Cargo executable for a metadata query.
+#[ohno::error]
+#[display("could not resolve Cargo for metadata toolchain `{toolchain}`: {reason}")]
+pub(crate) struct MetadataCargoResolutionError {
+    pub(crate) toolchain: String,
+    pub(crate) reason: String,
+}
 
 /// A `-p` / `--package` (or `--exclude`) selector matched no workspace
 /// member. Surfaced loudly so typos fail rather than silently skipping.

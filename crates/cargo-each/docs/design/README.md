@@ -179,6 +179,9 @@ It conflicts with execution options, command arguments, and JSON-record input.
 query only. Without this option, discovery preserves inherited Cargo selection.
 It applies to execution and listing, but not JSON-record mode. Consumers that
 compare metadata IDs must query with the same toolchain.
+Explicit toolchains resolve through `rustup which --toolchain <TOOLCHAIN> cargo`;
+the metadata command uses that absolute executable rather than `cargo` on `PATH`
+or an inherited `CARGO`. A resolution failure is reported, without fallback.
 
 `{cargo-spec}` is a per-package/per-target placeholder with the form
 `file:///...#name@version`. Its URL-encoded source is the absolute manifest
@@ -192,6 +195,11 @@ name/version selections; no cargo-delta dependency or record parser is involved.
 Paths, selectors, and literal IDs in the output belong to the current checkout.
 Resolve the portable selection again after relocation rather than reusing this
 output as a portable artifact.
+
+Aggregate `cargo build`/`cargo test` consumers may resolve once with `--list-json`
+and repeat `--package <cargo_spec>` in a single Cargo invocation; they need not
+use cargo-each's executor. Unscoped Cargo commands need no resolver. This keeps
+the existing cargo-delta selection format and Cargo's aggregate execution model.
 
 ```
 cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]

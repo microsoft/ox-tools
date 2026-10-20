@@ -10,12 +10,16 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 use cargo_metadata::semver::Version;
 use cargo_metadata::{Metadata, MetadataCommand, TargetKind};
 use serde_json::Value;
 
-use crate::error::{EachError, LoadMetadataError, WorkspaceManifestParseError, WorkspaceManifestReadError, WorkspaceRustVersionError};
+use crate::error::{
+    EachError, LoadMetadataError, MetadataCargoResolutionError, WorkspaceManifestParseError, WorkspaceManifestReadError,
+    WorkspaceRustVersionError,
+};
 
 /// A resolved view of the cargo workspace `cargo-each` is operating on.
 #[derive(Debug, Clone)]
@@ -115,7 +119,7 @@ impl Workspace {
     /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>, toolchain: Option<&str>) -> Result<Self, EachError> {
-        let metadata = metadata_command(manifest_path, toolchain)
+        let metadata = metadata_command(manifest_path, toolchain, Command::output)?
             .exec()
             .map_err(LoadMetadataError::caused_by)?;
         Ok(Self::from_metadata(&metadata))
@@ -280,17 +284,37 @@ fn parse_rust_version(value: &str) -> Result<Version, String> {
 
 // #[gamma::skip(all, reason = "replacing the configured command with its default makes integration tests traverse dependency metadata until the mutation-test budget expires; the exact argument-vector test covers this adapter")]
 #[mutants::skip] // The default-command replacement traverses dependency metadata until timeout; the exact argument-vector test covers this adapter.
-fn metadata_command(manifest_path: Option<&Path>, toolchain: Option<&str>) -> MetadataCommand {
+fn metadata_command(
+    manifest_path: Option<&Path>,
+    toolchain: Option<&str>,
+    run: impl FnOnce(&mut Command) -> std::io::Result<Output>,
+) -> Result<MetadataCommand, EachError> {
     let mut command = MetadataCommand::new();
     command.no_deps();
     if let Some(path) = manifest_path {
         command.manifest_path(path);
     }
     if let Some(toolchain) = toolchain {
-        // Do not inherit Cargo's absolute CARGO executable: it can bypass rustup.
-        command.cargo_path("cargo").env("RUSTUP_TOOLCHAIN", toolchain);
+        let resolution_error = |reason| MetadataCargoResolutionError::new(toolchain.to_owned(), reason);
+        let output = run(Command::new("rustup").args(["which", "--toolchain", toolchain, "cargo"]))
+            .map_err(|error| resolution_error(format!("could not run rustup: {error}")))?;
+        if !output.status.success() {
+            return Err(resolution_error(format!(
+                "rustup exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+            .into());
+        }
+        let stdout = std::str::from_utf8(&output.stdout)
+            .map_err(|error| resolution_error(format!("rustup returned a non-UTF-8 Cargo path: {error}")))?;
+        let cargo = Path::new(stdout.trim_end_matches(['\r', '\n']));
+        if !cargo.is_absolute() {
+            return Err(resolution_error(format!("rustup did not return an absolute Cargo path: {stdout:?}")).into());
+        }
+        command.cargo_path(cargo).env("RUSTUP_TOOLCHAIN", toolchain);
     }
-    command
+    Ok(command)
 }
 
 /// Parse a supported Cargo target-kind spelling.
@@ -535,7 +559,9 @@ mod tests {
     #[test]
     fn metadata_command_is_no_deps_and_preserves_manifest_path() {
         let manifest = Path::new("some-workspace/Cargo.toml");
-        let command = metadata_command(Some(manifest), None).cargo_command();
+        let command = metadata_command(Some(manifest), None, |_| panic!("inherited Cargo must not query rustup"))
+            .expect("no explicit toolchain needs resolution")
+            .cargo_command();
         let args: Vec<String> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
         assert_eq!(
             args,
@@ -552,17 +578,81 @@ mod tests {
 
     #[test]
     fn metadata_toolchain_overrides_the_inherited_cargo_executable() {
-        let command = metadata_command(None, Some("custom-metadata-toolchain")).cargo_command();
-        assert_eq!(command.get_program(), "cargo");
+        let cargo = Path::new(if cfg!(windows) {
+            r"C:\toolchains\custom toolchain\bin\cargo.exe"
+        } else {
+            "/toolchains/custom toolchain/bin/cargo"
+        });
+        let manifest = Path::new("selected workspace").join("Cargo.toml");
+        let mut calls = 0;
+        let command = metadata_command(Some(&manifest), Some("custom-metadata-toolchain"), |command| {
+            calls += 1;
+            assert_eq!(command.get_program(), "rustup");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["which", "--toolchain", "custom-metadata-toolchain", "cargo"]
+            );
+            Ok(rustup_output(0, format!("{}\r\n", cargo.display()).into_bytes(), b""))
+        })
+        .expect("scripted rustup resolution")
+        .cargo_command();
+        assert_eq!(calls, 1);
+        assert_eq!(command.get_program(), cargo);
         assert!(
             command
                 .get_envs()
                 .any(|(key, value)| { key == "RUSTUP_TOOLCHAIN" && value == Some(std::ffi::OsStr::new("custom-metadata-toolchain")) })
         );
         assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            ["metadata", "--format-version", "1", "--no-deps"]
+            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            [
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+                &manifest.to_string_lossy(),
+            ]
         );
+    }
+
+    fn rustup_output(code: u32, stdout: Vec<u8>, stderr: &[u8]) -> Output {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
+
+        #[cfg(windows)]
+        let status = std::process::ExitStatus::from_raw(code);
+        #[cfg(unix)]
+        let status = std::process::ExitStatus::from_raw(i32::try_from(code).expect("scripted exit code fits i32") << 8);
+        Output {
+            status,
+            stdout,
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn metadata_toolchain_resolution_failures_do_not_fall_back_to_path_cargo() {
+        for (result, expected) in [
+            (
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "scripted rustup not found")),
+                "could not run rustup: scripted rustup not found",
+            ),
+            (
+                Ok(rustup_output(1, Vec::new(), b"toolchain is not installed")),
+                "toolchain is not installed",
+            ),
+            (Ok(rustup_output(0, vec![0xff], b"")), "non-UTF-8 Cargo path"),
+            (Ok(rustup_output(0, Vec::new(), b"")), "absolute Cargo path"),
+            (Ok(rustup_output(0, b"cargo\n".to_vec(), b"")), "absolute Cargo path"),
+        ] {
+            let error = metadata_command(None, Some("missing-toolchain"), |_| result).expect_err("resolution must fail");
+            let rendered = error.to_string();
+            assert!(rendered.contains("missing-toolchain"), "{rendered}");
+            assert!(rendered.contains(expected), "{rendered}");
+        }
     }
 
     #[test]
