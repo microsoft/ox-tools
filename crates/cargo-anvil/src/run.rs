@@ -438,36 +438,29 @@ fn array_host_inputs(
                     for host in region_host_paths(workspace, spec) {
                         let host = (hosts.resolve)(repo_root, host)?;
                         let entry = paths.entry(host).or_insert_with(|| ArrayHost { format, paths: Vec::new() });
-                        if entry.format != format {
-                            bail!("one host cannot contain both TOML and JSON array regions");
-                        }
+                        debug_assert_eq!(entry.format, format, "validated array specs for one host always share a format");
                         entry.paths.push(path.to_vec());
                     }
                 }
             }
         }
     }
-    let mut candidates: BTreeSet<String> = paths.keys().cloned().collect();
+    let mut candidates: std::collections::BTreeMap<String, ArrayFormat> =
+        paths.iter().map(|(host, array)| (host.clone(), array.format)).collect();
     for key in manifest.regions.keys() {
-        if matches!(HostScanner::for_path(&key.host), HostScanner::Toml | HostScanner::Json) {
-            candidates.insert((hosts.resolve)(repo_root, &key.host)?);
+        let format = match HostScanner::for_path(&key.host) {
+            HostScanner::Toml => Some(ArrayFormat::Toml),
+            HostScanner::Json => Some(ArrayFormat::Json),
+            HostScanner::Lines => None,
+        };
+        if let Some(format) = format {
+            candidates.insert((hosts.resolve)(repo_root, &key.host)?, format);
         }
     }
     let mut originals = HashMap::new();
     let live = live_region_keys(repo_root, workspace, catalog, hosts)?;
-    for host in candidates {
+    for (host, format) in candidates {
         let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
-        let format = paths
-            .get(&host)
-            .map(|host| host.format)
-            .or_else(|| match HostScanner::for_path(&host) {
-                HostScanner::Toml => Some(ArrayFormat::Toml),
-                HostScanner::Json => Some(ArrayFormat::Json),
-                HostScanner::Lines => None,
-            });
-        let Some(format) = format else {
-            continue;
-        };
         let discovered = match format {
             ArrayFormat::Toml => crate::emit::toml_array_region::existing_array_paths(&text),
             ArrayFormat::Json => crate::emit::json_array_region::existing_array_paths(&text),
@@ -2204,6 +2197,10 @@ mod tests {
             (
                 RefusalRemedy::InvalidGeneratedToml,
                 "The generated region is invalid TOML even without repository content. Repair the catalog template that renders this region before retrying.",
+            ),
+            (
+                RefusalRemedy::InvalidGeneratedJson,
+                "The generated region is invalid JSON even without repository content. Repair the catalog template that renders this region before retrying.",
             ),
             (
                 RefusalRemedy::HostAlreadyUnparsable,

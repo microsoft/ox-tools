@@ -487,6 +487,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_json_array_region_identity() {
+        let array = JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["plugins".to_owned()],
+        };
+
+        let error = Catalog::builder(CliMeta::new("anvil"))
+            .with_json_array_region(array.clone())
+            .with_json_array_region(array)
+            .build()
+            .unwrap_err();
+
+        assert!(error.to_string().contains("with_json_array_region: an artifact with identity"));
+    }
+
+    #[test]
     fn subcommand_derives_bin_name() {
         let catalog = Catalog::anvil().into_builder().subcommand("myforge").build().unwrap();
         assert_eq!(catalog.cli().subcommand, "myforge");

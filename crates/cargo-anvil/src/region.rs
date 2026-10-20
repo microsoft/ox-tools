@@ -446,12 +446,9 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
                 end: ElementEnd::Close(prefix, local),
                 span,
             } => {
-                let Some(opened) = stack.pop() else {
-                    return Err(format!(
-                        "the XML host closes `{}` without a matching opening element",
-                        qualified_name(prefix.as_str(), local.as_str())
-                    ));
-                };
+                let opened = stack
+                    .pop()
+                    .expect("the XML tokenizer emits a closing token only after its matching element start");
                 let closed = (prefix.as_str(), local.as_str());
                 if opened.0 != closed.0 || opened.1 != closed.1 {
                     return Err(format!(
@@ -2996,8 +2993,8 @@ mod tests {
         );
         assert_eq!(xml_document_root("<root />\n").unwrap(), None);
         assert_eq!(
-            xml_document_root("<root>\n</other>\n").unwrap_err(),
-            "the XML host closes `other` while `root` is still open"
+            xml_document_root("<build:root>\n</other:root>\n").unwrap_err(),
+            "the XML host closes `other:root` while `build:root` is still open"
         );
     }
 
