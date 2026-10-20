@@ -48,6 +48,11 @@ fn expected_record(checkout: &str, package: &str, id: &str) -> Value {
 }
 
 fn workspace(checkout: &str, member_id: &str) -> Workspace {
+    let metadata: Metadata = serde_json::from_value(workspace_metadata(checkout, member_id)).expect("controlled collision metadata");
+    Workspace::from_metadata(&metadata)
+}
+
+fn workspace_metadata(checkout: &str, member_id: &str) -> Value {
     let root = checkout_path(checkout);
     let mut metadata: Value =
         serde_json::from_str(include_str!("../tests/fixtures/doctest-metadata.json")).expect("checked-in metadata fixture");
@@ -68,6 +73,8 @@ fn workspace(checkout: &str, member_id: &str) -> Workspace {
     root_package["name"] = json!("root-package");
     root_package["id"] = json!("literal-root-id");
     root_package["manifest_path"] = json!(root.join("Cargo.toml"));
+    root_package["targets"][0]["name"] = json!("root_package");
+    root_package["targets"][0]["src_path"] = json!(root.join("src").join("lib.rs"));
     root_package["dependencies"] = json!([{
         "name": "alpha",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -85,8 +92,7 @@ fn workspace(checkout: &str, member_id: &str) -> Workspace {
     metadata["workspace_default_members"] = json!(["literal-root-id"]);
     metadata["workspace_root"] = json!(root);
     metadata["target_directory"] = json!(root.join("target"));
-    let metadata: Metadata = serde_json::from_value(metadata).expect("controlled collision metadata");
-    Workspace::from_metadata(&metadata)
+    metadata
 }
 
 fn args(options: &[&str]) -> EachArgs {
@@ -237,8 +243,23 @@ fn explicit_root_selection_does_not_dispatch_other_default_members() {
         selection_without_files,
         |manifest, toolchain| {
             assert_eq!((manifest, toolchain), (None, None));
-            let mut workspace = workspace(checkout, "literal-local-id");
-            workspace.default_member_names = std::iter::once("alpha".to_owned()).collect();
+            let mut metadata = workspace_metadata(checkout, "literal-local-id");
+            metadata["workspace_default_members"] = json!(["literal-local-id"]);
+            let metadata: Metadata = serde_json::from_value(metadata).expect("controlled root-package metadata");
+            let workspace = Workspace::from_metadata(&metadata);
+            assert_eq!(
+                workspace.default_member_names,
+                std::collections::HashSet::from(["alpha".to_owned()])
+            );
+            assert_eq!(
+                workspace
+                    .members
+                    .iter()
+                    .find(|member| member.name == "root-package")
+                    .expect("root package is a member")
+                    .manifest_path,
+                workspace.root_manifest_path,
+            );
             Ok(workspace)
         },
         &mut output,
