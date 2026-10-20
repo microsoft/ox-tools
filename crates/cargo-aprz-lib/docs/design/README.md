@@ -37,8 +37,10 @@ supported, patched OpenSSL 3 development packages, dynamically linked. The
 Fetch request pipeline configures native retry and timeout middleware:
 three retries for transport errors,
 5xx, 429, and 403 with `Retry-After`. Downloads retry the complete transfer on
-body failures through a separate whole-transfer Seatbelt wrapper. Request timeouts
-apply to each attempt at each redirect hop. Responses remain streamed for large database and documentation
+body failures through a separate whole-transfer Seatbelt wrapper. Transport errors
+and unsuccessful HTTP responses that exhaust request resilience are returned
+without restarting documentation or crates.io dump downloads.
+Request timeouts apply to each attempt at each redirect hop. Responses remain streamed for large database and documentation
 downloads.
 
 GET requests follow at most ten HTTP(S) redirects, including relative locations.

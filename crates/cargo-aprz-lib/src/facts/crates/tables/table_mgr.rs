@@ -17,7 +17,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use flate2::bufread::GzDecoder;
 use futures_util::{Stream, StreamExt};
-use ohno::{EnrichableExt, IntoAppError, bail};
+use ohno::{EnrichableExt, IntoAppError};
 use tar::Archive;
 use tokio::sync::mpsc;
 use url::Url;
@@ -473,37 +473,61 @@ async fn prep_tables(
     now: DateTime<Utc>,
     progress: Arc<dyn Progress>,
 ) -> Result<TableMgr> {
-    let tables_root = tables_root.as_ref().to_path_buf();
-    let source = source.clone();
-
-    crate::facts::resilient_http::resilient_download(
-        CRATES_DB_DOWNLOAD_OPERATION,
-        (source, tables_root, max_ttl, now, progress),
-        CRATES_DB_DOWNLOAD_TIMEOUT,
-        move |(source, tables_root, max_ttl, now, progress)| async move {
-            prep_tables_core(&source, tables_root, max_ttl, now, progress).await
-        },
+    prep_tables_with_client(
+        crate::facts::resilient_http::new_client(),
+        source,
+        tables_root.as_ref().to_path_buf(),
+        max_ttl,
+        now,
+        progress,
     )
     .await
 }
 
+async fn prep_tables_with_client(
+    client: fetch::HttpClient,
+    source: &Url,
+    tables_root: PathBuf,
+    max_ttl: Duration,
+    now: DateTime<Utc>,
+    progress: Arc<dyn Progress>,
+) -> Result<TableMgr> {
+    let source = source.clone();
+
+    crate::facts::resilient_http::resilient_download(
+        CRATES_DB_DOWNLOAD_OPERATION,
+        (client, source, tables_root, max_ttl, now, progress),
+        CRATES_DB_DOWNLOAD_TIMEOUT,
+        move |(client, source, tables_root, max_ttl, now, progress)| async move {
+            prep_tables_core(&client, &source, tables_root, max_ttl, now, progress).await
+        },
+    )
+    .await?
+}
+
 async fn prep_tables_core(
+    client: &fetch::HttpClient,
     source: &Url,
     tables_root: std::path::PathBuf,
     max_ttl: Duration,
     now: DateTime<Utc>,
     progress: Arc<dyn Progress>,
-) -> Result<TableMgr> {
+) -> Result<Result<TableMgr>> {
     log::info!(target: LOG_TARGET, "Starting crates database download from {source}");
 
-    let client = crate::facts::resilient_http::new_client();
-
-    let response = download_response(&client, source)
+    let response = match download_response(client, source)
         .await
-        .into_app_err("requesting crates database dump")?;
+        .into_app_err("requesting crates database dump")
+    {
+        Ok(response) => response,
+        Err(error) => return Ok(Err(error)),
+    };
 
     if !response.status().is_success() {
-        bail!("unable to download crates database dump: HTTP {}", response.status());
+        return Ok(Err(ohno::app_err!(
+            "unable to download crates database dump: HTTP {}",
+            response.status()
+        )));
     }
 
     let content_length = crate::facts::resilient_http::content_length(&response);
@@ -525,7 +549,7 @@ async fn prep_tables_core(
     drop(tx);
     let table_mgr = join_processing_task(processing_handle).await?;
 
-    Ok(table_mgr)
+    Ok(Ok(table_mgr))
 }
 
 async fn download_response(client: &fetch::HttpClient, source: &Url) -> Result<fetch::HttpResponse> {
@@ -713,8 +737,8 @@ mod tests {
         CRATES_DB_DOWNLOAD_OPERATION, CRATES_DB_DOWNLOAD_TIMEOUT, ChannelReader, CratesTable, DELETE_ALL_TABLES_HOOK, ELAPSED_MS_HOOK,
         IoError, Path, SHARING_VIOLATION, SLEEP_HOOK, SLEEP_SECONDS_HOOK, Table, TableMgr, archive_entry_path, archive_filename,
         delete_all_tables, determinate_download_progress, download_channel, download_response, finish_download, forward_download_stream,
-        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, process_download, removal_left_file_locked,
-        send_download_chunk, set_download_progress,
+        fs, indeterminate_download_progress, join_processing_task, prep_tables_core, prep_tables_with_client, process_download,
+        removal_left_file_locked, send_download_chunk, set_download_progress,
     };
     use crate::facts::progress::Progress;
 
@@ -1286,6 +1310,7 @@ mod tests {
         let source = url::Url::parse("http://127.0.0.1:0/db-dump.tar.gz").expect("fixed URL is valid");
         let dir = TempDir::new().expect("creating a temporary directory");
         let error = prep_tables_core(
+            &crate::facts::resilient_http::new_client(),
             &source,
             dir.path().to_path_buf(),
             Duration::from_hours(1),
@@ -1293,6 +1318,7 @@ mod tests {
             Arc::new(RecordingProgress::default()),
         )
         .await
+        .expect("exhausted request resilience is not a body-transfer error")
         .expect_err("port zero cannot accept an HTTP connection");
 
         assert!(format!("{error:#}").contains("requesting crates database dump"));
@@ -1313,6 +1339,7 @@ mod tests {
         let dir = TempDir::new().expect("creating a temporary directory");
         let progress = Arc::new(RecordingProgress::default());
         prep_tables_core(
+            &crate::facts::resilient_http::new_client(),
             &source,
             dir.path().to_path_buf(),
             Duration::from_hours(1),
@@ -1331,6 +1358,62 @@ mod tests {
         let (total, downloaded, _) = callback();
         assert!(total > 0);
         assert_eq!(downloaded, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_request_failures_do_not_multiply_native_retries() {
+        for status in [
+            None,
+            Some(fetch::StatusCode::BAD_REQUEST),
+            Some(fetch::StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let calls = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+            let recorded = Arc::clone(&calls);
+            let handler = fetch::fake::FakeHandler::from_fn(move |_| {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                match status {
+                    Some(status) => fetch::HttpResponseBuilder::new_fake().status(status).build(),
+                    None => Err(fetch::HttpError::from(IoError::other("scripted connection failure"))),
+                }
+            });
+            let control = tick::ClockControl::new();
+            let clock = control.to_clock();
+            let client =
+                crate::facts::resilient_http::configure_request_resilience(fetch::HttpClient::builder_fake(handler, &clock)).build();
+            let destination = TempDir::new().unwrap();
+
+            let source = url::Url::parse("https://example.test/db-dump.tar.gz").unwrap();
+            let mut request = std::pin::pin!(prep_tables_with_client(
+                client,
+                &source,
+                destination.path().to_path_buf(),
+                Duration::from_hours(1),
+                chrono::DateTime::UNIX_EPOCH,
+                Arc::new(RecordingProgress::default()),
+            ));
+            let mut result = None;
+            for _ in 0..32 {
+                if let core::task::Poll::Ready(value) = futures_util::poll!(&mut request) {
+                    result = Some(value);
+                    break;
+                }
+                control.advance(Duration::from_secs(1));
+            }
+            let error = result
+                .expect("request resilience finishes within four attempts")
+                .expect_err("request failure must remain an error");
+
+            if let Some(status) = status {
+                assert_eq!(error.to_string(), format!("unable to download crates database dump: HTTP {status}"));
+            } else {
+                assert!(format!("{error:#}").contains("scripted connection failure"), "{error:#}");
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if status == Some(fetch::StatusCode::BAD_REQUEST) { 1 } else { 4 }
+            );
+            assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+        }
     }
 
     #[tokio::test]

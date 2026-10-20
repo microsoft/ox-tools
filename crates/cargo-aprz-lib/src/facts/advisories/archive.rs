@@ -63,7 +63,7 @@ pub(super) async fn download_with_clock(
     )
     .await??;
     tokio::task::spawn_blocking(move || {
-        extract(archive_file.path(), &destination)?;
+        extract(File::open(archive_file.path())?, &destination)?;
         archive_file.close()?;
         Ok(())
     })
@@ -100,9 +100,8 @@ fn check_download_size(bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn extract(archive_path: &Path, destination: &Path) -> Result<()> {
+fn extract(input: impl Read, destination: &Path) -> Result<()> {
     let contents = tempfile::Builder::new().prefix(".unpack-").tempdir_in(destination)?;
-    let input = File::open(archive_path)?;
     unpack(input, contents.path())?;
     let root = database_root(contents.path())?;
     // Never publish an empty or malformed database as a successful refresh.
@@ -179,7 +178,6 @@ fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -190,20 +188,18 @@ mod tests {
 
     fn extract_fixture(name: &str) -> Result<rustsec::database::Database> {
         let stage = tempfile::tempdir()?;
-        let archive = stage.path().join("input.tar.gz");
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
             .join("advisories")
             .join(name);
-        std::fs::copy(source, &archive)?;
-
-        extract(&archive, stage.path())?;
+        extract(File::open(source)?, stage.path())?;
 
         Ok(rustsec::database::Database::open(stage.path())?)
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn reads_a_database_at_the_archive_root() {
         let database = extract_fixture("root.tar.gz").expect("root fixture contains a valid database");
 
@@ -217,6 +213,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn reads_a_database_under_a_single_enclosing_directory() {
         let database = extract_fixture("wrapped.tar.gz").expect("wrapped fixture contains a valid database");
 
@@ -258,12 +255,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn reads_advisories_across_gzip_member_boundaries() {
         let stage = tempfile::tempdir().unwrap();
-        let archive = stage.path().join("input.tar.gz");
-        std::fs::write(&archive, multi_member_archive()).unwrap();
+        let archive = multi_member_archive();
 
-        extract(&archive, stage.path()).expect("gzip members form one complete tar archive");
+        extract(archive.as_slice(), stage.path()).expect("gzip members form one complete tar archive");
 
         let database = rustsec::database::Database::open(stage.path()).unwrap();
         let mut ids = database.iter().map(|advisory| advisory.metadata.id.to_string()).collect::<Vec<_>>();
@@ -272,15 +269,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
     fn rejects_a_corrupt_later_gzip_member_before_publishing_database_files() {
         let stage = tempfile::tempdir().unwrap();
-        let archive = stage.path().join("input.tar.gz");
         let mut compressed = multi_member_archive();
         let checksum = compressed.len() - 8;
         compressed[checksum] ^= 1;
-        std::fs::write(&archive, compressed).unwrap();
 
-        extract(&archive, stage.path()).expect_err("a later member's checksum must be validated");
+        extract(compressed.as_slice(), stage.path()).expect_err("a later member's checksum must be validated");
 
         assert!(
             !stage.path().join("crates").exists(),
@@ -289,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
     fn uncompressed_size_limit_covers_all_gzip_members() {
         let stage = tempfile::tempdir().unwrap();
         let compressed = multi_member_archive();
@@ -298,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn accepts_the_global_pax_metadata_used_by_github_archives() {
         let database = extract_fixture("github-pax.tar.gz").expect("GitHub metadata is not a filesystem entry");
 
@@ -305,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn preserves_the_optional_rust_advisory_collection() {
         let stage = tempfile::tempdir().unwrap();
         let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -313,7 +312,7 @@ mod tests {
             .join("advisories")
             .join("with-rust.tar.gz");
 
-        extract(&archive, stage.path()).expect("an optional rust/ collection is supported");
+        extract(File::open(archive).unwrap(), stage.path()).expect("an optional rust/ collection is supported");
 
         assert!(stage.path().join("rust").is_dir());
     }
@@ -331,6 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires Tokio filesystem workers")]
     async fn rejects_oversized_content_length_before_reading_the_body() {
         let calls = Arc::new(AtomicUsize::new(0));
         let recorded = Arc::clone(&calls);
@@ -358,6 +358,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore = "requires Tokio timers and filesystem workers")]
     async fn http_status_failures_do_not_restart_the_whole_transfer() {
         for status in [fetch::StatusCode::NOT_FOUND, fetch::StatusCode::INTERNAL_SERVER_ERROR] {
             let calls = Arc::new(AtomicUsize::new(0));
@@ -384,6 +385,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore = "requires Tokio timers and filesystem workers")]
     async fn exhausted_request_errors_do_not_restart_the_whole_transfer() {
         let calls = Arc::new(AtomicUsize::new(0));
         let recorded = Arc::clone(&calls);
@@ -407,6 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires Tokio filesystem workers and advisory database parsing")]
     async fn request_retry_after_waits_do_not_consume_the_body_timeout() {
         for status in [fetch::StatusCode::TOO_MANY_REQUESTS, fetch::StatusCode::FORBIDDEN] {
             let control = tick::ClockControl::new();
@@ -468,6 +471,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires Tokio filesystem workers")]
     async fn streamed_compressed_size_violations_are_not_retried() {
         let calls = Arc::new(AtomicUsize::new(0));
         let recorded = Arc::clone(&calls);
@@ -496,6 +500,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
     fn counts_entries_before_extracting_them() {
         let destination = tempfile::tempdir().unwrap();
         let input = include_bytes!("../../../tests/fixtures/advisories/wrapped.tar.gz");
@@ -507,6 +512,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
     fn includes_tar_padding_in_the_uncompressed_size_limit() {
         let destination = tempfile::tempdir().unwrap();
         let input = include_bytes!("../../../tests/fixtures/advisories/wrapped.tar.gz");
@@ -520,6 +526,7 @@ mod tests {
     macro_rules! rejected_archive {
         ($name:ident, $fixture:literal, $message:literal) => {
             #[test]
+            #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
             fn $name() {
                 let error = extract_fixture($fixture).expect_err("invalid archive must not be accepted");
 

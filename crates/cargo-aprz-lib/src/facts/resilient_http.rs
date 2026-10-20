@@ -376,6 +376,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn header_timeouts_get_a_fresh_deadline_and_exhaust_four_attempts() {
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let recorded = Arc::clone(&attempts);
+        let handler = fetch::fake::FakeHandler::from_async_fn(move |_| {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            core::future::pending::<fetch::Result<HttpResponse>>()
+        });
+        let client = configure_request_resilience(HttpClient::builder_fake(handler, &clock)).build();
+        let request = resilient_get(&client, "https://example.test/stalled");
+        let mut request = std::pin::pin!(request);
+
+        assert!(futures_util::poll!(&mut request).is_pending());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        for attempt in 1..=4 {
+            control.advance(DEFAULT_REQUEST_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap());
+            assert!(futures_util::poll!(&mut request).is_pending());
+            assert_eq!(attempts.load(Ordering::SeqCst), attempt, "each attempt receives its full timeout");
+            control.advance(Duration::from_secs(1));
+            if attempt < 4 {
+                assert!(futures_util::poll!(&mut request).is_pending());
+                assert_eq!(attempts.load(Ordering::SeqCst), attempt, "backoff precedes the next attempt");
+                control.advance(RETRY_BASE_DELAY * 2_u32.pow(attempt));
+                assert!(futures_util::poll!(&mut request).is_pending());
+                assert_eq!(attempts.load(Ordering::SeqCst), attempt + 1);
+            }
+        }
+
+        let error = request.await.expect_err("all four requests stall before headers");
+        assert!(format!("{error:#}").contains("timeout"), "{error:#}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
     async fn follows_relative_redirects_and_preserves_same_origin_credentials() {
         let server = MockServer::start().await;
         Mock::given(path("/start"))
