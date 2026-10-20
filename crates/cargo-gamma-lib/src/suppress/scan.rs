@@ -264,6 +264,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_timeout_multiplier_aliases_are_retained_in_both_attributes_and_comments() {
+        for name in ["test_timeout_multiplier", "timeout_multiplier"] {
+            for comment in ["", "// "] {
+                let source = format!(
+                    "{comment}#[gamma::{name}(arith, test_timeout_multiplier = 2.5)]\n\
+                    fn f(a: i32) -> i32 {{ a + 1 }}\n"
+                );
+                let source = SourceFile::parse("aliases.rs", source).expect("valid Rust source");
+                let found = directives(&source).expect("both public multiplier names are accepted");
+                assert_eq!(found.len(), 1, "{comment}{name}");
+                let directive = &found[0];
+                assert!(directive.intent.is_none());
+                assert_eq!(directive.test_timeout_multiplier.map(f64::to_bits), Some(2.5_f64.to_bits()));
+                assert!(directive.selection.contains("arith.add_to_sub"));
+                assert!(!directive.selection.contains("literal.int_to_zero"));
+                assert_eq!(
+                    directive.channel,
+                    if comment.is_empty() { Channel::Attribute } else { Channel::Comment }
+                );
+                assert_eq!(directive.line, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_cfg_attr_keeps_a_later_skip_after_a_stated_value_and_resource_annotation() {
+        let source = "#[cfg_attr(test, gamma::value(9), gamma::resource(memory = \"1MiB\"), gamma::skip(arith))]\n\
+            fn f(a: i32) -> i32 { a + 1 }\n";
+        let source = SourceFile::parse("nested.rs", source.to_owned()).expect("valid Rust attribute syntax");
+        let found = directives_for(&source, &CfgSet::parse("test")).expect("nonsuppression annotations do not end collection");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].intent, Some(Intent::Skip));
+        assert!(found[0].selection.contains("arith.add_to_sub"));
+        assert_eq!(found[0].channel, Channel::Attribute);
+    }
+
+    #[test]
+    fn survivor_multi_attribute_comments_ignore_foreign_namespaces_without_losing_later_directives() {
+        let source = SourceFile::parse(
+            "multiple.rs",
+            "// #[gamma::skip(arith)] #[unrelated::marker] #[gamma::expect_survived(literal)]\n\
+             fn f(a: i32) -> i32 { a + 1 }\n"
+                .to_owned(),
+        )
+        .expect("valid Rust source");
+        let found = directives(&source).expect("foreign attributes in the directive comment are ignored");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].intent, Some(Intent::Skip));
+        assert_eq!(found[1].intent, Some(Intent::ExpectSurvived));
+        assert!(found[0].selection.contains("arith.add_to_sub"));
+        assert!(found[1].selection.contains("literal.int_to_zero"));
+        let legacy = SourceFile::parse("legacy.rs", "// #[gamma(test_timeout_multiplier = 2.5)]\nfn f() {}\n".to_owned())
+            .expect("valid Rust source");
+        let found = directives(&legacy).expect("namespace-only multiplier directives remain supported");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].test_timeout_multiplier.map(f64::to_bits), Some(2.5_f64.to_bits()));
+        let bare = SourceFile::parse("bare.rs", "// #[gamma]\nfn f() {}\n".to_owned()).expect("valid Rust source");
+        let failure = directives(&bare).expect_err("a namespace with no intent or multiplier is not recognized");
+        assert!(failure.to_string().contains("not a recognized directive"), "{failure}");
+    }
+
+    #[test]
+    fn survivor_directive_comment_recognition_checks_all_supported_prefixes_and_rejects_prose() {
+        for text in [
+            "#[gamma::expect(killed)]",
+            "#[gamma(multiplier = 2)]",
+            "#[gamma]",
+            "#[  gamma(multiplier = 2)]",
+        ] {
+            assert_eq!(directive_source(text).as_deref(), Some(text));
+        }
+        for text in [
+            "gamma::expect",
+            "#[not_gamma]",
+            "#[foogamma]",
+            "#[gamma (multiplier = 2)]",
+            "mentions #[gamma]",
+        ] {
+            assert_eq!(directive_source(text), None);
+        }
+    }
+
+    #[test]
     fn directives_are_sorted_across_attribute_and_comment_channels() {
         let file = SourceFile::parse(
             "src/lib.rs",

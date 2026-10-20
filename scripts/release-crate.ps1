@@ -18,6 +18,8 @@
 
 .PARAMETER Version
     [Optional] The specific version to set (e.g., "1.2.3"). Can be specified with --version or -v.
+    Passing the crate's current, untagged version refreshes its generated changelog and README.
+    Use -BackfillVersion for an already tagged release.
     This parameter is mutually exclusive with --bump.
 
 .PARAMETER Bump
@@ -29,8 +31,9 @@
 
 .PARAMETER BackfillVersion
     [Optional] Reconstructs the changelog section for an existing tagged version without updating
-    crate versions or README files. The commit range is derived from the preceding semantic-version
-    tag and the requested version's tag. This parameter is mutually exclusive with --version and --bump.
+    crate versions or README files. The first semantic version uses the crate's complete history
+    through that tag; later versions use the preceding semantic-version tag as the lower bound.
+    This parameter is mutually exclusive with --version and --bump.
 
 .EXAMPLE
     # Increment the minor version for 'my-crate' (default behavior)
@@ -103,13 +106,17 @@ $script:IgnoredTypes = @('test')
 # --- COMPILED REGEX PATTERNS ---
 
 # Pattern for conventional commit format: type(scope)!: description (! indicates breaking change)
-$script:ConventionalCommitRegex = [regex]'^(\w+)(?:\(.*\))?(!)?:\s*(.*)'
+$script:ConventionalCommitRegex = [regex]'^(\w+)(?:\(([^)]*)\))?(!)?:\s*(.*)'
 
 # Pattern for PR references: (#123)
 $script:PrReferenceRegex = [regex]'\s*(\(#(\d+)\))$'
 
 # Release preparation entries superseded by linked release history.
 $script:LinkedReleaseRegex = [regex]'(?:^|:\s*)(Release [a-zA-Z0-9_-]+ \d+\.\d+\.\d+)\s+\(#\d+\)$'
+
+# Changelog-only maintenance commits must not add themselves to the generated
+# release section on every same-version refresh.
+$script:GeneratedReleaseNotesRegex = [regex]'^(?:refresh|finalize|regenerate).*(?:release )?notes(?:\s+\(#\d+\))?$'
 
 # Pattern for semantic version format: major.minor.patch
 $script:SemanticVersionRegex = [regex]'^\d+\.\d+\.\d+$'
@@ -347,6 +354,7 @@ function Format-ConventionalCommits {
 
     foreach ($message in $rawCommitMessages) {
         $type = "miscellaneous"
+        $scope = ""
         $description = $message
         $isConventional = $false
 
@@ -354,8 +362,9 @@ function Format-ConventionalCommits {
         $isBreaking = $false
         if ($conventionalMatch.Success) {
             $type = $conventionalMatch.Groups[1].Value
-            $isBreaking = $conventionalMatch.Groups[2].Value -eq '!'
-            $description = $conventionalMatch.Groups[3].Value
+            $scope = $conventionalMatch.Groups[2].Value
+            $isBreaking = $conventionalMatch.Groups[3].Value -eq '!'
+            $description = $conventionalMatch.Groups[4].Value
             $isConventional = $true
         }
 
@@ -363,8 +372,16 @@ function Format-ConventionalCommits {
             continue
         }
 
+        if ($type -eq 'chore' -and $script:GeneratedReleaseNotesRegex.IsMatch($description)) {
+            continue
+        }
+
         if ($linkedReleases -ccontains $description) {
             continue
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($scope)) {
+            $description = "${scope}: $description"
         }
 
         if (-not [string]::IsNullOrEmpty($prBaseUrl)) {
@@ -505,17 +522,14 @@ function Write-BackfilledChangelogVersion {
         Write-Error "Cannot backfill version '$version': tag '$targetTag' does not exist." -ErrorAction Stop
     }
 
-    if ($targetIndex -eq 0) {
-        Write-Error "Cannot backfill version '$version': tag '$targetTag' has no preceding semantic-version tag." -ErrorAction Stop
-    }
-
-    $previousTag = $releaseTags[$targetIndex - 1]
+    $previousTag = if ($targetIndex -gt 0) { $releaseTags[$targetIndex - 1] } else { $null }
+    $range = if ($previousTag) { "$previousTag..$targetTag" } else { $targetTag }
     $rawCommits = @(
-        Invoke-GitCommand -Command "log $previousTag..$targetTag --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for '$previousTag..$targetTag'"
+        Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for '$range'"
     )
     $formattedCommits = Format-ConventionalCommits -rawCommitMessages $rawCommits -prBaseUrl $prBaseUrl
     if (-not $formattedCommits) {
-        Write-Error "No relevant commits found for '$previousTag..$targetTag'." -ErrorAction Stop
+        Write-Error "No relevant commits found for '$range'." -ErrorAction Stop
     }
 
     $releaseCommit = Invoke-GitCommand -Command "rev-list -n 1 $targetTag" -ErrorMessage "Failed to resolve release commit for '$targetTag'"
@@ -594,9 +608,21 @@ function Write-Changelog {
 
     # A newly introduced crate may have shipped before its first release tag was created. Its
     # introduction belongs to that initial version, not to the next release generated from HEAD.
+    $hasEarlierReleaseSection = $false
+    if (Test-Path $changelogFile) {
+        $existingVersions = [regex]::Matches((Get-Content $changelogFile -Raw), '(?m)^## \[(\d+\.\d+\.\d+)\]')
+        $hasEarlierReleaseSection = $null -ne (
+            $existingVersions |
+                Where-Object { [version]$_.Groups[1].Value -lt [version]$newVersion } |
+                Select-Object -First 1
+        )
+    }
+
     $range = if ($latestTag) {
         "$latestTag..HEAD"
-    } elseif ($initialCommit -and $oldVersion -ne "0.0.0") {
+    } elseif ($initialCommit -and
+              $oldVersion -ne "0.0.0" -and
+              ($oldVersion -ne $newVersion -or $hasEarlierReleaseSection)) {
         "$initialCommit..HEAD"
     } else {
         "HEAD"
@@ -638,7 +664,7 @@ function Write-Changelog {
             $initialReleasePattern = '(?s)## \[Unreleased\]\s*-\s*Initial release\.\s*\z'
             $wasInitialRelease = $existingContent -match $initialReleasePattern
 
-            if ($wasInitialRelease -and $previousReleaseCommit) {
+            if ($oldVersion -ne $newVersion -and $wasInitialRelease -and $previousReleaseCommit) {
                 $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
                 $initialSection = "## [$oldVersion] - $initialDate`n`n- Initial release.`n"
                 $existingContent = [regex]::Replace($existingContent, $initialReleasePattern, $initialSection)
@@ -648,7 +674,11 @@ function Write-Changelog {
             $hasInitialVersion = $existingContent -match "(?m)^## \[$escapedOldVersion\]"
             $hasReleasedVersion = $existingContent -match '(?m)^## \[\d+\.\d+\.\d+\]'
             # A gap in an established changelog does not mean the previous version was the initial release.
-            if ($oldVersion -ne "0.0.0" -and -not $hasInitialVersion -and -not $hasReleasedVersion -and $previousReleaseCommit) {
+            if ($oldVersion -ne $newVersion -and
+                $oldVersion -ne "0.0.0" -and
+                -not $hasInitialVersion -and
+                -not $hasReleasedVersion -and
+                $previousReleaseCommit) {
                 $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
                 $existingContent = $existingContent.TrimEnd() + "`n`n## [$oldVersion] - $initialDate`n`n- Initial release.`n"
             }
@@ -842,9 +872,17 @@ if (-not [string]::IsNullOrEmpty($Version)) {
     }
 
     $versionComparison = Compare-SemanticVersions -version1 $Version -version2 $currentVersion
-    if ($versionComparison -le 0) {
-        Write-Error "Specified version '$Version' must be greater than current version '$currentVersion'. Please specify a higher version number."
+    if ($versionComparison -lt 0) {
+        Write-Error "Specified version '$Version' cannot be lower than current version '$currentVersion'."
         Exit 1
+    }
+    if ($versionComparison -eq 0) {
+        $releaseTag = "$CrateName-v$Version"
+        $existingTag = Invoke-GitCommand -command "tag --list `"$releaseTag`"" -errorMessage "Failed to inspect release tags"
+        if ($existingTag) {
+            Write-Error "Version '$Version' is already tagged as '$releaseTag'. Use -BackfillVersion to regenerate published notes."
+            Exit 1
+        }
     }
 }
 

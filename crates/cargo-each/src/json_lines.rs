@@ -162,6 +162,23 @@ mod tests {
     }
 
     #[test]
+    fn non_object_records_report_their_exact_physical_line() {
+        let source: Arc<str> = Arc::from("shapes.jsonl");
+        for value in ["[]", "null", "42", "\"text\"", "true"] {
+            let mut records = Vec::new();
+            let input = format!("\n{{\"name\":\"kept\"}}\n{value}\n{{\"name\":\"unread\"}}\n");
+
+            let error = parse_file(std::io::Cursor::new(input), &source, &mut records)
+                .expect_err("each scalar or array must be rejected as a record");
+
+            assert_eq!(error.to_string(), "JSON record in shapes.jsonl at line 3 must be an object");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].fields["name"], "kept");
+            assert_eq!(records[0].line, 2);
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "uses temporary files; Miri isolation forbids filesystem access")]
     fn file_io_and_utf8_errors_name_the_file() {
         let temp = tempfile::tempdir().expect("temporary directory");

@@ -57,6 +57,11 @@ pub(super) fn spawn_failure(program: &str, work: &Workspace, cause: io::Error) -
 /// against a compiler blocked writing to it — which would look exactly like the hang this is meant
 /// to catch.
 pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration>, events: &mut dyn Events) -> Result<Option<Output>> {
+    #[cfg(test)]
+    if let Some(output) = SCRIPTED_COMPILER.with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(work, args, budget, events))) {
+        return output;
+    }
+
     let mut command = work.cargo();
 
     let _command = command
@@ -68,6 +73,37 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
         .stdout(Stdio::piped());
 
     supervise(command, work, budget, events)
+}
+
+#[cfg(test)]
+type ScriptedCompiler = Box<dyn FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>>>;
+
+#[cfg(test)]
+std::thread_local! {
+    static SCRIPTED_COMPILER: std::cell::RefCell<Option<ScriptedCompiler>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+// Supplies synchronous compile results on this thread, bypassing command supervision. Installation
+// cannot nest and resets after the body, including unwinding; it does not cover native supervision.
+pub(in crate::exec) fn with_compiler<T>(
+    runner: impl FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SCRIPTED_COMPILER.with_borrow_mut(|runner| {
+                let _ = runner.take();
+            });
+        }
+    }
+    SCRIPTED_COMPILER.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "a thread cannot install two Cargo runners simultaneously");
+        *slot = Some(Box::new(runner));
+    });
+    let _reset = Reset;
+    body()
 }
 
 /// Runs an already-configured cargo command under containment, and collects what it said.
@@ -323,6 +359,51 @@ pub(super) fn rendered_diagnostic(line: &str) -> Option<String> {
         None
     } else {
         Some(rendered.into_owned())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    #[test]
+    fn missing_diagnostic_fields_are_absent_not_panics() {
+        for line in [
+            "not JSON",
+            r#"{"reason":"compiler-message"}"#,
+            r#"{"reason":"compiler-message","message":{}}"#,
+            r#"{"reason":"compiler-message","message":{"rendered":" \n\t"}}"#,
+        ] {
+            assert_eq!(rendered_diagnostic(line), None);
+        }
+        assert_eq!(
+            rendered_diagnostic(r#"{"reason":"compiler-message","message":{"rendered":"error: detail\n"}}"#),
+            Some("error: detail\n".into())
+        );
+    }
+
+    #[test]
+    fn an_oversized_narrated_line_invalidates_output_even_when_retained_bytes_fit() {
+        let limits = OutputLimits {
+            retained: 64,
+            line: 3,
+            backlog: 8,
+        };
+        for (text, within_limits, narrated) in [
+            (b"abc\n".as_slice(), true, vec!["abc"]),
+            (b"abcd\nok\n".as_slice(), false, vec!["ok"]),
+            (b"abcd".as_slice(), false, Vec::new()),
+        ] {
+            let (sender, receiver) = mpsc::sync_channel(8);
+            let reader = read_pipe_with_limits(io::Cursor::new(text.to_vec()), Stream::Prose, &sender, limits).unwrap();
+            drop(sender);
+            let pipe = reader.join().unwrap();
+            assert_eq!(pipe.text, text);
+            assert!(pipe.complete);
+            assert_eq!(pipe.within_limits, within_limits);
+            assert_eq!(receiver.try_iter().map(|(_, text)| text).collect::<Vec<_>>(), narrated);
+        }
     }
 }
 
@@ -721,6 +802,8 @@ mod mutation_tests {
     use std::collections::VecDeque;
     use std::io::Cursor;
 
+    use cargo_gamma_process::faults::{self as process_faults, Fault as ProcessFault};
+
     use super::*;
     use crate::model::Mutant;
 
@@ -749,6 +832,211 @@ mod mutation_tests {
         }
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn mutant(&mut self, _mutant: &Mutant) {}
+    }
+
+    #[test]
+    fn independently_refused_readers_are_finished_failures_not_live_threads_or_empty_successes() {
+        for stderr_refused in [false, true] {
+            let (_sender, receiver) = mpsc::sync_channel(1);
+            let failure = Some(Err(io::Error::other("selected reader creation refused")));
+            let (stdout, stderr) = if stderr_refused { (None, failure) } else { (failure, None) };
+            let (stdout, stderr) = finish_readers(stdout, stderr, &receiver, &mut Recorded::default(), Instant::now());
+            let (refused, absent) = if stderr_refused { (stderr, stdout) } else { (stdout, stderr) };
+            assert!(refused.is_none(), "a creation failure cannot authorize an empty successful pipe");
+            let absent = absent.expect("an absent reader remains a complete empty stream, even at an expired deadline");
+            assert_eq!(absent.text, b"");
+            assert!(absent.complete);
+            assert!(absent.within_limits);
+        }
+    }
+
+    #[test]
+    fn native_supervision_rejects_a_refused_stdout_reader_after_finishing_the_build() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = camino::Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut command = Command::new(crate::testing::helper_binary_path().as_std_path());
+        let _command = command
+            .arg(crate::testing::directive("print:short"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut events = Recorded::default();
+        let _refused = faults::arm(Fault::Thread);
+        let failure = supervise(command, &work, Some(Duration::from_secs(30)), &mut events)
+            .expect_err("a failed native stdout reader must escape the supervisor rather than panic at complete_pipes");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "cargo in `{}` finished, but its output could not be read to the end, so what it built could not be read",
+                encode_controls(root.as_str())
+            )
+        );
+        assert_eq!(events.finished, 1);
+    }
+
+    #[test]
+    fn native_supervision_propagates_prepare_and_postspawn_adoption_refusals_with_their_exact_completion_counts() {
+        for fault in [ProcessFault::Prepare, ProcessFault::Adopt] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = camino::Utf8Path::from_path(directory.path()).unwrap().to_owned();
+            let work = Workspace::adopt(root.clone(), root.join("target"));
+            let mut command = Command::new(crate::testing::helper_binary_path());
+            let _ = command
+                .arg(crate::testing::directive("print:never authoritative"))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut events = Recorded::default();
+            let _refused = process_faults::arm(fault);
+            let failure = supervise(command, &work, Some(Duration::from_secs(30)), &mut events)
+                .expect_err("native containment refusal is not successful output or an unwrap precondition");
+            assert!(failure.message().starts_with(&format!(
+                "the cargo build in `{}` could not be contained:",
+                encode_controls(root.as_str())
+            )));
+            assert_eq!(events.finished, usize::from(matches!(fault, ProcessFault::Adopt)));
+            assert!(events.progress.is_empty());
+            assert!(events.output.is_empty());
+        }
+    }
+
+    #[test]
+    fn narration_drains_a_bounded_queue_while_a_real_build_is_still_producing_output() {
+        const CHILD: &str = "GAMMA_EXEC_BUILD_NARRATION_BACKPRESSURE";
+        let tail = "x".repeat(512);
+        if std::env::var_os(CHILD).is_some() {
+            for index in 0..256 {
+                eprintln!("   Compiling [{index}] {tail}");
+            }
+            return;
+        }
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = camino::Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        let _ = command
+            .args([
+                "--exact",
+                &format!("{module}::narration_drains_a_bounded_queue_while_a_real_build_is_still_producing_output"),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut events = Recorded::default();
+        let output = supervise_with_limits(
+            command,
+            &work,
+            Some(Duration::from_secs(30)),
+            &mut events,
+            OutputLimits {
+                retained: 256 * 1024,
+                line: 1024,
+                backlog: 8,
+            },
+        )
+        .unwrap()
+        .expect("continuous bounded narration lets the contained writer finish without expiring its build budget");
+        assert!(output.status.success());
+        assert_eq!(events.finished, 1);
+        assert_eq!(
+            events.progress,
+            (0..256).map(|index| format!("   Compiling [{index}] {tail}")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stderr_alone_can_refuse_a_complete_build_even_when_its_stdout_is_within_the_retained_cap() {
+        const CHILD: &str = "GAMMA_EXEC_BUILD_STDERR_CAP";
+        if std::env::var_os(CHILD).is_some() {
+            eprint!("{}", "stderr overflow bytes".repeat(8));
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = camino::Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        for pipe_stderr in [false, true] {
+            let module = module_path!().split_once("::").unwrap().1;
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            let _ = command
+                .args([
+                    "--quiet",
+                    "--exact",
+                    &format!("{module}::stderr_alone_can_refuse_a_complete_build_even_when_its_stdout_is_within_the_retained_cap"),
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .stdout(Stdio::piped())
+                .stderr(if pipe_stderr { Stdio::piped() } else { Stdio::null() });
+            let mut events = Recorded::default();
+            let output = supervise_with_limits(
+                command,
+                &work,
+                Some(Duration::from_secs(30)),
+                &mut events,
+                OutputLimits {
+                    retained: 64,
+                    line: 1024,
+                    backlog: 8,
+                },
+            );
+            if pipe_stderr {
+                assert_eq!(
+                    output.unwrap_err().message(),
+                    output_limit_error(
+                        &encode_controls(root.as_str()),
+                        OutputLimits {
+                            retained: 64,
+                            line: 1024,
+                            backlog: 8
+                        }
+                    )
+                    .message()
+                );
+            } else {
+                let output = output.unwrap().unwrap();
+                assert!(output.status.success());
+                assert!(output.stdout.len() <= 64);
+                assert!(output.stderr.is_empty());
+            }
+            assert_eq!(events.finished, 1);
+        }
+    }
+
+    #[test]
+    fn supervision_propagates_a_native_collection_failure_after_releasing_the_build_and_its_completion_event() {
+        const CHILD: &str = "GAMMA_EXEC_BUILD_COLLECTION_FAILURE";
+        if std::env::var_os(CHILD).is_some() {
+            let (_sender, receiver) = mpsc::channel::<()>();
+            let _bounded = receiver.recv_timeout(Duration::from_secs(30));
+            return;
+        }
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = camino::Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        let _ = command
+            .args([
+                "--exact",
+                &format!("{module}::supervision_propagates_a_native_collection_failure_after_releasing_the_build_and_its_completion_event"),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut events = Recorded::default();
+        let _refused = process_faults::arm(ProcessFault::Terminate);
+        let failure = supervise(command, &work, Some(Duration::ZERO), &mut events)
+            .expect_err("a budget-expiry collection error must propagate through the saved supervisor outcome");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "cargo in `{}` could not be terminated after its build budget expired",
+                encode_controls(root.as_str())
+            )
+        );
+        assert_eq!(events.finished, 1);
     }
 
     #[test]

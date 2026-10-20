@@ -295,6 +295,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_unicode_controls_do_not_hide_del_or_change_safe_text_ownership() {
+        let text = "é\0\t\n\r\x1b\u{7f}\u{80}🦀";
+        let expected = "é\\0\\t\\n\\r\\e\\u{7f}\\u{80}🦀";
+        assert_eq!(encode_controls(text), expected);
+        assert_eq!(encode_preserving_color(text), expected);
+        assert!(matches!(encode_controls("é🦀"), Cow::Borrowed("é🦀")));
+        assert_eq!(encode_preserving_color("\x1b[31mé\u{7f}"), "\x1b[31mé\\u{7f}\x1b[0m");
+    }
+
+    #[test]
     fn control_boundaries_and_style_endpoints_have_exact_encodings() {
         for (text, expected) in [
             ("\0\t", "\\0\\t"),

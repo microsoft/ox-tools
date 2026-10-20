@@ -25,11 +25,15 @@ const fn retention_limit() -> u64 {
 ///
 /// Returns the reader's I/O error, or [`io::ErrorKind::InvalidData`] when the retained bytes are
 /// not valid UTF-8.
-pub(super) fn text(input: impl Read) -> io::Result<Option<String>> {
-    text_with_limit(input, retention_limit())
+pub(super) fn text<R: Read>(input: R) -> io::Result<Option<String>> {
+    text_using(input, text_with_limit)
 }
 
-fn text_with_limit(mut input: impl Read, limit: u64) -> io::Result<Option<String>> {
+fn text_using<R: Read>(input: R, read: impl FnOnce(R, u64) -> io::Result<Option<String>>) -> io::Result<Option<String>> {
+    read(input, retention_limit())
+}
+
+pub(super) fn text_with_limit(mut input: impl Read, limit: u64) -> io::Result<Option<String>> {
     let mut bytes = Vec::new();
     let mut capped = input.by_ref().take(limit.saturating_add(1));
 
@@ -51,6 +55,16 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    #[test]
+    fn survivor_discovery_reader_receives_the_entire_retention_budget_without_an_off_by_one() {
+        let text = text_using(Cursor::new(b"four"), |input, limit| {
+            assert_eq!(limit, MAX_BYTES);
+            text_with_limit(input, 4)
+        })
+        .unwrap();
+        assert_eq!(text.as_deref(), Some("four"));
+    }
 
     #[test]
     fn the_discovery_limit_is_exactly_the_documented_budget() {

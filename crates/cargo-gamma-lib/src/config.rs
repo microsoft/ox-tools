@@ -912,6 +912,27 @@ mod tests {
         assert!(!args.no_confirm);
     }
 
+    #[test]
+    fn survivor_absent_library_test_selection_is_not_an_implicit_opt_in() {
+        for (configured, cli, expected) in [
+            (None, false, false),
+            (None, true, true),
+            (Some(false), false, false),
+            (Some(false), true, true),
+            (Some(true), false, true),
+            (Some(true), true, true),
+        ] {
+            let config = Config {
+                test_lib: configured,
+                ..Config::default()
+            };
+            let mut args = RunArgs::default();
+            args.measure.test_lib = cli;
+            config.apply(&mut args).expect("the typed configuration is valid");
+            assert_eq!(args.measure.test_lib, expected, "configured={configured:?}, cli={cli}");
+        }
+    }
+
     /// `packages` in the file and `--workspace` on the command line both reach `selected_packages`,
     /// where `packages` wins — so a committed file quietly reduces `--workspace` to a fraction of
     /// the workspace and says nothing. clap cannot see it: `conflicts_with` constrains what was

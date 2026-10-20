@@ -387,6 +387,28 @@ mod tests {
     use super::*;
     use crate::discover::load_metadata;
 
+    #[test]
+    fn survivor_new_cross_package_features_return_the_work_item_that_drives_transitive_propagation() {
+        let mut on: HashMap<String, HashSet<String>> = [("alpha".to_owned(), HashSet::default()), ("beta".to_owned(), HashSet::default())]
+            .into_iter()
+            .collect();
+        let renames = Renames::default();
+        assert_eq!(
+            apply_worklist("beta/leaf", "alpha", &renames, &mut on),
+            Some(("beta".to_owned(), "leaf".to_owned()))
+        );
+        assert!(on["beta"].contains("leaf"));
+        assert!(
+            apply_worklist("beta/leaf", "alpha", &renames, &mut on).is_none(),
+            "an already-enabled feature must not be enqueued again"
+        );
+        assert_eq!(
+            apply_worklist("ordinary", "beta", &renames, &mut on),
+            Some(("beta".to_owned(), "ordinary".to_owned()))
+        );
+        assert!(on["beta"].contains("ordinary"));
+    }
+
     /// Writes a workspace of manifests and gives back the metadata cargo reads from it.
     ///
     /// A `src/lib.rs` is written beside every manifest that declares a package, because a package
@@ -930,4 +952,63 @@ mod tests {
 
         assert_eq!(widened.features, vec!["typed".to_owned(), "passed".to_owned()]);
     }
+}
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn survivor_feature_values_that_look_like_flags_are_consumed_as_values() {
+    let extra = ["--features", "--all-features", "-F", "--no-default-features", "--features=ordinary"].map(str::to_owned);
+    let features = from_extra(&FeatureArgs::default(), &extra);
+    assert_eq!(features.features, ["--all-features", "--no-default-features", "ordinary"]);
+    assert!(!features.all_features);
+    assert!(!features.no_default_features);
+}
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn survivor_external_dependencies_do_not_stop_later_workspace_dependency_feature_propagation() {
+    use serde_json::json;
+
+    let dependency = |name: &str, features: &[&str]| {
+        json!({
+            "name": name, "source": null, "req": "*", "kind": null, "rename": null,
+            "optional": false, "uses_default_features": false, "features": features,
+            "target": null, "registry": null
+        })
+    };
+    let package = |name: &str, dependencies, features| {
+        json!({
+            "name": name, "version": "0.0.0", "id": name, "source": null,
+            "dependencies": dependencies, "targets": [], "features": features,
+            "manifest_path": format!("workspace/{name}/Cargo.toml"),
+            "edition": "2024"
+        })
+    };
+    let metadata: Metadata = serde_json::from_value(json!({
+        "packages": [
+            package("alpha", vec![dependency("aaa_external", &[]), dependency("beta", &["leaf"])], json!({})),
+            package("beta", vec![], json!({"leaf": ["deep"], "deep": []})),
+        ],
+        "workspace_members": ["alpha", "beta"], "workspace_default_members": ["alpha", "beta"],
+        "workspace_root": "workspace", "target_directory": "workspace/target",
+        "resolve": null, "metadata": null, "version": 1
+    }))
+    .expect("controlled metadata matches Cargo's schema");
+    let alpha = metadata
+        .workspace_packages()
+        .into_iter()
+        .find(|package| package.name.as_str() == "alpha")
+        .expect("alpha is a workspace member");
+    assert_eq!(alpha.dependencies[0].name, "aaa_external");
+    assert_eq!(alpha.dependencies[1].name, "beta");
+    let enabled = enabled(
+        &metadata,
+        &FeatureArgs {
+            no_default_features: true,
+            ..FeatureArgs::default()
+        },
+    );
+    assert_eq!(enabled["beta"], ["deep", "leaf"]);
+    assert!(
+        !enabled.contains_key("aaa_external"),
+        "only workspace members belong in the mutation feature map"
+    );
 }

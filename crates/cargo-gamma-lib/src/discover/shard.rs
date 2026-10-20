@@ -62,6 +62,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_jump_hash_assignments_match_fixed_vectors_across_small_and_wide_rotations() {
+        // Golden outputs from the unchanged implementation pin compatibility for empty and hex IDs
+        // across small counts, powers of two, wide counts and the maximum representable count.
+        let counts = [1, 2, 3, 7, 16, 257, 65_537, u32::MAX];
+        for (id, expected) in [
+            ("", [0, 1, 1, 1, 13, 90, 14_284, 2_595_306_538]),
+            ("000000000000", [0, 0, 0, 5, 5, 5, 11_221, 3_683_456_029]),
+            ("abcdefabcdef", [0, 0, 0, 6, 7, 25, 31_037, 451_876_351]),
+            ("0123456789ab", [0, 1, 1, 6, 10, 86, 45_879, 360_330_067]),
+            ("deadbeef1234", [0, 0, 0, 5, 8, 19, 59_604, 906_081_268]),
+        ] {
+            for (count, expected) in counts.into_iter().zip(expected) {
+                assert_eq!(shard_of(id, NonZeroU32::new(count).unwrap()), expected, "{id} of {count}");
+            }
+        }
+    }
+
+    #[test]
     fn one_count_selects_shard_zero() {
         for id in ["a", "b", "deadbeef1234"] {
             assert_eq!(shard_of(id, NonZeroU32::MIN), 0);

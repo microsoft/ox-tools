@@ -80,16 +80,4 @@ impl core::error::Error for InvalidMutantId {}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::CanonicalMutantId;
-
-    #[test]
-    fn invalid_mutant_ids_encode_terminal_controls() {
-        let error = CanonicalMutantId::parse("bad\n\u{1b}[2K").expect_err("control-bearing ID must be rejected");
-
-        assert_eq!(
-            error.to_string(),
-            "`bad\\n\\e[2K` has an invalid format; expected 12 lowercase hexadecimal characters"
-        );
-    }
-}
+mod tests;

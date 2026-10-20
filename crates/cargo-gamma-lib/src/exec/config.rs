@@ -136,8 +136,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        Self::default_with_parallelism(available_parallelism)
+    }
+}
+
+impl Config {
+    fn default_with_parallelism(available: impl FnOnce() -> usize) -> Self {
         Self {
-            jobs: resolve_jobs(None),
+            jobs: resolve_jobs_with(None, available, watchable()),
             test_timeout_multiplier: 1.5,
             timeout_floor: Duration::from_secs(20),
             baseline: true,
@@ -172,9 +178,13 @@ impl Default for Config {
 /// that ceiling would not buy parallelism, it would buy processes that survive `Ctrl-C`. The
 /// ceiling is far above any machine's useful width, so clamping to it costs nothing real.
 pub(crate) fn resolve_jobs(jobs: Option<usize>) -> usize {
-    let wanted = jobs.unwrap_or_else(|| default_jobs(available_parallelism()));
+    resolve_jobs_with(jobs, available_parallelism, watchable())
+}
 
-    wanted.min(watchable())
+fn resolve_jobs_with(jobs: Option<usize>, available: impl FnOnce() -> usize, capacity: usize) -> usize {
+    let wanted = jobs.unwrap_or_else(|| default_jobs(available()));
+
+    wanted.min(capacity)
 }
 
 /// The parallelism the host makes available to this process.
@@ -212,8 +222,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interior_job_widths_are_preserved_and_default_stack_settings_are_exact() {
+        for jobs in [1, 2, 7, 31] {
+            assert_eq!(resolve_jobs(Some(jobs)), jobs.min(watchable()));
+        }
+        for (available, capacity, expected) in [(1, 8, 2), (7, 8, 8), (8, 8, 8), (usize::MAX, 8, 8)] {
+            assert_eq!(resolve_jobs_with(None, || available, capacity), expected);
+        }
+        let defaults = Config::default_with_parallelism(|| 3);
+        assert_eq!(defaults.jobs, 4.min(watchable()));
+        assert_eq!(defaults.stall_factor.to_bits(), 10_f64.to_bits());
+        assert_eq!(defaults.stall_floor, Duration::from_secs(5));
+        assert_eq!(defaults.cache_dir, None);
+    }
+
+    #[test]
     fn the_default_timeout_never_falls_below_the_floor() {
-        let config = Config::default();
+        let config = Config::default_with_parallelism(|| 1);
         let scaled = Duration::from_millis(1).mul_f64(config.test_timeout_multiplier);
 
         assert_eq!(scaled.max(config.timeout_floor), config.timeout_floor);
@@ -221,8 +246,9 @@ mod tests {
 
     #[test]
     fn command_policy_defaults_are_explicit() {
-        let config = Config::default();
+        let config = Config::default_with_parallelism(|| 7);
 
+        assert_eq!(config.jobs, 8.min(watchable()));
         assert_eq!(config.timeout_floor, Duration::from_secs(20));
         assert!(config.baseline);
         assert!(config.confirm);
@@ -244,12 +270,15 @@ mod tests {
         // Bit-exact: the default is an exactly representable value, so this must fail on a wrong
         // default rather than slip under an approximate tolerance — and comparing the bits keeps
         // the pedantic `float_cmp` lint quiet, as the tool does elsewhere by wrapping the value.
-        assert_eq!(Config::default().test_timeout_multiplier.to_bits(), 1.5_f64.to_bits());
+        assert_eq!(
+            Config::default_with_parallelism(|| 1).test_timeout_multiplier.to_bits(),
+            1.5_f64.to_bits()
+        );
     }
 
     #[test]
     fn the_default_timeout_scales_with_a_slow_baseline() {
-        let config = Config::default();
+        let config = Config::default_with_parallelism(|| 1);
         let baseline = Duration::from_mins(1);
         let scaled = baseline.mul_f64(config.test_timeout_multiplier);
 
@@ -263,7 +292,7 @@ mod tests {
 
     #[test]
     fn an_unspecified_job_count_uses_host_parallelism() {
-        assert!(resolve_jobs(None) >= 1);
+        assert_eq!(resolve_jobs_with(None, || 3, 8), 4);
     }
 
     #[test]
@@ -292,7 +321,9 @@ mod tests {
     /// Whatever the machine's width, the default cannot outrun the registry either.
     #[test]
     fn the_default_job_count_is_also_watchable() {
-        assert!(resolve_jobs(None) <= watchable());
+        for available in [0, 1, 7, 8, usize::MAX] {
+            assert_eq!(resolve_jobs_with(None, || available, 8), available.saturating_add(1).min(8));
+        }
     }
 
     /// Memory control is off until it is asked for.
@@ -302,7 +333,7 @@ mod tests {
         // into unbounded allocation, and the user who most needs protecting from that is the one
         // who never thought to ask. The ceiling is derived from each binary's own baseline peak, so
         // it is a statement about this suite rather than a guess about suites in general.
-        let config = Config::default();
+        let config = Config::default_with_parallelism(|| 1);
 
         assert!(config.memory.measuring());
         assert!(config.memory.enforcing());

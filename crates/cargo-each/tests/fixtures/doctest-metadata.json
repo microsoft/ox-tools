@@ -19,6 +19,16 @@
           "doc": true,
           "doctest": true,
           "test": true
+        },
+        {
+          "kind": ["bin"],
+          "crate_types": ["bin"],
+          "name": "enabled-lib-cli",
+          "src_path": "/workspace/enabled-lib/src/main.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": false,
+          "test": true
         }
       ],
       "features": {},

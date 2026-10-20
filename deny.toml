@@ -9,10 +9,6 @@ yanked = "deny"
 unmaintained = "all"
 # <<< anvil-managed: anvil-deny-advisories
 
-# Advisories we have consciously accepted. Each entry needs a reason and,
-# where the fix is out of our hands, the upstream we are waiting on.
-ignore = []
-
 # >>> anvil-managed: anvil-deny-bans
 [bans]
 multiple-versions = "warn"

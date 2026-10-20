@@ -62,6 +62,31 @@ fn found(results: &HashMap<String, ProviderResult<CratesData>>, name: &str) -> C
 }
 
 #[tokio::test]
+async fn suggestions_are_ranked_after_a_later_slot_is_replaced() {
+    let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+    let mut dump = Dump::sample(now);
+    // The first three fill the slots, with the second weakest. The best candidate arrives last,
+    // replacing that second slot: retained slot order then differs from descending score order.
+    dump.crates.extend(
+        ["survivorfixtuxy", "survivorfixtxyz", "survivorfixxyze", "survivorfixturx"]
+            .into_iter()
+            .zip(1200..)
+            .map(|(name, id)| support::dump::Crate::new(id, name, now, 1)),
+    );
+    let server = dump_server(dump.to_tar_gz(), Some(1)).await;
+    let cache = tempfile::tempdir().unwrap();
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("survivorfixture", None)]).await;
+    let ProviderResult::CrateNotFound(suggestions) = &results["survivorfixture"] else {
+        panic!("the requested crate is absent");
+    };
+    assert_eq!(
+        suggestions.iter().map(AsRef::<str>::as_ref).collect::<Vec<_>>(),
+        ["survivorfixturx", "survivorfixtuxy", "survivorfixxyze"]
+    );
+}
+
+#[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn reports_full_facts_for_a_requested_version() {
     let now = Utc::now();

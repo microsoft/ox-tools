@@ -252,14 +252,18 @@ pub struct SweepCost {
     pub exact_probes: usize,
     pub exact_hits: usize,
 
-    /// Generalized item, binary, census and reach-cluster probes attempted and confirmed.
-    pub generalized_probes: usize,
-    pub generalized_hits: usize,
-    pub generalized_rejected: usize,
+    /// Inferred item, binary, census and reach-cluster test selections attempted and confirmed.
+    #[serde(rename = "generalized_probes")]
+    pub inferred_probes: usize,
+    #[serde(rename = "generalized_hits")]
+    pub inferred_hits: usize,
+    #[serde(rename = "generalized_rejected")]
+    pub inferred_rejected: usize,
 
     /// Hint candidates available when mutants were assigned.
     pub exact_candidates: usize,
-    pub generalized_candidates: usize,
+    #[serde(rename = "generalized_candidates")]
+    pub inferred_candidates: usize,
     pub item_candidates: usize,
     pub reach_candidates: usize,
     pub file_candidates: usize,
@@ -320,11 +324,11 @@ impl SweepCost {
             probes,
             exact_probes,
             exact_hits,
-            generalized_probes,
-            generalized_hits,
-            generalized_rejected,
+            inferred_probes,
+            inferred_hits,
+            inferred_rejected,
             exact_candidates,
-            generalized_candidates,
+            inferred_candidates,
             item_candidates,
             reach_candidates,
             file_candidates,
@@ -397,6 +401,25 @@ mod tests {
             })
             .collect();
         cost
+    }
+
+    #[test]
+    fn inferred_test_counters_preserve_checkpoint_field_names() {
+        let mut legacy = serde_json::to_value(SweepCost::default()).unwrap();
+        for (field, count) in [
+            ("generalized_probes", 7),
+            ("generalized_hits", 3),
+            ("generalized_rejected", 5),
+            ("generalized_candidates", 11),
+        ] {
+            legacy[field] = serde_json::json!(count);
+        }
+        let restored: SweepCost = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(restored.inferred_probes, 7);
+        assert_eq!(restored.inferred_hits, 3);
+        assert_eq!(restored.inferred_rejected, 5);
+        assert_eq!(restored.inferred_candidates, 11);
+        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
     }
 
     #[test]

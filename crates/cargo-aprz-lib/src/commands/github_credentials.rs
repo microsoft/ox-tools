@@ -15,6 +15,7 @@ use tokio::process::Command;
 use url::Url;
 
 use crate::facts::Endpoints;
+use crate::facts::process::{RunError, run_with_timeout, wait_with_timeout};
 
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
 const GH_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -231,33 +232,54 @@ where
 }
 
 async fn run_gh_command(request: GhCommandRequest) -> io::Result<GhCommandOutput> {
-    let GhCommandRequest {
-        executable,
-        args,
-        stdin,
-        stdout,
-        stderr,
-        timeout,
-    } = request;
-    let child = Command::new(executable)
-        .args(args)
-        // Rejected blank values must not make gh ignore its authenticated account.
-        .env_remove(GITHUB_TOKEN_ENV)
-        .stdin(stdin.into_stdio())
-        .stdout(stdout.into_stdio())
-        .stderr(stderr.into_stdio())
-        .kill_on_drop(true)
-        .spawn()?;
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "trivial", reason = "an OS error after a child was spawned but before its exit status can be collected cannot be induced portably; spawn and timeout failures are tested separately")]
-        Ok(output) => output?,
-        Err(elapsed) => return Err(io::Error::new(io::ErrorKind::TimedOut, elapsed)),
-    };
+    run_gh_command_with(
+        request,
+        |request, kill_on_drop| {
+            let GhCommandRequest {
+                executable,
+                args,
+                stdin,
+                stdout,
+                stderr,
+                ..
+            } = request;
+            // Rejected blank values must not make gh ignore its authenticated account.
+            let child = Command::new(executable)
+                .args(args)
+                .env_remove(GITHUB_TOKEN_ENV)
+                .stdin(stdin.into_stdio())
+                .stdout(stdout.into_stdio())
+                .stderr(stderr.into_stdio())
+                .kill_on_drop(kill_on_drop)
+                .spawn()?;
+            Ok(async move {
+                let output = child.wait_with_output().await?;
+                Ok(GhCommandOutput {
+                    success: output.status.success(),
+                    stdout: output.stdout,
+                })
+            })
+        },
+        wait_with_timeout,
+    )
+    .await
+}
 
-    Ok(GhCommandOutput {
-        success: output.status.success(),
-        stdout: output.stdout,
-    })
+async fn run_gh_command_with<F, T>(
+    request: GhCommandRequest,
+    spawn: impl FnOnce(GhCommandRequest, bool) -> io::Result<F>,
+    wait: impl FnOnce(Duration, F) -> T,
+) -> io::Result<GhCommandOutput>
+where
+    F: Future<Output = io::Result<GhCommandOutput>>,
+    T: Future<Output = Result<io::Result<GhCommandOutput>, ()>>,
+{
+    run_with_timeout(request.timeout, |kill_on_drop| spawn(request, kill_on_drop), wait)
+        .await
+        .map_err(|error| match error {
+            RunError::Spawn(error) | RunError::Wait(error) => error,
+            RunError::Timeout => io::Error::new(io::ErrorKind::TimedOut, "deadline has elapsed"),
+        })
 }
 
 async fn resolve_gh_executable() -> io::Result<PathBuf> {
@@ -841,6 +863,72 @@ mod tests {
         std::thread::sleep(Duration::from_secs(30));
     }
 
+    #[tokio::test]
+    async fn timed_out_gh_children_cannot_write_a_later_marker() {
+        use std::rc::Rc;
+
+        use crate::facts::process::test_util::{ScriptedChild, expire};
+
+        let request = || GhCommandRequest {
+            executable: PathBuf::from("scripted-gh"),
+            args: vec!["auth".into(), "token".into(), "--hostname".into(), "github.com".into()],
+            stdin: GhStdio::Null,
+            stdout: GhStdio::Capture,
+            stderr: GhStdio::Null,
+            timeout: Duration::from_secs(10),
+        };
+        let completed = Rc::new(Cell::new(false));
+        let dropped = Rc::new(Cell::new(false));
+        let output = run_gh_command_with(
+            request(),
+            |actual, kill_on_drop| {
+                assert_eq!(actual, request());
+                assert!(kill_on_drop);
+                Ok(ScriptedChild {
+                    output: Some(GhCommandOutput {
+                        success: true,
+                        stdout: b"completed".to_vec(),
+                    }),
+                    completed: Rc::clone(&completed),
+                    dropped: Rc::clone(&dropped),
+                })
+            },
+            |timeout, child| async move {
+                assert_eq!(timeout, Duration::from_secs(10));
+                Ok(child.await)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout, b"completed");
+        assert!(completed.get());
+        assert!(dropped.get());
+
+        completed.set(false);
+        dropped.set(false);
+        let error = run_gh_command_with(
+            request(),
+            |actual, kill_on_drop| {
+                assert_eq!(actual, request());
+                assert!(kill_on_drop);
+                Ok(ScriptedChild {
+                    output: None,
+                    completed: Rc::clone(&completed),
+                    dropped: Rc::clone(&dropped),
+                })
+            },
+            expire,
+        )
+        .await
+        .err()
+        .expect("the scripted deadline must be reported");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "deadline has elapsed");
+        assert!(dropped.get(), "the pending child must be dropped before returning");
+        assert!(!completed.get(), "the timed-out child must not complete its later side effect");
+    }
+
     #[test]
     fn path_resolution_prefers_path_over_a_planted_cwd_executable() {
         let root = tempfile::tempdir().expect("creating a resolver fixture");
@@ -881,6 +969,17 @@ mod tests {
         let resolved = resolve_test_executable(OsStr::new("."), &current_dir);
 
         assert_eq!(resolved.as_deref(), Some(current_dir.join(".").join(test_gh_name()).as_path()));
+    }
+
+    #[test]
+    fn a_missing_current_directory_is_reported_before_path_resolution() {
+        let resolved = resolve_gh_with(
+            || Some(OsString::from(".")),
+            || None,
+            || panic!("PATHEXT is irrelevant when the current directory cannot be read"),
+        );
+
+        assert!(resolved.is_none());
     }
 
     #[cfg(windows)]

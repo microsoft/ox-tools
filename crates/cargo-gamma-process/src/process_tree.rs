@@ -1320,13 +1320,9 @@ impl ProcessTree {
     /// The child is still killed when sweeping the surrounding subtree fails. A direct child-kill
     /// failure takes precedence over the sweep failure after both cleanup attempts complete.
     fn kill(&self, child: &mut Child) -> io::Result<()> {
-        let swept = self.sweep();
-
         // The group or job may not have covered the child — the id could not be converted, the job
         // could not be created — and in any case this is what makes `wait` return.
-        let killed = kill_if_running(child);
-
-        killed.and(swept)
+        kill_with(child, || self.sweep(), kill_if_running)
     }
 
     /// Ends the subtree and reaps its leader without exposing its group id to reuse.
@@ -1343,18 +1339,16 @@ impl ProcessTree {
             .take()
             .ok_or_else(|| io::Error::other("the subtree leader was already reaped"))?;
 
-        let killed = self.kill(&mut child);
-        // #[gamma::skip(stmt.delete_call, reason = "release has no effect on non-Unix mutation hosts; Unix tests assert termination frees the watched slot before reaping")]
-        self.release();
-
-        let reaped = reaped_after_cleanup(child.wait(), killed)?;
-
-        #[cfg(any(test, feature = "fault-injection"))]
-        if faults::fired(faults::Fault::Terminate) {
-            return Err(io::Error::other("subtree termination failed as requested by a test"));
-        }
-
-        Ok(reaped)
+        terminate_leader_with(
+            &mut child,
+            |child| {
+                let killed = self.kill(child);
+                // #[gamma::skip(stmt.delete_call, reason = "release has no effect on non-Unix mutation hosts; Unix tests assert termination frees the watched slot before reaping")]
+                self.release();
+                killed
+            },
+            Child::wait,
+        )
     }
 
     /// Ends descendants while their leader's process-group id is still reserved.
@@ -1608,6 +1602,28 @@ fn kill_if_running(child: &mut Child) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(kill_error) => resolve_kill_failure(kill_error, &child.try_wait()),
     }
+}
+
+fn kill_with<C>(child: &mut C, sweep: impl FnOnce() -> io::Result<()>, kill: impl FnOnce(&mut C) -> io::Result<()>) -> io::Result<()> {
+    let swept = sweep();
+    let killed = kill(child);
+    killed.and(swept)
+}
+
+fn terminate_leader_with<C>(
+    child: &mut C,
+    cleanup: impl FnOnce(&mut C) -> io::Result<()>,
+    wait: impl FnOnce(&mut C) -> io::Result<ExitStatus>,
+) -> io::Result<ExitStatus> {
+    let killed = cleanup(child);
+    let reaped = reaped_after_cleanup(wait(child), killed)?;
+
+    #[cfg(any(test, feature = "fault-injection"))]
+    if faults::fired(faults::Fault::Terminate) {
+        return Err(io::Error::other("subtree termination failed as requested by a test"));
+    }
+
+    Ok(reaped)
 }
 
 fn reaped_after_cleanup(reaped: io::Result<ExitStatus>, killed: io::Result<()>) -> io::Result<ExitStatus> {
@@ -3462,6 +3478,68 @@ mod tests {
         let reason = output(no_op_command(), MemoryRequest::default()).expect_err("adoption failures remain containment errors");
         assert!(matches!(reason, OutputError::Containment(_)));
         assert!(reason.to_string().contains("would not take the child"), "{reason}");
+    }
+
+    #[test]
+    fn public_output_does_not_discard_an_explicit_memory_ceiling() {
+        let request = MemoryRequest {
+            meter: true,
+            limit: Some(1),
+        };
+        let bounded = output_with(Command::new("scripted-child"), request, |command, forwarded| {
+            assert_eq!(command.get_program(), "scripted-child");
+            assert_eq!(forwarded.meter, request.meter);
+            assert_eq!(forwarded.limit, Some(1));
+            Err(PlatformError::new_static(Situation::Refused, "one-byte memory ceiling refused"))
+        })
+        .expect_err("the scripted preparation failure must be returned");
+        let OutputError::Containment(reason) = bounded else {
+            panic!("preparation failures must retain their containment classification");
+        };
+        assert_eq!(reason.situation(), Situation::Refused);
+        assert_eq!(reason.to_string(), "one-byte memory ceiling refused");
+    }
+
+    #[test]
+    fn terminate_returns_a_sweep_error_after_reaping_the_leader() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
+
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut reaped = false;
+        let error = terminate_leader_with(
+            &mut reaped,
+            |reaped| {
+                let killed = kill_with(
+                    reaped,
+                    || {
+                        calls.borrow_mut().push("sweep");
+                        Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted sweep failure"))
+                    },
+                    |reaped| {
+                        assert!(!*reaped, "the leader must reserve its id through cleanup");
+                        calls.borrow_mut().push("kill");
+                        Ok(())
+                    },
+                );
+                calls.borrow_mut().push("release");
+                killed
+            },
+            |reaped| {
+                calls.borrow_mut().push("wait");
+                assert!(!*reaped, "the leader must only be reaped once");
+                *reaped = true;
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
+        .expect_err("a failed boundary sweep is returned after reaping");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "scripted sweep failure");
+        assert_eq!(calls.into_inner(), ["sweep", "kill", "release", "wait"]);
+        assert!(reaped, "a sweep failure must not leave the leader unreaped");
     }
 
     #[cfg(unix)]

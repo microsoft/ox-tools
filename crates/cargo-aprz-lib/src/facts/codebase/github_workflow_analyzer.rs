@@ -222,6 +222,68 @@ mod tests {
     }
 
     #[test]
+    fn reaching_the_workflow_limit_stops_before_later_walk_errors() {
+        let entries = (0..101)
+            .map(|number| Ok((PathBuf::from(format!("workflow-{number}.yml")), false)))
+            .chain(std::iter::once(Err(std::io::Error::other("unvisited walk failure"))));
+        let mut opened = 0;
+
+        let result = scan_workflow_entries(Path::new("workflows"), entries, |_| {
+            opened += 1;
+            Ok(std::io::Cursor::new("run: cargo test\n"))
+        })
+        .expect("the walk after the file limit must not be evaluated");
+
+        assert_eq!(opened, 100);
+        assert_eq!(
+            (result.workflows_detected, result.miri_detected, result.clippy_detected),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn scanning_reuses_a_line_buffer_without_retaining_processed_lines() {
+        struct ObservingReader<'a> {
+            inner: std::io::Cursor<&'a [u8]>,
+            lengths: &'a std::cell::RefCell<Vec<usize>>,
+        }
+
+        impl std::io::Read for ObservingReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.inner.read(buf)
+            }
+        }
+
+        impl BufRead for ObservingReader<'_> {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                self.inner.fill_buf()
+            }
+
+            fn consume(&mut self, amount: usize) {
+                self.inner.consume(amount);
+            }
+
+            fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+                self.lengths.borrow_mut().push(buf.len());
+                self.inner.read_line(buf)
+            }
+        }
+
+        let lengths = std::cell::RefCell::new(Vec::new());
+        let entries = [Ok::<_, std::io::Error>((PathBuf::from("ci.yml"), false))];
+        let result = scan_workflow_entries(Path::new("workflows"), entries, |_| {
+            Ok(ObservingReader {
+                inner: std::io::Cursor::new(b"run: cargo test\nrun: cargo build\n".as_slice()),
+                lengths: &lengths,
+            })
+        })
+        .expect("the workflow is readable");
+
+        assert_eq!(*lengths.borrow(), [0, 0, 0]);
+        assert!(!result.miri_detected && !result.clippy_detected);
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn test_no_workflows_directory() {
         let temp_dir = tempfile::tempdir().unwrap();

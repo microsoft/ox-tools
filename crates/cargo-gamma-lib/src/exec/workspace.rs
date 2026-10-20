@@ -11,6 +11,7 @@ use std::fs::{self, File, TryLockError};
 use std::io::{Read as _, Write as _};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
 use std::{env, io, thread};
@@ -47,6 +48,19 @@ pub(crate) struct CacheLocks {
 
 #[cfg(any(test, feature = "internals"))]
 static NEXT_CACHE_LOCK_IDENTITY: AtomicUsize = AtomicUsize::new(1);
+
+#[cfg(any(test, feature = "internals"))]
+fn next_cache_lock_identity(next: &AtomicUsize) -> usize {
+    next.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Intercepts the first journal arming immediately before its native open and workspace installation.
+/// The hook is consumed before invocation; callers establish any required state-publication
+/// precondition themselves. This current-thread scope cannot nest and clears the hook on drop.
+#[cfg(all(test, not(miri)))]
+pub(super) fn with_journal_arm_hook<T>(hook: impl FnOnce(&Utf8Path) + 'static, operation: impl FnOnce() -> T) -> T {
+    tests::with_journal_arm_hook(hook, operation)
+}
 
 /// Identifies one claimed lock pair across the adoption-to-preparation handoff.
 #[cfg(any(test, feature = "internals"))]
@@ -318,6 +332,17 @@ impl Workspace {
         events: &mut impl Events,
         locks: Option<CacheLocks>,
     ) -> Result<Self> {
+        Self::prepare_with_locks_observed(source, target_directory, config, events, locks, |_| {})
+    }
+
+    fn prepare_with_locks_observed(
+        source: &Utf8Path,
+        target_directory: &Utf8Path,
+        config: &Config,
+        events: &mut impl Events,
+        locks: Option<CacheLocks>,
+        observe_locks: impl FnOnce(&CacheLocks),
+    ) -> Result<Self> {
         config.cargo.validate()?;
 
         // Absolute from here on, so that the copy's own exclusion — which compares the scratch base
@@ -350,6 +375,7 @@ impl Workspace {
             Some(locks) => locks,
             None => claim_cache(source, target_directory, config.cache_dir.as_deref())?,
         };
+        observe_locks(&locks);
         #[cfg(any(test, feature = "internals"))]
         crate::testing::pause_during_workspace_preparation(source, cache_lock_identity(&locks));
         let CacheLocks {
@@ -497,11 +523,10 @@ impl Workspace {
         Ok(true)
     }
 
-    /// Runs a cargo command in the copied tree.
-    /// Wraps an existing directory as a workspace, without copying or locking anything.
+    /// Wraps a root as a workspace, without copying, querying storage, or locking anything.
     ///
-    /// Only for tests that need a real tree to run cargo in. The tree is left in place on drop,
-    /// because it belongs to whatever created it rather than to this handle.
+    /// The root may be synthetic for command/policy tests, or an owned real tree for native
+    /// acceptance. It is left in place on drop because this handle never owns its storage.
     #[cfg(any(test, feature = "internals"))]
     pub(crate) fn adopt(root: Utf8PathBuf, target: Utf8PathBuf) -> Self {
         let test_cache_home = crate::testing::cache_home(&root);
@@ -645,6 +670,8 @@ impl Workspace {
     }
 
     pub(super) fn arm_testing_journal(&mut self) -> Result<()> {
+        #[cfg(all(test, not(miri)))]
+        tests::before_journal_arm(&self.base);
         self.testing_journal = Some(super::testing_state::TestingJournal::open(&self.base, None)?);
         Ok(())
     }
@@ -815,12 +842,33 @@ impl Workspace {
         self.launch.get_or_init(|| Launch::derive(&self.libraries))
     }
 
+    #[cfg(test)]
+    pub(super) fn set_launch(&mut self, launch: Launch) {
+        self.launch = OnceLock::from(launch);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_harness_threads(&mut self, threads: &str) {
+        self.harness_threads = OnceLock::from(Some(threads.to_owned()));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_rustc_captures(&mut self, captures: Option<Utf8PathBuf>) {
+        // Exclusive access prevents readers; this store does not publish the following assignment.
+        self.rustc_captures_ready.store(captures.is_some(), Ordering::Release);
+        self.rustc_captures = captures;
+    }
+
     /// Settles how wide each spawned test harness runs, from the run's own job count.
     ///
     /// Called once, before anything is spawned, so that the baseline and every mutant after it are
     /// measured under the same contention. See [`Workspace::harness_threads`].
     pub(super) fn calibrate_harness(&self, jobs: usize) {
-        let cores = thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        self.calibrate_harness_with(jobs, thread::available_parallelism());
+    }
+
+    fn calibrate_harness_with(&self, jobs: usize, available: io::Result<NonZeroUsize>) {
+        let cores = available.map_or(1, NonZeroUsize::get);
         let inherited = env::var(TEST_THREADS_VAR).ok();
 
         let _settled = self
@@ -895,7 +943,7 @@ impl Workspace {
     }
 
     #[cfg(test)]
-    pub(super) fn set_test_environment(&mut self, package: &str, name: &str, value: &str) {
+    pub(super) fn set_test_environment(&mut self, package: &str, name: &str, value: impl Into<OsString>) {
         self.test_environment = Some(TestEnvironment::fake(package, name, value));
     }
 
@@ -1014,6 +1062,11 @@ impl Workspace {
     /// helpers. Their stdout and stderr are drained concurrently, and every descendant is swept
     /// before inherited pipe handles are allowed to keep this capture open.
     fn capture(&self, command: Command, what: &str) -> Result<String> {
+        #[cfg(all(test, not(miri)))]
+        if let Some(output) = tests::scripted_capture(&command, what) {
+            return interpret(output, what, &self.root);
+        }
+
         interpret(
             contained_output(command, MemoryRequest::default()).map(Captured::from),
             what,
@@ -1203,6 +1256,14 @@ pub(crate) fn campaign_base_from_state(root: &Utf8Path, cache: Option<&Utf8Path>
 
 /// Resolves the workspace root and persisted campaign base for a state-consuming command.
 pub(crate) fn campaign_state_from(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+    campaign_state_from_with_metadata(selected, cache, |base| fs::symlink_metadata(base.as_std_path()))
+}
+
+fn campaign_state_from_with_metadata(
+    selected: &Utf8Path,
+    cache: Option<&Utf8Path>,
+    inspect: impl FnOnce(&Utf8Path) -> io::Result<fs::Metadata>,
+) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
     let selected = physical(selected);
 
     if let Some(cache) = cache {
@@ -1235,7 +1296,7 @@ pub(crate) fn campaign_state_from(selected: &Utf8Path, cache: Option<&Utf8Path>)
     let (root, target) = metadata;
 
     let base = campaign_base(&root, &target, None);
-    match fs::symlink_metadata(base.as_std_path()) {
+    match inspect(&base) {
         Ok(_) => validate_campaign_state_owner(&root, &base)?,
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
         Err(cause) => {
@@ -1262,9 +1323,17 @@ fn validate_campaign_state_owner(root: &Utf8Path, base: &Utf8Path) -> Result<()>
 /// campaign's locator or the same state as the first resolution, never the stale locator that led
 /// this command to the lock.
 pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
-    let (root, _base) = campaign_state_from(selected, cache)?;
+    claim_campaign_state_with(selected, cache, campaign_state_from)
+}
+
+fn claim_campaign_state_with(
+    selected: &Utf8Path,
+    cache: Option<&Utf8Path>,
+    mut resolve: impl FnMut(&Utf8Path, Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)>,
+) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
+    let (root, _base) = resolve(selected, cache)?;
     let lock = claim_workspace(&root)?;
-    let (locked_root, base) = campaign_state_from(selected, cache)?;
+    let (locked_root, base) = resolve(selected, cache)?;
 
     if !same_existing_path(&root, &locked_root) {
         return Err(error!(
@@ -1276,9 +1345,17 @@ pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>
 }
 
 pub(crate) fn claim_testing_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
-    let (root, _) = locate_testing_state(selected, cache)?;
+    claim_testing_state_with(selected, cache, locate_testing_state)
+}
+
+fn claim_testing_state_with(
+    selected: &Utf8Path,
+    cache: Option<&Utf8Path>,
+    mut locate: impl FnMut(&Utf8Path, Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)>,
+) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
+    let (root, _) = locate(selected, cache)?;
     let lock = claim_workspace(&root)?;
-    let (locked_root, base) = locate_testing_state(selected, cache)?;
+    let (locked_root, base) = locate(selected, cache)?;
     if !same_existing_path(&root, &locked_root) {
         return Err(error!(
             "the testing campaign changed while acquiring its lock; retry `--resume-testing`"
@@ -1325,13 +1402,17 @@ fn selected_within_workspace(selected: &Utf8Path, root: &Utf8Path, mut same: imp
 }
 
 fn cache_owner_root(base: &Utf8Path) -> Option<Utf8PathBuf> {
-    let base_metadata = fs::symlink_metadata(base.as_std_path()).ok()?;
+    cache_owner_root_with_metadata(base, |path| fs::symlink_metadata(path.as_std_path()))
+}
+
+fn cache_owner_root_with_metadata(base: &Utf8Path, mut inspect: impl FnMut(&Utf8Path) -> io::Result<fs::Metadata>) -> Option<Utf8PathBuf> {
+    let base_metadata = inspect(base).ok()?;
     if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
         return None;
     }
 
     let owner = base.join(CACHE_OWNER);
-    let owner_metadata = fs::symlink_metadata(owner.as_std_path()).ok()?;
+    let owner_metadata = inspect(&owner).ok()?;
     if !owner_metadata.is_file() || owner_metadata.file_type().is_symlink() || owner_metadata.len() > MAX_CACHE_OWNER_LEN {
         return None;
     }
@@ -1504,36 +1585,59 @@ fn digest_workspace_path(root: &Utf8Path) -> String {
 /// Only the workspace's own cache is cleaned. A cache redirected elsewhere with `--cache-dir` is
 /// not reachable from the workspace root alone and is the caller's to remove.
 pub fn clean_cache(root: &Utf8Path, target: &Utf8Path) -> Result<bool> {
+    clean_cache_with_guard(root, target, validate_default_cache_base)
+}
+
+fn clean_cache_with_guard(
+    root: &Utf8Path,
+    target: &Utf8Path,
+    validate_scratch: impl FnOnce(&Utf8Path, &Utf8Path) -> Result<()>,
+) -> Result<bool> {
     let scratch = gamma_base(root, None);
     let campaign = campaign_base(root, target, None);
-    let mut removed = false;
 
-    validate_default_cache_base(root, &scratch)?;
+    validate_scratch(root, &scratch)?;
     validate_default_campaign_base(root, target, &campaign)?;
 
+    clean_cache_paths(root, &scratch, &campaign, || claim_workspace(root))
+}
+
+fn clean_cache_paths(root: &Utf8Path, scratch: &Utf8Path, campaign: &Utf8Path, claim: impl FnOnce() -> Result<File>) -> Result<bool> {
+    let mut removed = false;
     if !scratch.exists() && !campaign.exists() {
         return Ok(false);
     }
 
-    let _lock = claim_workspace(root)?;
+    let _lock = claim()?;
 
     if scratch.exists() {
-        removed |= clean_owned_cache(root, &scratch, true)?;
+        removed |= clean_owned_cache(root, scratch, true)?;
     }
 
-    if campaign.exists() && physical(&campaign) != physical(&scratch) {
-        removed |= clean_owned_cache(root, &campaign, false)?;
+    if campaign.exists() && physical(campaign) != physical(scratch) {
+        removed |= clean_owned_cache(root, campaign, false)?;
     }
 
     Ok(removed)
 }
 
 fn clean_owned_cache(root: &Utf8Path, base: &Utf8Path, preserve_lock: bool) -> Result<bool> {
+    clean_owned_cache_with_entries(root, base, preserve_lock, |base| fs::read_dir(base.as_std_path()))
+}
+
+fn clean_owned_cache_with_entries<I>(
+    root: &Utf8Path,
+    base: &Utf8Path,
+    preserve_lock: bool,
+    list: impl FnOnce(&Utf8Path) -> io::Result<I>,
+) -> Result<bool>
+where
+    I: IntoIterator<Item = io::Result<fs::DirEntry>>,
+{
     reject_linked_cache(base)?;
     validate_cache_owner(root, base, CacheKind::Default)?;
 
-    let entries =
-        fs::read_dir(base.as_std_path()).map_err(|cause| error!("could not read cargo-gamma's cache at `{base}`").caused_by(cause))?;
+    let entries = list(base).map_err(|cause| error!("could not read cargo-gamma's cache at `{base}`").caused_by(cause))?;
     let mut removed = false;
 
     for entry in entries {
@@ -1556,13 +1660,15 @@ fn clean_owned_cache(root: &Utf8Path, base: &Utf8Path, preserve_lock: bool) -> R
 /// clean into a recursive delete of whatever it points at.
 fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
     let path = entry.path();
-    let file_type = entry
-        .file_type()
-        .map_err(|cause| error!("could not inspect cached data at `{}`", path.display()).caused_by(cause))?;
+    remove_cached_with_type(&path, || entry.file_type())
+}
+
+fn remove_cached_with_type(path: &std::path::Path, inspect: impl FnOnce() -> io::Result<fs::FileType>) -> Result<()> {
+    let file_type = inspect().map_err(|cause| error!("could not inspect cached data at `{}`", path.display()).caused_by(cause))?;
     let result = if file_type.is_dir() && !file_type.is_symlink() {
-        fs::remove_dir_all(&path)
+        fs::remove_dir_all(path)
     } else {
-        fs::remove_file(&path)
+        fs::remove_file(path)
     };
 
     result.map_err(|cause| error!("could not remove cached data at `{}`", path.display()).caused_by(cause))
@@ -1573,13 +1679,17 @@ fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
 /// Purely textual, so it never touches the filesystem and never fails: the paths it is given are
 /// scratch directories that do not exist yet, which is exactly when canonicalising cannot answer.
 pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
+    absolute_with_current_directory(path, env::current_dir)
+}
+
+fn absolute_with_current_directory(path: &Utf8Path, current_directory: impl FnOnce() -> io::Result<PathBuf>) -> Utf8PathBuf {
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     let rooted = if path.is_absolute() {
         path.to_owned()
     } else {
         // A current directory that is not UTF-8, or that has been removed out from under the
         // process, leaves the path as written rather than failing a run over it.
-        env::current_dir()
+        current_directory()
             .ok()
             .and_then(|cwd| Utf8PathBuf::from_path_buf(cwd).ok())
             .map_or_else(|| path.to_owned(), |cwd| cwd.join(path))
@@ -1743,6 +1853,26 @@ fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
 
 /// Makes source-control metadata visible from an isolated default scratch tree.
 fn expose_vcs_metadata(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
+    expose_vcs_metadata_with(source, scratch, |marker, destination, directory| {
+        #[cfg(unix)]
+        {
+            let _ = directory;
+            std::os::unix::fs::symlink(marker.as_std_path(), destination.as_std_path())
+        }
+        #[cfg(windows)]
+        if directory {
+            std::os::windows::fs::symlink_dir(marker.as_std_path(), destination.as_std_path())
+        } else {
+            std::os::windows::fs::symlink_file(marker.as_std_path(), destination.as_std_path())
+        }
+    })
+}
+
+fn expose_vcs_metadata_with(
+    source: &Utf8Path,
+    scratch: &Utf8Path,
+    mut link: impl FnMut(&Utf8Path, &Utf8Path, bool) -> io::Result<()>,
+) -> Result<()> {
     let markers = visible_vcs_metadata(source);
 
     for name in VCS_DIRS {
@@ -1777,20 +1907,8 @@ fn expose_vcs_metadata(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
             continue;
         }
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(marker.as_std_path(), destination.as_std_path())
-            .map_err(|cause| error!("could not expose VCS metadata at `{destination}`").caused_by(cause))?;
-
-        #[cfg(windows)]
-        {
-            let linked = if marker.as_std_path().is_dir() {
-                std::os::windows::fs::symlink_dir(marker.as_std_path(), destination.as_std_path())
-            } else {
-                std::os::windows::fs::symlink_file(marker.as_std_path(), destination.as_std_path())
-            };
-
-            linked.map_err(|cause| error!("could not expose VCS metadata at `{destination}`").caused_by(cause))?;
-        }
+        let linked = link(marker, &destination, marker.as_std_path().is_dir());
+        linked.map_err(|cause| error!("could not expose VCS metadata at `{destination}`").caused_by(cause))?;
     }
 
     Ok(())
@@ -1834,13 +1952,22 @@ pub fn scratch_tree(root: &Utf8Path, scratch: Option<&Utf8Path>) -> Utf8PathBuf 
 /// collision: different workspaces naming the same redirected cache. Ownership is established only
 /// for an empty directory; existing unmarked contents are never adopted as cargo-gamma state.
 fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
+    claim_redirected_cache_with(source, base, |owner| fs::symlink_metadata(owner.as_std_path()), has_any_entries)
+}
+
+fn claim_redirected_cache_with(
+    source: &Utf8Path,
+    base: &Utf8Path,
+    inspect_owner: impl FnOnce(&Utf8Path) -> io::Result<fs::Metadata>,
+    inventory: impl FnOnce(&Utf8Path) -> Result<bool>,
+) -> Result<File> {
     if base.exists() {
         reject_linked_cache(base)?;
 
-        match fs::symlink_metadata(base.join(CACHE_OWNER).as_std_path()) {
+        match inspect_owner(&base.join(CACHE_OWNER)) {
             Ok(_metadata) => {}
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
-                if has_any_entries(base)? {
+                if inventory(base)? {
                     return Err(unowned_cache(base));
                 }
             }
@@ -1883,6 +2010,11 @@ fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
     fs::create_dir_all(path.as_std_path())
+}
+
+#[cfg(test)]
+pub(crate) fn create_private_dir_all_for_test(path: &Utf8Path) {
+    create_private_dir_all(path).expect("the private test directory should be creatable");
 }
 
 /// Refuses a cache directory that is reached through a link.
@@ -2026,13 +2158,31 @@ impl CacheKind {
 /// type is checked is the file whose contents decide the answer. Reopening it by name between the
 /// two would leave an interval in which the checked file could be replaced by another.
 fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> Result<()> {
+    validate_cache_owner_with_metadata(source, base, kind, File::metadata)
+}
+
+fn validate_cache_owner_with_metadata(
+    source: &Utf8Path,
+    base: &Utf8Path,
+    kind: CacheKind,
+    inspect: impl FnOnce(&File) -> io::Result<fs::Metadata>,
+) -> Result<()> {
+    validate_cache_owner_with_inventory(source, base, kind, inspect, has_unowned_entries)
+}
+
+fn validate_cache_owner_with_inventory(
+    source: &Utf8Path,
+    base: &Utf8Path,
+    kind: CacheKind,
+    inspect: impl FnOnce(&File) -> io::Result<fs::Metadata>,
+    inventory: impl FnOnce(&Utf8Path) -> Result<bool>,
+) -> Result<()> {
     let owner = base.join(CACHE_OWNER);
     let source = physical(source);
 
     match open_cache_owner(&owner) {
         Ok(mut marker) => {
-            let metadata = marker
-                .metadata()
+            let metadata = inspect(&marker)
                 .map_err(|cause| error!("could not inspect the cargo-gamma cache owner marker at `{owner}`").caused_by(cause))?;
 
             if !metadata.is_file() {
@@ -2080,7 +2230,7 @@ fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> 
             }
         }
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
-            if has_unowned_entries(base)? {
+            if inventory(base)? {
                 return Err(unowned_cache(base));
             }
 
@@ -2145,6 +2295,10 @@ fn has_any_entries(base: &Utf8Path) -> Result<bool> {
 fn has_unowned_entries(base: &Utf8Path) -> Result<bool> {
     let entries = fs::read_dir(base.as_std_path()).map_err(|cause| error!("could not inspect the cache at `{base}`").caused_by(cause))?;
 
+    has_unowned_entries_from(base, entries)
+}
+
+fn has_unowned_entries_from(base: &Utf8Path, entries: impl IntoIterator<Item = io::Result<fs::DirEntry>>) -> Result<bool> {
     for entry in entries {
         let entry = entry.map_err(|cause| error!("could not inspect an entry in the cache at `{base}`").caused_by(cause))?;
         if entry.file_name() != "lock" {
@@ -2292,7 +2446,11 @@ fn validate_default_campaign_base(root: &Utf8Path, target: &Utf8Path, base: &Utf
         };
     }
 
-    let expected_identity = workspace_identity(&root);
+    validate_production_campaign_base(&root, target, base)
+}
+
+fn validate_production_campaign_base(root: &Utf8Path, target: &Utf8Path, base: &Utf8Path) -> Result<()> {
+    let expected_identity = workspace_identity(root);
     let shaped = base.file_name() == Some(expected_identity.as_str())
         && base.parent().is_some_and(|cache| cache.file_name() == Some("cache"))
         && base
@@ -2307,7 +2465,7 @@ fn validate_default_campaign_base(root: &Utf8Path, target: &Utf8Path, base: &Utf
         ));
     }
 
-    let expected = production_campaign_base(&root, target);
+    let expected = production_campaign_base(root, target);
 
     if base != expected {
         return Err(error!(
@@ -2329,13 +2487,22 @@ fn claim_default_campaign_cache(root: &Utf8Path, target: &Utf8Path, base: &Utf8P
 
 /// Takes every lock needed to use one workspace's reusable state.
 pub(crate) fn claim_cache(root: &Utf8Path, target: &Utf8Path, cache: Option<&Utf8Path>) -> Result<CacheLocks> {
+    claim_cache_with_resolver(root, target, cache, physical)
+}
+
+fn claim_cache_with_resolver(
+    root: &Utf8Path,
+    target: &Utf8Path,
+    cache: Option<&Utf8Path>,
+    mut resolve: impl FnMut(&Utf8Path) -> Utf8PathBuf,
+) -> Result<CacheLocks> {
     let workspace = claim_workspace(root)?;
     let base = campaign_base(root, target, cache);
     let scratch = gamma_base(root, None);
     let default = campaign_base(root, target, None);
-    let redirected = if cache.is_some() && physical(&base) == physical(&scratch) {
+    let redirected = if cache.is_some() && resolve(&base) == resolve(&scratch) {
         None
-    } else if cache.is_some() && physical(&base) != physical(&default) {
+    } else if cache.is_some() && resolve(&base) != resolve(&default) {
         Some(claim_redirected_cache(root, &base)?)
     } else {
         claim_default_campaign_cache(root, target, &base)?;
@@ -2346,7 +2513,7 @@ pub(crate) fn claim_cache(root: &Utf8Path, target: &Utf8Path, cache: Option<&Utf
         workspace,
         redirected,
         #[cfg(any(test, feature = "internals"))]
-        identity: NEXT_CACHE_LOCK_IDENTITY.fetch_add(1, Ordering::Relaxed),
+        identity: next_cache_lock_identity(&NEXT_CACHE_LOCK_IDENTITY),
     })
 }
 
@@ -2434,17 +2601,24 @@ fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> R
 /// under deny-by-default, guard-induced warnings become errors, and the mutants that produced them
 /// are withdrawn as unviable — a score computed over a silently smaller denominator.
 fn cap_ambient_rustflags(command: &mut Command) {
+    cap_ambient_rustflags_from(command, |name| env::var_os(name), env::vars_os);
+}
+
+fn cap_ambient_rustflags_from<I>(command: &mut Command, lookup: impl Fn(&str) -> Option<OsString>, variables: impl FnOnce() -> I)
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
     // The encoded spelling separates flags with a unit separator rather than a space, which is the
     // whole reason it exists: a flag may contain spaces.
-    if let Some(inherited) = env::var_os("CARGO_ENCODED_RUSTFLAGS") {
+    if let Some(inherited) = lookup("CARGO_ENCODED_RUSTFLAGS") {
         return extend(command, "CARGO_ENCODED_RUSTFLAGS", inherited, "\u{1f}");
     }
 
-    if let Some(inherited) = env::var_os("RUSTFLAGS") {
+    if let Some(inherited) = lookup("RUSTFLAGS") {
         return extend(command, "RUSTFLAGS", inherited, " ");
     }
 
-    for (name, inherited) in env::vars_os() {
+    for (name, inherited) in variables() {
         let Some(name) = name.to_str() else {
             continue;
         };
@@ -2454,7 +2628,7 @@ fn cap_ambient_rustflags(command: &mut Command) {
         }
     }
 
-    if let Some(inherited) = env::var_os("CARGO_BUILD_RUSTFLAGS") {
+    if let Some(inherited) = lookup("CARGO_BUILD_RUSTFLAGS") {
         extend(command, "CARGO_BUILD_RUSTFLAGS", inherited, " ");
     }
 }
@@ -2844,14 +3018,1276 @@ mod testing_resume_tests {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    // Direct relaxed flag accesses below inspect or configure workspaces on the owning thread.
+    // They publish no state to other threads and are not concurrent readiness checks.
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
+    #[cfg(windows)]
     use std::os::windows::fs::symlink_dir;
+    use std::path::Path;
 
     use super::*;
     use crate::testing::private_system_tempdir;
+
+    type CaptureScript = Box<dyn FnMut(&Command, &str) -> io::Result<Captured>>;
+    type JournalArmHook = Box<dyn FnOnce(&Utf8Path)>;
+
+    std::thread_local! {
+        static CAPTURE_SCRIPT: std::cell::RefCell<Option<CaptureScript>> = const { std::cell::RefCell::new(None) };
+        static JOURNAL_ARM_HOOK: std::cell::RefCell<Option<JournalArmHook>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_journal_arm(base: &Utf8Path) {
+        let hook = JOURNAL_ARM_HOOK.with_borrow_mut(Option::take);
+        if let Some(hook) = hook {
+            hook(base);
+        }
+    }
+
+    pub(super) fn with_journal_arm_hook<T>(hook: impl FnOnce(&Utf8Path) + 'static, operation: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                JOURNAL_ARM_HOOK.with_borrow_mut(|slot| {
+                    let _unused = slot.take();
+                });
+            }
+        }
+        JOURNAL_ARM_HOOK.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "journal arming hooks cannot nest on one thread");
+            *slot = Some(Box::new(hook));
+        });
+        let _reset = Reset;
+        operation()
+    }
+
+    pub(super) fn scripted_capture(command: &Command, what: &str) -> Option<io::Result<Captured>> {
+        CAPTURE_SCRIPT.with_borrow_mut(|slot| slot.as_mut().map(|script| script(command, what)))
+    }
+
+    fn with_capture_script<T>(script: impl FnMut(&Command, &str) -> io::Result<Captured> + 'static, body: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CAPTURE_SCRIPT.with_borrow_mut(|slot| {
+                    let _ = slot.take();
+                });
+            }
+        }
+        CAPTURE_SCRIPT.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "capture scripts cannot nest on one thread");
+            *slot = Some(Box::new(script));
+        });
+        let _reset = Reset;
+        body()
+    }
+
+    fn capture_success(text: &str) -> Captured {
+        Captured {
+            succeeded: true,
+            stdout: text.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_native_junction(link: &Utf8Path, target: &Utf8Path) {
+        let output = Command::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn default_claims_do_not_resolve_paths_for_redirected_cache_comparisons() {
+        let directory = private_system_tempdir("workspace-parent-default-claim-short-circuit-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let mut resolutions = 0;
+        let locks = claim_cache_with_resolver(&root, &root.join("target"), None, |path| {
+            resolutions += 1;
+            physical(path)
+        })
+        .unwrap();
+        assert!(locks.redirected.is_none());
+        assert_eq!(
+            resolutions, 0,
+            "an implicit default cache needs no redirected-path canonicalization"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_current_directory_still_removes_leading_current_components_from_relative_paths() {
+        let normalized = absolute_with_current_directory(Utf8Path::new("./member"), || Err(io::Error::from(io::ErrorKind::NotFound)));
+        assert_eq!(normalized.as_str(), "member");
+    }
+
+    #[test]
+    fn anchoring_returns_reserved_workspace_runtime_errors_before_saving_the_manifest() {
+        let directory = private_system_tempdir("workspace-parent-workspace-runtime-errors-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let source = root.join("source");
+        let copy = root.join("copy");
+        fs::create_dir(&copy).unwrap();
+        let manifest = copy.join("Cargo.toml");
+        let text =
+            "[package]\nname='subject'\nversion='0.0.0'\n[workspace.dependencies]\ngamma_rt={package='different-package',version='1'}\n";
+        fs::write(&manifest, text).unwrap();
+        let failure = anchor_manifests(&source, &copy, &copy.join("runtime"))
+            .expect_err("an unrelated workspace dependency cannot occupy the reserved runtime name");
+        assert!(failure.message().contains("gamma_rt"), "{failure}");
+        assert_eq!(fs::read_to_string(manifest).unwrap(), text);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_linked_default_campaign_is_refused_before_its_target_is_claimed() {
+        let directory = private_system_tempdir("workspace-parent-linked-default-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let base = gamma_base(&root, None);
+        let real = root.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir_all(base.parent().unwrap()).unwrap();
+        create_native_junction(&base, &real);
+        let failure = claim_default_campaign_cache(&root, &root.join("target"), &base)
+            .expect_err("a linked default campaign must return a refusal rather than panic");
+        assert!(failure.message().contains("is a link"), "{failure}");
+        assert!(!real.join(CACHE_OWNER).exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cleaning_rechecks_campaign_identity_after_a_native_workspace_relocation() {
+        let directory = private_system_tempdir("workspace-parent-relocated-clean-");
+        let outer = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let first = outer.join("first");
+        let second = outer.join("second");
+        let source = outer.join("source");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        create_native_junction(&source, &first);
+        crate::testing::with_cache_home_at(outer.join("private"), || {
+            let scratch = gamma_base(&source, None);
+            fs::create_dir_all(&scratch).unwrap();
+            let retained = scratch.join("retained");
+            fs::write(&retained, "keep this cache").unwrap();
+            let failure = clean_cache_with_guard(&source, &outer.join("target"), |root, base| {
+                validate_default_cache_base(root, base)?;
+                fs::remove_dir(&source).unwrap();
+                create_native_junction(&source, &second);
+                Ok(())
+            })
+            .expect_err("a root relocated after scratch validation must fail the independent campaign guard");
+            assert!(failure.message().contains("escaped its private cache base"), "{failure}");
+            assert_eq!(fs::read_to_string(retained).unwrap(), "keep this cache");
+        });
+    }
+
+    #[test]
+    fn relative_owned_campaign_locators_are_not_accepted_as_absolute_campaign_state() {
+        let directory = tempfile::Builder::new()
+            .prefix("workspace-parent-relative-campaign-")
+            .tempdir_in(".")
+            .unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[package]\nname='located'\nversion='0.0.0'\n[workspace]\n"),
+                ("src/lib.rs", ""),
+            ],
+        );
+        crate::testing::with_cache_home_at(root.join("private"), || {
+            let located = root.join("located");
+            fs::create_dir(&located).unwrap();
+            mark_cache_owned_for_test(&root, &located);
+            let default = gamma_base(&root, None);
+            fs::create_dir_all(&default).unwrap();
+            mark_cache_owned_for_test(&root, &default);
+            let relative = located.strip_prefix(physical(Utf8Path::new("."))).unwrap();
+            assert!(!relative.is_absolute());
+            fs::write(default.join(CAMPAIGN_LOCATION), relative.as_str()).unwrap();
+            let (resolved, base) = campaign_state_from(&root, None).unwrap();
+            assert!(same_existing_path(&resolved, &root));
+            assert_eq!(base, default);
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn campaign_and_redirected_inspection_failures_are_not_missing_owners_or_empty_inventories() {
+        let directory = private_system_tempdir("workspace-parent-inspection-errors-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[package]\nname='inspection'\nversion='0.0.0'\n[workspace]\n"),
+                ("src/lib.rs", ""),
+            ],
+        );
+        let denied = root.join("denied");
+        fs::write(&denied, "keep").unwrap();
+        let held = File::options().read(true).share_mode(0).open(&denied).unwrap();
+        let inspect = |_: &Utf8Path| {
+            let result = File::open(&denied).and_then(|file| file.metadata());
+            assert_ne!(result.as_ref().unwrap_err().kind(), io::ErrorKind::NotFound);
+            result
+        };
+        crate::testing::with_cache_home_at(root.join("private"), || {
+            let base = campaign_base(&root, &root.join("target"), None);
+            let failure = campaign_state_from_with_metadata(&root, None, inspect)
+                .expect_err("a native non-NotFound inspection refusal cannot authorize absent campaign state");
+            assert_eq!(
+                failure.message(),
+                format!("could not inspect the campaign state at `{base}` before validating its owner")
+            );
+        });
+        let base = root.join("redirected");
+        fs::create_dir(&base).unwrap();
+        fs::write(base.join(CACHE_OWNER), root.as_str()).unwrap();
+        let failure = claim_redirected_cache_with(&root, &base, inspect, has_any_entries).unwrap_err();
+        assert_eq!(
+            failure.message(),
+            format!(
+                "could not inspect the cargo-gamma cache owner marker at `{}`",
+                base.join(CACHE_OWNER)
+            )
+        );
+        drop(held);
+        fs::remove_file(base.join(CACHE_OWNER)).unwrap();
+        let failure = claim_redirected_cache_with(
+            &root,
+            &base,
+            |owner| fs::symlink_metadata(owner.as_std_path()),
+            |_| has_any_entries(&denied),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), format!("could not inspect the redirected cache at `{denied}`"));
+        assert_eq!(fs::read_to_string(denied).unwrap(), "keep");
+    }
+
+    #[test]
+    fn campaign_claims_return_postlock_resolution_errors_and_reject_a_changed_workspace() {
+        for changed in [false, true] {
+            let directory = crate::testing::workdir("workspace-parent-rechecking-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let first = root.join("first");
+            let second = root.join("second");
+            fs::create_dir(&first).unwrap();
+            fs::create_dir(&second).unwrap();
+            let mut calls = 0;
+            let failure = claim_campaign_state_with(&first, None, |_, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok((first.clone(), first.join("campaign")))
+                } else if changed {
+                    Ok((second.clone(), second.join("campaign")))
+                } else {
+                    Err(error!("the campaign disappeared after acquiring its lock"))
+                }
+            })
+            .expect_err("a postlock failure or root change cannot return a successfully claimed campaign");
+            assert_eq!(calls, 2);
+            if changed {
+                assert!(
+                    failure.message().contains("while cargo-gamma was acquiring its state lock"),
+                    "{failure}"
+                );
+            } else {
+                assert_eq!(failure.message(), "the campaign disappeared after acquiring its lock");
+            }
+            drop(claim_workspace(&first).expect("an unsuccessful campaign claim releases its workspace lock"));
+        }
+    }
+
+    #[test]
+    fn late_cache_inventory_errors_are_returned_after_a_real_lock_entry() {
+        let directory = crate::testing::workdir("workspace-parent-late-inventory-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        fs::write(root.join("lock"), "preserved").unwrap();
+        let entry = fs::read_dir(root)
+            .unwrap()
+            .map(core::result::Result::unwrap)
+            .find(|entry| entry.file_name() == "lock")
+            .unwrap();
+        let native_error = File::open(root.join("absent")).unwrap_err();
+        let failure = has_unowned_entries_from(root, [Ok(entry), Err(native_error)])
+            .expect_err("a late native entry failure cannot be treated as an empty owned directory");
+        assert_eq!(failure.message(), format!("could not inspect an entry in the cache at `{root}`"));
+        assert_eq!(fs::read_to_string(root.join("lock")).unwrap(), "preserved");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn owner_open_failures_and_redirected_creation_refusals_keep_their_native_boundaries() {
+        let directory = crate::testing::workdir("workspace-parent-owner-open-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let cache = root.join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::create_dir(cache.join(CACHE_OWNER)).unwrap();
+        let failure = validate_cache_owner(root, &cache, CacheKind::Default)
+            .expect_err("a directory cannot serve as the regular-file cache owner marker");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "could not inspect the cargo-gamma cache owner marker at `{}`",
+                cache.join(CACHE_OWNER)
+            )
+        );
+        let file = root.join("file");
+        fs::write(&file, "retained").unwrap();
+        let redirected = file.join("redirected");
+        let failure = claim_redirected_cache(root, &redirected).expect_err("a redirected cache cannot be created beneath a file");
+        assert_eq!(
+            failure.message(),
+            format!("could not create the redirected cargo-gamma cache at `{redirected}`")
+        );
+        assert_eq!(fs::read_to_string(file).unwrap(), "retained");
+    }
+
+    #[test]
+    fn vcs_exposure_preserves_git_pointers_and_returns_each_native_refusal_stage() {
+        for boundary in ["git", "malformed", "write", "hg"] {
+            let directory = private_system_tempdir("workspace-parent-vcs-exposure-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let source = root.join("source");
+            let scratch = root.join("scratch");
+            fs::create_dir(&source).unwrap();
+            fs::create_dir(&scratch).unwrap();
+            if boundary == "hg" {
+                fs::create_dir(source.join(".hg")).unwrap();
+                fs::create_dir(scratch.join(".hg")).unwrap();
+                let failure = expose_vcs_metadata(&source, &scratch).unwrap_err();
+                assert!(failure.message().starts_with("could not expose VCS metadata at"), "{failure}");
+                continue;
+            }
+            let git = source.join(".git");
+            if boundary == "malformed" {
+                fs::write(&git, "a pointer without its required prefix").unwrap();
+            } else {
+                fs::create_dir(&git).unwrap();
+            }
+            if boundary == "write" {
+                fs::create_dir(scratch.join(".git")).unwrap();
+            }
+            let result = expose_vcs_metadata(&source, &scratch);
+            match boundary {
+                "git" => {
+                    result.unwrap();
+                    assert_eq!(fs::read_to_string(scratch.join(".git")).unwrap(), format!("gitdir: {git}\n"));
+                }
+                "malformed" => assert_eq!(
+                    result.unwrap_err().message(),
+                    format!("Git metadata pointer `{git}` has no `gitdir:` target")
+                ),
+                "write" => assert_eq!(
+                    result.unwrap_err().message(),
+                    format!("could not expose Git metadata at `{}`", scratch.join(".git"))
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn vcs_exposure_visits_later_kinds_and_selects_native_link_shapes_before_reporting_link_errors() {
+        for fail in [false, true] {
+            let directory = private_system_tempdir("workspace-parent-vcs-link-kinds-");
+            let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+            let source = root.join("source");
+            let scratch = root.join("scratch");
+            fs::create_dir(&source).unwrap();
+            fs::create_dir(&scratch).unwrap();
+            fs::create_dir(source.join(".git")).unwrap();
+            fs::create_dir(source.join(".hg")).unwrap();
+            fs::write(source.join(".bzr"), "file-shaped metadata").unwrap();
+            let mut observations = Vec::new();
+            let result = expose_vcs_metadata_with(&source, &scratch, |marker, destination, directory| {
+                observations.push((marker.file_name().unwrap().to_owned(), directory));
+                assert_eq!(destination.parent(), Some(scratch.as_path()));
+                if fail {
+                    Err(File::open(root.join("absent")).unwrap_err())
+                } else {
+                    fs::write(destination, format!("directory={directory}"))
+                }
+            });
+            assert_eq!(
+                fs::read_to_string(scratch.join(".git")).unwrap(),
+                format!("gitdir: {}\n", source.join(".git"))
+            );
+            if fail {
+                assert_eq!(observations, [(".hg".to_owned(), true)]);
+                assert_eq!(
+                    result.unwrap_err().message(),
+                    format!("could not expose VCS metadata at `{}`", scratch.join(".hg"))
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(observations, [(".hg".to_owned(), true), (".bzr".to_owned(), false)]);
+                assert_eq!(fs::read_to_string(scratch.join(".hg")).unwrap(), "directory=true");
+                assert_eq!(fs::read_to_string(scratch.join(".bzr")).unwrap(), "directory=false");
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_exposes_metadata_only_for_the_default_cache_and_returns_invalid_git_pointers() {
+        for boundary in ["default", "explicit", "malformed"] {
+            let directory = private_system_tempdir("workspace-parent-vcs-preparation-");
+            let source = absolute(Utf8Path::from_path(directory.path()).unwrap());
+            crate::testing::write_project(
+                source.as_std_path(),
+                &[
+                    ("Cargo.toml", "[package]\nname='vcs'\nversion='0.0.0'\n[workspace]\n"),
+                    ("src/lib.rs", ""),
+                ],
+            );
+            let git = source.join(".git");
+            if boundary == "malformed" {
+                fs::write(&git, "invalid git pointer").unwrap();
+            } else {
+                fs::create_dir(&git).unwrap();
+            }
+            let config = Config {
+                cache_dir: (boundary == "explicit").then(|| source.join("explicit-cache")),
+                ..Config::default()
+            };
+            let result = Workspace::prepare(&source, &source.join("target"), &config, &mut crate::testing::Recorder::default());
+            if boundary == "malformed" {
+                assert_eq!(
+                    result.unwrap_err().message(),
+                    format!("Git metadata pointer `{git}` has no `gitdir:` target")
+                );
+            } else {
+                let mut work = result.unwrap();
+                assert_eq!(work.root.join(".git").exists(), boundary == "default");
+                work.teardown().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_competing_owner_marker_is_never_overwritten_after_the_empty_inventory_check() {
+        let directory = private_system_tempdir("workspace-parent-owner-race-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let base = root.join("cache");
+        fs::create_dir(&base).unwrap();
+        let owner = base.join(CACHE_OWNER);
+        let failure = validate_cache_owner_with_inventory(&root, &base, CacheKind::Default, File::metadata, |base| {
+            assert!(!has_unowned_entries(base).unwrap());
+            fs::write(&owner, "competing owner").unwrap();
+            Ok(false)
+        })
+        .expect_err("create_new must return a concurrent ownership refusal rather than truncate or panic");
+        assert_eq!(
+            failure.message(),
+            format!("could not write the cargo-gamma cache owner marker at `{owner}`")
+        );
+        assert_eq!(fs::read_to_string(owner).unwrap(), "competing owner");
+    }
+
+    #[test]
+    fn claiming_an_owner_in_a_missing_cache_returns_the_native_inventory_error() {
+        let directory = private_system_tempdir("workspace-parent-missing-inventory-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let base = root.join("absent");
+        let failure = validate_cache_owner(&root, &base, CacheKind::Default)
+            .expect_err("a missing cache cannot be enumerated while establishing ownership");
+        assert_eq!(failure.message(), format!("could not inspect the cache at `{base}`"));
+        assert!(!base.exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn native_read_denials_keep_git_pointer_and_cache_owner_failure_stages_distinct() {
+        let directory = private_system_tempdir("workspace-parent-native-read-denial-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&scratch).unwrap();
+        let git = source.join(".git");
+        fs::write(&git, "gitdir: elsewhere").unwrap();
+        let held = File::options().read(true).share_mode(0).open(&git).unwrap();
+        let failure = expose_vcs_metadata(&source, &scratch).unwrap_err();
+        assert_eq!(failure.message(), format!("could not read Git metadata pointer `{git}`"));
+        drop(held);
+        let owner = scratch.join(CACHE_OWNER);
+        fs::write(&owner, source.as_str()).unwrap();
+        let held = File::options().read(true).share_mode(0).open(&owner).unwrap();
+        let failure = validate_cache_owner(&source, &scratch, CacheKind::Default).unwrap_err();
+        assert_eq!(
+            failure.message(),
+            format!("could not inspect the cargo-gamma cache owner marker at `{owner}`")
+        );
+        drop(held);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn native_junction_aliases_cannot_turn_copy_refusals_into_prunable_layouts() {
+        let directory = private_system_tempdir("workspace-parent-junction-pruning-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        let inside = source.join("inside");
+        fs::create_dir(&inside).unwrap();
+        for (index, (link, target)) in [
+            (root.join("outside-alias"), inside.clone()),
+            (source.join("inside-alias"), inside),
+            (root.join("root-alias"), source.clone()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            create_native_junction(&link, &target);
+            let failure = ensure_copy_terminates(&source, &link)
+                .expect_err("a junction that aliases the source cannot be pruned by its lexical spelling");
+            assert!(
+                failure.message().contains(if index == 2 {
+                    "workspace at"
+                } else {
+                    "not named as a path inside it"
+                }),
+                "{failure}"
+            );
+            if index == 2 {
+                assert!(failure.message().contains("itself, so copying"), "{failure}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn manifest_lookup_rejects_external_junctions_and_stops_before_an_in_root_physical_ancestor() {
+        let directory = private_system_tempdir("workspace-parent-manifest-junctions-");
+        let outer = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let source = outer.join("source");
+        let external = outer.join("external");
+        fs::create_dir_all(source.join("src")).unwrap();
+        fs::create_dir_all(external.join("src")).unwrap();
+        fs::write(external.join("Cargo.toml"), "[package]\nname='external'\nversion='0.0.0'\n").unwrap();
+        let nested = outer.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let alias = source.join("alias");
+        let scratch = nested.join("scratch");
+        for (link, target) in [(&alias, &external), (&scratch, &outer)] {
+            create_native_junction(link, target);
+        }
+        for (root, path) in [(&source, "alias/src/lib.rs"), (&scratch, "source/src/lib.rs")] {
+            let work = Workspace::adopt(root.clone(), outer.join("artifacts"));
+            let files = [TargetFile {
+                path: path.into(),
+                absolute: root.join(path),
+                package: "subject".into(),
+                source: None,
+            }];
+            assert_eq!(work.manifest_of("subject", &files), None);
+        }
+    }
+
+    #[test]
+    fn nextest_packages_are_sorted_before_nonadjacent_duplicates_are_removed() {
+        let work = unsettled_default();
+        let binaries = ["z-last", "a-first", "z-last"].map(|package| TestBinary {
+            package_id: package.to_owned(),
+            ..crate::testing::test_binary("unused")
+        });
+        let command = work.nextest_list_command(&binaries);
+        let arguments = command.get_args().map(|argument| argument.to_str().unwrap()).collect::<Vec<_>>();
+        let packages = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--package")
+            .map(|pair| pair[1])
+            .collect::<Vec<_>>();
+        assert_eq!(packages, ["a-first", "z-last"]);
+    }
+
+    #[test]
+    fn native_cache_readers_and_workspace_claims_return_nondirectory_errors() {
+        let directory = crate::testing::workdir("workspace-parent-native-errors-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let file = root.join("plain-file");
+        fs::write(&file, "retained").unwrap();
+        for unowned in [false, true] {
+            let result = if unowned {
+                has_unowned_entries(&file)
+            } else {
+                has_any_entries(&file)
+            };
+            let failure = result.expect_err("a file cannot be enumerated as a cache directory");
+            assert!(failure.message().contains(file.as_str()), "{failure}");
+            assert!(failure.message().starts_with("could not inspect"), "{failure}");
+        }
+        let base = gamma_base(root, None);
+        let namespace = base.parent().unwrap();
+        fs::create_dir_all(namespace.parent().unwrap()).unwrap();
+        fs::write(namespace, "not a namespace directory").unwrap();
+        let failure = claim_workspace_at(root, &base).expect_err("a structurally valid cache cannot be created beneath a file");
+        assert_eq!(
+            failure.message(),
+            format!("could not create cargo-gamma's workspace cache at `{base}`")
+        );
+        assert_eq!(fs::read_to_string(file).unwrap(), "retained");
+    }
+
+    #[test]
+    fn default_cache_guards_check_the_namespace_private_home_and_campaign_identity_independently() {
+        let directory = crate::testing::workdir("workspace-parent-shape-guards-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let correct = gamma_base(root, None);
+        validate_default_cache_base(root, &correct).unwrap();
+        let misplaced = root.join("wrong-namespace").join(workspace_identity(root));
+        let failure = validate_default_cache_base(root, &misplaced).unwrap_err();
+        assert!(failure.message().contains("malformed default cache path"), "{failure}");
+        let outside = root.join("outside-home").join("cargo-gamma").join(workspace_identity(root));
+        let failure = validate_default_cache_base(root, &outside).unwrap_err();
+        assert!(failure.message().contains("escaped its private cache home"), "{failure}");
+        validate_default_campaign_base(root, &root.join("target"), &correct).unwrap();
+        let failure = validate_default_campaign_base(root, &root.join("target"), &outside).unwrap_err();
+        assert!(failure.message().contains("escaped its private cache base"), "{failure}");
+        let failure = claim_default_campaign_cache(root, &root.join("target"), &outside).unwrap_err();
+        assert!(failure.message().contains("escaped its private cache base"), "{failure}");
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn preparing_a_workspace_propagates_an_existing_claim_instead_of_panicking() {
+        let directory = crate::testing::workdir("workspace-parent-held-claim-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[package]\nname='claimed'\nversion='0.0.0'\n[workspace]\n"),
+                ("src/lib.rs", ""),
+            ],
+        );
+        let _held = claim_workspace(root).unwrap();
+        let failure = Workspace::prepare(
+            root,
+            &root.join("target"),
+            &Config::default(),
+            &mut crate::testing::Recorder::default(),
+        )
+        .expect_err("an active workspace lock is a returned usage error, not a panic");
+        assert!(failure.is_usage());
+        assert!(failure.message().contains("another `cargo gamma` run"), "{failure}");
+    }
+
+    #[test]
+    fn preparation_observes_the_exact_adopted_lock_identity_before_copying() {
+        let directory = crate::testing::workdir("workspace-parent-lock-handoff-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[package]\nname='handoff'\nversion='0.0.0'\n[workspace]\n"),
+                ("src/lib.rs", ""),
+            ],
+        );
+        let target = root.join("target");
+        let locks = claim_cache(&root, &target, None).unwrap();
+        let expected = cache_lock_identity(&locks);
+        let observed = std::cell::Cell::new(None);
+        let mut work = Workspace::prepare_with_locks_observed(
+            &root,
+            &target,
+            &Config::default(),
+            &mut crate::testing::Recorder::default(),
+            Some(locks),
+            |locks| observed.set(Some(cache_lock_identity(locks))),
+        )
+        .unwrap();
+        assert_eq!(observed.get(), Some(expected));
+        work.teardown().unwrap();
+    }
+
+    #[test]
+    fn a_wrapping_lock_identity_sequence_does_not_skip_into_the_next_retained_identity() {
+        let retained = next_cache_lock_identity(&AtomicUsize::new(1));
+        let next = AtomicUsize::new(usize::MAX);
+        let last = next_cache_lock_identity(&next);
+        let wrapped = next_cache_lock_identity(&next);
+        assert_ne!(last, retained);
+        assert_ne!(wrapped, last);
+        assert_ne!(wrapped, retained);
+    }
+
+    #[test]
+    fn preparation_and_cleaning_return_private_home_guard_refusals_without_writing() {
+        let directory = crate::testing::workdir("workspace-parent-home-refusal-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let home = root.join("missing").join("..").join("private");
+        crate::testing::with_cache_home_at(home, || {
+            let failure = Workspace::prepare(
+                &root,
+                &root.join("target"),
+                &Config::default(),
+                &mut crate::testing::Recorder::default(),
+            )
+            .expect_err("a path outside the exact private-home spelling must be rejected before copying");
+            assert!(failure.message().contains("escaped its private cache home"), "{failure}");
+            let failure = clean_cache(&root, &root.join("target"))
+                .expect_err("cleaning must return the same private-home guard refusal rather than panic");
+            assert!(failure.message().contains("escaped its private cache home"), "{failure}");
+        });
+        assert!(!root.join("private").exists());
+        assert!(!root.join("target").exists());
+    }
+
+    #[test]
+    fn runtime_linking_returns_malformed_manifest_and_dependency_shape_errors() {
+        for malformed in [false, true] {
+            let directory = crate::testing::workdir("workspace-parent-runtime-errors-");
+            let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+            fs::create_dir(root.join("src")).unwrap();
+            fs::write(root.join("src/lib.rs"), "pub fn subject() {}\n").unwrap();
+            let manifest = root.join("Cargo.toml");
+            let text = if malformed {
+                "[package\n"
+            } else {
+                "[package]\nname='subject'\nversion='0.0.0'\n[target.'cfg(windows)'.dependencies]\ngamma_rt={package='different-package',version='1'}\n"
+            };
+            fs::write(&manifest, text).unwrap();
+            let work = Workspace::adopt(root.clone(), root.join("target"));
+            let files = [TargetFile {
+                path: "src/lib.rs".into(),
+                absolute: root.join("src/lib.rs"),
+                package: "subject".into(),
+                source: None,
+            }];
+            let failure = work
+                .link_runtime("subject", &files)
+                .expect_err("invalid manifests cannot be linked to a runtime");
+            assert!(
+                failure.message().contains(if malformed { "could not parse" } else { "gamma_rt" }),
+                "{failure}"
+            );
+            assert_eq!(fs::read_to_string(manifest).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn checkpoint_publication_refusal_is_returned_after_the_journal_was_armed() {
+        let directory = crate::testing::workdir("workspace-parent-journal-refusal-");
+        let base = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let mut work = Workspace::adopt(base.join("workspace"), base.join("target"));
+        fs::write(base.join("testing-session.json"), "{}").unwrap();
+        fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
+        work.arm_testing_journal().unwrap();
+        let mut mutant = crate::fixtures::mutant();
+        mutant.outcome = crate::model::Outcome::Survived;
+        work.testing_journal
+            .as_mut()
+            .unwrap()
+            .replace_writer_for_test(File::open(base.join("testing-verdicts.jsonl")).unwrap());
+        let failure = work
+            .checkpoint_mutant(
+                &mutant,
+                &super::super::killers::Killers::default(),
+                &super::super::session::SweepCost::default(),
+            )
+            .expect_err("the native read-only journal handle must refuse appending a checkpoint");
+        assert!(failure.message().starts_with("could not persist testing progress"), "{failure}");
+    }
+
+    #[test]
+    fn metadata_owner_diagnostics_and_explicit_base_resolution_keep_the_requested_cache() {
+        let directory = crate::testing::workdir("workspace-parent-state-owner-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[
+                ("Cargo.toml", "[package]\nname='subject'\nversion='0.0.0'\n[workspace]\n"),
+                ("src/lib.rs", ""),
+            ],
+        );
+        let base = root.join("explicit-cache");
+        fs::create_dir(&base).unwrap();
+        let failure = validate_campaign_state_owner(root, &base).unwrap_err();
+        assert!(failure.message().ends_with("(owner marker resolves to `<unowned>`)"), "{failure}");
+        mark_cache_owned_for_test(root, &base);
+        assert!(same_existing_path(
+            &campaign_base_from_state(root, Some(&base)).unwrap(),
+            &physical(&base)
+        ));
+        let held = claim_workspace(root).unwrap();
+        let failure = claim_campaign_state(root, Some(&base)).expect_err("a campaign claim must respect the active workspace lock");
+        assert!(failure.is_usage());
+        drop(held);
+        let missing = root.join("no-workspace");
+        fs::create_dir(&missing).unwrap();
+        fs::write(missing.join("Cargo.toml"), "[broken").unwrap();
+        claim_campaign_state(&missing, None).expect_err("a malformed workspace cannot resolve campaign state");
+        claim_testing_state(&missing, Some(&root.join("unowned"))).expect_err("an ownerless cache cannot resolve testing state");
+    }
+
+    #[test]
+    fn refused_campaign_locators_report_the_failure_without_claiming_publication() {
+        let directory = crate::testing::workdir("workspace-parent-locator-refusal-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let base = root.join("campaign");
+        fs::create_dir(&base).unwrap();
+        assert!(!remember_campaign_base(root, &base));
+        mark_cache_owned_for_test(root, &base);
+        let locator = gamma_base(root, None).join(CAMPAIGN_LOCATION);
+        fs::create_dir_all(&locator).unwrap();
+        let run = crate::notes::Run::new();
+        let _scope = crate::notes::enter(Some(&run));
+        assert!(!remember_campaign_base(root, &base));
+        let notes = crate::notes::drain();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("could not save campaign-state location:"), "{notes:?}");
+    }
+
+    #[test]
+    fn absent_binary_parents_do_not_hide_later_test_search_paths() {
+        let mut work = unsettled_default();
+        work.libraries.clear();
+        let binaries = [crate::testing::test_binary(""), crate::testing::test_binary("profile/deps/actual")];
+        work.prepend_test_search_paths(&binaries);
+        assert_eq!(work.libraries, ["profile", "profile/deps"].map(Utf8PathBuf::from));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn anchored_manifests_keep_external_paths_and_return_parse_and_write_refusals() {
+        for boundary in ["paths", "parse", "write"] {
+            let directory = crate::testing::workdir("workspace-parent-anchor-contract-");
+            let source = Utf8Path::from_path(directory.path()).unwrap().join("source");
+            let copy = source.parent().unwrap().join("copy");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir(&copy).unwrap();
+            let external = source.parent().unwrap().join("external");
+            fs::create_dir(&external).unwrap();
+            fs::write(external.join("Cargo.toml"), "[package]\nname='external'\nversion='0.0.0'\n").unwrap();
+            let manifest = copy.join("Cargo.toml");
+            let text = if boundary == "parse" {
+                "[package\n"
+            } else {
+                "[package]\nname='subject'\nversion='0.0.0'\n[dependencies]\nexternal={path='../external'}\n[workspace]\n"
+            };
+            fs::write(&manifest, text).unwrap();
+            let _denied = (boundary == "write").then(|| fs::OpenOptions::new().read(true).share_mode(1).open(&manifest).unwrap());
+            let result = anchor_manifests(&source, &copy, &copy.join("runtime"));
+            match boundary {
+                "paths" => {
+                    result.unwrap();
+                    let saved = fs::read_to_string(&manifest).unwrap();
+                    let saved = saved.parse::<toml_edit::DocumentMut>().unwrap();
+                    let dependency = Utf8Path::new(saved["dependencies"]["external"]["path"].as_str().unwrap());
+                    assert!(dependency.is_absolute(), "{dependency}");
+                    assert_eq!(absolute(dependency), absolute(&external));
+                }
+                "parse" => assert!(result.unwrap_err().message().contains("could not parse")),
+                "write" => {
+                    let failure = result.unwrap_err();
+                    assert_eq!(failure.message(), format!("could not update `{manifest}`"));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn cargo_capture_callers_preserve_command_identity_labels_output_and_each_independent_failure() {
+        let work = unsettled_default();
+        let root = work.root.clone();
+        for metadata in [true, false] {
+            for mode in 0..4 {
+                let expected_root = root.clone();
+                let observed = std::rc::Rc::new(std::cell::Cell::new(0));
+                let calls = std::rc::Rc::clone(&observed);
+                let label = if metadata { "cargo metadata" } else { "cargo nextest list" };
+                let result = with_capture_script(
+                    move |command, what| {
+                        calls.set(calls.get() + 1);
+                        assert_eq!(command.get_current_dir(), Some(expected_root.as_std_path()));
+                        assert_eq!(what, label);
+                        let args = command.get_args().map(OsStr::to_string_lossy).collect::<Vec<_>>();
+                        if metadata {
+                            assert_eq!(args, ["metadata", "--format-version", "1"]);
+                        } else {
+                            assert_eq!(
+                                args,
+                                ["nextest", "list", "--list-type", "binaries-only", "--message-format", "json"]
+                            );
+                        }
+                        match mode {
+                            0 => Ok(capture_success("distinctive payload\n")),
+                            1 => Err(io::Error::other("scripted transport refusal")),
+                            2 => Ok(Captured {
+                                succeeded: false,
+                                stdout: b"not successful output".to_vec(),
+                                stderr: b"  scripted status refusal \n".to_vec(),
+                            }),
+                            _ => Ok(Captured {
+                                succeeded: true,
+                                stdout: vec![0xff],
+                                stderr: Vec::new(),
+                            }),
+                        }
+                    },
+                    || {
+                        if metadata {
+                            work.capture_cargo_metadata()
+                        } else {
+                            work.capture_nextest_list(&[])
+                        }
+                    },
+                );
+                assert_eq!(observed.get(), 1);
+                match mode {
+                    0 => assert_eq!(result.unwrap(), "distinctive payload\n"),
+                    1 => assert_eq!(result.unwrap_err().message(), format!("could not run `{label}` in {root}")),
+                    2 => assert_eq!(
+                        result.unwrap_err().message(),
+                        format!("`{label}` failed in {root}:\nscripted status refusal")
+                    ),
+                    _ => assert_eq!(result.unwrap_err().message(), format!("`{label}` did not print valid UTF-8")),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arming_the_real_cargo_environment_publishes_metadata_paths_and_package_variables_together() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let mut work = unsettled_at(root.clone(), root.join("runtime"));
+        let mut binary = crate::testing::test_binary("release/deps/prepared");
+        binary.package_id = "proof-package".into();
+        let metadata = serde_json::json!({
+            "packages": [{
+                "id": "proof-package", "name": "prepared", "version": "2.3.4",
+                "manifest_path": root.join("Cargo.toml"),
+            }],
+        })
+        .to_string();
+        let artifacts = serde_json::json!({
+            "reason": "build-script-executed", "package_id": "proof-package", "out_dir": "generated-output",
+        })
+        .to_string();
+        let output = metadata.clone();
+        with_capture_script(
+            move |_, what| {
+                assert_eq!(what, "cargo metadata");
+                Ok(capture_success(&output))
+            },
+            || work.arm_test_environment(std::slice::from_ref(&binary), &artifacts),
+        )
+        .unwrap();
+        assert_eq!(work.cargo_metadata.as_deref(), Some(metadata.as_str()));
+        assert_eq!(work.libraries, ["release", "release/deps"].map(Utf8PathBuf::from));
+        assert_eq!(
+            work.testing_roots().unwrap(),
+            [root.clone(), root.join("runtime"), "generated-output".into()]
+        );
+        let mut command = Command::new("not-executed");
+        work.configure_test_environment(&mut command, &binary);
+        assert_eq!(command_env(&command, "CARGO_PKG_NAME"), "prepared");
+        assert_eq!(command_env(&command, "CARGO_PKG_VERSION"), "2.3.4");
+        assert_eq!(command_env(&command, "OUT_DIR"), "generated-output");
+    }
+
+    #[test]
+    fn arming_failures_retain_the_previous_environment_and_metadata_after_settling_search_paths() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        for transport in [false, true] {
+            let mut work = unsettled_at(root.clone(), root.join("runtime"));
+            let binary = crate::testing::test_binary("release/deps/prepared");
+            work.cargo_metadata = Some("previous metadata".into());
+            work.set_test_environment(&binary.package_id, "PREVIOUS", "retained");
+            let result = with_capture_script(
+                move |_, _| {
+                    if transport {
+                        Err(io::Error::other("metadata transport refused"))
+                    } else {
+                        Ok(capture_success("malformed metadata"))
+                    }
+                },
+                || work.arm_test_environment(std::slice::from_ref(&binary), ""),
+            );
+            let failure = result.expect_err("both transport refusal and malformed metadata must abort environment preparation");
+            if transport {
+                assert_eq!(failure.message(), format!("could not run `cargo metadata` in {root}"));
+            } else {
+                assert_eq!(failure.message(), "could not decode Cargo metadata for the test environment");
+            }
+            assert_eq!(work.cargo_metadata.as_deref(), Some("previous metadata"));
+            assert_eq!(work.libraries, ["release", "release/deps"].map(Utf8PathBuf::from));
+            let mut command = Command::new("not-executed");
+            work.configure_test_environment(&mut command, &binary);
+            assert_eq!(command_env(&command, "PREVIOUS"), "retained");
+        }
+    }
+
+    #[test]
+    fn arming_nextest_retains_both_real_scratch_documents_and_propagates_late_listing_failure() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let mut work = unsettled_at(root.clone(), root.join("runtime"));
+        work.target = root.join("target");
+        work.cargo_metadata = Some("chosen metadata".into());
+        with_capture_script(
+            |_, label| {
+                assert_eq!(label, "cargo nextest list");
+                Ok(capture_success("{\"rust-suites\":{}}"))
+            },
+            || work.arm_nextest(&[]),
+        )
+        .unwrap();
+        assert!(work.runner().is_some());
+        let paths = [work.target.join("nextest-binaries.json"), work.target.join("nextest-metadata.json")];
+        assert_eq!(fs::read_to_string(&paths[0]).unwrap(), "{\"rust-suites\":{}}");
+        assert_eq!(fs::read_to_string(&paths[1]).unwrap(), "chosen metadata");
+        assert_eq!(
+            work.testing_roots().unwrap(),
+            [root.clone(), root.join("runtime"), paths[0].clone(), paths[1].clone()]
+        );
+        let failure = with_capture_script(
+            |_, _| Err(io::Error::other("late nextest listing refusal")),
+            || work.arm_nextest(&[]),
+        )
+        .expect_err("an armed runner does not authorize suppressing a later failed listing");
+        assert_eq!(failure.message(), format!("could not run `cargo nextest list` in {root}"));
+        assert!(work.runner().is_some(), "the previous runner survives failed replacement");
+    }
+
+    #[test]
+    fn nextest_preparation_propagates_each_scratch_write_failure_and_rejects_a_missing_binary_after_both_writes() {
+        for failure_at in 0..3 {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+            let mut work = Workspace::adopt(root.clone(), root.join("target"));
+            work.cargo_metadata = Some("selected metadata".into());
+            fs::create_dir_all(&work.target).unwrap();
+            let binaries_path = work.target.join("nextest-binaries.json");
+            let metadata_path = work.target.join("nextest-metadata.json");
+            if failure_at < 2 {
+                fs::create_dir(if failure_at == 0 { &binaries_path } else { &metadata_path }).unwrap();
+            }
+            let binaries = if failure_at == 2 {
+                vec![crate::testing::test_binary("missing-binary")]
+            } else {
+                vec![]
+            };
+            let failure = with_capture_script(
+                |_, label| {
+                    assert_eq!(label, "cargo nextest list");
+                    Ok(capture_success("{\"rust-binaries\":{}}"))
+                },
+                || work.arm_nextest(&binaries),
+            )
+            .expect_err("the exact scratch/identity failure must escape nextest preparation");
+            if failure_at < 2 {
+                let blocked = if failure_at == 0 { &binaries_path } else { &metadata_path };
+                assert_eq!(failure.message(), format!("could not write `{blocked}`"));
+                assert!(blocked.is_dir());
+            } else {
+                assert_eq!(
+                    failure.message(),
+                    "`cargo nextest` does not know the test binary `missing-binary` that this run built.\nRun without `--nextest` to run the binaries directly instead."
+                );
+                assert_eq!(fs::read_to_string(&metadata_path).unwrap(), "selected metadata");
+            }
+            if failure_at > 0 {
+                assert_eq!(fs::read_to_string(&binaries_path).unwrap(), "{\"rust-binaries\":{}}");
+            }
+            assert!(work.runner().is_none());
+        }
+    }
+
+    #[test]
+    fn an_adopted_workspace_has_no_cargo_metadata_and_refuses_nextest_before_any_capture() {
+        let mut work = unsettled_default();
+        let failure = with_capture_script(
+            |_, _| panic!("an adopted but unarmed workspace must not ask Cargo or nextest anything"),
+            || work.arm_nextest(&[]),
+        )
+        .expect_err("adoption does not imply a prepared Cargo test environment");
+        assert_eq!(failure.message(), "the Cargo test environment was not prepared before nextest");
+        assert!(work.runner().is_none());
+    }
+
+    #[test]
+    fn capture_generation_switches_from_ready_to_unavailable_and_back_without_reusing_stale_records() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let mut work = Workspace::adopt(root.clone(), root.join("target"));
+        let captures = root.join("captures");
+        fs::create_dir(&captures).unwrap();
+        fs::write(captures.join("previous.json"), "old generation").unwrap();
+        work.set_rustc_captures(Some(captures.clone()));
+        assert_eq!(work.rustc_captures(), Some(captures.clone()));
+        work.begin_build_sequence();
+        assert_eq!(work.rustc_captures(), Some(captures.clone()));
+        assert!(fs::read_dir(&captures).unwrap().next().is_none());
+        fs::remove_dir(&captures).unwrap();
+        fs::write(&captures, "not a directory").unwrap();
+        work.begin_build_sequence();
+        assert_eq!(work.rustc_captures(), None);
+        assert_eq!(fs::read_to_string(&captures).unwrap(), "not a directory");
+        fs::remove_file(&captures).unwrap();
+        work.begin_build_sequence();
+        assert_eq!(work.rustc_captures(), Some(captures));
+    }
+
+    #[test]
+    fn workspace_resource_capacity_snapshot_exposes_the_actual_named_admission_limit() {
+        let mut work = unsettled_default();
+        let binary = crate::testing::test_binary("resource-subject");
+        work.resources = Resources::fake_tests(&binary, &[("one", "database"), ("two", "database")]);
+        assert_eq!(
+            work.resource_capacities(),
+            std::iter::once((Arc::<str>::from("database"), 1)).collect()
+        );
+    }
+
+    #[test]
+    fn postopen_owner_validation_rejects_a_native_directory_metadata_snapshot_before_reading_marker_bytes() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let base = root.join("cache");
+        fs::create_dir(&base).unwrap();
+        let owner = base.join(CACHE_OWNER);
+        fs::write(&owner, b"\xff").unwrap();
+        let inspected = std::cell::Cell::new(false);
+        let failure = validate_cache_owner_with_metadata(&root, &base, CacheKind::Default, |file| {
+            assert!(file.metadata().unwrap().is_file(), "the real marker must already have been opened");
+            inspected.set(true);
+            fs::metadata(&base)
+        })
+        .expect_err("the metadata adapter's nonregular snapshot is refused before marker parsing");
+        assert!(inspected.get());
+        assert_eq!(
+            failure.message(),
+            format!(
+                "the cargo-gamma cache owner marker at `{owner}` is not a regular file.\n{}",
+                CacheKind::Default.collision_advice()
+            )
+        );
+        assert!(failure.is_usage());
+        assert_eq!(fs::read(&owner).unwrap(), b"\xff");
+    }
+
+    #[test]
+    fn owned_cache_cleaning_propagates_independent_directory_open_and_late_entry_failures_after_validating_the_owner() {
+        for entry_failure in [false, true] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+            let base = root.join("cache");
+            fs::create_dir(&base).unwrap();
+            let owner = base.join(CACHE_OWNER);
+            fs::write(&owner, physical(&root).as_str()).unwrap();
+            let inspected = std::cell::Cell::new(false);
+            let failure = clean_owned_cache_with_entries(&root, &base, true, |path| {
+                assert_eq!(path, base);
+                let entries = fs::read_dir(path)?.collect::<Vec<_>>();
+                assert_eq!(entries.len(), 1, "only the validated owner marker is present");
+                inspected.set(true);
+                if entry_failure {
+                    Ok(entries
+                        .into_iter()
+                        .chain(std::iter::once(Err(io::Error::other("late cache entry refusal"))))
+                        .collect::<Vec<_>>())
+                } else {
+                    Err(io::Error::other("cache directory refused after native open"))
+                }
+            })
+            .expect_err("neither failed directory enumeration nor a failed later entry may report a clean cache");
+            assert!(inspected.get());
+            assert_eq!(
+                failure.message(),
+                if entry_failure {
+                    format!("could not read an entry in cargo-gamma's cache at `{base}`")
+                } else {
+                    format!("could not read cargo-gamma's cache at `{base}`")
+                }
+            );
+            assert_eq!(fs::read_to_string(&owner).unwrap(), physical(&root).as_str());
+        }
+    }
+
+    #[test]
+    fn cleaning_refuses_native_nondirectory_and_foreign_owner_shapes_before_removing_any_bytes() {
+        for foreign_owner in [false, true] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+            let base = root.join("cache");
+            if foreign_owner {
+                fs::create_dir(&base).unwrap();
+                fs::write(base.join(CACHE_OWNER), physical(&root.join("foreign")).as_str()).unwrap();
+                fs::write(base.join("payload"), "foreign bytes").unwrap();
+            } else {
+                fs::write(&base, "not a cache directory").unwrap();
+            }
+            let failure = clean_owned_cache(&root, &base, true).expect_err("neither native shape authorizes destructive cleaning");
+            assert!(
+                failure.message().contains(if foreign_owner {
+                    "belongs to the workspace"
+                } else {
+                    "is not a directory"
+                }),
+                "{failure}"
+            );
+            assert_eq!(
+                if foreign_owner {
+                    fs::read_to_string(base.join("payload"))
+                } else {
+                    fs::read_to_string(&base)
+                }
+                .unwrap(),
+                if foreign_owner { "foreign bytes" } else { "not a cache directory" }
+            );
+        }
+    }
+
+    #[test]
+    fn cached_entry_type_inspection_failure_keeps_the_real_entry_and_reports_its_exact_path() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let path = root.join("preserved");
+        fs::write(&path, "owned bytes").unwrap();
+        let entry = fs::read_dir(root).unwrap().next().unwrap().unwrap();
+        let failure = remove_cached_with_type(&entry.path(), || {
+            assert!(entry.file_type().unwrap().is_file());
+            Err(io::Error::other("late cached entry type refusal"))
+        })
+        .expect_err("a failed late type inspection must not silently unlink or unwrap");
+        assert_eq!(failure.message(), format!("could not inspect cached data at `{path}`"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "owned bytes");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn owned_cache_cleaning_propagates_native_entry_removal_denial_and_keeps_the_owner_marker() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let base = root.join("cache");
+        fs::create_dir(&base).unwrap();
+        let owner = base.join(CACHE_OWNER);
+        fs::write(&owner, physical(&root).as_str()).unwrap();
+        let path = base.join("locked-payload");
+        fs::write(&path, "owned locked bytes").unwrap();
+        let locked = fs::File::options().read(true).share_mode(0).open(&path).unwrap();
+        let failure = clean_owned_cache(&root, &base, true).expect_err("a locked real entry cannot count as removed");
+        assert_eq!(failure.message(), format!("could not remove cached data at `{path}`"));
+        drop(locked);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "owned locked bytes");
+        assert_eq!(fs::read_to_string(&owner).unwrap(), physical(&root).as_str());
+    }
 
     /// A capture that succeeded hands back exactly what the command printed.
     #[test]
@@ -2958,6 +4394,230 @@ mod tests {
 
         assert_eq!(args.iter().filter(|arg| *arg == "fallback").count(), 1);
         assert_eq!(args.iter().filter(|arg| *arg == "precise-id").count(), 1);
+    }
+
+    #[test]
+    fn testing_resume_restores_launch_environment_arguments_and_idle_resource_admission() {
+        let directory = crate::testing::private_system_tempdir("workspace-testing-restore-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).unwrap();
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).unwrap();
+        let root = base.join("workspace");
+        create_private_dir_all(&source).unwrap();
+        create_private_dir_all(&root).unwrap();
+        fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
+        mark_cache_owned_for_test(&source, &base);
+        let mut original = Workspace::adopt(root, base.join("target"));
+        original.runtime = base.join("rt");
+        original.cargo.profile = Some("gamma".to_owned());
+        original.cargo.test_args = vec!["--skip".into(), "slow".into()];
+        original.test_environment = Some(TestEnvironment::fake("subject", "BUILD_SCRIPT_VALUE", "captured"));
+        original.harness_threads = OnceLock::from(Some("3".into()));
+        original.launch = OnceLock::from(Launch {
+            loader: Some("captured-library-path".into()),
+            stack: "7654321".into(),
+        });
+        let binary = TestBinary {
+            package_id: "subject".into(),
+            ..crate::testing::test_binary("a-test")
+        };
+        original.resources = Resources::fake_tests(&binary, &[("one", "database")]);
+        let _held = original.acquire_resources(&binary, super::super::verdict::Only::One("one"));
+        let snapshot = original.testing_snapshot().unwrap();
+        assert!(snapshot["resources"].get("active").is_none());
+        let restored = Workspace::resume_testing(
+            &source,
+            &base,
+            snapshot.clone(),
+            tempfile::tempfile().unwrap(),
+            0,
+            TestingResumeIo::FILESYSTEM,
+        )
+        .unwrap();
+        assert_eq!(restored.testing_snapshot().unwrap(), snapshot);
+        assert_eq!(restored.reporting_profile(), Some("gamma"));
+        assert_eq!(restored.test_arguments(), ["--skip", "slow"]);
+        assert_eq!(restored.harness_threads(), Some("3"));
+        assert_eq!(restored.launch().stack, "7654321");
+        let required = restored.required_resources(&binary, super::super::verdict::Only::One("one"));
+        assert_eq!(required.iter().map(AsRef::as_ref).collect::<Vec<&str>>(), ["database"]);
+        let mut command = Command::new("unused");
+        restored.configure_test_environment(&mut command, &binary);
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "BUILD_SCRIPT_VALUE" && value == Some(OsStr::new("captured")))
+        );
+        let _fresh = restored.acquire_resources(&binary, super::super::verdict::Only::One("one"));
+    }
+
+    #[test]
+    fn resume_validates_each_independent_workspace_shape_before_repairing_the_exact_journal_prefix() {
+        let directory = crate::testing::private_system_tempdir("workspace-resume-shapes-");
+        let directory = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let source = directory.join("source");
+        let base = directory.join("cache");
+        create_private_dir_all(&source).unwrap();
+        create_private_dir_all(&base.join("workspace")).unwrap();
+        mark_cache_owned_for_test(&source, &base);
+        let journal = base.join("testing-verdicts.jsonl");
+        fs::write(&journal, "prefix\nunfinished").unwrap();
+        let mut original = Workspace::adopt(base.join("workspace"), base.join("target"));
+        original.runtime = base.join("rt");
+        original.launch = OnceLock::from(Launch {
+            loader: Some("saved-loader".into()),
+            stack: "7340032".into(),
+        });
+        let snapshot = original.testing_snapshot().unwrap();
+        let foreign = directory.join("foreign");
+        let resume = |source: &Utf8Path, snapshot, valid_bytes| {
+            Workspace::resume_testing(
+                source,
+                &base,
+                snapshot,
+                tempfile::tempfile_in(&directory).unwrap(),
+                valid_bytes,
+                TestingResumeIo::FILESYSTEM,
+            )
+        };
+        for (field, replacement) in [
+            ("base", foreign.clone()),
+            ("target", base.join("wrong-target")),
+            ("root", base.join("wrong-root")),
+            ("runtime", base.join("wrong-runtime")),
+            ("root", foreign.join("workspace")),
+        ] {
+            let mut invalid = snapshot.clone();
+            invalid[field] = serde_json::to_value(replacement).unwrap();
+            let failure = resume(&source, invalid, 7).unwrap_err();
+            assert!(failure.message().starts_with("prepared testing workspace does not belong to"));
+            assert_eq!(fs::read(&journal).unwrap(), b"prefix\nunfinished");
+        }
+        let failure = resume(&source, serde_json::json!({}), 7).expect_err("an empty object is not a prepared workspace snapshot");
+        assert_eq!(failure.message(), "prepared testing workspace is invalid; start a new campaign");
+        let mut no_parent = snapshot.clone();
+        no_parent["root"] = serde_json::json!("");
+        let failure = resume(&source, no_parent, 7).expect_err("a snapshot with no scratch parent is a returned validation error");
+        assert_eq!(failure.message(), "prepared testing workspace has no scratch directory");
+        for default_scratch in [false, true] {
+            fs::write(&journal, "prefix\nunfinished").unwrap();
+            let mut saved = snapshot.clone();
+            if default_scratch {
+                let scratch = gamma_base(&source, None);
+                saved["root"] = serde_json::to_value(scratch.join("workspace")).unwrap();
+                saved["runtime"] = serde_json::to_value(scratch.join("rt")).unwrap();
+            }
+            let mut restored = resume(&source, saved.clone(), 7).unwrap();
+            assert_eq!(restored.testing_snapshot().unwrap(), saved);
+            assert_eq!(fs::read(&journal).unwrap(), b"prefix\n");
+            assert!(restored.testing_journal.is_some());
+            #[expect(
+                clippy::used_underscore_binding,
+                reason = "the test verifies ownership of the retention-only cache lock"
+            )]
+            let holds_lock = restored._cache_lock.is_some();
+            assert_eq!(holds_lock, !default_scratch);
+            assert!(restored.settled.load(Ordering::Relaxed));
+            assert!(!restored.leak);
+            assert!(!restored.torn_down);
+            assert!(!restored.rustc_captures_ready.load(Ordering::Relaxed));
+            assert!(restored.rustc_captures.is_none());
+            assert!(restored.cargo_metadata.is_none());
+            restored.leak = true;
+        }
+        fs::remove_file(&journal).unwrap();
+        let failure = resume(&source, snapshot.clone(), 7).expect_err("resuming requires the committed verdict journal");
+        assert!(failure.message().contains("testing-verdicts.jsonl"), "{failure}");
+        fs::write(&journal, "foreign-prefix\n").unwrap();
+        let foreign_source = directory.join("foreign-source");
+        fs::create_dir(&foreign_source).unwrap();
+        let failure = resume(&foreign_source, snapshot, 0).expect_err("a foreign source cannot claim an owned cache");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "the cargo-gamma cache at `{base}` belongs to the workspace at `{}`, not `{}`.\n{}",
+                crate::report::encode_controls(physical(&source).as_str()),
+                physical(&foreign_source),
+                CacheKind::Redirected.collision_advice(),
+            ),
+            "{failure}"
+        );
+        assert_eq!(fs::read(&journal).unwrap(), b"foreign-prefix\n", "{failure}");
+        assert_eq!(
+            fs::read_to_string(base.join(CACHE_OWNER)).unwrap(),
+            physical(&source).as_str(),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn resuming_the_default_all_in_one_cache_retains_only_its_existing_workspace_lock() {
+        let directory = crate::testing::workdir("workspace-parent-default-resume-");
+        let source = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let base = gamma_base(&source, None);
+        let lock = claim_workspace(&source).unwrap();
+        fs::create_dir_all(base.join("workspace")).unwrap();
+        fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
+        let mut original = Workspace::adopt(base.join("workspace"), base.join("target"));
+        original.runtime = base.join("rt");
+        let snapshot = original.testing_snapshot().unwrap();
+        let mut restored = Workspace::resume_testing(&source, &base, snapshot.clone(), lock, 0, TestingResumeIo::FILESYSTEM).unwrap();
+        assert_eq!(restored.testing_snapshot().unwrap(), snapshot);
+        #[expect(
+            clippy::used_underscore_binding,
+            reason = "verifying that resumption does not acquire its own lock twice"
+        )]
+        let has_extra_lock = restored._cache_lock.is_some();
+        assert!(!has_extra_lock);
+        restored.leak = true;
+    }
+
+    #[test]
+    fn arming_checkpoints_and_completion_change_only_the_armed_campaign() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        fs::create_dir(base.join("workspace")).unwrap();
+        let mut work = Workspace::adopt(base.join("workspace"), base.join("target"));
+        let failure = work
+            .arm_testing_journal()
+            .expect_err("a workspace cannot arm a missing verdict journal");
+        assert!(failure.message().contains("testing-verdicts.jsonl"));
+        fs::write(base.join("testing-session.json"), "{}").unwrap();
+        let journal = base.join("testing-verdicts.jsonl");
+        fs::write(&journal, "").unwrap();
+        work.arm_testing_journal().unwrap();
+        assert!(work.testing_journal.is_some());
+        let mut mutant = crate::fixtures::mutant();
+        mutant.outcome = crate::model::Outcome::Survived;
+        let cost = super::super::session::SweepCost::default();
+        work.checkpoint_mutant(&mutant, &super::super::killers::Killers::default(), &cost)
+            .unwrap();
+        let committed = fs::read_to_string(&journal).unwrap();
+        assert_eq!(committed.lines().count(), 1);
+        assert!(committed.ends_with('\n'));
+        work.complete_testing().unwrap();
+        let phase = base.join("testing-phase.json");
+        let status: serde_json::Value = serde_json::from_slice(&fs::read(&phase).unwrap()).unwrap();
+        assert_eq!(status["phase"], "FinishedTesting");
+        work.testing_journal = None;
+        fs::remove_file(&phase).unwrap();
+        work.complete_testing().unwrap();
+        assert!(!phase.exists());
+        assert_eq!(fs::read_to_string(&journal).unwrap(), committed);
+        let committed: serde_json::Value = serde_json::from_str(&committed).unwrap();
+        let payload = format!(
+            "{{\"mutant\":{},\"probe\":null,\"sweep\":{}}}",
+            serde_json::to_string(&mutant).unwrap(),
+            serde_json::to_string(&cost).unwrap()
+        );
+        assert_eq!(
+            committed,
+            serde_json::json!({
+                "mutant": mutant,
+                "probe": null,
+                "sweep": cost,
+                "checksum": blake3::hash(payload.as_bytes()).to_hex().to_string(),
+            })
+        );
     }
 
     #[test]
@@ -3162,6 +4822,235 @@ mod tests {
         assert_eq!(work.manifest_of("inside", &files), None);
     }
 
+    fn source_snapshot_plan(root: &Utf8Path, paths: &[&str]) -> crate::discover::Plan {
+        crate::discover::Plan {
+            root: root.to_owned(),
+            files: paths
+                .iter()
+                .map(|path| TargetFile {
+                    path: (*path).into(),
+                    absolute: root.join(path),
+                    package: "subject".into(),
+                    source: Some(format!("source of {path}")),
+                })
+                .collect(),
+            mutants: Vec::new(),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            skipped: Vec::new(),
+            digests: crate::HashMap::default(),
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        }
+    }
+
+    #[test]
+    fn report_snapshot_failures_identify_the_exact_filesystem_operation() {
+        for (paths, operation) in [
+            (vec!["blocked", "blocked/child.rs"], "could not create report source directory"),
+            (vec!["directory/child.rs", "directory"], "could not retain report source"),
+        ] {
+            let temporary = tempfile::tempdir_in(".").unwrap();
+            let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+            let work = Workspace::adopt(base.join("workspace"), base.join("target"));
+            let failure = work
+                .snapshot_report_sources(&source_snapshot_plan(work.root(), &paths))
+                .expect_err("the earlier retained path collides with the later path");
+            assert!(failure.message().starts_with(operation), "{failure}");
+            let first = work.report_source_root().join(paths[0]);
+            assert_eq!(fs::read_to_string(first).unwrap(), format!("source of {}", paths[0]));
+        }
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+        let mut work = Workspace::adopt(base.join("workspace"), base.join("target"));
+        work.base = base.join("missing-parent");
+        let failure = work
+            .snapshot_report_sources(&source_snapshot_plan(work.root(), &[]))
+            .expect_err("the sidecar's parent does not exist");
+        assert_eq!(
+            failure.message(),
+            format!("could not create report source directory `{}`", work.report_source_root())
+        );
+        work.base = base.join("\0invalid-parent");
+        let failure = work
+            .snapshot_report_sources(&source_snapshot_plan(work.root(), &[]))
+            .expect_err("NUL is invalid in a filesystem path");
+        assert_eq!(
+            failure.message(),
+            format!("could not inspect report source directory `{}`", work.report_source_root())
+        );
+    }
+
+    #[test]
+    fn scratch_collisions_and_outside_source_writes_return_context_without_mutating_files() {
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+        let root = base.join("workspace");
+        let target = base.join("target");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&target).unwrap();
+        let work = Workspace::adopt(root.clone(), target.clone());
+        fs::write(target.join("blocked"), "parent file").unwrap();
+        let failure = work
+            .write_scratch("blocked/child", "new")
+            .expect_err("a regular file cannot become the scratch parent");
+        assert_eq!(failure.message(), format!("could not create `{}`", target.join("blocked")));
+        fs::create_dir(target.join("directory")).unwrap();
+        let failure = work
+            .write_scratch("directory", "new")
+            .expect_err("a scratch write cannot replace a directory");
+        assert_eq!(failure.message(), format!("could not write `{}`", target.join("directory")));
+        let outside = base.join("user.rs");
+        fs::write(&outside, "untouched user source").unwrap();
+        let failure = Workspace::overwrite(&root, &outside, "mutated source").expect_err("the regular file is outside the copied root");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "refusing to write `{outside}`, which is `{}` — outside the scratch tree at `{}`, so the write would land in the real source tree",
+                physical(&outside),
+                physical(&root)
+            )
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched user source");
+        assert_eq!(fs::read_to_string(target.join("blocked")).unwrap(), "parent file");
+        assert!(target.join("directory").is_dir());
+    }
+
+    #[test]
+    fn a_linked_report_sidecar_is_refused_without_clearing_its_target() {
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+        let work = Workspace::adopt(base.join("workspace"), base.join("target"));
+        let outside = base.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), "user bytes").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, work.report_source_root()).unwrap();
+        #[cfg(windows)]
+        {
+            let output = Command::new("cmd.exe")
+                .args(["/c", "mklink", "/J"])
+                .arg(work.report_source_root().as_str().replace('/', "\\"))
+                .arg(outside.as_str().replace('/', "\\"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "junction creation failed: {output:?}");
+        }
+        let failure = work
+            .snapshot_report_sources(&source_snapshot_plan(work.root(), &[]))
+            .expect_err("a sidecar link is not owned report storage");
+        assert_eq!(
+            failure.message(),
+            format!("report source directory `{}` is a link", work.report_source_root())
+        );
+        assert_eq!(fs::read_to_string(outside.join("sentinel")).unwrap(), "user bytes");
+        assert!(fs::symlink_metadata(work.report_source_root()).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_report_snapshot_returns_the_clear_error_without_discarding_the_old_source() {
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+        let work = Workspace::adopt(base.join("workspace"), base.join("target"));
+        fs::create_dir(work.report_source_root()).unwrap();
+        let source = work.report_source_root().join("locked.rs");
+        fs::write(&source, "old source").unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&source).unwrap();
+        let failure = work
+            .snapshot_report_sources(&source_snapshot_plan(work.root(), &[]))
+            .expect_err("the exclusive handle denies clearing the prior sidecar");
+        assert_eq!(
+            failure.message(),
+            format!("could not clear report source directory `{}`", work.report_source_root())
+        );
+        drop(lock);
+        assert_eq!(fs::read_to_string(&source).unwrap(), "old source");
+    }
+
+    #[test]
+    fn teardown_is_idempotent_and_respects_both_preservation_flags_independently() {
+        for settled in [false, true] {
+            for leak in [false, true] {
+                let temporary = tempfile::tempdir_in(".").unwrap();
+                let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+                let root = base.join("workspace");
+                let target = base.join("target");
+                fs::create_dir(&root).unwrap();
+                fs::create_dir(&target).unwrap();
+                fs::write(root.join("source.rs"), "source").unwrap();
+                fs::write(target.join("artifact"), "artifact").unwrap();
+                let mut work = unsettled(&base, &root, &target);
+                work.settled.store(settled, Ordering::Relaxed);
+                work.leak = leak;
+                work.teardown().unwrap();
+                assert!(work.torn_down);
+                assert_eq!(root.exists(), settled || leak);
+                assert_eq!(target.exists(), settled || leak);
+                fs::create_dir_all(&root).unwrap();
+                fs::create_dir_all(&target).unwrap();
+                fs::write(root.join("new-source.rs"), "later source").unwrap();
+                fs::write(target.join("new-artifact"), "later artifact").unwrap();
+                work.settled.store(false, Ordering::Relaxed);
+                work.leak = false;
+                work.teardown().unwrap();
+                drop(work);
+                assert_eq!(fs::read_to_string(root.join("new-source.rs")).unwrap(), "later source");
+                assert_eq!(fs::read_to_string(target.join("new-artifact")).unwrap(), "later artifact");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn denied_writes_preserve_copied_sources_and_scratch_files() {
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+        let root = base.join("workspace");
+        let target = base.join("target");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&target).unwrap();
+        let work = Workspace::adopt(root.clone(), target.clone());
+        for scratch in [false, true] {
+            let path = if scratch { target.join("locked") } else { root.join("locked") };
+            fs::write(&path, "original bytes").unwrap();
+            let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+            let failure = if scratch {
+                work.write_scratch("locked", "replacement")
+                    .expect_err("the exclusive handle denies reopening the scratch file")
+            } else {
+                Workspace::overwrite(&root, &path, "replacement").expect_err("the exclusive handle denies reopening the copied file")
+            };
+            assert_eq!(failure.message(), format!("could not write `{path}`"));
+            drop(lock);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "original bytes");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_tree_removal_still_cleans_the_other_tree_and_is_not_retried_on_drop() {
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+        let root = base.join("workspace");
+        let target = base.join("target");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&target).unwrap();
+        let path = root.join("locked");
+        fs::write(&path, "source").unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let mut work = unsettled(&base, &root, &target);
+        let failure = work.teardown().expect_err("the exclusive handle prevents removing the copied tree");
+        assert!(failure.message().contains(&root.to_string()), "{failure}");
+        assert!(work.torn_down);
+        assert!(!target.exists());
+        drop(lock);
+        drop(work);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "source");
+    }
+
     #[test]
     fn report_sources_use_a_fresh_sidecar_outside_the_copied_workspace() {
         let temporary = tempfile::tempdir().expect("temporary cache");
@@ -3176,12 +5065,20 @@ mod tests {
         let work = unsettled(&base, &root, &target);
         let plan = crate::discover::Plan {
             root: root.clone(),
-            files: vec![TargetFile {
-                path: Utf8PathBuf::from("src/lib.rs"),
-                absolute: root.join("src/lib.rs"),
-                package: "subject".to_owned(),
-                source: Some("pub fn answer() -> i32 { 42 }\n".to_owned()),
-            }],
+            files: vec![
+                TargetFile {
+                    path: "src/not-retained.rs".into(),
+                    absolute: root.join("src/not-retained.rs"),
+                    package: "subject".into(),
+                    source: None,
+                },
+                TargetFile {
+                    path: Utf8PathBuf::from("src/lib.rs"),
+                    absolute: root.join("src/lib.rs"),
+                    package: "subject".to_owned(),
+                    source: Some("pub fn answer() -> i32 { 42 }\n".to_owned()),
+                },
+            ],
             mutants: Vec::new(),
             suppressed: 0,
             idle: Vec::new(),
@@ -3200,9 +5097,21 @@ mod tests {
             "pub fn answer() -> i32 { 42 }\n"
         );
         assert!(!base.join(".cargo-gamma-report-source/stale").exists());
+        assert!(!base.join(".cargo-gamma-report-source/src/not-retained.rs").exists());
         assert_eq!(
             fs::read_to_string(root.join(".cargo-gamma-report-source/sentinel")).expect("copied collision remains untouched"),
             "workspace"
+        );
+        fs::remove_dir_all(work.report_source_root()).unwrap();
+        fs::write(work.report_source_root(), "do not overwrite this regular file").unwrap();
+        let failure = work.snapshot_report_sources(&plan).unwrap_err();
+        assert_eq!(
+            failure.message(),
+            format!("report source path `{}` is not a directory", work.report_source_root())
+        );
+        assert_eq!(
+            fs::read_to_string(work.report_source_root()).unwrap(),
+            "do not overwrite this regular file"
         );
     }
 
@@ -4242,6 +6151,7 @@ mod tests {
     /// In an ordinary suite run the scenario variable is unset and this returns at once.
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[expect(clippy::too_many_lines, reason = "isolated environment scenarios share one subprocess entry point")]
     fn env_child_helper() {
         let Ok(scenario) = env::var(CHILD_SCENARIO_VAR) else {
             return;
@@ -4251,6 +6161,131 @@ mod tests {
 
         match scenario.as_str() {
             "cargo_binary" => payload.push(("cargo", cargo_binary())),
+            "wrapper_capture" => {
+                let directory = private_system_tempdir("workspace-parent-capture-child-");
+                let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+                crate::testing::write_project(
+                    root.as_std_path(),
+                    &[
+                        ("Cargo.toml", "[package]\nname='capture'\nversion='0.0.0'\n[workspace]\n"),
+                        ("src/lib.rs", ""),
+                    ],
+                );
+                let mut work = Workspace::prepare(
+                    &root,
+                    &root.join("target"),
+                    &Config::default(),
+                    &mut crate::testing::Recorder::default(),
+                )
+                .unwrap();
+                let captures = work.target.join(".cargo-gamma-rustc");
+                assert_eq!(work.rustc_captures.as_ref(), Some(&captures));
+                assert!(work.rustc_captures().is_none());
+                fs::create_dir_all(&captures).unwrap();
+                fs::write(captures.join("stale.json"), "previous generation").unwrap();
+                work.begin_build_sequence();
+                assert_eq!(work.rustc_captures(), Some(captures.clone()));
+                assert!(!captures.join("stale.json").exists());
+                let private_home = root.join("explicit-private-home");
+                work.test_cache_home = Some(private_home.clone());
+                let command = work.cargo();
+                let wrapper = wrapper_path().expect("the copied test executable has cargo-gamma's exact filename");
+                assert_eq!(command_env(&command, "RUSTC_WRAPPER"), wrapper.as_str());
+                assert_eq!(command_env(&command, CAPTURE_DIR_VAR), captures.as_str());
+                assert_eq!(command_env(&command, TEST_CACHE_HOME_VAR), private_home.as_str());
+                let expected_outer = env::var("RUSTC_WRAPPER")
+                    .ok()
+                    .filter(|outer| !wrapper_is_self(OsStr::new(outer), &wrapper, &work.root));
+                assert_eq!(
+                    command_env(&command, ORIGINAL_WRAPPER_VAR),
+                    expected_outer.as_deref().unwrap_or(PAYLOAD_REMOVED)
+                );
+                payload.push(("capture", "retained".to_owned()));
+                work.teardown().unwrap();
+            }
+            "cache_claims" => crate::testing::with_ambient_cache_home(|| {
+                let directory = private_system_tempdir("workspace-parent-claim-child-");
+                let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+                let target = root.join("artifacts");
+                let scratch = gamma_base(&root, None);
+                let campaign = campaign_base(&root, &target, None);
+                let redirected = root.join("redirected");
+                let mut identities = Vec::new();
+                for cache in [None, Some(&scratch), Some(&campaign), Some(&redirected)] {
+                    let locks = claim_cache(&root, &target, cache.map(Utf8PathBuf::as_path)).unwrap();
+                    assert_eq!(locks.redirected.is_some(), cache == Some(&redirected));
+                    assert!(
+                        !identities.contains(&locks.identity),
+                        "every claimed handoff has a distinct identity"
+                    );
+                    identities.push(locks.identity);
+                }
+                for cache in [None, Some(redirected.as_path())] {
+                    let base = campaign_base(&root, &target, cache);
+                    fs::write(base.join(CACHE_OWNER), "a foreign workspace").unwrap();
+                    let failure = claim_cache(&root, &target, cache)
+                        .err()
+                        .expect("a foreign campaign owner must be returned as an error, not unwrapped");
+                    assert!(failure.message().contains("belongs to the workspace"), "{failure}");
+                    fs::write(base.join(CACHE_OWNER), physical(&root).as_str()).unwrap();
+                }
+                payload.push(("claims", identities.len().to_string()));
+            }),
+            "cache_paths" | "campaign_creation_refusal" => crate::testing::with_ambient_cache_home(|| {
+                let directory = private_system_tempdir("workspace-parent-child-cache-");
+                let root = Utf8Path::from_path(directory.path()).unwrap();
+                let target = root.join("artifacts");
+                let scratch = gamma_base(root, None);
+                let campaign = absolute(&default_campaign_base(root, &target));
+                payload.push(("root", root.to_string()));
+                payload.push(("target", target.to_string()));
+                payload.push(("identity", workspace_identity(root)));
+                payload.push(("home", default_cache_home(root).to_string()));
+                payload.push(("scratch", scratch.to_string()));
+                payload.push(("campaign", campaign.to_string()));
+                validate_default_cache_base(root, &scratch).unwrap();
+                validate_default_campaign_base(root, &target, &campaign).unwrap();
+                assert!(validate_default_campaign_base(root, &target, &root.join("foreign")).is_err());
+                if scenario == "campaign_creation_refusal" {
+                    crate::testing::write_project(
+                        root.as_std_path(),
+                        &[
+                            ("Cargo.toml", "[package]\nname='child'\nversion='0.0.0'\n[workspace]\n"),
+                            ("src/lib.rs", ""),
+                        ],
+                    );
+                    fs::write(&target, "not a target directory").unwrap();
+                    let failure = Workspace::prepare(root, &target, &Config::default(), &mut crate::testing::Recorder::default())
+                        .expect_err("the campaign directory cannot be created beneath a file");
+                    payload.push(("error", failure.message().to_owned()));
+                    assert_eq!(failure.message(), format!("could not create the campaign cache at `{campaign}`"));
+                    assert_eq!(fs::read_to_string(&target).unwrap(), "not a target directory");
+                    let failure = claim_default_campaign_cache(root, &target, &campaign).unwrap_err();
+                    assert_eq!(
+                        failure.message(),
+                        format!("could not create cargo-gamma's campaign cache at `{campaign}`")
+                    );
+                }
+            }),
+            "calibrate_exact" => {
+                let cores = NonZeroUsize::new(8).unwrap();
+                let work = unsettled_default();
+                assert!(work.harness_threads().is_none());
+                work.calibrate_harness_with(cores.get(), Ok(cores));
+                assert_eq!(work.harness_threads(), Some("1"));
+                payload.push(("cores", cores.to_string()));
+                payload.push(("threads", option_payload(work.harness_threads())));
+                work.calibrate_harness_with(1, Ok(cores));
+                assert_eq!(work.harness_threads(), Some("1"));
+            }
+            "calibrate_unavailable" => {
+                let directory = private_system_tempdir("workspace-parent-unavailable-cores-");
+                let unavailable = File::open(directory.path().join("absent")).map(|_| NonZeroUsize::MIN);
+                assert!(unavailable.is_err());
+                let work = unsettled_default();
+                work.calibrate_harness_with(1, unavailable);
+                payload.push(("threads", option_payload(work.harness_threads())));
+            }
             "cargo_flags" => {
                 let command = unsettled_default().cargo();
 
@@ -4297,6 +6332,11 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_child(scenario: &str, vars: &[(&str, Option<&str>)]) -> BTreeMap<String, String> {
         let executable = env::current_exe().expect("the test binary knows its own path");
+        run_child_at(&executable, scenario, vars)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_child_at(executable: &Path, scenario: &str, vars: &[(&str, Option<&str>)]) -> BTreeMap<String, String> {
         let mut command = Command::new(executable);
 
         // libtest names a test by its module path with the crate segment stripped, e.g.
@@ -4337,7 +6377,8 @@ mod tests {
     /// output, or `None` if the child never emitted a complete block.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn parse_payload(stdout: &str) -> Option<BTreeMap<String, String>> {
-        let mut lines = stdout.lines().skip_while(|line| *line != PAYLOAD_OPEN);
+        // Single-threaded libtest can print the test name before the opening marker.
+        let mut lines = stdout.lines().skip_while(|line| !line.ends_with(PAYLOAD_OPEN));
 
         // Consume the PAYLOAD_OPEN marker itself; bail if the child never emitted one.
         let _ = lines.next()?;
@@ -4355,6 +6396,35 @@ mod tests {
         }
 
         None
+    }
+
+    #[test]
+    fn child_payload_parser_accepts_standalone_and_libtest_prefixed_markers() {
+        let expected = BTreeMap::from([
+            ("cargo".to_owned(), "distinct-invoking-cargo".to_owned()),
+            ("flags".to_owned(), "--cfg=value".to_owned()),
+            ("empty".to_owned(), String::new()),
+        ]);
+        for stdout in [
+            "\nrunning 1 test\n<<<GAMMA-ENV-PAYLOAD\ncargo=distinct-invoking-cargo\nflags=--cfg=value\nempty=\nGAMMA-ENV-PAYLOAD>>>\nok\n",
+            "\r\nrunning 1 test\r\ntest exec::workspace::tests::env_child_helper ... <<<GAMMA-ENV-PAYLOAD\r\ncargo=distinct-invoking-cargo\r\nflags=--cfg=value\r\nempty=\r\nGAMMA-ENV-PAYLOAD>>>\r\nok\r\n",
+        ] {
+            assert_eq!(parse_payload(stdout), Some(expected.clone()), "{stdout:?}");
+        }
+    }
+
+    #[test]
+    fn child_payload_parser_rejects_missing_or_incomplete_markers() {
+        for stdout in [
+            "",
+            "running 0 tests\n",
+            "cargo=distinct-invoking-cargo\nGAMMA-ENV-PAYLOAD>>>\n",
+            "<<<GAMMA-ENV-PAYLOAD\ncargo=distinct-invoking-cargo\n",
+            "<<<GAMMA-ENV-PAYLOAD-extra\ncargo=distinct-invoking-cargo\nGAMMA-ENV-PAYLOAD>>>\n",
+            "<<<GAMMA-ENV-PAYLOAD\ncargo=distinct-invoking-cargo\nGAMMA-ENV-PAYLOAD>>>-extra\n",
+        ] {
+            assert_eq!(parse_payload(stdout), None, "{stdout:?}");
+        }
     }
 
     /// The value a built `Command` carries for `key`: the string it sets, [`PAYLOAD_REMOVED`] if it
@@ -4420,6 +6490,66 @@ mod tests {
         assert_eq!(fallback["cargo"], "cargo", "an unset CARGO falls back to the bare name");
     }
 
+    #[test]
+    fn isolated_cargo_callers_keep_the_exact_executable_flags_and_settled_harness_width_during_mutation() {
+        let injected = run_child("cargo_binary", &[("CARGO", Some("distinct-invoking-cargo"))]);
+        assert_eq!(injected["cargo"], "distinct-invoking-cargo");
+        let missing = run_child("cargo_binary", &[("CARGO", None)]);
+        assert_eq!(missing["cargo"], "cargo");
+        let flags = run_child(
+            "cargo_flags",
+            &[("CARGO_ENCODED_RUSTFLAGS", Some("--cfg\u{1f}distinct")), ("RUSTFLAGS", None)],
+        );
+        assert_eq!(flags["encoded"], format!("--cfg\u{1f}distinct\u{1f}{CAP_LINTS}"));
+        let calibration = run_child("calibrate_exact", &[(TEST_THREADS_VAR, None)]);
+        assert_eq!(calibration["threads"], "1", "{calibration:?}");
+        let unavailable = run_child("calibrate_unavailable", &[(TEST_THREADS_VAR, None)]);
+        assert_eq!(unavailable["threads"], "1");
+    }
+
+    #[test]
+    fn isolated_default_campaign_paths_keep_target_identity_and_cache_override_boundaries() {
+        let directory = private_system_tempdir("workspace-parent-cache-environment-");
+        let home = directory.path().to_str().unwrap();
+        let no_override = [(TEST_CACHE_HOME_VAR, None), ("XDG_CACHE_HOME", Some(home))];
+        let ordinary = run_child("cache_paths", &no_override);
+        let target = Utf8Path::new(&ordinary["target"]);
+        assert_eq!(
+            Utf8Path::new(&ordinary["campaign"]),
+            target.join("cargo-gamma").join("cache").join(&ordinary["identity"])
+        );
+        assert_eq!(Utf8Path::new(&ordinary["home"]), Utf8Path::new(home).join("cargo-gamma"));
+        assert_eq!(
+            Utf8Path::new(&ordinary["scratch"]),
+            Utf8Path::new(home).join("cargo-gamma").join(&ordinary["identity"])
+        );
+        let overridden = run_child(
+            "cache_paths",
+            &[(TEST_CACHE_HOME_VAR, Some(home)), ("XDG_CACHE_HOME", Some("not-absolute"))],
+        );
+        assert_eq!(overridden["campaign"], overridden["scratch"]);
+        assert_eq!(Utf8Path::new(&overridden["home"]), Utf8Path::new(home).join("cargo-gamma"));
+        let refusal = run_child("campaign_creation_refusal", &no_override);
+        assert_eq!(
+            refusal["error"],
+            format!("could not create the campaign cache at `{}`", refusal["campaign"])
+        );
+        let claims = run_child("cache_claims", &no_override);
+        assert_eq!(claims["claims"], "4");
+    }
+
+    #[test]
+    fn the_real_gamma_executable_derives_captures_and_interposes_each_outer_wrapper_shape() {
+        let directory = private_system_tempdir("workspace-parent-copied-executable-");
+        let executable = directory.path().join(format!("cargo-gamma{}", env::consts::EXE_SUFFIX));
+        fs::copy(env::current_exe().unwrap(), &executable).unwrap();
+        let self_wrapper = executable.to_str().unwrap();
+        for outer in [None, Some("distinct-outer-wrapper"), Some(self_wrapper)] {
+            let child = run_child_at(&executable, "wrapper_capture", &[("RUSTC_WRAPPER", outer)]);
+            assert_eq!(child["capture"], "retained");
+        }
+    }
+
     /// [`unsettled_default`] over a real directory, for the tests that touch the tree.
     ///
     /// Spelled out rather than deriving from [`unsettled_default`] with struct update syntax:
@@ -4452,33 +6582,663 @@ mod tests {
         }
     }
 
+    #[test]
+    fn search_path_preparation_preserves_order_and_deduplicates_both_sources() {
+        let mut work = unsettled_default();
+        let root = work.root.clone();
+        work.runtime = root.join("runtime");
+        work.libraries = vec!["toolchain/deps".into(), "toolchain/deps".into(), "other".into()];
+        let binaries = ["profile/deps/one", "profile/deps/two", "elsewhere/three"].map(crate::testing::test_binary);
+        work.prepend_test_search_paths(&binaries);
+        assert_eq!(
+            work.libraries,
+            ["profile", "profile/deps", "elsewhere", "toolchain", "toolchain/deps", "other"].map(Utf8PathBuf::from)
+        );
+        let once = work.libraries.clone();
+        work.prepend_test_search_paths(&binaries);
+        assert_eq!(work.libraries, once);
+        assert_eq!(work.testing_roots().unwrap(), [root.clone(), root.join("runtime")]);
+        work.runtime = root.clone();
+        assert_eq!(work.testing_roots().unwrap(), [root]);
+        assert!(work.arm_nextest(&[]).unwrap_err().message().contains("was not prepared"));
+    }
+
+    #[test]
+    fn owner_lookup_rejects_nonregular_invalid_and_missing_markers_without_panicking() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let base = root.join("cache");
+        assert_eq!(cache_owner_root(&base), None);
+        fs::create_dir(&base).unwrap();
+        assert_eq!(cache_owner_root(&base), None);
+        let marker = base.join(CACHE_OWNER);
+        fs::create_dir(&marker).unwrap();
+        assert_eq!(cache_owner_root(&base), None);
+        fs::remove_dir(&marker).unwrap();
+        for contents in [b"relative".as_slice(), b"\xff", b""] {
+            fs::write(&marker, contents).unwrap();
+            assert_eq!(cache_owner_root(&base), None);
+        }
+        fs::write(&marker, root.as_str()).unwrap();
+        assert_eq!(cache_owner_root(&base), Some(root));
+        File::create(&marker).unwrap().set_len(MAX_CACHE_OWNER_LEN + 1).unwrap();
+        assert_eq!(cache_owner_root(&base), None);
+        fs::remove_file(&marker).unwrap();
+        fs::remove_dir(&base).unwrap();
+        fs::write(&base, "not a directory").unwrap();
+        assert_eq!(cache_owner_root(&base), None);
+    }
+
+    #[test]
+    fn owner_snapshot_gates_reject_replaced_nondirectories_and_nonregular_markers_before_reading_later_names() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        for replace_base in [false, true] {
+            let base = root.join(if replace_base { "replaced-base" } else { "replaced-marker" });
+            let marker = base.join(CACHE_OWNER);
+            if replace_base {
+                fs::write(&base, "a file at inspection time").unwrap();
+            } else {
+                fs::create_dir_all(&marker).unwrap();
+            }
+            let mut calls = 0;
+            let owner = cache_owner_root_with_metadata(&base, |path| {
+                calls += 1;
+                let metadata = fs::symlink_metadata(path)?;
+                if replace_base && path == base {
+                    fs::remove_file(&base)?;
+                    fs::create_dir(&base)?;
+                    fs::write(&marker, root.as_str())?;
+                } else if !replace_base && path == marker {
+                    fs::remove_dir(&marker)?;
+                    fs::write(&marker, root.as_str())?;
+                }
+                Ok(metadata)
+            });
+            assert_eq!(owner, None, "the inspected identity must be checked before trusting a replacement");
+            assert_eq!(calls, if replace_base { 1 } else { 2 });
+            assert_eq!(fs::read_to_string(&marker).unwrap(), root.as_str());
+        }
+    }
+
+    #[test]
+    fn owner_marker_size_limit_accepts_the_last_two_lengths_and_rejects_the_first_excess_byte() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        let base = root.join("cache");
+        fs::create_dir(&base).unwrap();
+        let marker = base.join(CACHE_OWNER);
+        for length in [MAX_CACHE_OWNER_LEN - 1, MAX_CACHE_OWNER_LEN, MAX_CACHE_OWNER_LEN + 1] {
+            let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
+            let remaining = usize::try_from(length).unwrap() - prefix.len();
+            let recorded = Utf8PathBuf::from(format!("{prefix}{}", "x".repeat(remaining)));
+            assert_eq!(recorded.as_str().len(), usize::try_from(length).unwrap());
+            fs::write(&marker, recorded.as_str()).unwrap();
+            if length <= MAX_CACHE_OWNER_LEN {
+                assert_eq!(cache_owner_root(&base), Some(recorded.clone()));
+                validate_cache_owner(&recorded, &base, CacheKind::Redirected).unwrap();
+            } else {
+                assert_eq!(cache_owner_root(&base), None);
+                let failure = validate_cache_owner(&recorded, &base, CacheKind::Redirected)
+                    .expect_err("the first byte beyond the bounded owner protocol is invalid");
+                assert_eq!(
+                    failure.message(),
+                    format!(
+                        "the cargo-gamma cache owner marker at `{marker}` has an invalid length.\nChoose a different directory for --cache-dir."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owner_validation_rejects_postinspection_growth_and_truncation_and_reports_metadata_transport_failure() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        let base = root.join("cache");
+        fs::create_dir(&base).unwrap();
+        let marker = base.join(CACHE_OWNER);
+        let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
+        let recorded = Utf8PathBuf::from(format!(
+            "{prefix}{}",
+            "x".repeat(usize::try_from(MAX_CACHE_OWNER_LEN).unwrap() - prefix.len())
+        ));
+        for extra in [None, Some(b"x".as_slice()), Some(b"x\xff".as_slice())] {
+            fs::write(&marker, recorded.as_str()).unwrap();
+            let failure = validate_cache_owner_with_metadata(&recorded, &base, CacheKind::Redirected, |opened| {
+                let metadata = opened.metadata()?;
+                let mut writer = File::options().write(true).open(&marker)?;
+                if let Some(extra) = extra {
+                    let _ = std::io::Seek::seek(&mut writer, std::io::SeekFrom::End(0))?;
+                    writer.write_all(extra)?;
+                } else {
+                    writer.set_len(MAX_CACHE_OWNER_LEN - 1)?;
+                }
+                Ok(metadata)
+            })
+            .expect_err("reading through the opened handle must reject a length different from its inspected snapshot");
+            assert_eq!(
+                failure.message(),
+                format!(
+                    "the cargo-gamma cache owner marker at `{marker}` has an invalid length.\nChoose a different directory for --cache-dir."
+                )
+            );
+        }
+        fs::write(&marker, root.as_str()).unwrap();
+        let failure = validate_cache_owner_with_metadata(&root, &base, CacheKind::Default, |opened| {
+            assert_eq!(opened.metadata()?.len(), u64::try_from(root.as_str().len()).unwrap());
+            Err(io::Error::other("metadata transport refused after successful open"))
+        })
+        .expect_err("metadata failure after a successful marker open cannot become a successful claim");
+        assert_eq!(
+            failure.message(),
+            format!("could not inspect the cargo-gamma cache owner marker at `{marker}`")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn opened_owner_directories_fail_the_native_handle_type_check_before_any_read() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        let base = root.join("cache");
+        let marker = base.join(CACHE_OWNER);
+        fs::create_dir_all(&marker).unwrap();
+        let failure = validate_cache_owner(&root, &base, CacheKind::Default)
+            .expect_err("O_NONBLOCK allows a directory handle to open but cannot authorize it as a marker");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "the cargo-gamma cache owner marker at `{marker}` is not a regular file.\nPass --cache-dir to give one of the two workspaces a cache of its own."
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn opening_an_owner_directory_retains_the_native_invalid_input_diagnostic() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let marker = root.join(CACHE_OWNER);
+        fs::create_dir(&marker).unwrap();
+        let failure = open_cache_owner(&marker).expect_err("the pre-open Windows type check must reject directories");
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(failure.to_string(), "cache owner marker is not a regular file");
+        fs::remove_dir(&marker).unwrap();
+        fs::write(&marker, "regular marker").unwrap();
+        let mut contents = String::new();
+        open_cache_owner(&marker).unwrap().read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "regular marker");
+    }
+
+    #[test]
+    fn testing_state_resolution_prefers_explicit_owners_then_searches_past_missing_child_locators() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        crate::testing::with_cache_home_at(root.join("cache-home"), || {
+            let child = root.join("member/src");
+            fs::create_dir_all(&child).unwrap();
+            let explicit = root.join("explicit");
+            let located = root.join("located");
+            for base in [&explicit, &located] {
+                fs::create_dir(base).unwrap();
+                mark_cache_owned_for_test(&root, base);
+            }
+            let locator = gamma_base(&root, None).join(CAMPAIGN_LOCATION);
+            fs::create_dir_all(locator.parent().unwrap()).unwrap();
+            mark_cache_owned_for_test(&root, locator.parent().unwrap());
+            fs::write(&locator, format!("\n{located}\n")).unwrap();
+            assert_eq!(
+                locate_testing_state(&child, Some(&explicit)).unwrap(),
+                (root.clone(), explicit.clone())
+            );
+            assert_eq!(locate_testing_state(&child, None).unwrap(), (root.clone(), located));
+            let (claimed_root, claimed_base, lock) = claim_testing_state(&child, Some(&explicit)).unwrap();
+            assert_eq!((claimed_root, claimed_base), (root.clone(), explicit.clone()));
+            drop(lock);
+            let failure = locate_testing_state(&child, Some(&root.join("missing")))
+                .expect_err("an explicit ownerless cache cannot silently use the locator");
+            assert_eq!(
+                failure.message(),
+                format!(
+                    "cannot resume testing: `{}` has no valid campaign owner; start a new campaign",
+                    root.join("missing")
+                )
+            );
+            let outside = root.parent().unwrap();
+            let failure = locate_testing_state(outside, Some(&explicit)).expect_err("a valid owner cannot authorize its parent directory");
+            assert!(
+                failure
+                    .message()
+                    .contains(&format!("belongs to `{root}`, not the selected directory")),
+                "{failure}"
+            );
+        });
+    }
+
+    #[derive(Default)]
+    struct PreparationEvents {
+        calls: Vec<String>,
+        refuse_log: bool,
+    }
+
+    impl Events for PreparationEvents {
+        fn phase(&mut self, verb: &str, detail: &str) {
+            self.calls.push(format!("phase:{verb}:{detail}"));
+        }
+
+        fn mutant(&mut self, _mutant: &crate::model::Mutant) {}
+
+        fn begin(&mut self, active: &str, completed: &str, detail: &str) {
+            self.calls.push(format!("begin:{active}:{completed}:{detail}"));
+        }
+
+        fn end(&mut self, detail: &str) {
+            self.calls.push(format!("end:{detail}"));
+        }
+
+        fn testing_log(&mut self, base: &Utf8Path) -> Result<()> {
+            self.calls.push(format!("log:{base}"));
+            if self.refuse_log {
+                Err(error!("testing log was refused"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_reports_exact_phase_boundaries_and_starts_with_unarmed_state_for_both_leak_policies() {
+        for leak in [false, true] {
+            let directory = crate::testing::workdir("exec-preparation-state-");
+            let source = Utf8Path::from_path(directory.path()).unwrap();
+            crate::testing::write_project(
+                source.as_std_path(),
+                &[
+                    ("Cargo.toml", "[package]\nname='prepared'\nversion='0.0.0'\n[workspace]\n"),
+                    ("src/lib.rs", "pub fn subject() {}\n"),
+                ],
+            );
+            let config = Config {
+                leak_dirs: leak,
+                cargo: CargoOptions {
+                    features: vec!["--features=nondefault".into()],
+                    profile: Some("release".into()),
+                    test_args: vec!["--exact".into(), "selected".into()],
+                    ..CargoOptions::default()
+                },
+                ..Config::default()
+            };
+            let mut events = PreparationEvents::default();
+            let mut work = Workspace::prepare(source, &source.join("target"), &config, &mut events).unwrap();
+            assert_eq!(
+                events.calls,
+                [
+                    "begin:Copying:Copied:the workspace".to_owned(),
+                    format!("log:{}", work.base),
+                    "end:".to_owned()
+                ]
+            );
+            assert_eq!(work.cargo.features, config.cargo.features);
+            assert_eq!(work.cargo.profile, config.cargo.profile);
+            assert_eq!(work.cargo.test_args, config.cargo.test_args);
+            assert_eq!(work.leak, leak);
+            assert!(!work.settled.load(Ordering::Relaxed));
+            assert!(!work.rustc_captures_ready.load(Ordering::Relaxed));
+            assert!(!work.torn_down);
+            assert!(work.nextest.is_none());
+            assert!(work.test_environment.is_none());
+            assert!(work.testing_journal.is_none());
+            assert!(work.launch.get().is_none());
+            assert!(work.harness_threads.get().is_none());
+            assert_eq!(fs::read_to_string(work.root.join("src/lib.rs")).unwrap(), "pub fn subject() {}\n");
+            let prepared_root = work.root.clone();
+            work.teardown().unwrap();
+            assert_eq!(prepared_root.exists(), leak);
+        }
+    }
+
+    #[test]
+    fn preparation_refuses_invalid_options_and_log_publication_before_copying_source_files() {
+        let directory = crate::testing::workdir("exec-preparation-refusal-");
+        let source = Utf8Path::from_path(directory.path()).unwrap();
+        let mut config = Config::default();
+        config.cargo.extra.push("--config=build.target='unmodeled'".into());
+        let mut events = PreparationEvents::default();
+        let failure = Workspace::prepare(source, &source.join("target"), &config, &mut events)
+            .expect_err("unsupported Cargo configuration is refused before any preparation");
+        assert!(failure.message().contains("is not supported"), "{failure}");
+        assert!(events.calls.is_empty());
+        config.cargo.extra.clear();
+        events.refuse_log = true;
+        let failure = Workspace::prepare(source, &source.join("target"), &config, &mut events)
+            .expect_err("log publication failure must stop preparation without copying inputs");
+        assert_eq!(failure.message(), "testing log was refused");
+        assert_eq!(events.calls.len(), 2);
+        assert_eq!(events.calls[0], "begin:Copying:Copied:the workspace");
+        assert!(!scratch_tree(source, None).exists());
+    }
+
+    #[test]
+    fn preparation_propagates_scratch_copy_runtime_and_manifest_failures_at_their_native_boundaries() {
+        for boundary in ["scratch", "copy", "runtime", "manifest"] {
+            let directory = crate::testing::workdir("exec-preparation-errors-");
+            let source = Utf8Path::from_path(directory.path()).unwrap();
+            crate::testing::write_project(
+                source.as_std_path(),
+                &[
+                    ("Cargo.toml", "[package]\nname='prepared'\nversion='0.0.0'\n[workspace]\n"),
+                    ("src/lib.rs", "pub fn subject() {}\n"),
+                ],
+            );
+            let scratch = gamma_base(source, None);
+            let mut locks = None;
+            let expected = match boundary {
+                "scratch" => {
+                    fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+                    fs::write(&scratch, "not a directory").unwrap();
+                    format!("could not create the scratch directory at `{scratch}`")
+                }
+                "copy" => {
+                    fs::write(source.join(".ignore"), "ignored by searches only\n").unwrap();
+                    #[cfg(windows)]
+                    let name = { OsString::from_wide(&[0xd800]) };
+                    #[cfg(unix)]
+                    let name = { OsString::from_vec(vec![0xff]) };
+                    fs::write(source.as_std_path().join(name), "invalid source name").unwrap();
+                    "is not valid UTF-8".to_owned()
+                }
+                "runtime" => {
+                    locks = Some(claim_cache(source, &source.join("target"), None).unwrap());
+                    fs::write(scratch.join("rt"), "not a runtime directory").unwrap();
+                    format!("could not create `{}`", scratch.join("rt").join("src"))
+                }
+                "manifest" => {
+                    fs::write(source.join("Cargo.toml"), "[package\n").unwrap();
+                    "could not parse".to_owned()
+                }
+                _ => unreachable!(),
+            };
+            let mut events = PreparationEvents::default();
+            let failure = Workspace::prepare_with_locks(source, &source.join("target"), &Config::default(), &mut events, locks)
+                .expect_err("each native boundary must retain its recoverable preparation failure");
+            assert!(failure.message().contains(&expected), "{boundary}: {failure}");
+            assert!(events.calls.iter().all(|call| !call.starts_with("end:")));
+        }
+    }
+
+    #[test]
+    fn testing_locators_reject_relative_foreign_and_unreadable_state_instead_of_searching_past_it() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        crate::testing::with_cache_home_at(root.join("cache-home"), || {
+            let base = root.join("state");
+            fs::create_dir(&base).unwrap();
+            mark_cache_owned_for_test(&root, &base);
+            let locator = gamma_base(&root, None).join(CAMPAIGN_LOCATION);
+            fs::create_dir_all(locator.parent().unwrap()).unwrap();
+            let relative = base.strip_prefix(physical(Utf8Path::new("."))).unwrap();
+            assert!(!relative.is_absolute());
+            assert_eq!(cache_owner_root(relative), Some(root.clone()));
+            fs::write(&locator, relative.as_str()).unwrap();
+            let failure = locate_testing_state(&root, None).expect_err("even a valid owner does not authorize a relative locator");
+            assert_eq!(
+                failure.message(),
+                format!("testing campaign location `{locator}` has an invalid owner; start a new campaign")
+            );
+            let foreign = root.join("foreign");
+            fs::create_dir(&foreign).unwrap();
+            mark_cache_owned_for_test(&foreign, &base);
+            fs::write(&locator, base.as_str()).unwrap();
+            let failure = locate_testing_state(&root, None).expect_err("an absolute locator must retain this workspace's ownership");
+            assert_eq!(
+                failure.message(),
+                format!("testing campaign location `{locator}` has an invalid owner; start a new campaign")
+            );
+            fs::remove_file(&locator).unwrap();
+            fs::create_dir(&locator).unwrap();
+            let failure = locate_testing_state(&root, None).expect_err("a directory in place of the locator is not NotFound");
+            assert_eq!(failure.message(), format!("could not read testing campaign location `{locator}`"));
+        });
+    }
+
+    #[test]
+    fn claiming_testing_state_rechecks_ownership_after_locking_and_releases_failed_claims() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        crate::testing::with_cache_home_at(root.join("cache-home"), || {
+            let mut resolutions = 0;
+            let failure = claim_testing_state_with(&root, None, |_, _| {
+                resolutions += 1;
+                let owner = if resolutions == 1 { root.clone() } else { root.join("changed") };
+                Ok((owner, root.join("state")))
+            })
+            .expect_err("a changed root cannot be authorized by a lock on the first root");
+            assert_eq!(resolutions, 2);
+            assert_eq!(
+                failure.message(),
+                "the testing campaign changed while acquiring its lock; retry `--resume-testing`"
+            );
+            let lock = claim_workspace(&root).expect("the rejected recheck must release its workspace lock");
+            drop(lock);
+            let failure = claim_testing_state_with(&root, None, |_, _| Err(error!("initial resolution failed")))
+                .expect_err("initial location errors are not panics");
+            assert_eq!(failure.message(), "initial resolution failed");
+            let mut resolutions = 0;
+            let failure = claim_testing_state_with(&root, None, |_, _| {
+                resolutions += 1;
+                if resolutions == 1 {
+                    Ok((root.clone(), root.join("state")))
+                } else {
+                    Err(error!("locked resolution failed"))
+                }
+            })
+            .expect_err("the post-lock location error must be returned");
+            assert_eq!(failure.message(), "locked resolution failed");
+            assert_eq!(resolutions, 2);
+        });
+    }
+
+    #[test]
+    fn owned_cache_cleanup_preserves_only_the_requested_lock_and_owner() {
+        for preserve_lock in [false, true] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+            let base = root.join("cache");
+            fs::create_dir(&base).unwrap();
+            mark_cache_owned_for_test(&root, &base);
+            fs::write(base.join("lock"), "lock bytes").unwrap();
+            fs::create_dir_all(base.join("data/deep")).unwrap();
+            fs::write(base.join("data/deep/file"), "stale").unwrap();
+            fs::write(base.join("artifact"), "stale").unwrap();
+            assert!(clean_owned_cache(&root, &base, preserve_lock).unwrap());
+            assert_eq!(fs::read_to_string(base.join(CACHE_OWNER)).unwrap(), root.as_str());
+            assert_eq!(base.join("lock").exists(), preserve_lock);
+            assert!(!base.join("artifact").exists());
+            assert!(!base.join("data").exists());
+            assert!(!clean_owned_cache(&root, &base, preserve_lock).unwrap());
+            if preserve_lock {
+                assert_eq!(fs::read(base.join("lock")).unwrap(), b"lock bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn cache_cleanup_handles_each_independent_tree_and_preserves_only_the_workspace_lock() {
+        for (has_scratch, has_campaign) in [(false, false), (true, false), (false, true), (true, true)] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+            let scratch = root.join("scratch");
+            let campaign = root.join("campaign");
+            for (present, base) in [(has_scratch, &scratch), (has_campaign, &campaign)] {
+                if present {
+                    fs::create_dir(base).unwrap();
+                    mark_cache_owned_for_test(&root, base);
+                    fs::write(base.join("data"), "stale").unwrap();
+                    fs::write(base.join("lock"), "lock").unwrap();
+                }
+            }
+            let mut claims = 0;
+            let removed = clean_cache_paths(&root, &scratch, &campaign, || {
+                claims += 1;
+                File::create(root.join("held-workspace-lock")).map_err(crate::error::Error::from)
+            })
+            .unwrap();
+            assert_eq!(removed, has_scratch || has_campaign);
+            assert_eq!(claims, usize::from(has_scratch || has_campaign));
+            assert_eq!(scratch.exists(), has_scratch);
+            assert_eq!(campaign.exists(), has_campaign);
+            if has_scratch {
+                assert_eq!(fs::read(scratch.join("lock")).unwrap(), b"lock");
+                assert!(!scratch.join("data").exists());
+                assert_eq!(cache_owner_root(&scratch), Some(root.clone()));
+            }
+            if has_campaign {
+                assert!(!campaign.join("lock").exists());
+                assert!(!campaign.join("data").exists());
+                assert_eq!(cache_owner_root(&campaign), Some(root.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn cache_cleanup_does_not_clean_an_alias_twice_or_hide_either_tree_ownership_error() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = physical(Utf8Path::from_path(directory.path()).unwrap());
+        let scratch = root.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        mark_cache_owned_for_test(&root, &scratch);
+        fs::write(scratch.join("lock"), "keep").unwrap();
+        fs::write(scratch.join("data"), "remove").unwrap();
+        let claim = || File::create(root.join("held-workspace-lock")).map_err(crate::error::Error::from);
+        assert!(clean_cache_paths(&root, &scratch, &scratch.join("."), claim).unwrap());
+        assert_eq!(fs::read(scratch.join("lock")).unwrap(), b"keep");
+        let campaign = root.join("campaign");
+        fs::create_dir(&campaign).unwrap();
+        fs::write(campaign.join("unowned"), "must remain").unwrap();
+        let failure =
+            clean_cache_paths(&root, &scratch, &campaign, claim).expect_err("campaign cleanup must not silently adopt foreign data");
+        assert!(failure.message().contains("not marked as cargo-gamma state"), "{failure}");
+        assert_eq!(fs::read(campaign.join("unowned")).unwrap(), b"must remain");
+        fs::remove_file(scratch.join(CACHE_OWNER)).unwrap();
+        fs::write(scratch.join("unowned"), "must remain").unwrap();
+        let failure = clean_cache_paths(&root, &scratch, &root.join("missing"), claim)
+            .expect_err("scratch ownership failure must propagate before cleanup");
+        assert!(failure.message().contains("not marked as cargo-gamma state"), "{failure}");
+        assert_eq!(fs::read(scratch.join("lock")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn wrapper_identity_requires_a_matching_name_or_the_same_existing_file() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let wrapper = root.join("wrapper.exe");
+        fs::write(&wrapper, "wrapper").unwrap();
+        assert!(wrapper_is_self(OsStr::new("wrapper.exe"), &wrapper, &root));
+        assert!(wrapper_is_self(wrapper.as_os_str(), &wrapper, &root));
+        assert!(wrapper_is_self(OsStr::new("./wrapper.exe"), &wrapper, &root));
+        assert!(!wrapper_is_self(OsStr::new("different.exe"), &wrapper, &root));
+        assert!(!wrapper_is_self(OsStr::new("missing/wrapper.exe"), &wrapper, &root));
+        assert!(executable_names_equal("wrapper", "wrapper"));
+        assert_eq!(executable_names_equal("Wrapper", "wrapper"), cfg!(windows));
+        assert!(!executable_names_equal("different", "wrapper"));
+    }
+
+    #[test]
+    fn extending_flags_pins_empty_and_encoded_separators_without_ambient_environment() {
+        for (inherited, separator, expected) in [
+            ("", " ", " --cap-lints=allow"),
+            ("-Dwarnings", " ", "-Dwarnings --cap-lints=allow"),
+            ("--cfg=with space", "\u{1f}", "--cfg=with space\u{1f}--cap-lints=allow"),
+        ] {
+            let mut command = Command::new("not-executed");
+            extend(&mut command, "FLAGS", inherited.into(), separator);
+            assert_eq!(
+                command.get_envs().find(|(key, _)| *key == "FLAGS").unwrap().1,
+                Some(OsStr::new(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_flag_precedence_and_target_name_filters_use_exact_environment_spellings() {
+        for encoded in [None, Some(""), Some("-D\u{1f}warnings")] {
+            for plain in [None, Some(""), Some("-D warnings")] {
+                let mut environment = std::collections::BTreeMap::<OsString, OsString>::from_iter([
+                    ("CARGO_TARGET_ALPHA_RUSTFLAGS".into(), "--cfg alpha".into()),
+                    ("CARGO_TARGET_BETA_RUSTFLAGS".into(), "".into()),
+                    ("CARGO_TARGET_ALPHA_RUNNER".into(), "runner".into()),
+                    ("NOT_CARGO_TARGET_ALPHA_RUSTFLAGS".into(), "other".into()),
+                    ("_RUSTFLAGS_CARGO_TARGET_".into(), "reverse".into()),
+                    ("CARGO_BUILD_RUSTFLAGS".into(), "-C opt-level=2".into()),
+                ]);
+                if let Some(value) = encoded {
+                    let _ = environment.insert("CARGO_ENCODED_RUSTFLAGS".into(), value.into());
+                }
+                if let Some(value) = plain {
+                    let _ = environment.insert("RUSTFLAGS".into(), value.into());
+                }
+                let mut command = Command::new("unused");
+                cap_ambient_rustflags_from(
+                    &mut command,
+                    |name| environment.get(OsStr::new(name)).cloned(),
+                    || environment.clone(),
+                );
+                let actual = command
+                    .get_envs()
+                    .map(|(key, value)| (key.to_str().unwrap().to_owned(), value.unwrap().to_str().unwrap().to_owned()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let expected = if let Some(value) = encoded {
+                    std::collections::BTreeMap::from([("CARGO_ENCODED_RUSTFLAGS".into(), format!("{value}\u{1f}--cap-lints=allow"))])
+                } else if let Some(value) = plain {
+                    std::collections::BTreeMap::from([("RUSTFLAGS".into(), format!("{value} --cap-lints=allow"))])
+                } else {
+                    std::collections::BTreeMap::from([
+                        ("CARGO_TARGET_ALPHA_RUSTFLAGS".into(), "--cfg alpha --cap-lints=allow".into()),
+                        ("CARGO_TARGET_BETA_RUSTFLAGS".into(), " --cap-lints=allow".into()),
+                        ("CARGO_BUILD_RUSTFLAGS".into(), "-C opt-level=2 --cap-lints=allow".into()),
+                    ])
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn production_campaign_validation_requires_every_component_and_the_resolved_target() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let target = root.join("artifacts");
+        let identity = workspace_identity(&root);
+        let valid = target.join("cargo-gamma/cache").join(&identity);
+        validate_production_campaign_base(&root, &target, &valid).expect("the cache namespace and identity match the resolved target");
+        for invalid in [
+            target.join("cargo-gamma/cache/wrong-identity"),
+            target.join("cargo-gamma/wrong-cache").join(&identity),
+            target.join("wrong-namespace/cache").join(&identity),
+            root.join("other-target/cargo-gamma/cache").join(&identity),
+            Utf8PathBuf::new(),
+            Utf8PathBuf::from(&identity),
+        ] {
+            let error = validate_production_campaign_base(&root, &target, &invalid).unwrap_err();
+            assert!(error.message().starts_with("cargo-gamma refused the malformed campaign cache path"));
+            assert!(!invalid.exists());
+        }
+        let failure = validate_production_campaign_base(&root, &root.join("different-target"), &valid)
+            .expect_err("a campaign base must belong to the resolved target");
+        assert!(failure.message().contains(valid.as_str()));
+    }
+
     /// A workspace over no real directory, for tests that only inspect the `Command` it builds.
     ///
     /// Leaked rather than torn down: nothing was ever created, so nothing should be removed.
     fn unsettled_default() -> Workspace {
-        Workspace {
-            base: Utf8PathBuf::from("/tmp"),
-            root: Utf8PathBuf::from("/tmp/gamma-root"),
-            runtime: Utf8PathBuf::from("/tmp/gamma-rt"),
-            target: Utf8PathBuf::from("/tmp/gamma-target"),
-            rustc_captures: None,
-            rustc_captures_ready: AtomicBool::new(false),
-            libraries: Vec::new(),
-            cargo: CargoOptions::default(),
-            nextest: None,
-            test_environment: None,
-            cargo_metadata: None,
-            settled: AtomicBool::new(true),
-            leak: true,
-            launch: OnceLock::new(),
-            harness_threads: OnceLock::new(),
-            resources: Resources::default(),
-            testing_journal: None,
-            test_cache_home: None,
-            _workspace_lock: Some(tempfile::tempfile().unwrap()),
-            _cache_lock: None,
-            torn_down: false,
-        }
+        let root = Utf8PathBuf::from(if cfg!(windows) {
+            "C:/workspace-policy"
+        } else {
+            "/workspace-policy"
+        });
+        Workspace::adopt(root.clone(), root.join("target"))
     }
 
     /// `CARGO_ENCODED_RUSTFLAGS` uses a unit separator rather than a space, and cargo prefers it
@@ -5612,7 +8372,6 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("lib.rs").as_std_path()).unwrap(), "pub fn f() {}\n");
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_external_manifest_link_is_refused_before_its_target_is_rewritten() {
         let temporary = tempfile::tempdir().unwrap();
@@ -5623,11 +8382,19 @@ mod tests {
 
         fs::create_dir_all(root.as_std_path()).unwrap();
         fs::write(outside.as_std_path(), original).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(outside.as_std_path(), root.join("Cargo.toml").as_std_path()).unwrap();
+        #[cfg(windows)]
+        if let Err(cause) = std::os::windows::fs::symlink_file(outside.as_std_path(), root.join("Cargo.toml").as_std_path()) {
+            assert_eq!(cause.raw_os_error(), Some(1314), "unexpected symlink creation failure: {cause}");
+            eprintln!("Windows file-symlink fixture needs Developer Mode or symbolic-link privilege: {cause}");
+            return;
+        }
 
         let failure = anchor_manifests(&source, &root, &root.join("rt")).expect_err("an external manifest must not be rewritten");
 
         assert!(failure.to_string().contains("outside"), "{failure}");
+        assert!(failure.message().starts_with("refusing to use a scratch manifest "), "{failure}");
         assert_eq!(fs::read_to_string(outside.as_std_path()).unwrap(), original);
     }
 

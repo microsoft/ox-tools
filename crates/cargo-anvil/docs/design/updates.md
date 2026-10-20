@@ -96,6 +96,44 @@ The region owns the header and its generated assignments. User-only settings
 belong outside the sentinels, directly after the closing marker and before the
 next table. They must not repeat the table header or a managed key.
 
+Markers are complete comment lines in the host's comment syntax. Hash and
+slash-slash hosts use `# >>> anvil-managed: <id>` and
+`// >>> anvil-managed: <id>` (with matching `<<<` closers). XML and MSBuild
+hosts use `<!-- >>> anvil-managed: <id> -->` and
+`<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
+element, attribute, or larger comment is ordinary user content. XML region IDs
+containing `--`, CR, LF, or characters outside the XML 1.0 character set are
+rejected during catalog construction. Marker-
+shaped lines inside DTD/entity values, CDATA, processing instructions, or other
+non-comment XML content are not ownership boundaries. Comment recognition and
+root discovery use XML tokenizer tokens rather than raw substring matching.
+When an XML region is absent, the XML
+tokenizer discovers the document's actual root element and the region is
+inserted before that root's complete-line closing tag. The comment syntax does
+not assume MSBuild, `Project`, or any other XML vocabulary. TOML-specific
+placement rules are applied only to hash comment regions, even when an XML
+region happens to reuse one of their IDs. If the host is missing or malformed,
+the root is self-closing, or its closing tag shares a line with other content,
+introduction refuses rather than scaffolding a document or appending invalid
+content after the root.
+
+Always introducing an absent XML region at the end of the document root is a
+deliberate simplicity trade-off. It covers the current adopter-owned project
+lists without adding XML-path selectors, sibling anchors, or host-specific
+placement rules to `RegionSpec`. The region model can add an explicit placement
+specification later when a catalog needs to target a more precise XML location;
+existing regions will continue to update in place.
+
+Changing the declared syntax of
+an existing `(host, id)` is refused whenever marker lines in the previous
+syntax remain, including an unpaired marker; the manifest does not record the
+old syntax, so treating those markers as absent could duplicate an unbounded
+generated body. This protection also applies when the manifest is missing the
+region: Anvil uses the current rendered-body checksum to identify existing
+marker evidence rather than treating the region as new. Recovery requires
+restoring the previous catalog syntax or deliberately removing the old markers
+and body before retrying.
+
 ### Strict ownership
 
 | State | Action |
@@ -268,11 +306,11 @@ Before ownership checks, remove redundant or unmatched marker **lines only**:
 | Two openers followed by a close | Keep the first opener and close; remove the duplicate opener, preserving intervening content. |
 | Opener followed by two closers | Keep the first complete pair; remove the extra close. Content after the first close stays unmanaged. |
 
-The same rules apply to `#` and `//` sentinels. Removed marker noise does not
-participate in body checksums. Cleanup is persisted even for otherwise in-sync
-regions and even if remaining content conflicts. Cleanup never blesses a changed
-non-marker body. Nested cross-id recovery and general broken-input repair are
-outside this contract.
+The same rules apply to `#`, `//`, and complete-line XML comment sentinels.
+Removed marker noise does not participate in body checksums. Cleanup is
+persisted even for otherwise in-sync regions and even if remaining content
+conflicts. Cleanup never blesses a changed non-marker body. Nested cross-id
+recovery and general broken-input repair are outside this contract.
 Retired markers in hosts receiving new regions are repaired before adoption
 and validation, using the same accumulated text through retirement. If two
 complete pairs share a retired id, only the first body is owned; the second

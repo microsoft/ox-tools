@@ -4,6 +4,7 @@
 //! Resolving paths before operations whose destination has to be known.
 
 use std::fs;
+use std::path::PathBuf;
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 
@@ -19,6 +20,11 @@ const MAX_SYMLINKS: usize = 40;
 /// that destination visible while still leaving a genuinely absent tail in place.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
+    physical_with_links(path, |candidate| fs::read_link(candidate))
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn physical_with_links(path: &Utf8Path, mut read_link: impl FnMut(&Utf8Path) -> std::io::Result<PathBuf>) -> Result<Utf8PathBuf> {
     let mut pending = absolute(path)?;
     let mut followed_links = 0;
 
@@ -71,7 +77,7 @@ pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
                         return Err(error!("could not resolve `{path}`: too many symlinks"));
                     }
 
-                    let target = fs::read_link(candidate.as_std_path())
+                    let target = read_link(&candidate)
                         .map_err(|cause| error!("could not read the link `{candidate}` while resolving `{path}`").caused_by(cause))?;
                     let target = Utf8PathBuf::from_path_buf(target)
                         .map_err(|target| error!("the link `{candidate}` has a non-UTF-8 target `{}`", target.display()))?;
@@ -143,12 +149,16 @@ pub(crate) fn reject_collisions(outputs: &[(&str, &Utf8Path)]) -> Result<()> {
 /// Parent components must survive until [`physical`] has followed preceding symlinks: `link/..`
 /// names the parent of the link's target, not necessarily the parent of the link itself.
 fn absolute(path: &Utf8Path) -> Result<Utf8PathBuf> {
+    absolute_with_current_dir(path, std::env::current_dir)
+}
+
+fn absolute_with_current_dir(path: &Utf8Path, current_dir: impl FnOnce() -> std::io::Result<PathBuf>) -> Result<Utf8PathBuf> {
     // #[gamma::skip(cond.always_false, reason = "joining an absolute path to the current directory returns that absolute path unchanged, so the fallback branch is observationally identical")]
     if path.is_absolute() {
         Ok(path.to_owned())
     } else {
-        let current = std::env::current_dir()
-            .map_err(|cause| error!("could not resolve the current directory while resolving `{path}`").caused_by(cause))?;
+        let current =
+            current_dir().map_err(|cause| error!("could not resolve the current directory while resolving `{path}`").caused_by(cause))?;
         let current = Utf8PathBuf::from_path_buf(current)
             .map_err(|current| error!("the current directory `{}` is not a UTF-8 path", current.display()))?;
 
@@ -185,15 +195,216 @@ fn append<'path>(destination: &mut Utf8PathBuf, components: impl IntoIterator<It
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod current_directory_tests {
+    use super::*;
+
+    #[test]
+    fn current_directory_query_failures_are_returned_and_absolute_paths_do_not_query_it() {
+        let relative = Utf8Path::new("output");
+        let error = absolute_with_current_dir(relative, || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected current directory failure",
+            ))
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not resolve the current directory while resolving `output`"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("injected current directory failure"), "{error}");
+        #[cfg(windows)]
+        let root = Utf8PathBuf::from(r"C:\synthetic\output");
+        #[cfg(not(windows))]
+        let root = Utf8PathBuf::from("/synthetic/output");
+        assert_eq!(
+            absolute_with_current_dir(&root, || panic!("absolute paths must not query the current directory")).unwrap(),
+            root
+        );
+    }
+}
+
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(any(unix, windows))]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
+
     use super::*;
 
     fn root() -> (tempfile::TempDir, Utf8PathBuf) {
         let directory = crate::testing::workdir("paths-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
         (directory, root)
+    }
+
+    #[cfg(windows)]
+    fn directory_link(link: &Utf8Path, target: &Utf8Path) {
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(link.as_str().replace('/', "\\"))
+            .arg(target.as_str().replace('/', "\\"))
+            .output()
+            .expect("Windows test hosts provide cmd.exe for creating the owned junction fixture");
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+
+    #[cfg(unix)]
+    fn directory_link(link: &Utf8Path, target: &Utf8Path) {
+        std::os::unix::fs::symlink(target, link).expect("the owned test directory permits creating its symlink fixture");
+    }
+
+    #[test]
+    fn filesystem_resolution_errors_are_not_treated_as_absent_tails_or_unwrapped_by_containment() {
+        let (_directory, root) = root();
+        let invalid = root.join("a".repeat(300));
+        let error = physical(&invalid).expect_err("a component longer than the filesystem limit cannot be resolved");
+        assert!(error.to_string().contains(&format!("could not resolve `{invalid}`")));
+        for (destination, boundary) in [(&invalid, &root), (&root, &invalid)] {
+            let error = require_within(destination, boundary, "a regression destination").unwrap_err();
+            assert!(error.to_string().contains(&format!("could not resolve `{invalid}`")));
+        }
+    }
+    #[test]
+    #[cfg(unix)]
+    fn exactly_forty_finite_symlinks_are_allowed_but_forty_one_are_not() {
+        let (_directory, root) = root();
+        for index in 0..41 {
+            std::os::unix::fs::symlink(format!("link-{}", index + 1), root.join(format!("link-{index}"))).unwrap();
+        }
+
+        fs::write(root.join("link-41"), "destination").unwrap();
+        assert_eq!(physical(&root.join("link-1")).unwrap(), physical(&root.join("link-41")).unwrap());
+        assert!(
+            physical(&root.join("link-0"))
+                .unwrap_err()
+                .to_string()
+                .contains("too many symlinks")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn exactly_forty_finite_junctions_are_allowed_but_forty_one_are_not() {
+        let (_directory, root) = root();
+        fs::create_dir(root.join("link-41")).unwrap();
+        for index in (0..41).rev() {
+            directory_link(&root.join(format!("link-{index}")), &root.join(format!("link-{}", index + 1)));
+        }
+        assert_eq!(physical(&root.join("link-1")).unwrap(), physical(&root.join("link-41")).unwrap());
+        assert!(
+            physical(&root.join("link-0"))
+                .unwrap_err()
+                .to_string()
+                .contains("too many symlinks")
+        );
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn link_read_failures_after_metadata_are_returned_without_panicking() {
+        let (_directory, root) = root();
+        let target = root.join("destination");
+        fs::create_dir(&target).unwrap();
+        let link = root.join("link");
+        directory_link(&link, &target);
+        let error = physical_with_links(&link, |candidate| {
+            assert!(candidate.ends_with("link"));
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected link read failure",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("could not read the link"), "{error}");
+        assert!(error.to_string().contains("injected link read failure"), "{error}");
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn non_utf8_working_directory_failures_are_isolated_and_recoverable() {
+        #[cfg(windows)]
+        let name = OsString::from_wide(&[0xd800]);
+        #[cfg(unix)]
+        let name = OsString::from_vec(vec![0xff]);
+        let directory = tempfile::tempdir().unwrap();
+        let non_utf8 = directory.path().join(name);
+        fs::create_dir(&non_utf8).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "paths::tests::non_utf8_working_directory_helper", "--ignored"])
+            .env("CARGO_GAMMA_NON_UTF8_CWD_HELPER", "1")
+            .current_dir(&non_utf8)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "helper stdout: {}\nhelper stderr: {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned in an isolated non-UTF-8 working directory"]
+    #[cfg(any(unix, windows))]
+    fn non_utf8_working_directory_helper() {
+        assert!(std::env::var_os("CARGO_GAMMA_NON_UTF8_CWD_HELPER").is_some());
+        let path = Utf8Path::new("output");
+        for error in [
+            absolute(path).unwrap_err(),
+            physical(path).unwrap_err(),
+            lexical(path).unwrap_err(),
+            reject_collisions(&[("report", path)]).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("is not a UTF-8 path"), "{error}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_symlink_targets_are_reported_without_panicking() {
+        let (_directory, root) = root();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(OsString::from_vec(vec![0xff]), &link).unwrap();
+        let error = physical(&link).unwrap_err();
+        let resolved_link = physical(&root).unwrap().join("link");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("the link `{resolved_link}` has a non-UTF-8 target"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn non_utf8_junction_targets_are_reported_without_panicking() {
+        let (_directory, root) = root();
+        let target = PathBuf::from(root.as_str().replace('/', "\\")).join(OsString::from_wide(&[0xd800]));
+        fs::create_dir(&target).unwrap();
+        let link = root.join("link");
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(link.as_str().replace('/', "\\"))
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        let error = physical(&link).unwrap_err();
+        let resolved_link = physical(&root).unwrap().join("link");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("the link `{resolved_link}` has a non-UTF-8 target")),
+            "{error}"
+        );
     }
 
     #[test]

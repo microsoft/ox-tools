@@ -59,6 +59,13 @@ pub enum RefusalRemedy {
     /// The region's marker lines do not form a usable pair, so no boundary can
     /// be proven for whatever sits between them.
     MalformedMarkers,
+    /// Retirement cannot uniquely identify which marker syntax owns the
+    /// recorded body, or malformed XML prevents proving marker absence.
+    RetirementInference,
+    /// The catalog declares a different marker syntax for an existing region.
+    SyntaxChange,
+    /// An XML host has no safe complete-line insertion point inside its root.
+    XmlPlacement,
     /// An existing region owns the selected array or a separator needed for adoption.
     EnclosingOwnership,
     /// A neighboring change would remove delimiters or change a live array's table membership.
@@ -433,7 +440,11 @@ fn splice(scanner: HostScanner, host_text: Option<&str>, request: ManagedRegionR
         base
     };
 
-    let placement = lint_region_placement(region_id, Some(base)).unwrap_or(placement);
+    let placement = if syntax == CommentSyntax::Hash {
+        lint_region_placement(region_id, Some(base)).unwrap_or(placement)
+    } else {
+        placement
+    };
     let region = scanner
         .find(base, region_id, syntax)
         .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?;
@@ -767,6 +778,42 @@ yanked = \"deny\"
         );
     }
 
+    #[test]
+    fn xml_regions_keep_the_existing_drift_and_reconciliation_contract() {
+        let old_body = "  <Project Include=\"old.proj\" />\n";
+        let new_body = "  <Project Include=\"new.proj\" />\n";
+        let host = format!(
+            "<Project>\n  <ItemGroup Label=\"before\" />\n<!-- >>> anvil-managed: r -->\n{old_body}<!-- <<< anvil-managed: r -->\n  <Target Name=\"after\" />\n</Project>\n"
+        );
+        let request = ManagedRegionRequest::at_end("dirs.proj", "r", new_body, CommentSyntax::Xml);
+        let mut manifest = Manifest::default();
+        manifest.set_region("dirs.proj", "r", checksum_str(old_body));
+
+        let item = plan_managed_region(&manifest, Some(&host), request).unwrap();
+        assert_eq!(item.decision, Decision::Write);
+        assert_eq!(
+            item.spliced_host.as_deref(),
+            Some(concat!(
+                "<Project>\n",
+                "  <ItemGroup Label=\"before\" />\n",
+                "<!-- >>> anvil-managed: r -->\n",
+                "  <Project Include=\"new.proj\" />\n",
+                "<!-- <<< anvil-managed: r -->\n",
+                "  <Target Name=\"after\" />\n",
+                "</Project>\n",
+            ))
+        );
+
+        let edited = host.replace("old.proj", "user.proj");
+        let refusal = plan_managed_region(&manifest, Some(&edited), request).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::EditedRegion);
+        assert_eq!(
+            refusal.reason.to_string(),
+            "the managed region contains edits that do not match its last render or the current template. \
+             Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels"
+        );
+    }
+
     /// An update whose body disagrees with a hand-written value still has no
     /// safe output, so it refuses exactly as an introduction does — and the
     /// remedy the diagnostic names is one the user can actually carry out.
@@ -816,6 +863,10 @@ yanked = \"deny\"
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain the exhaustive TOML adoption matrix; focused adoption tests preserve Miri coverage"
+    )]
     #[test]
     fn review_ordinary_toml_adoption_preserves_residue_and_generated_marker_data() {
         for newline in ["\n", "\r\n"] {

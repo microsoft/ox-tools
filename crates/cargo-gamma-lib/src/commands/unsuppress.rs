@@ -44,8 +44,20 @@ pub(super) fn unsuppress_with_cargo<H: Host>(
     styler: Styler,
     cargo: &CargoOptions,
 ) -> crate::Result<i32> {
+    unsuppress_with_discovery(host, args, styler, cargo, |selection, shard| {
+        crate::discover::plan_for_build(&args.select, selection, shard, cargo, &mut |_| {})
+    })
+}
+
+fn unsuppress_with_discovery<H: Host>(
+    host: &mut H,
+    args: &UnsuppressArgs,
+    styler: Styler,
+    cargo: &CargoOptions,
+    discover: impl FnOnce(&crate::ops::Selection, Option<(u32, u32)>) -> crate::Result<Plan>,
+) -> crate::Result<i32> {
     let selection = args.select.selection()?;
-    let before = crate::discover::plan_for_build(&args.select, &selection, args.select.shard()?, cargo, &mut |_| {})?;
+    let before = discover(&selection, args.select.shard()?)?;
 
     if before.idle.is_empty() {
         writeln!(
@@ -315,9 +327,23 @@ fn verify_or_revert_with_cargo<H: Host>(
     styler: Styler,
     cargo: &CargoOptions,
 ) -> crate::Result<i32> {
+    verify_with_discovery(host, args, before, removed, written, styler, |selection, shard| {
+        crate::discover::plan_for_build(&args.select, selection, shard, cargo, &mut |_| {})
+    })
+}
+
+fn verify_with_discovery<H: Host>(
+    host: &mut H,
+    args: &UnsuppressArgs,
+    before: &Plan,
+    removed: usize,
+    written: Written,
+    styler: Styler,
+    discover: impl FnOnce(&crate::ops::Selection, Option<(u32, u32)>) -> crate::Result<Plan>,
+) -> crate::Result<i32> {
     let verified = (|| {
         let selection = args.select.selection()?;
-        let after = crate::discover::plan_for_build(&args.select, &selection, args.select.shard()?, cargo, &mut |_| {})?;
+        let after = discover(&selection, args.select.shard()?)?;
 
         Ok(crate::fix::verify(&before.mutants, &after.mutants, &BTreeSet::new()))
     })();
@@ -376,6 +402,357 @@ mod tests {
             },
             apply,
             allow_dirty: false,
+        }
+    }
+
+    #[cfg(feature = "system-tests")]
+    mod native_acceptance {
+        use super::*;
+
+        fn survivor_idle_plan(root: &Utf8PathBuf, text: &str) -> Plan {
+            let file = Utf8PathBuf::from("source.rs");
+            fs::write(root.join(&file), text).expect("fixture is writable");
+            Plan {
+                digests: std::iter::once((file.clone(), crate::discover::digest(crate::parse::strip_bom(text).as_bytes()))).collect(),
+                idle: vec![Idle {
+                    file,
+                    line: 1,
+                    selectors: "arith".to_owned(),
+                    reason: None,
+                }],
+                ..plan_at(root)
+            }
+        }
+
+        struct DiagnosticFailure(crate::testing::FlakyHost);
+
+        impl Host for DiagnosticFailure {
+            fn output(&mut self) -> impl Write {
+                std::io::sink()
+            }
+            fn error(&mut self) -> impl Write {
+                self.0.error()
+            }
+            fn is_terminal(&self) -> bool {
+                false
+            }
+            fn terminal_width(&self) -> Option<u16> {
+                None
+            }
+        }
+
+        struct Denied;
+
+        impl Write for Denied {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "preview denied"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Host for Denied {
+            fn output(&mut self) -> impl Write {
+                Self
+            }
+            fn error(&mut self) -> impl Write {
+                std::io::sink()
+            }
+            fn is_terminal(&self) -> bool {
+                false
+            }
+            fn terminal_width(&self) -> Option<u16> {
+                None
+            }
+        }
+
+        #[test]
+        fn survivor_unsuppress_entrypoint_propagates_selection_shard_discovery_and_generation_errors() {
+            let directory = crate::testing::workdir("unsuppress-entry-errors-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture roots are UTF-8");
+            let cargo = CargoOptions::default();
+            for invalid_selection in [true, false] {
+                let mut args = args(&root, false);
+                if invalid_selection {
+                    args.select.mutators = Some("not.a.mutator".to_owned());
+                } else {
+                    args.select.shard_count = Some(2);
+                }
+                unsuppress_with_discovery(&mut Sink::default(), &args, Styler::new(false), &cargo, |_, _| {
+                    panic!("invalid selection or shard must fail before discovery")
+                })
+                .expect_err("invalid request is an ordinary error");
+            }
+            let args = args(&root, false);
+            let failure = unsuppress_with_discovery(&mut Sink::default(), &args, Styler::new(false), &cargo, |_, _| {
+                Err(error!("actual discovery failure marker"))
+            })
+            .expect_err("discovery failures must propagate");
+            assert!(failure.to_string().contains("actual discovery failure marker"));
+            for missing_generation in [false, true] {
+                let failure = unsuppress_with_discovery(&mut Sink::default(), &args, Styler::new(false), &cargo, |_, _| {
+                    let mut plan = survivor_idle_plan(&root, "// #[gamma::skip(arith)]\npub struct S;\n");
+                    if missing_generation {
+                        plan.digests.clear();
+                    } else {
+                        fs::remove_file(root.join("source.rs")).expect("fixture exists");
+                    }
+                    Ok(plan)
+                })
+                .expect_err("missing source or generation cannot be removed");
+                assert!(failure.to_string().contains(if missing_generation {
+                    "no recorded generation"
+                } else {
+                    "could not read"
+                }));
+            }
+        }
+
+        #[test]
+        fn survivor_unsuppress_preview_and_empty_entrypoints_retain_style_and_each_writer_failure() {
+            let directory = crate::testing::workdir("unsuppress-preview-matrix-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture roots are UTF-8");
+            let args = args(&root, false);
+            let cargo = CargoOptions::default();
+            let mut host = Sink::default();
+            unsuppress_with_discovery(&mut host, &args, Styler::new(true), &cargo, |_, _| Ok(plan_at(&root)))
+                .expect("an empty scope succeeds");
+            assert!(host.err().contains("\u{1b}["), "{}", host.err());
+            assert!(host.err().contains("nothing to remove"));
+            unsuppress_with_discovery(
+                &mut DiagnosticFailure(crate::testing::FlakyHost::new(0)),
+                &args,
+                Styler::new(false),
+                &cargo,
+                |_, _| Ok(plan_at(&root)),
+            )
+            .expect_err("the empty-scope diagnostic can fail");
+            let source = "// #[gamma::skip(arith)]\npub struct S;\n";
+            let plan = survivor_idle_plan(&root, source);
+            let mut host = Sink::default();
+            unsuppress_with_discovery(&mut host, &args, Styler::new(true), &cargo, |_, _| {
+                Ok(survivor_idle_plan(&root, source))
+            })
+            .expect("a preview does not require Git recovery state");
+            assert!(host.err().contains("\u{1b}["));
+            assert!(host.err().contains("1 skip directive in 1 file would be removed; pass `--apply`"));
+            assert!(host.out().contains("-// #[gamma::skip(arith)]"));
+            assert_eq!(fs::read_to_string(root.join("source.rs")).expect("source remains"), source);
+            unsuppress_with_discovery(
+                &mut DiagnosticFailure(crate::testing::FlakyHost::new(0)),
+                &args,
+                Styler::new(false),
+                &cargo,
+                |_, _| Ok(survivor_idle_plan(&root, source)),
+            )
+            .expect_err("the preview diagnostic can fail");
+            let (removals, _) = sort_out(&plan).expect("the real generation is unchanged");
+            let failure = remove_all(&mut Denied, &args, &plan, &removals).expect_err("preview output PermissionDenied must propagate");
+            assert!(failure.to_string().contains("preview denied"));
+            unsuppress_with_discovery(&mut Denied, &args, Styler::new(false), &cargo, |_, _| {
+                Ok(survivor_idle_plan(&root, source))
+            })
+            .expect_err("the entrypoint must propagate a failed bulk-removal preview");
+        }
+
+        #[test]
+        fn survivor_unsuppress_declined_directives_are_styled_reported_and_never_previewed_as_zero_removals() {
+            let directory = crate::testing::workdir("unsuppress-declined-matrix-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture roots are UTF-8");
+            let source = "#[gamma::skip(arith)] pub struct S;\n";
+            let mut host = Sink::default();
+            unsuppress_with_discovery(
+                &mut host,
+                &args(&root, false),
+                Styler::new(true),
+                &CargoOptions::default(),
+                |_, _| Ok(survivor_idle_plan(&root, source)),
+            )
+            .expect("an inline directive is declined");
+            assert!(host.err().contains("\u{1b}["));
+            assert!(host.err().contains("source.rs:1: skip(arith)"));
+            assert!(!host.err().contains("Preview"));
+            assert!(!host.err().contains("0 skip directives"));
+            let plan = survivor_idle_plan(&root, source);
+            let (_, declined) = sort_out(&plan).expect("the source generation matches");
+            let mut styled = Sink::default();
+            report_declined(&mut styled, &declined, Styler::new(true)).expect("the declined report renders");
+            assert!(styled.err().contains("\u{1b}["));
+            crate::testing::fails_at_every_line(2, |host| report_declined(host, &declined, Styler::new(false)));
+            unsuppress_with_discovery(
+                &mut DiagnosticFailure(crate::testing::FlakyHost::new(0)),
+                &args(&root, false),
+                Styler::new(false),
+                &CargoOptions::default(),
+                |_, _| Ok(survivor_idle_plan(&root, source)),
+            )
+            .expect_err("the outer declined-report call must propagate errors");
+        }
+
+        #[test]
+        fn survivor_unsuppress_validated_removals_reject_a_later_editor_generation_without_claiming_success() {
+            let directory = crate::testing::workdir("unsuppress-editor-generation-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture roots are UTF-8");
+            let original = "// #[gamma::skip(arith)]\npub struct S;\n";
+            let plan = survivor_idle_plan(&root, original);
+            let (removals, _) = sort_out(&plan).expect("the planned generation matches");
+            let edited = "// #[gamma::skip(arith)]\npub struct Changed;\n";
+            fs::write(root.join("source.rs"), edited).expect("the editor saves a new generation");
+            let mut written = Written::new();
+            let failure = remove_directives(&mut Sink::default(), &args(&root, true), &plan, &removals, &mut written)
+                .expect_err("a stale removal is not success");
+            assert!(
+                failure.to_string().contains("changed since the run that planned this edit"),
+                "{failure}"
+            );
+            assert!(written.is_empty());
+            assert_eq!(
+                fs::read_to_string(root.join("source.rs")).expect("editor generation remains"),
+                edited
+            );
+        }
+
+        #[cfg(any(unix, windows))]
+        #[test]
+        fn survivor_unsuppress_native_external_directory_links_are_rejected_at_both_publication_guards() {
+            let directory = crate::testing::workdir("unsuppress-link-workspace-");
+            let external = crate::testing::workdir("unsuppress-link-outside-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+            let outside = Utf8PathBuf::from_path_buf(external.path().to_owned()).expect("fixture paths are UTF-8");
+            let source = "// #[gamma::skip(arith)]\npub struct S;\n";
+            fs::write(outside.join("source.rs"), source).expect("external fixture is writable");
+            let link = root.join("linked");
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd.exe")
+                    .args(["/c", "mklink", "/J"])
+                    .arg(link.as_str().replace('/', "\\"))
+                    .arg(outside.as_str().replace('/', "\\"))
+                    .output()
+                    .expect("Windows supplies cmd.exe");
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&outside, &link).expect("the native directory link can be created");
+            let relative = Utf8PathBuf::from("linked/source.rs");
+            let plan = Plan {
+                idle: vec![Idle {
+                    file: relative.clone(),
+                    line: 1,
+                    selectors: "arith".to_owned(),
+                    reason: None,
+                }],
+                digests: std::iter::once((relative, crate::discover::digest(source.as_bytes()))).collect(),
+                ..plan_at(&root)
+            };
+            let (removals, _) = sort_out(&plan).expect("reading an external source does not authorize editing it");
+            let mut preview = Sink::default();
+            assert!(
+                remove_all(&mut preview, &args(&root, false), &plan, &removals)
+                    .expect("a preview may read an external source without publishing")
+                    .is_empty()
+            );
+            assert!(preview.out().contains("-// #[gamma::skip(arith)]"));
+            let mut written = Written::new();
+            let failure = remove_directives(&mut Sink::default(), &args(&root, true), &plan, &removals, &mut written)
+                .expect_err("physical publication must reject an external referent");
+            assert!(failure.to_string().contains("a source edit"), "{failure}");
+            assert!(failure.to_string().contains("outside"), "{failure}");
+            assert!(written.is_empty());
+            remove_all(&mut Sink::default(), &args(&root, true), &plan, &removals)
+                .expect_err("the bulk-edit guard must return, not panic on, external referents");
+            assert_eq!(
+                fs::read_to_string(outside.join("source.rs")).expect("external bytes remain"),
+                source
+            );
+            #[cfg(windows)]
+            fs::remove_dir(&link).expect("remove only the junction, not its external target");
+            #[cfg(unix)]
+            fs::remove_file(&link).expect("remove only the symbolic link");
+        }
+
+        #[test]
+        fn survivor_unsuppress_verification_keeps_style_and_reverts_each_preverification_failure() {
+            let directory = crate::testing::workdir("unsuppress-verify-provider-");
+            let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture roots are UTF-8");
+            let original = "// #[gamma::skip(arith)]\npub struct S;\n";
+            let edited = "pub struct S;\n";
+            let path = root.join("source.rs");
+            for bad_shard in [false, true] {
+                fs::write(&path, edited).expect("the removal was published");
+                let mut args = args(&root, true);
+                if bad_shard {
+                    args.select.shard_count = Some(2);
+                }
+                let written = vec![crate::commands::suppress::WrittenFile::new(
+                    path.clone(),
+                    original.to_owned(),
+                    edited.to_owned(),
+                )];
+                let failure = verify_with_discovery(
+                    &mut Sink::default(),
+                    &args,
+                    &plan_at(&root),
+                    1,
+                    written,
+                    Styler::new(false),
+                    |_, _| {
+                        assert!(!bad_shard, "an invalid shard must fail before discovery");
+                        Err(error!("verification source read failed"))
+                    },
+                )
+                .expect_err("failed verification must compensate");
+                assert!(failure.to_string().contains("reverted"), "{failure}");
+                assert_eq!(fs::read_to_string(&path).expect("source restored"), original);
+            }
+            fs::write(&path, edited).expect("the removal was published");
+            let mut host = Sink::default();
+            let written = vec![crate::commands::suppress::WrittenFile::new(
+                path,
+                original.to_owned(),
+                edited.to_owned(),
+            )];
+            verify_with_discovery(
+                &mut host,
+                &args(&root, true),
+                &plan_at(&root),
+                1,
+                written,
+                Styler::new(true),
+                |_, _| Ok(plan_at(&root)),
+            )
+            .expect("an unchanged population verifies");
+            assert!(host.err().contains("\u{1b}["));
+            assert!(host.err().contains("1 skip directive from 1 file"), "{}", host.err());
+            verify_with_discovery(
+                &mut DiagnosticFailure(crate::testing::FlakyHost::new(0)),
+                &args(&root, true),
+                &plan_at(&root),
+                0,
+                Written::new(),
+                Styler::new(false),
+                |_, _| Ok(plan_at(&root)),
+            )
+            .expect_err("the successful-verification diagnostic can fail");
+        }
+
+        #[test]
+        fn survivor_actual_unsuppress_entrypoints_forward_color_through_real_discovery() {
+            let (_directory, root) = crate::fixtures::crate_dir("unsuppress-real-style-", "pub struct S;\n");
+            let mut args = args(&root, false);
+            args.select.mutators = Some("literal.int_decrement".to_owned());
+            let cargo = CargoOptions::default();
+            let mut host = Sink::default();
+            unsuppress_with_cargo(&mut host, &args, Styler::new(true), &cargo)
+                .expect("a real discovered empty mutation population succeeds");
+            assert!(host.err().contains("\u{1b}["));
+            assert!(host.err().contains("nothing to remove"));
+            let mut host = Sink::default();
+            verify_or_revert_with_cargo(&mut host, &args, &plan_at(&root), 0, Written::new(), Styler::new(true), &cargo)
+                .expect("actual rediscovery retains the empty mutant population");
+            assert!(host.err().contains("\u{1b}["));
+            assert!(host.err().contains("0 skip directives from 0 files"), "{}", host.err());
         }
     }
 

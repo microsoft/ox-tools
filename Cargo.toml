@@ -82,7 +82,7 @@ regex = { version = "1.13.1", default-features = false }
 regex-syntax = { version = "0.8.11", default-features = false }
 reqwest = { version = "0.13.4", default-features = false }
 rmp-serde = { version = "1.3.1", default-features = false }
-rust_xlsxwriter = { version = "0.99.0", default-features = false }
+rust_xlsxwriter = { version = "0.100.0", default-features = false }
 rustc-hash = { version = "2.1.3", default-features = false }
 rustc_lexer = { version = "0.1.0", default-features = false }
 rustdoc-types-v50 = { package = "rustdoc-types", version = "0.50.0", default-features = false }
@@ -130,6 +130,7 @@ walkdir = { version = "2.5.0", default-features = false }
 windows = { version = "0.62.2", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
+xmlparser = { version = "0.13.6", default-features = false }
 yaml_serde = { version = "0.10.7", default-features = false }
 zstd = { version = "0.14.0", default-features = false }
 

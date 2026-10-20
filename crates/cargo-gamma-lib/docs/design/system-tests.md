@@ -133,3 +133,102 @@ validation. Re-executed checks require exactly one passing child test; a
 successful zero-test selection is a harness failure. Cold build and resource
 exit/overlap assertions are not weakened by retries, skips, relaxed thresholds,
 or success-shaped fallback behavior.
+
+## Native execution and persistence acceptance
+
+The execution unit modules also retain narrow native-adapter acceptance
+checks. Their boundary is distinct from the storage-free command, census,
+hint-selection and verdict-state-machine regressions:
+
+- `exec::census::final_survivor_tests` checks real listing output, invalid
+  UTF-8 rejection, unsuccessful termination and containment refusal. The
+  real-process cases require `system-tests`; decoding/status policy has a
+  separate supplied-byte matrix.
+- `exec::verdict::final_survivor_tests` checks real pipe authority, tails,
+  reader completion and wakeups. The pipe round trip requires
+  `system-tests`. Startup completion and deadline verdict/evidence decisions
+  instead consume scripted lifecycle and expiration observations.
+- `exec::copy` and `exec::sync` check native collision preservation and
+  timestamp updates on owned output files, using fixed representable
+  timestamps rather than the host date.
+- `exec::killers::tests::completed_records_round_trip_without_incomplete_fallback`
+  verifies completed publication, exclusion from incomplete generations and
+  exact/generalized knowledge after loading. A separate supplied-record
+  case checks staging and hint policy without publication or storage.
+- `exec::testing_state` retains a separate directory-read rejection check;
+  bounded JSON size/overflow policy consumes in-memory readers.
+
+These checks require writable owned project-local directories; process cases
+also require the already-built helper/current test executable and native
+process containment support. They need no external service, registry fetch,
+credentials or shared mutable fixture. Temporary trees, cache generations
+and subprocess outputs belong to the individual test and remain alive until
+the synchronous operation and its cleanup finish.
+
+Each scenario has a fixed small input/launch count and targets less than one
+second after provisioning. This is an operational budget, not a correctness
+deadline: the native listing/pipe round trips wait for completion rather
+than interpreting ten- or thirty-second expiration as decoding or completion
+evidence. CI job limits provide the outer safety bound, including mutation
+runs; no in-test correctness watchdog remains active under mutation testing.
+Production launches retain their configured supervision budgets. Native
+acceptance is not a substitute for controlled policy coverage, nor are test
+helper bodies counted as production coverage.
+
+## Native command and storage acceptance
+
+The non-default `system-tests` feature also selects narrow private native
+acceptance cases in the command modules. These complement the existing
+fake-Host CLI/session driver; they do not expand the default public API.
+
+The additional boundary comprises:
+
+- `commands::explain::tests::native_acceptance` and
+  `commands::hints::tests::native_acceptance`: actual configuration,
+  retained-report, campaign and hint generations, including provenance,
+  guarded publication, conflicts and output failures.
+- Feature-selected listing cases: project discovery, skipped-source
+  diagnostics, population publication and discovery-list writer failures.
+  Registry selection and JSON/text writer policy remain in-process.
+- Feature-selected merge cases: native directory collection, report
+  budgets, filename encoding and publication/collision handling.
+  Freshness and gate matrices instead consume in-memory reports, and
+  scripted directory errors inject the directory-kind decision.
+- `commands::run::tests::native_resume_acceptance` and feature-selected
+  artifact/configuration cases: persisted snapshots, journals, phase
+  generations, workspace claims, teardown and published output files.
+  Metadata timestamps, statistics, gates and configuration-value policy
+  retain controlled in-process inputs.
+- The suppression and unsuppression private `native_acceptance` modules:
+  source generations, rollback and compensation under real workspace
+  locks, publication conflicts and external symlink/junction rejection.
+- Feature-selected verdict-log cases: native reopening, metadata errors,
+  tail repair/truncation and read-only-handle failures. Retention byte
+  accounting instead uses the production helper with an in-memory writer.
+- The summary append-error case: a second native handle must reacquire the
+  operating-system lock after writer failure. Exact writer-error and
+  unlock-error precedence are covered separately without storage.
+- The bounded report reader's native-handle case: real opening, directory
+  rejection and write-only-handle errors. Byte limits and UTF-8 decoding
+  have separate byte-slice tests.
+
+These cases require writable owned native storage, file locking and the
+platform's publication/synchronization operations. Discovery cases require
+the provisioned Cargo/rustc environment. External-link cases require Unix
+symlink support or Windows `cmd.exe` junction creation.
+
+Each test owns its workspace, source/report/ledger generations, output
+files and any external-link target directories. RAII retains those trees
+until native handles and synchronous operations finish, then removes them.
+No developer workspace, credentials or shared mutable fixture is used.
+
+Storage/lock/link/journal scenarios target one second after provisioning;
+Cargo discovery scenarios target tens of seconds. Matrices have fixed,
+small case counts. These are operational budgets, not wall-clock
+correctness assertions; CI job limits provide the outer safety bound.
+
+Native generation, collision, rollback, external-byte preservation and
+second-handle assertions remain real observations, not successful stubs.
+The storage-free writer, clock, report-selection, merge-policy and
+retention regressions remain independently selectable without
+`system-tests`.

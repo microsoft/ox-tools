@@ -919,6 +919,133 @@ mod tests {
     use super::*;
 
     #[test]
+    fn qualified_associated_values_do_not_become_bare_numeric_names() {
+        let file = syn::parse_file("fn f<T: Associated>(values: &[u8]) { let _ = <T>::VALUE + 1; let _ = values[<T>::INDEX]; }").unwrap();
+        let found = indexes_in(
+            &file,
+            &crate::ops::registry::Selection::everything(),
+            &crate::cfg::CfgSet::unconditional(),
+        );
+        assert!(!found.numeric_uses.names.contains("VALUE"));
+        assert!(!found.numeric_uses.names.contains("INDEX"));
+        assert!(!found.numeric_uses.unsigned_names.contains("INDEX"));
+    }
+
+    #[test]
+    fn imported_foreign_and_parent_module_names_cannot_prove_a_local_unit_call() {
+        let file = syn::parse_file(
+            "fn drop() {} fn foreign_value() {} fn unit() {} \
+             mod names {use core::mem::drop; unsafe extern \"C\" {static foreign_value:u8;}} \
+             mod nested { fn caller() {} }",
+        )
+        .unwrap();
+        let found = indexes_in(
+            &file,
+            &crate::ops::registry::Selection::everything(),
+            &crate::cfg::CfgSet::unconditional(),
+        );
+        let imports = crate::HashMap::default();
+        for name in ["drop", "foreign_value"] {
+            assert!(
+                !found
+                    .local_calls
+                    .returns_unit(&syn::parse_str(name).unwrap(), &Vec::new(), &imports),
+                "{name}"
+            );
+        }
+        assert!(found.local_calls.returns_unit(&syn::parse_quote!(unit), &Vec::new(), &imports));
+        let syn::Item::Mod(module) = file.items.last().unwrap() else {
+            unreachable!()
+        };
+        let scope = vec![super::module_id(&module.ident)];
+        assert!(!found.local_calls.returns_unit(&syn::parse_quote!(unit), &scope, &imports));
+    }
+
+    #[test]
+    fn canonical_root_imports_preserve_agreement_and_demote_independent_conflicts_and_cycles() {
+        let file = syn::parse_file(
+            "use std::time as clock; use clock::Duration as Span; \
+             use std::time::Instant as Same; use std::time::Instant as Same; \
+             use std::time::Instant as Conflict; use foreign::Instant as Conflict; \
+             use cycle::nested as cycle; fn f() {}",
+        )
+        .unwrap();
+        let cfg = crate::cfg::CfgSet::unconditional();
+        let found = indexes_in(&file, &crate::ops::registry::Selection::everything(), &cfg);
+        assert_eq!(
+            found.root_imports["Span"],
+            Some(vec!["std".into(), "time".into(), "Duration".into()])
+        );
+        assert_eq!(
+            found.root_imports["Same"],
+            Some(vec!["std".into(), "time".into(), "Instant".into()])
+        );
+        assert_eq!(found.root_imports["Conflict"], None);
+        assert_eq!(found.root_imports["cycle"], None);
+        assert_eq!(found.imports["Conflict"], None);
+        assert_eq!(found.imports["cycle"], None);
+    }
+
+    #[test]
+    fn recursive_declaration_visits_supply_evidence_beyond_their_outer_signature() {
+        let file = syn::parse_file(
+            r#"
+            fn unit() {}
+            fn occupied() {}
+            fn external() {}
+            type Width = [u8; alias_left - alias_right];
+            extern "C" {
+                fn imported(external: [u8; foreign_left - foreign_right]);
+                static VALUE: [u8; static_left - static_right];
+            }
+            struct Fields { #[cfg(any())] hidden: u8, visible: u16 }
+            const CLEAN: u8 = #[transform] 1;
+            fn caller() { struct occupied; use dependency::*; unit(); }
+        "#,
+        )
+        .unwrap();
+        let cfg = crate::cfg::CfgSet::parse("");
+        let found = indexes_in(&file, &crate::ops::registry::Selection::everything(), &cfg);
+        for name in [
+            "alias_left",
+            "alias_right",
+            "foreign_left",
+            "foreign_right",
+            "static_left",
+            "static_right",
+        ] {
+            assert!(found.numeric_uses.names.contains(name), "{name}");
+        }
+        assert_eq!(found.fields.get("hidden"), None);
+        assert_eq!(found.fields.get("visible"), Some(&true));
+        let imports = crate::HashMap::default();
+        for name in ["occupied", "external", "unit"] {
+            let expression = syn::parse_str(name).unwrap();
+            let expected = name == "unit";
+            assert_eq!(
+                found.local_calls.returns_unit(&expression, &Vec::new(), &imports),
+                expected,
+                "{name}"
+            );
+        }
+        let caller = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "caller" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let scope = vec![super::block_id(&caller.block)];
+        assert!(found.scope_imports[&scope].contains_key("*"));
+        assert!(
+            !found
+                .local_calls
+                .returns_unit(&syn::parse_quote!(unit), &scope, &found.scope_imports[&scope])
+        );
+    }
+
+    #[test]
     fn local_index_callbacks_obey_independent_evidence_gates() {
         let cfg = CfgSet::unconditional();
         for numeric in [false, true] {
@@ -1378,6 +1505,36 @@ mod tests {
         let mut disabled = walk(false, false, &cfg);
         disabled.returned("f", &parse_quote!(-> usize));
         assert!(disabled.indexes.returns.is_empty());
+    }
+
+    #[test]
+    fn scoped_aliases_preserve_agreement_and_reject_conflicting_targets_and_parameters() {
+        let cfg = CfgSet::unconditional();
+        for (second_generics, second_target) in [
+            (parse_quote!(<T>), parse_quote!(Option<T>)),
+            (parse_quote!(<T>), parse_quote!(Vec<T>)),
+            (parse_quote!(<U>), parse_quote!(Option<T>)),
+        ] {
+            let mut walk = walk(false, true, &cfg);
+            let scope = vec![(7, 3)];
+            walk.scope_path.clone_from(&scope);
+            let generics = parse_quote!(<T>);
+            let target = parse_quote!(Option<T>);
+            walk.alias("Shared", &generics, &target);
+            walk.alias("Shared", &second_generics, &second_target);
+            let agrees = second_generics == generics && second_target == target;
+            let expected = agrees.then(|| Alias {
+                parameters: vec!["T".into()],
+                target: target.clone(),
+            });
+            assert!(walk.indexes.scope_aliases[&scope]["Shared"] == expected);
+            assert!(walk.indexes.aliases["Shared"] == expected);
+            if !agrees {
+                walk.alias("Shared", &generics, &target);
+                assert!(walk.indexes.scope_aliases[&scope]["Shared"].is_none());
+                assert!(walk.indexes.aliases["Shared"].is_none());
+            }
+        }
     }
 
     #[test]

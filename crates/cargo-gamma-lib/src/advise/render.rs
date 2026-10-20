@@ -308,6 +308,33 @@ mod tests {
     use crate::advise::analysis::{analyze, yields};
     use crate::testing::advise_fixture::{mutant, timing};
 
+    #[test]
+    fn survivor_document_and_embedded_layouts_keep_cost_and_glossary_order() {
+        let mutants = [mutant("a.rs", "arith.add_to_sub", Outcome::Survived, 100)];
+        for (layout, prefix) in [(Layout::Document, "## "), (Layout::Embedded, "### ")] {
+            let text = render_markdown(&[], &yields(&mutants), Summary::of(&mutants), &timing(1, 2, 10), layout);
+            if layout == Layout::Document {
+                let costs = ["| Build |", "| Baseline |", "| Testing mutants |"].map(|label| text.find(label).unwrap());
+                assert!(costs.windows(2).all(|pair| pair[0] < pair[1]));
+            } else {
+                assert!(!text.contains("| Cost |"));
+            }
+            assert!(text.contains(&format!("{prefix}{YIELD_HEADING}\n")));
+            assert!(text.contains(&format!("{prefix}{GLOSSARY_HEADING}\n")));
+            let terms = [
+                "Killed",
+                "Survived",
+                "Timed out",
+                "Out of memory",
+                "Uncovered",
+                "Unviable",
+                "Baseline",
+            ]
+            .map(|term| text.find(&format!("- **{term}**")).unwrap());
+            assert!(terms.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
     /// The verdict rows of the run table, as `(label, count, share)`.
     ///
     /// Taken from between the table's separator and the score line, so that neither the cost table

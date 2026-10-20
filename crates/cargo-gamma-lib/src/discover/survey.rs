@@ -656,8 +656,7 @@ impl Survey {
         // one it ends on, so editing an interior line of a multi-line site still selects it.
         if let Some(diff) = self.diff.as_ref() {
             mutants.retain(|mutant| {
-                let start = u32::try_from(mutant.line).unwrap_or(u32::MAX);
-                let end = u32::try_from(mutant.end_line).unwrap_or(u32::MAX);
+                let (start, end) = diff_extent(mutant.line, mutant.end_line);
 
                 diff.touches(&mutant.file, start, end)
             });
@@ -1001,6 +1000,26 @@ fn scan(
     cfgs: &Cfgs,
     exclude_trait_impls: &[String],
 ) -> Result<Scan> {
+    scan_with_declarations(
+        files,
+        declaration_files,
+        roots,
+        selection,
+        cfgs,
+        exclude_trait_impls,
+        parse_declarations_parallel,
+    )
+}
+
+fn scan_with_declarations(
+    files: &[&TargetFile],
+    declaration_files: &[(&Utf8Path, &CfgSet, &str)],
+    roots: &[Utf8PathBuf],
+    selection: &Selection,
+    cfgs: &Cfgs,
+    exclude_trait_impls: &[String],
+    declarations: impl FnOnce(&[(&Utf8Path, &CfgSet, &str)]) -> Result<Declarations>,
+) -> Result<Scan> {
     let selected: HashSet<&Utf8Path> = files.iter().map(|file| file.absolute.as_path()).collect();
     let mut extra_decl_files: Vec<(&Utf8Path, &CfgSet, &str)> = declaration_files
         .iter()
@@ -1013,7 +1032,7 @@ fn scan(
         skipped: declaration_skips,
         defaults: extra_defaults,
         incomplete_packages,
-    } = parse_declarations_parallel(&extra_decl_files)?;
+    } = declarations(&extra_decl_files)?;
 
     // #[gamma::skip(all, reason = "the worker count is a positive resource bound; changing it either preserves results while changing scheduling or violates that bound")]
     let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len().max(1));
@@ -1051,9 +1070,7 @@ fn scan(
                 // first is a race. The earliest in file order is reported so the message does not
                 // change between runs.
                 Err((at, error)) => {
-                    if failure.as_ref().is_none_or(|(seen, _)| at < *seen) {
-                        failure = Some((at, error));
-                    }
+                    retain_first_failure(&mut failure, at, error);
                 }
             }
         }
@@ -1131,6 +1148,22 @@ fn scan(
     })
 }
 
+fn retain_first_failure(failure: &mut Option<(usize, Error)>, at: usize, error: Error) {
+    if failure.as_ref().is_none_or(|(seen, _)| at < *seen) {
+        *failure = Some((at, error));
+    }
+}
+
+fn diff_extent(line: usize, end_line: usize) -> (u32, u32) {
+    let start = u32::try_from(line).unwrap_or(u32::MAX);
+    let end = u32::try_from(end_line).unwrap_or(u32::MAX);
+    (start, end)
+}
+
+const fn next_discovery_index(index: u32) -> u32 {
+    index + 1
+}
+
 type DeclarationParse = (usize, Result<DeclarationOutcome>);
 
 /// What parsing one declaration-only file yielded: its declarations, or the reason it was skipped.
@@ -1168,6 +1201,21 @@ struct Declarations {
 ///
 /// Returns the first non-skippable file-read or parse error encountered, in path order.
 fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet, &str)]) -> Result<Declarations> {
+    parse_declarations_with_parallelism(files, thread::available_parallelism)
+}
+
+fn parse_declarations_with_parallelism(
+    files: &[(&Utf8Path, &CfgSet, &str)],
+    parallelism: impl FnOnce() -> std::io::Result<NonZero<usize>>,
+) -> Result<Declarations> {
+    parse_declarations_with_parser(files, parallelism, parse_declarations_of)
+}
+
+fn parse_declarations_with_parser(
+    files: &[(&Utf8Path, &CfgSet, &str)],
+    parallelism: impl FnOnce() -> std::io::Result<NonZero<usize>>,
+    parse: impl Fn(&Utf8Path, &CfgSet) -> Result<DeclarationOutcome> + Sync,
+) -> Result<Declarations> {
     if files.is_empty() {
         return Ok(Declarations {
             declared: Vec::new(),
@@ -1177,13 +1225,13 @@ fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet, &str)]) -> Result<D
         });
     }
 
-    let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len());
+    let workers = parallelism().map_or(1, NonZero::get).min(files.len());
 
     let mut results: Vec<DeclarationParse> = if workers <= 1 {
         let mut results = Vec::with_capacity(files.len());
 
         for (index, &(path, cfg, _package)) in files.iter().enumerate() {
-            results.push((index, parse_declarations_of(path, cfg)));
+            results.push((index, parse(path, cfg)));
         }
 
         results
@@ -1194,6 +1242,7 @@ fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet, &str)]) -> Result<D
             let handles: Vec<_> = (0..workers)
                 .map(|_worker| {
                     let next = &next;
+                    let parse = &parse;
 
                     scope.spawn(move || {
                         let mut mine = Vec::new();
@@ -1206,7 +1255,7 @@ fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet, &str)]) -> Result<D
                                 break;
                             };
 
-                            mine.push((index, parse_declarations_of(path, cfg)));
+                            mine.push((index, parse(path, cfg)));
                         }
 
                         mine
@@ -1659,7 +1708,7 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
                 } else {
                     index_of[neighbor] = Some(next_index);
                     low_link[neighbor] = next_index;
-                    next_index += 1;
+                    next_index = next_discovery_index(next_index);
                     stack.push(neighbor);
                     on_stack[neighbor] = true;
                     call_stack.push(Frame {
@@ -1825,14 +1874,20 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
 /// another would place guards in files the compiler never sees.
 // #[gamma::skip(stmt.delete_call, reason = "Cargo metadata feature forwarding is exercised by integration fixtures; the command depends on an external Cargo process")]
 pub fn load_metadata(dir: &Utf8Path, features: &FeatureArgs) -> Result<Metadata> {
+    load_metadata_using(dir, features, MetadataCommand::exec)
+}
+
+fn load_metadata_using(
+    dir: &Utf8Path,
+    features: &FeatureArgs,
+    read: impl FnOnce(&MetadataCommand) -> std::result::Result<Metadata, cargo_metadata::Error>,
+) -> Result<Metadata> {
     let mut command = MetadataCommand::new();
 
     let _builder = command.current_dir(dir).no_deps();
     apply_metadata_features(&mut command, features);
 
-    command
-        .exec()
-        .map_err(|cause| error!("could not read cargo metadata for `{dir}`").caused_by(cause))
+    read(&command).map_err(|cause| error!("could not read cargo metadata for `{dir}`").caused_by(cause))
 }
 
 /// The local filesystem inputs Cargo's dependency graph exposes.
@@ -2264,6 +2319,10 @@ fn walk_rust_files(directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
 
     use tempfile::TempDir;
 
@@ -2275,6 +2334,495 @@ mod tests {
     /// Injected by name rather than by an armed flag so that nothing has to be disarmed and no
     /// other test running at the same time can trip it.
     const PANIC_PROBE: &str = "gamma_panic_probe.rs";
+
+    #[test]
+    fn survivor_every_item_kind_retains_the_attributes_that_disable_its_configuration() {
+        let cfg = CfgSet::parse("");
+        assert!(cfg.holds_for(&[]));
+        for declaration in [
+            "const C: i32 = 1;",
+            "enum E { A }",
+            "extern crate core;",
+            "fn f() {}",
+            "unsafe extern \"C\" { fn f(); }",
+            "impl S {}",
+            "make!();",
+            "mod m {}",
+            "static S: i32 = 1;",
+            "struct S;",
+            "trait T {}",
+            "trait T = Send;",
+            "type T = i32;",
+            "union U { x: i32 }",
+            "use core::fmt;",
+        ] {
+            let item: syn::Item = syn::parse_str(&format!("#[cfg(any())] {declaration}")).unwrap();
+            let attributes = item_attributes(&item);
+            assert_eq!(attributes.len(), 1, "{declaration}");
+            assert!(!cfg.holds_for(attributes), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn survivor_diff_extents_preserve_the_last_line_and_saturate_both_endpoints_without_allocating_source() {
+        let maximum = usize::try_from(u32::MAX).expect("supported targets have at least 32-bit usize");
+        let file = Utf8Path::new("src/lib.rs");
+        let changed = |line: u32| Diff::parse(&format!("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -0,0 +{line},1 @@\n+changed\n"));
+        let last = changed(u32::MAX);
+        let previous = changed(u32::MAX - 1);
+        for (line, end_line, touches_previous, touches_last) in [
+            (maximum - 1, maximum - 1, true, false),
+            (maximum, maximum, false, true),
+            (maximum - 1, maximum, true, true),
+        ] {
+            let (start, end) = diff_extent(line, end_line);
+            assert_eq!(previous.touches(file, start, end), touches_previous);
+            assert_eq!(last.touches(file, start, end), touches_last);
+        }
+        if let Some(beyond) = maximum.checked_add(1) {
+            let (start, end) = diff_extent(beyond, beyond);
+            assert!(
+                !previous.touches(file, start, end),
+                "a saturated start must not admit the previous changed line"
+            );
+            assert!(
+                last.touches(file, start, end),
+                "a saturated end must still admit the final representable changed line"
+            );
+            let (start, end) = diff_extent(maximum - 1, beyond);
+            assert!(previous.touches(file, start, end));
+            assert!(
+                last.touches(file, start, end),
+                "an overflowing end must not shrink an otherwise valid extent"
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_child_discovery_index_can_reach_the_u32_boundary_without_premature_overflow() {
+        let edges = [vec![1], vec![2], vec![1, 3], vec![]];
+        assert_eq!(strongly_connected_components(&edges), [2, 1, 1, 0]);
+        for (current, expected) in [(u32::MAX - 1, u32::MAX), (u32::MAX - 2, u32::MAX - 1)] {
+            assert_eq!(next_discovery_index(current), expected);
+        }
+    }
+
+    #[test]
+    fn survivor_declaration_batches_retain_every_path_sort_results_and_propagate_read_errors() {
+        let directory = crate::testing::workdir("declaration-survivors-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let a = root.join("a.rs");
+        let z = root.join("z.rs");
+        fs::write(&a, "mod first;").unwrap();
+        fs::write(&z, "mod last;").unwrap();
+        let cfg = CfgSet::default();
+        let empty = parse_declarations_parallel(&[]).unwrap();
+        assert!(empty.declared.is_empty());
+        assert!(empty.defaults.is_empty());
+        for files in [
+            vec![(a.as_path(), &cfg, "a")],
+            vec![(z.as_path(), &cfg, "z"), (a.as_path(), &cfg, "a")],
+        ] {
+            let result = parse_declarations_parallel(&files).unwrap();
+            let expected = if files.len() == 1 {
+                vec![a.as_path()]
+            } else {
+                vec![a.as_path(), z.as_path()]
+            };
+            assert_eq!(result.declared.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(), expected);
+            assert_eq!(result.defaults.len(), files.len());
+            assert!(result.skipped.is_empty());
+        }
+        let missing = root.join("missing.rs");
+        let result = parse_declarations_parallel(&[(a.as_path(), &cfg, "a"), (missing.as_path(), &cfg, "a")]);
+        let Err(failure) = result else {
+            panic!("missing declaration source must fail");
+        };
+        assert!(failure.to_string().contains("missing.rs"));
+        let result = parse_declarations_of(&missing, &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn survivor_multiple_include_patterns_are_alternatives_not_requirements() {
+        let args = SelectArgs {
+            files: vec!["src/one.rs".to_owned(), "src/two.rs".to_owned()],
+            ..SelectArgs::default()
+        };
+        assert!(is_included(Utf8Path::new("src/one.rs"), &args));
+        assert!(is_included(Utf8Path::new("src/two.rs"), &args));
+        assert!(!is_included(Utf8Path::new("src/three.rs"), &args));
+    }
+
+    #[test]
+    fn survivor_declaration_parser_keeps_single_file_or_single_cpu_work_on_the_calling_thread() {
+        let root = Utf8Path::new("synthetic/declarations");
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let cfg = CfgSet::default();
+        let files = [(first.as_path(), &cfg, "first"), (second.as_path(), &cfg, "second")];
+        let caller = thread::current().id();
+        for (count, available) in [(1, 4), (2, 1)] {
+            let observed = std::sync::Mutex::new(Vec::new());
+            let parsed = parse_declarations_with_parser(
+                &files[..count],
+                || Ok(NonZero::new(available).expect("the fixture supplies a positive CPU count")),
+                |path, _configuration| {
+                    observed
+                        .lock()
+                        .expect("no observer can panic while holding this lock")
+                        .push((path.to_owned(), thread::current().id()));
+                    Ok(DeclarationOutcome::Declared(path.to_owned(), Vec::new(), Box::default()))
+                },
+            )
+            .expect("the controlled parser returns declarations under the selected worker budget");
+            assert_eq!(parsed.declared.len(), count);
+            assert_eq!(
+                parsed.declared.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(),
+                files[..count].iter().map(|(path, _, _)| *path).collect::<Vec<_>>()
+            );
+            assert!(parsed.skipped.is_empty());
+            let observed = observed.into_inner().expect("the observer never panics under its lock");
+            assert_eq!(observed.len(), count);
+            assert!(
+                observed.iter().all(|(_, worker)| *worker == caller),
+                "one file or one available CPU must not create unnecessary native worker threads: {observed:?}"
+            );
+            assert_eq!(
+                observed.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(),
+                files[..count].iter().map(|(path, _, _)| *path).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_parallel_declarations_claim_the_first_file_and_retain_real_read_failures() {
+        let directory = crate::testing::workdir("parallel-declarations-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture paths are UTF-8");
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        fs::write(&first, "mod first_child;").expect("fixture is writable");
+        fs::write(&second, "mod second_child;").expect("fixture is writable");
+        let cfg = CfgSet::default();
+        let files = [(first.as_path(), &cfg, "first"), (second.as_path(), &cfg, "second")];
+        for available in [None, Some(1), Some(2), Some(4)] {
+            let parsed = parse_declarations_with_parallelism(&files, || {
+                available
+                    .and_then(NonZero::new)
+                    .ok_or_else(|| std::io::Error::other("parallelism unavailable"))
+            })
+            .expect("both actual source files parse");
+            assert_eq!(parsed.declared.iter().map(|(path, _)| path).collect::<Vec<_>>(), [&first, &second]);
+            assert!(parsed.defaults.contains_key("first"));
+            assert!(parsed.defaults.contains_key("second"));
+        }
+        fs::remove_file(&first).expect("the first source exists");
+        let result = parse_declarations_with_parallelism(&files, || Ok(NonZero::new(2).expect("two is nonzero")));
+        let Err(failure) = result else {
+            panic!("a missing first file must not silently disappear from the parallel scan");
+        };
+        assert!(failure.to_string().contains("first.rs"), "{failure}");
+    }
+
+    #[test]
+    fn survivor_scan_supplies_only_sorted_unselected_declarations_and_propagates_their_read_error() {
+        let directory = crate::testing::workdir("scan-extra-declarations-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture paths are UTF-8");
+        let selected = root.join("selected.rs");
+        let a = root.join("a.rs");
+        let z = root.join("z.rs");
+        fs::write(&selected, "pub fn value() -> i32 { 1 }").expect("fixture is writable");
+        fs::write(&a, "mod a_child;").expect("fixture is writable");
+        fs::write(&z, "mod z_child;").expect("fixture is writable");
+        let cfg = CfgSet::default();
+        let declarations = [(z.as_path(), &cfg, "p"), (selected.as_path(), &cfg, "p"), (a.as_path(), &cfg, "p")];
+        let target = TargetFile {
+            path: "selected.rs".into(),
+            absolute: selected.clone(),
+            package: "p".to_owned(),
+            source: None,
+        };
+        let selection = Selection::parse("literal.int_decrement").expect("a registered mutator");
+        let scanned = scan_with_declarations(&[&target], &declarations, &[], &selection, &Cfgs::unconditional(), &[], |extras| {
+            assert_eq!(
+                extras.iter().map(|(path, _, _)| *path).collect::<Vec<_>>(),
+                [a.as_path(), z.as_path()]
+            );
+            parse_declarations_parallel(extras)
+        })
+        .expect("selected and unselected source files parse");
+        assert!(!scanned.mutants.is_empty());
+        fs::remove_file(&a).expect("the first extra source exists");
+        let result = scan(&[&target], &declarations, &[], &selection, &Cfgs::unconditional(), &[]);
+        let Err(failure) = result else {
+            panic!("an unreadable declaration file must fail the selected-file scan");
+        };
+        assert!(failure.to_string().contains("a.rs"), "{failure}");
+    }
+
+    #[test]
+    fn survivor_worker_error_selection_uses_input_order_even_when_completion_order_is_reversed() {
+        for order in [[2, 0, 1], [0, 2, 1], [1, 2, 0]] {
+            let mut failure = None;
+            for at in order {
+                retain_first_failure(&mut failure, at, error!("scripted parser failure {at}"));
+            }
+            let (at, failure) = failure.expect("three controlled errors were provided");
+            assert_eq!(at, 0);
+            assert_eq!(failure.message(), "scripted parser failure 0");
+        }
+    }
+
+    #[test]
+    fn survivor_trait_exclusions_skip_only_supported_parse_limits_and_ignore_inactive_implementations() {
+        let directory = crate::testing::workdir("trait-exclusion-errors-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture paths are UTF-8");
+        let source = root.join("source.rs");
+        let missing = root.join("missing.rs");
+        let target = |absolute: Utf8PathBuf| TargetFile {
+            path: absolute.file_name().expect("a fixture filename").into(),
+            absolute,
+            package: "p".to_owned(),
+            source: None,
+        };
+        let packages = std::iter::once(("p".to_owned(), Vec::<String>::new())).collect();
+        let cfgs = Cfgs::new(&CfgSet::parse(""), &packages);
+        let excluded = ["Visible".to_owned()];
+        fs::write(&source, "struct S; impl Visible for S {}").expect("fixture is writable");
+        validate_trait_exclusions(&excluded, &[target(source.clone())], &cfgs).expect("a real implementation is recognized");
+        let failure = validate_trait_exclusions(&excluded, &[target(missing.clone())], &cfgs)
+            .expect_err("ordinary read failures must not be treated as a parser limitation");
+        assert!(failure.to_string().contains("missing.rs"), "{failure}");
+        let deep = format!("fn deep() -> i32 {{ {}1{} }}", "(".repeat(512), ")".repeat(512));
+        fs::write(&source, &deep).expect("fixture is writable");
+        let failure = validate_trait_exclusions(&excluded, &[target(source.clone())], &cfgs)
+            .expect_err("a skipped file supplies no trait implementation evidence");
+        assert!(failure.to_string().contains("exclude-trait-impl"), "{failure}");
+        assert!(!failure.to_string().contains("nests deeper"), "{failure}");
+        fs::write(&source, "#[cfg(any())] impl Visible for S {}").expect("fixture is writable");
+        validate_trait_exclusions(&excluded, &[target(source.clone())], &cfgs)
+            .expect_err("an inactive implementation does not validate a requested exclusion");
+        fs::write(&source, "impl Visible for S {}").expect("fixture is writable");
+        validate_trait_exclusions(&excluded, &[target(source), target(missing)], &cfgs)
+            .expect("once all exclusions are proven, unrelated unreadable files are not scanned");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn survivor_native_non_utf8_source_names_are_errors_but_non_source_names_are_ignored() {
+        let directory = crate::testing::workdir("native-source-name-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture roots are UTF-8");
+        fs::write(root.join("valid.rs"), "fn valid() {}").expect("fixture is writable");
+        #[cfg(windows)]
+        let odd = std::ffi::OsString::from_wide(&[0xd800, 46, 114, 115]);
+        #[cfg(unix)]
+        let odd = std::ffi::OsString::from_vec(vec![0xff, b'.', b'r', b's']);
+        let path = directory.path().join(odd);
+        fs::write(&path, "fn unnamed() {}").expect("the native filesystem accepts this filename");
+        let failure = walk_rust_files(root).expect_err("an unnameable Rust source is not silently discarded");
+        assert!(failure.to_string().contains("not UTF-8"), "{failure}");
+        fs::rename(&path, path.with_extension("txt")).expect("the native file can be renamed");
+        assert_eq!(
+            walk_rust_files(root).expect("non-source names do not enter the population"),
+            [root.join("valid.rs")]
+        );
+    }
+
+    fn survivor_nested_workspace() -> (TempDir, Utf8PathBuf) {
+        let directory = crate::testing::workdir("survey-nested-members-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("fixture paths are UTF-8");
+        crate::testing::write_project(
+            root.as_std_path(),
+            &[(
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"outer\", \"outer/inner\", \"sibling\"]\nresolver = \"2\"\n",
+            )],
+        );
+        for (path, name) in [("outer", "outer"), ("outer/inner", "inner"), ("sibling", "sibling")] {
+            crate::testing::write_project(
+                root.join(path).as_std_path(),
+                &[(
+                    "Cargo.toml",
+                    &format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"),
+                )],
+            );
+            crate::testing::write_fixture(
+                root.join(path).as_std_path(),
+                &[(
+                    "src/lib.rs",
+                    &format!("pub fn value() -> i32 {{ 1 }}\n#[test] fn {name}_case() {{}}\n"),
+                )],
+            );
+        }
+        (directory, root)
+    }
+
+    #[test]
+    fn survivor_owning_package_uses_the_deepest_real_manifest_and_ignores_unrelated_members_in_every_order() {
+        let (_directory, root) = survivor_nested_workspace();
+        let mut metadata = load_metadata(&root, &FeatureArgs::default()).expect("the offline workspace is valid");
+        metadata.packages.sort_by_key(|package| package.manifest_path.components().count());
+        for reversed in [false, true] {
+            if reversed {
+                metadata.packages.reverse();
+            }
+            for (path, expected) in [
+                ("", None),
+                ("outside", None),
+                ("outer", Some("outer")),
+                ("outer/src", Some("outer")),
+                ("outer/inner", Some("inner")),
+                ("outer/inner/src", Some("inner")),
+                ("sibling/src", Some("sibling")),
+            ] {
+                assert_eq!(owning_package(&metadata, &root.join(path)).as_deref(), expected, "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_metadata_loading_really_applies_requested_features_to_cargo() {
+        let (_directory, root) = survivor_nested_workspace();
+        load_metadata(&root, &FeatureArgs::default()).expect("ordinary metadata succeeds");
+        let manifest = root.join("outer/Cargo.toml");
+        let original = fs::read_to_string(&manifest).expect("fixture manifest exists");
+        fs::write(&manifest, format!("{original}\n[features]\nobserved = []\n")).expect("a real feature can be declared");
+        load_metadata_using(
+            &root,
+            &FeatureArgs {
+                features: vec!["outer/observed".to_owned()],
+                all_features: true,
+                no_default_features: true,
+            },
+            |metadata| {
+                let command = metadata.cargo_command();
+                let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+                assert!(arguments.iter().any(|argument| argument == "--all-features"), "{arguments:?}");
+                assert!(
+                    arguments.iter().any(|argument| argument == "--no-default-features"),
+                    "{arguments:?}"
+                );
+                assert!(arguments.iter().any(|argument| argument == "outer/observed"), "{arguments:?}");
+                metadata.exec()
+            },
+        )
+        .expect("the observed command executes actual offline metadata for a declared feature");
+    }
+
+    #[test]
+    fn survivor_killer_discovery_retains_real_test_locations_and_marks_walk_failures_incomplete() {
+        let (_directory, root) = survivor_nested_workspace();
+        let mut survey = Survey::new(
+            &SelectArgs {
+                dir: root.clone(),
+                ..SelectArgs::default()
+            },
+            None,
+        )
+        .expect("the fixture can be surveyed");
+        let expected = crate::paths::physical(&root)
+            .expect("actual fixture roots can be normalized")
+            .join("outer/src/lib.rs");
+        let killers = survey.killers();
+        assert!(killers.is_complete());
+        assert_eq!(killers.file_for("outer_case"), Some(expected.as_path()));
+        survey.source_dirs.push(root.join("missing-source-directory"));
+        let killers = survey.killers();
+        assert!(!killers.is_complete());
+        assert_eq!(killers.file_for("outer_case"), Some(expected.as_path()));
+    }
+
+    #[test]
+    fn survivor_sharding_keeps_source_suppressed_and_settled_mutants_without_charging_them_as_live_work() {
+        let (_directory, root) = survivor_nested_workspace();
+        fs::write(
+            root.join("outer/src/lib.rs"),
+            "#[gamma::skip(literal.int_increment, reason = \"source policy\")]\npub fn value() -> i32 { 1 }\n",
+        )
+        .expect("fixture is writable");
+        let mut survey = Survey::new(
+            &SelectArgs {
+                dir: root,
+                ..SelectArgs::default()
+            },
+            None,
+        )
+        .expect("the fixture can be surveyed");
+        let selection = Selection::parse("all").expect("a valid selection");
+        let original = survey.scan(None, &selection, &mut 0).expect("the population scans");
+        assert!(original.suppressed > 0);
+        let settled = original
+            .mutants
+            .iter()
+            .find(|mutant| mutant.outcome == Outcome::Pending)
+            .expect("the fixture has live mutants")
+            .id
+            .clone();
+        survey.settle(std::iter::once((settled.clone(), Outcome::Killed)).collect());
+        let whole = survey.scan(None, &selection, &mut 0).expect("the settled population scans");
+        let count = NonZeroU32::new(2).expect("two is nonzero");
+        let index = 1 - shard_of(&settled, count);
+        survey.shard = Some((count.get(), index));
+        let sharded = survey.scan(None, &selection, &mut 0).expect("the sharded population scans");
+        assert!(
+            sharded
+                .mutants
+                .iter()
+                .any(|mutant| mutant.id == settled && mutant.outcome == Outcome::Killed)
+        );
+        for ignored in whole.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Ignored) {
+            assert!(sharded.mutants.iter().any(|mutant| mutant.id == ignored.id));
+        }
+        let live = |mutants: &[Mutant]| mutants.iter().filter(|mutant| mutant.outcome == Outcome::Pending).count();
+        assert_eq!(sharded.sharded_out, live(&whole.mutants) - live(&sharded.mutants));
+        assert_eq!(sharded.settled_out, 1);
+        assert_eq!(sharded.suppressed, whole.suppressed);
+    }
+
+    #[test]
+    fn survivor_trait_configuration_continues_after_free_functions_and_does_not_replace_source_suppression() {
+        let text = "pub fn free() -> i32 { 7 }\ntrait Excluded { fn chosen() -> i32; }\nstruct S;\n\
+            impl Excluded for S {\n\
+            #[gamma::skip(literal.int_increment, reason = \"source policy\")]\n\
+            fn chosen() -> i32 { 2 }\n}\n";
+        let source = SourceFile::parse("source.rs", text.to_owned()).expect("the fixture is valid Rust syntax");
+        let cfgs = Cfgs::unconditional();
+        let target = TargetFile {
+            path: "source.rs".into(),
+            absolute: "source.rs".into(),
+            package: "p".to_owned(),
+            source: None,
+        };
+        let defaults = collect::Defaults::of_in(source.ast(), cfgs.for_package("p"));
+        let selection = Selection::parse("literal.int_increment,literal.int_decrement").expect("registered mutators");
+        let parsed = mutate(&target, &source, &selection, &cfgs, &defaults, &["Excluded".to_owned()])
+            .expect("configuration and source directives are valid");
+        let in_impl = |mutator: &str| {
+            parsed
+                .mutants
+                .iter()
+                .find(|mutant| mutant.line == 6 && mutant.mutator.as_ref() == mutator)
+                .expect("the implementation has both integer mutants")
+        };
+        let configured = in_impl("literal.int_decrement");
+        assert_eq!(configured.outcome, Outcome::Ignored);
+        assert_eq!(
+            configured.suppression.as_ref().expect("config suppression exists").channel,
+            Channel::Config
+        );
+        let original = in_impl("literal.int_increment");
+        assert_eq!(original.outcome, Outcome::Ignored);
+        let suppression = original.suppression.as_ref().expect("source suppression exists");
+        assert_eq!(suppression.channel, Channel::Attribute);
+        assert_eq!(suppression.reason.as_deref(), Some("source policy"));
+        assert_eq!(parsed.suppressed, 2);
+        assert!(
+            parsed
+                .mutants
+                .iter()
+                .any(|mutant| mutant.line == 1 && mutant.outcome == Outcome::Pending)
+        );
+    }
 
     #[test]
     fn retained_source_restores_only_a_leading_byte_order_mark() {

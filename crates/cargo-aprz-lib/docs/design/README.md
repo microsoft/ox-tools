@@ -4,6 +4,23 @@ This crate implements cargo-aprz's commands, fact collection, metric
 extraction, policy-expression evaluation, and reports. It is an implementation
 detail of the command-line tool, not a stable library API.
 
+## Native provider acceptance
+
+`tests/crates_provider_integration.rs` and `tests/hosting_provider_integration.rs`
+are native acceptance suites, not in-process policy tests. They require Tokio's
+socket reactor and loopback listeners; crates-provider cases additionally need
+writable, memory-mappable storage for downloaded tables. Each case owns its
+Wiremock server and cache directory, uses controlled responses without developer
+credentials, and tears both down on completion. No external service is contacted.
+The target budget is under one second per case after compilation.
+
+The suggestion replacement regression retains a deliberately ordered candidate
+population through the real dump download/table/query boundary. The last-page
+link regression exercises real HTTP header handling and asserts exactly one
+issue request. These native observations remain separate from pure ranking and
+pagination policy checks; moving them into integration targets does not make
+their prerequisites disappear.
+
 ## Progress styling
 
 Progress phase labels use the command's explicit color policy. Colored labels

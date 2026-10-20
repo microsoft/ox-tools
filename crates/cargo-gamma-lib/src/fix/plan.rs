@@ -177,7 +177,11 @@ fn generated_selectors(line: &str) -> Option<Vec<String>> {
 /// directive auditable a year later: "why is this here" is answerable from the comment alone.
 #[must_use]
 pub fn today() -> String {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+    today_at(SystemTime::now())
+}
+
+fn today_at(now: SystemTime) -> String {
+    let seconds = now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
 
     civil_from_days(i64::try_from(seconds / 86_400).unwrap_or(0))
 }
@@ -208,6 +212,35 @@ mod tests {
 
     use super::*;
     use crate::fixtures::mutant_at as mutant;
+
+    #[test]
+    fn survivor_generated_dates_change_at_exact_utc_midnight_and_handle_gregorian_century_exceptions() {
+        assert_eq!(today_at(UNIX_EPOCH - std::time::Duration::from_secs(1)), "1970-01-01");
+        for (seconds, expected) in [
+            (0, "1970-01-01"),
+            (86_399, "1970-01-01"),
+            (86_400, "1970-01-02"),
+            (172_799, "1970-01-02"),
+            (172_800, "1970-01-03"),
+        ] {
+            assert_eq!(today_at(UNIX_EPOCH + std::time::Duration::from_secs(seconds)), expected);
+        }
+        for (days, expected) in [
+            (-133_621, "1604-02-28"),
+            (-133_620, "1604-02-29"),
+            (-98_557, "1700-02-28"),
+            (-98_556, "1700-03-01"),
+            (-25_509, "1900-02-28"),
+            (-25_508, "1900-03-01"),
+            (11_015, "2000-02-28"),
+            (11_016, "2000-02-29"),
+            (11_017, "2000-03-01"),
+            (157_112, "2400-02-28"),
+            (157_113, "2400-02-29"),
+        ] {
+            assert_eq!(civil_from_days(days), expected, "independent Gregorian day offset {days}");
+        }
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "exhaustive 801-year calendar sweep; bounded era-boundary coverage remains enabled")]

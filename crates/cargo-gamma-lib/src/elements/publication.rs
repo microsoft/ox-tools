@@ -211,6 +211,10 @@ fn replace(path: &Utf8Path, destination: &Utf8Path, fill: impl FnOnce(&mut dyn i
 /// publication integration tests rather than deterministic in-process branches.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn publish(path: &Utf8Path, contents: &str) -> Result<bool> {
+    publish_with_cleanup(path, contents, |scratch| fs::remove_file(scratch.as_std_path()))
+}
+
+fn publish_with_cleanup(path: &Utf8Path, contents: &str, remove: impl FnOnce(&Utf8Path) -> io::Result<()>) -> Result<bool> {
     create_parents(path)?;
 
     let scratch = scratch_path(path);
@@ -230,7 +234,7 @@ pub fn publish(path: &Utf8Path, contents: &str) -> Result<bool> {
     // Said out loud rather than swallowed: the file under the final name is correct either way, so
     // this is not a failed publish, but the leftover sits beside it under a hidden name that
     // nothing else will ever mention.
-    if let Err(cause) = fs::remove_file(scratch.as_std_path()) {
+    if let Err(cause) = remove(&scratch) {
         crate::notes::note(format!("`{scratch}` was left behind and could not be removed: {cause}"));
     }
 
@@ -508,6 +512,76 @@ mod tests {
 
     const EDITOR_PATH: &str = "CARGO_GAMMA_PUBLICATION_EDITOR_PATH";
 
+    #[test]
+    fn survivor_publish_returns_parent_collisions_and_non_already_exists_link_errors_without_claiming_success() {
+        let directory = crate::testing::workdir("publish-native-errors-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture roots are UTF-8");
+        let parent = root.join("ordinary-file");
+        fs::write(&parent, "not a directory").expect("collision fixture is writable");
+        let error = publish(&parent.join("report.json"), "{}").expect_err("a file cannot be created beneath a regular file");
+        assert!(error.to_string().contains("could not create"), "{error}");
+        assert_eq!(fs::read_to_string(&parent).expect("collision remains intact"), "not a directory");
+        let scratch = root.join(".safe-stage");
+        next_scratch_path(scratch.clone());
+        let error = publish(&root.join("invalid\0destination"), "{}")
+            .expect_err("a native NUL path is InvalidInput, not an already-existing publication");
+        assert!(error.to_string().contains("could not write"), "{error}");
+        assert!(!scratch.exists(), "the staged bytes must be discarded after linking fails");
+    }
+
+    #[test]
+    fn survivor_publish_keeps_successful_contents_and_reports_a_real_scratch_cleanup_collision() {
+        let directory = crate::testing::workdir("publish-cleanup-note-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture roots are UTF-8");
+        let destination = root.join("report.json");
+        let scratch = root.join(".known-stage");
+        next_scratch_path(scratch.clone());
+        let notes = crate::notes::Run::new();
+        let _scope = crate::notes::enter(Some(&notes));
+        assert!(
+            publish_with_cleanup(&destination, "{\"complete\":true}", |staged| {
+                assert_eq!(staged, scratch);
+                fs::remove_file(staged)?;
+                fs::create_dir(staged)?;
+                fs::remove_file(staged)
+            })
+            .expect("cleanup failure cannot undo an already-published hard link")
+        );
+        assert_eq!(
+            fs::read_to_string(&destination).expect("published destination exists"),
+            "{\"complete\":true}"
+        );
+        let messages = crate::notes::drain();
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].starts_with(&format!("`{scratch}` was left behind and could not be removed: ")),
+            "{messages:?}"
+        );
+        assert!(scratch.is_dir(), "the actual cleanup obstruction remains visible");
+    }
+
+    #[test]
+    fn survivor_staging_copies_native_read_only_permissions_after_writing_all_requested_bytes() {
+        let directory = crate::testing::workdir("stage-native-permissions-");
+        let root = Utf8Path::from_path(directory.path()).expect("fixture roots are UTF-8");
+        let source = root.join("source.rs");
+        let staged = root.join(".stage");
+        fs::write(&source, "old").expect("mode source can be written");
+        let original = fs::metadata(&source).expect("mode source exists").permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&source, read_only).expect("native read-only permissions can be applied");
+        stage(&staged, write_bytes("complete replacement"), Some(&source)).expect("bytes are written before copied permissions");
+        assert_eq!(
+            fs::read_to_string(&staged).expect("staged bytes can be read"),
+            "complete replacement"
+        );
+        let copied = fs::metadata(&staged).expect("staged file exists").permissions().readonly();
+        fs::set_permissions(&source, original.clone()).expect("source permissions can be restored");
+        fs::set_permissions(&staged, original).expect("staging permissions can be restored before cleanup");
+        assert!(copied, "omitting mode forwarding loses the source file's native read-only marking");
+    }
+
     fn edit_in_child(path: &Utf8Path) {
         let status = Command::new(std::env::current_exe().expect("test executable"))
             .args([
@@ -535,6 +609,50 @@ mod tests {
 
         assert!(parent.is_dir(), "the parent directory was not created");
         assert_eq!(fs::read_to_string(path.as_std_path()).expect("read report"), "{}");
+    }
+
+    #[test]
+    fn survivor_invalid_physical_paths_and_non_directory_parents_return_errors_without_publication() {
+        let directory = crate::testing::workdir("publication-error-survivors-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let invalid = root.join("invalid\0name");
+        write(&invalid, "new").expect_err("NUL in a physical path must reject writing");
+        write_streamed(&invalid, |_| Ok(())).expect_err("NUL in a physical path must reject streamed writing");
+        write_if_unchanged_locked(&invalid, None, "new").expect_err("NUL in a physical path must reject conditional writing");
+        remove_if_unchanged(root, &invalid, "old").expect_err("NUL in a physical path must reject conditional removal");
+        let parent = root.join("file-not-directory");
+        fs::write(&parent, "preserved").unwrap();
+        let destination = parent.join("report.json");
+        write(&destination, "new").expect_err("a regular-file parent must reject writing");
+        write_streamed(&destination, |_| Ok(())).expect_err("a regular-file parent must reject streamed writing");
+        publish(&destination, "new").expect_err("a regular-file parent must reject publication");
+        write_if_unchanged_locked(&destination, None, "new").expect_err("a regular-file parent must reject conditional writing");
+        assert_eq!(fs::read_to_string(&parent).unwrap(), "preserved");
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn survivor_conditional_removal_and_replacement_recheck_the_generation_after_the_hook() {
+        let directory = crate::testing::workdir("publication-hook-survivors-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let path = root.join("report.json");
+        fs::write(&path, "old").unwrap();
+        let changed = path.clone();
+        before_next_publication(move |_| fs::write(&changed, "later-generation").unwrap());
+        assert!(matches!(
+            remove_if_unchanged_locked(&path, &path, "old").unwrap(),
+            Publication::Conflict
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "later-generation");
+        fs::write(&path, "old").unwrap();
+        let changed = path.clone();
+        before_next_publication(move |_| fs::write(&changed, "another-generation").unwrap());
+        assert!(matches!(
+            write_if_unchanged_locked(&path, Some("old"), "new").unwrap(),
+            Publication::Conflict
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "another-generation");
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1);
     }
 
     /// The streaming writer publishes exactly the bytes its filler produced, so a report streamed

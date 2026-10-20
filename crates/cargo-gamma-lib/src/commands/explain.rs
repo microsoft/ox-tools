@@ -50,11 +50,21 @@ fn mutant_id_syntax(subject: &str) -> bool {
     super::CanonicalMutantId::parse(subject).is_ok()
 }
 
+fn explain_mutant<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Result<i32> {
+    explain_mutant_with(host, args, |select, selection, cargo| {
+        crate::discover::plan_for_build(select, selection, None, cargo, &mut |_| {})
+    })
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "current discovery and retained-report context are one explanation transaction"
 )]
-fn explain_mutant<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Result<i32> {
+fn explain_mutant_with<H: Host>(
+    host: &mut H,
+    args: &ExplainArgs,
+    discover: impl FnOnce(&super::cli::SelectArgs, &crate::ops::Selection, &crate::exec::CargoOptions) -> crate::Result<crate::discover::Plan>,
+) -> crate::Result<i32> {
     let explicit_report = args
         .report
         .as_ref()
@@ -82,7 +92,7 @@ fn explain_mutant<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Result<i3
         select.mutators = Some("all".to_owned());
 
         let selection = select.selection()?;
-        let plan = crate::discover::plan_for_build(&select, &selection, None, &cargo, &mut |_| {})?;
+        let plan = discover(&select, &selection, &cargo)?;
         Ok((plan, config.artifact_dir))
     };
     let (plan, configured_artifact_dir) = match discover_current() {
@@ -193,6 +203,75 @@ mod tests {
     use crate::elements::FileResult;
     use crate::testing::{BrokenHost, Sink};
 
+    #[derive(Debug)]
+    struct LineLimitedHost {
+        remaining: usize,
+        output: Vec<u8>,
+        diagnostics: Vec<u8>,
+    }
+
+    impl Host for LineLimitedHost {
+        fn output(&mut self) -> impl Write {
+            LineLimitedOutput {
+                remaining: &mut self.remaining,
+                output: &mut self.output,
+            }
+        }
+        fn error(&mut self) -> impl Write {
+            &mut self.diagnostics
+        }
+        fn is_terminal(&self) -> bool {
+            false
+        }
+        fn terminal_width(&self) -> Option<u16> {
+            None
+        }
+    }
+
+    struct LineLimitedOutput<'a> {
+        remaining: &'a mut usize,
+        output: &'a mut Vec<u8>,
+    }
+
+    impl Write for LineLimitedOutput<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if *self.remaining == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "explanation output denied",
+                ));
+            }
+            self.output.extend_from_slice(buf);
+            *self.remaining -= buf.iter().map(|&byte| usize::from(byte == b'\n')).sum::<usize>();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn survivor_mutator_explanations_return_non_pipe_errors_at_each_output_line() {
+        let args = args("arith.add_to_sub", ".".into());
+        let mut complete = Sink::default();
+        assert_eq!(explain(&mut complete, &args).unwrap(), EXIT_OK);
+        assert!(complete.out().starts_with("arith.add_to_sub\n"));
+        assert!(complete.out().contains("  suppress with: // #[gamma::skip(arith.add_to_sub)]\n"));
+        for remaining in 0..complete.out().lines().count() {
+            let mut host = LineLimitedHost {
+                remaining,
+                output: Vec::new(),
+                diagnostics: Vec::new(),
+            };
+            assert!(
+                explain(&mut host, &args)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("explanation output denied")
+            );
+        }
+    }
+
     fn args(subject: impl Into<String>, dir: Utf8PathBuf) -> ExplainArgs {
         ExplainArgs {
             subject: subject.into(),
@@ -202,6 +281,284 @@ mod tests {
             packages: Vec::new(),
             workspace: false,
             config: super::super::cli::ConfigArgs::default(),
+        }
+    }
+
+    fn source_plan(root: &Utf8Path) -> crate::discover::Plan {
+        let parsed = crate::parse::SourceFile::parse("src/lib.rs", "pub fn answer() -> i32 { 42 }\n".to_owned()).unwrap();
+        let candidates = crate::ops::collect_candidates(&parsed, &crate::ops::Selection::everything());
+        crate::discover::Plan {
+            root: root.to_owned(),
+            files: Vec::new(),
+            mutants: crate::ops::into_mutants(&parsed, "subject", candidates),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            digests: crate::HashMap::default(),
+            skipped: Vec::new(),
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        }
+    }
+
+    #[cfg(all(feature = "system-tests", not(miri)))]
+    mod native_acceptance {
+        use super::*;
+
+        #[test]
+        fn survivor_current_explanation_consumes_effective_selection_and_writes_every_field() {
+            let directory = crate::testing::workdir("explain-current-effective-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let config_path = root.join("custom.toml");
+            std::fs::write(&config_path, "features = ['configured']\nmutators = ['fn_value.unit']\n").unwrap();
+            for workspace in [false, true] {
+                let plan = source_plan(root);
+                let mutant = plan
+                    .mutants
+                    .iter()
+                    .find(|mutant| mutant.mutator.as_ref() == "literal.int_decrement")
+                    .unwrap()
+                    .clone();
+                let mut selected = args(mutant.id.as_str(), root.to_owned());
+                selected.config.path = Some(config_path.clone());
+                selected.workspace = workspace;
+                selected.packages = if workspace { Vec::new() } else { vec!["subject".into()] };
+                selected.features.features = vec!["requested".into()];
+                selected.features.all_features = true;
+                selected.features.no_default_features = true;
+                let mut host = Sink::default();
+                explain_mutant_with(&mut host, &selected, |effective, selection, _| {
+                    assert_eq!(effective.dir, root);
+                    assert_eq!(effective.config.path.as_ref(), Some(&config_path));
+                    assert_eq!(effective.workspace, workspace);
+                    assert_eq!(effective.packages, selected.packages);
+                    assert_eq!(effective.features.features, ["requested", "configured"]);
+                    assert!(effective.features.all_features);
+                    assert!(effective.features.no_default_features);
+                    assert_eq!(effective.mutators.as_deref(), Some("all"));
+                    assert!(selection.includes_optimistic("literal.int_decrement"));
+                    Ok(plan.clone())
+                })
+                .unwrap();
+                assert_eq!(
+                    host.out(),
+                    format!(
+                        "mutant {}\n  identity version: {MUTANT_ID_VERSION}\n  current: yes\n  package: subject\n  location: {}:{}:{}\n  item: {}\n  mutator: {}\n  original: {}\n  replacement: {}\n  suppress with: // #[gamma::skip({})]\n",
+                        mutant.id,
+                        mutant.file,
+                        mutant.line,
+                        mutant.column,
+                        mutant.item_path,
+                        mutant.mutator,
+                        mutant.original,
+                        mutant.replacement,
+                        mutant.mutator
+                    )
+                );
+                for remaining in 0..host.out().lines().count() {
+                    let mut denied = LineLimitedHost {
+                        remaining,
+                        output: Vec::new(),
+                        diagnostics: Vec::new(),
+                    };
+                    assert!(
+                        explain_mutant_with(&mut denied, &selected, |_, _, _| Ok(plan.clone()))
+                            .unwrap_err()
+                            .to_string()
+                            .contains("explanation output denied")
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn survivor_explanation_missing_ids_and_discovery_errors_keep_their_specific_report_hints() {
+            let directory = crate::testing::workdir("explain-missing-matrix-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let report_path = root.join("empty.json");
+            crate::elements::write_json(&crate::fixtures::report_with(None, 0, Vec::new()), &report_path).unwrap();
+            for explicit in [false, true] {
+                let mut selected = args("deadbeefcafe", root.to_owned());
+                selected.report = explicit.then(|| report_path.clone());
+                let mut plan = source_plan(root);
+                plan.mutants.clear();
+                let failure = explain_mutant_with(&mut Sink::default(), &selected, |_, _, _| Ok(plan)).unwrap_err();
+                let hint = if explicit {
+                    format!("; `{report_path}` does not contain it either")
+                } else {
+                    "; pass `--report <PATH>` to inspect a retained CI report".to_owned()
+                };
+                assert_eq!(
+                    failure.message(),
+                    format!(
+                        "mutant ID `deadbeefcafe` is not produced by current discovery{hint}. The source site may have changed, the current selection may exclude it, or the report may use another identity version."
+                    )
+                );
+                assert!(failure.is_usage());
+                let failure = explain_mutant_with(&mut Sink::default(), &selected, |_, _, _| {
+                    Err(error!("specific current discovery failure"))
+                })
+                .unwrap_err();
+                assert_eq!(failure.message(), "specific current discovery failure");
+            }
+            assert_eq!(default_report_path(root, None), root.join("target/cargo-gamma/gamma-report.json"));
+            let artifacts = root.join("custom-artifacts");
+            assert_eq!(default_report_path(root, Some(&artifacts)), artifacts.join("gamma-report.json"));
+        }
+
+        #[test]
+        fn survivor_explanation_configuration_and_default_report_failures_do_not_panic_or_discover() {
+            let directory = crate::testing::workdir("explain-input-errors-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let mut selected = args("deadbeefcafe", root.to_owned());
+            let config = root.join("gamma.toml");
+            std::fs::write(&config, "[").unwrap();
+            assert!(
+                explain_mutant_with(&mut Sink::default(), &selected, |_, _, _| panic!(
+                    "malformed config must precede discovery"
+                ))
+                .unwrap_err()
+                .to_string()
+                .contains("gamma.toml")
+            );
+            std::fs::write(&config, "packages = ['configured-package']\n").unwrap();
+            selected.workspace = true;
+            assert!(
+                explain_mutant_with(&mut Sink::default(), &selected, |_, _, _| panic!(
+                    "conflicting effective selection must precede discovery"
+                ))
+                .unwrap_err()
+                .is_usage()
+            );
+            std::fs::remove_file(config).unwrap();
+            selected.workspace = false;
+            let path = default_report_path(root, None);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{").unwrap();
+            assert!(
+                explain_mutant_with(&mut Sink::default(), &selected, |_, _, _| Ok(source_plan(root)))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("not a mutation report")
+            );
+        }
+
+        #[test]
+        fn survivor_explicit_history_uses_the_read_generation_and_empty_source_fallback() {
+            let directory = crate::testing::workdir("explain-retained-generation-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let path = root.join("history.json");
+            let mut report = crate::fixtures::report_with(None, 0, Vec::new());
+            let mut historical = crate::fixtures::mutant_result_at("deadbeefcafe", 9, "Survived");
+            historical.replacement = Some("replacement text".into());
+            historical.status_reason = None;
+            historical.killed_by = None;
+            report.files.values_mut().next().unwrap().mutants.push(historical);
+            crate::elements::write_json(&report, &path).unwrap();
+            let mut selected = args("deadbeefcafe", root.to_owned());
+            selected.report = Some(path.clone());
+            let mut host = Sink::default();
+            explain_mutant_with(&mut host, &selected, |_, _, _| {
+                std::fs::write(&path, "{").unwrap();
+                Err(error!("the current tree cannot be discovered"))
+            })
+            .unwrap();
+            assert!(host.out().contains(&format!("  identity version: {MUTANT_ID_VERSION}\n")));
+            assert!(host.out().contains("  reported source: \n"));
+            assert!(host.out().contains("  reported replacement: replacement text\n"));
+            assert!(!host.out().contains("  reason:"));
+            assert!(!host.out().contains("  killed by:"));
+        }
+
+        #[test]
+        fn survivor_current_identity_version_outranks_a_different_retained_report_generation() {
+            let directory = crate::testing::workdir("explain-current-and-history-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let plan = source_plan(root);
+            let subject = plan.mutants[0].id.to_string();
+            let mut report = crate::fixtures::report_with(None, 0, vec![crate::fixtures::mutant_result_at(&subject, 1, "Killed")]);
+            report.config.as_mut().unwrap().mutant_id_version = Some(97);
+            let path = root.join("history.json");
+            crate::elements::write_json(&report, &path).unwrap();
+            let mut selected = args(subject, root.to_owned());
+            selected.report = Some(path);
+            let mut host = Sink::default();
+            explain_mutant_with(&mut host, &selected, |_, _, _| Ok(plan)).unwrap();
+            assert!(host.out().contains(&format!("  identity version: {MUTANT_ID_VERSION}\n")));
+            assert!(!host.out().contains("identity version: 97"));
+            assert!(host.out().contains("  current: yes\n"));
+            assert!(host.out().contains("  verdict: Killed\n"));
+        }
+
+        #[test]
+        fn survivor_historical_explanation_uses_the_requested_id_line_and_retained_metadata() {
+            let directory = crate::testing::workdir("explain-survivor-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let path = root.join("history.json");
+            let mut report = crate::fixtures::report_with(None, 0, Vec::new());
+            report.files.clear();
+            report.config.as_mut().unwrap().mutant_id_version = Some(97);
+            let mut result = crate::fixtures::mutant_result_at("deadbeefcafe", 2, "Killed");
+            result.location.start.column = 7;
+            result.replacement = None;
+            result.status_reason = Some("assertion rejected the change".to_owned());
+            result.killed_by = Some(vec!["first".to_owned(), "second".to_owned()]);
+            report.files.insert(
+                "other.rs".to_owned(),
+                FileResult {
+                    source: "other".to_owned(),
+                    language: "rust".to_owned(),
+                    mutants: vec![crate::fixtures::mutant_result_at("0123456789ab", 1, "Survived")],
+                },
+            );
+            report.files.insert(
+                "source.rs".to_owned(),
+                FileResult {
+                    source: "wrong first line\n    expected second line    \nwrong third line".to_owned(),
+                    language: "rust".to_owned(),
+                    mutants: vec![crate::fixtures::mutant_result_at("abcdefabcdef", 1, "Survived"), result],
+                },
+            );
+            crate::elements::write_json(&report, &path).unwrap();
+            let mut args = args("deadbeefcafe", root.join("missing-workspace"));
+            args.report = Some(path.clone());
+            let mut host = Sink::default();
+            assert_eq!(explain(&mut host, &args).unwrap(), EXIT_OK);
+            assert_eq!(
+                host.out(),
+                format!(
+                    "mutant deadbeefcafe\n  identity version: 97\n  current: no (the current discovery no longer produces this mutant)\n  report: {path}\n  reported location: source.rs:2:7\n  reported source: expected second line\n  reported replacement: <not recorded>\n  verdict: Killed\n  reason: assertion rejected the change\n  killed by: first, second\n"
+                )
+            );
+            assert!(host.err.is_empty());
+            assert_eq!(default_report_path(root, None), root.join("target/cargo-gamma/gamma-report.json"));
+            for remaining in 0..host.out().lines().count() {
+                let mut denied = LineLimitedHost {
+                    remaining,
+                    output: Vec::new(),
+                    diagnostics: Vec::new(),
+                };
+                assert!(
+                    explain(&mut denied, &args)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("explanation output denied")
+                );
+            }
+        }
+
+        #[test]
+        fn survivor_malformed_explicit_report_is_returned_as_an_error_before_discovery() {
+            let directory = crate::testing::workdir("explain-bad-report-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let path = root.join("report.json");
+            std::fs::write(&path, "{").unwrap();
+            let mut args = args("deadbeefcafe", root.join("missing"));
+            args.report = Some(path);
+            let mut host = Sink::default();
+            explain(&mut host, &args).expect_err("malformed explicit report must be rejected");
+            assert!(host.out.is_empty());
         }
     }
 
