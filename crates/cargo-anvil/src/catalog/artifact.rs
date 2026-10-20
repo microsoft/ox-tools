@@ -117,6 +117,27 @@ pub struct TomlArrayRegionSpec {
     pub path: Vec<String>,
 }
 
+/// A managed region containing required string entries of a JSON array.
+///
+/// Object properties and array delimiters remain repository-owned.
+/// `region.body` contains JSON string entries, including a trailing comma,
+/// and uses slash-slash comments. Hosts require a `.json` suffix. JSONC line
+/// and block comments and trailing commas are accepted; other JSON extensions
+/// are not. Scaffolding must be independent of other regions, and ownership
+/// migrations refuse. Identity is still the region's host and id, not its
+/// array selector.
+///
+/// Like [`RegionSpec`], this is editable catalog input, not a validated
+/// catalog. [`super::CatalogBuilder::build`] validates its path and body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonArrayRegionSpec {
+    /// Ordinary region identity, content, and comment syntax.
+    pub region: RegionSpec,
+    /// JSON object-property components, for example
+    /// `["EnlistmentRootPaths", "SourceRootDirs"]`.
+    pub path: Vec<String>,
+}
+
 /// One catalog artifact: an owned file or a managed region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Artifact {

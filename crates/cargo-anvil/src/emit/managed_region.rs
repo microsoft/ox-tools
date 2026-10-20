@@ -52,6 +52,9 @@ pub enum RefusalRemedy {
     /// The catalog rendered TOML that does not parse even without any host
     /// content. Repository edits cannot repair the generated body.
     InvalidGeneratedToml,
+    /// The catalog rendered JSON that does not parse even without any host
+    /// content. Repository edits cannot repair the generated body.
+    InvalidGeneratedJson,
     /// The region is live, but its body on disk matches neither the body anvil
     /// last generated nor the current template. Nothing was parsed and no
     /// table collided; the host's format is irrelevant.

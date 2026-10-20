@@ -243,8 +243,8 @@ fn build_plan_with_hosts(
         live: live_region_keys(repo_root, workspace, catalog, hosts)?,
         ..ComposedHosts::default()
     };
-    let (array_paths, mut original_hosts) = array_host_inputs(repo_root, workspace, manifest, catalog, hosts)?;
-    for host in array_paths.keys() {
+    let (array_hosts, mut original_hosts) = array_host_inputs(repo_root, workspace, manifest, catalog, hosts)?;
+    for (host, array_host) in &array_hosts {
         for other in composed
             .live
             .iter()
@@ -253,7 +253,7 @@ fn build_plan_with_hosts(
         {
             let other = (hosts.resolve)(repo_root, other)?;
             if host != &other && host.eq_ignore_ascii_case(&other) {
-                bail!("ambiguous casing for TOML array host: {host} and {other}");
+                bail!("ambiguous casing for {} array host: {host} and {other}", array_host.format.name());
             }
         }
     }
@@ -276,41 +276,17 @@ fn build_plan_with_hosts(
     }
 
     for artifact in catalog.artifacts() {
-        match artifact {
-            Artifact::OwnedFile(spec) => {
-                let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
-                if selected {
-                    let path = (hosts.resolve)(repo_root, spec.path)?;
-                    plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
-                }
-            }
-            Artifact::Region(spec) => {
-                if let Some(path) = catalog.toml_array_path(spec) {
-                    let array = crate::catalog::TomlArrayRegionSpec {
-                        region: spec.clone(),
-                        path: path.to_vec(),
-                    };
-                    for host in region_host_paths(workspace, spec) {
-                        let host = (hosts.resolve)(repo_root, host)?;
-                        let current = hosts.get_or_read(repo_root, &host)?;
-                        match crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array) {
-                            Ok(item) => {
-                                if let Some(text) = &item.spliced_host {
-                                    hosts.set(&host, text.clone());
-                                }
-                                plan.push(item);
-                            }
-                            Err(refusal) => {
-                                // No partially composed host is returned for application.
-                                return Err(array_plan_refusal(&host, &refusal));
-                            }
-                        }
-                    }
-                } else {
-                    push_region(repo_root, workspace, manifest, &mut plan, hosts, &mut composed, spec)?;
-                }
-            }
-        }
+        plan_catalog_artifact(
+            repo_root,
+            workspace,
+            manifest,
+            backends,
+            catalog,
+            artifact,
+            &mut plan,
+            hosts,
+            &mut composed,
+        )?;
     }
 
     plan_removals(repo_root, manifest, &mut plan, hosts, &composed)?;
@@ -322,22 +298,36 @@ fn build_plan_with_hosts(
             && let Some(after) = &item.spliced_host
         {
             let host = (hosts.resolve)(repo_root, host)?;
-            if let Some(paths) = array_paths.get(&host) {
+            if let Some(array_host) = array_hosts.get(&host) {
                 let before = original_hosts.get(&host).expect("array hosts were captured before planning");
-                let adopted = item.rendered.as_deref().and_then(|body| {
-                    match crate::region::adopt_unmanaged_toml_tables(before, body, CommentSyntax::Hash) {
-                        crate::region::TomlAdoption::Adopted { text, .. } => Some(text),
-                        _ => None,
-                    }
-                });
+                let adopted = (array_host.format == ArrayFormat::Toml)
+                    .then(|| {
+                        item.rendered.as_deref().and_then(|body| {
+                            match crate::region::adopt_unmanaged_toml_tables(before, body, CommentSyntax::Hash) {
+                                crate::region::TomlAdoption::Adopted { text, .. } => Some(text),
+                                _ => None,
+                            }
+                        })
+                    })
+                    .flatten();
                 // Table adoption and region insertion are separate edits. Checking
                 // their combined envelope would reject an untouched array between them.
                 if let Some(adopted) = &adopted {
-                    crate::emit::toml_array_region::validate_neighbor_splice(before, adopted, paths)
+                    crate::emit::toml_array_region::validate_neighbor_splice(before, adopted, &array_host.paths)
                         .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
                 }
-                crate::emit::toml_array_region::validate_neighbor_splice(adopted.as_deref().unwrap_or(before), after, paths)
-                    .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
+                match array_host.format {
+                    ArrayFormat::Toml => crate::emit::toml_array_region::validate_neighbor_splice(
+                        adopted.as_deref().unwrap_or(before),
+                        after,
+                        &array_host.paths,
+                    )
+                    .map_err(|refusal| array_plan_refusal(&host, &refusal))?,
+                    ArrayFormat::Json => {
+                        crate::emit::json_array_region::validate_neighbor_splice(before, after, &array_host.paths)
+                            .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                    }
+                }
                 original_hosts.insert(host, after.clone());
             }
         }
@@ -346,7 +336,89 @@ fn build_plan_with_hosts(
     Ok(plan)
 }
 
-type ArrayHostPaths = std::collections::BTreeMap<String, Vec<Vec<String>>>;
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads the complete planner state through one artifact dispatch"
+)]
+fn plan_catalog_artifact(
+    repo_root: &Path,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    backends: &[Backend],
+    catalog: &Catalog,
+    artifact: &Artifact,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &mut ComposedHosts,
+) -> Result<(), AppError> {
+    match artifact {
+        Artifact::OwnedFile(spec) => {
+            if spec.gate.is_none_or(|gate| backends.contains(&gate)) {
+                let path = (hosts.resolve)(repo_root, spec.path)?;
+                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
+            }
+        }
+        Artifact::Region(spec) => {
+            if let Some(path) = catalog.json_array_path(spec) {
+                let array = crate::catalog::JsonArrayRegionSpec {
+                    region: spec.clone(),
+                    path: path.to_vec(),
+                };
+                for host in region_host_paths(workspace, spec) {
+                    let host = (hosts.resolve)(repo_root, host)?;
+                    let current = hosts.get_or_read(repo_root, &host)?;
+                    let item = crate::emit::json_array_region::plan_json_array_region(manifest, current.as_deref(), &host, &array)
+                        .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                    if let Some(text) = &item.spliced_host {
+                        hosts.set(&host, text.clone());
+                    }
+                    plan.push(item);
+                }
+            } else if let Some(path) = catalog.toml_array_path(spec) {
+                let array = crate::catalog::TomlArrayRegionSpec {
+                    region: spec.clone(),
+                    path: path.to_vec(),
+                };
+                for host in region_host_paths(workspace, spec) {
+                    let host = (hosts.resolve)(repo_root, host)?;
+                    let current = hosts.get_or_read(repo_root, &host)?;
+                    let item = crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array)
+                        .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
+                    if let Some(text) = &item.spliced_host {
+                        hosts.set(&host, text.clone());
+                    }
+                    plan.push(item);
+                }
+            } else {
+                push_region(repo_root, workspace, manifest, plan, hosts, composed, spec)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayFormat {
+    Toml,
+    Json,
+}
+
+impl ArrayFormat {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Toml => "TOML",
+            Self::Json => "JSON",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArrayHost {
+    format: ArrayFormat,
+    paths: Vec<Vec<String>>,
+}
+
+type ArrayHosts = std::collections::BTreeMap<String, ArrayHost>;
 
 fn array_host_inputs(
     repo_root: &Path,
@@ -354,21 +426,30 @@ fn array_host_inputs(
     manifest: &Manifest,
     catalog: &Catalog,
     hosts: &mut HostTextCache,
-) -> Result<(ArrayHostPaths, HashMap<String, String>), AppError> {
-    let mut paths = ArrayHostPaths::new();
+) -> Result<(ArrayHosts, HashMap<String, String>), AppError> {
+    let mut paths = ArrayHosts::new();
     for artifact in catalog.artifacts() {
-        if let Artifact::Region(spec) = artifact
-            && let Some(path) = catalog.toml_array_path(spec)
-        {
-            for host in region_host_paths(workspace, spec) {
-                let host = (hosts.resolve)(repo_root, host)?;
-                paths.entry(host).or_default().push(path.to_vec());
+        if let Artifact::Region(spec) = artifact {
+            for (format, path) in [
+                (ArrayFormat::Toml, catalog.toml_array_path(spec)),
+                (ArrayFormat::Json, catalog.json_array_path(spec)),
+            ] {
+                if let Some(path) = path {
+                    for host in region_host_paths(workspace, spec) {
+                        let host = (hosts.resolve)(repo_root, host)?;
+                        let entry = paths.entry(host).or_insert_with(|| ArrayHost { format, paths: Vec::new() });
+                        if entry.format != format {
+                            bail!("one host cannot contain both TOML and JSON array regions");
+                        }
+                        entry.paths.push(path.to_vec());
+                    }
+                }
             }
         }
     }
     let mut candidates: BTreeSet<String> = paths.keys().cloned().collect();
     for key in manifest.regions.keys() {
-        if HostScanner::for_path(&key.host) == HostScanner::Toml {
+        if matches!(HostScanner::for_path(&key.host), HostScanner::Toml | HostScanner::Json) {
             candidates.insert((hosts.resolve)(repo_root, &key.host)?);
         }
     }
@@ -376,10 +457,36 @@ fn array_host_inputs(
     let live = live_region_keys(repo_root, workspace, catalog, hosts)?;
     for host in candidates {
         let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
-        match crate::emit::toml_array_region::existing_array_paths(&text) {
+        let format = paths
+            .get(&host)
+            .map(|host| host.format)
+            .or_else(|| match HostScanner::for_path(&host) {
+                HostScanner::Toml => Some(ArrayFormat::Toml),
+                HostScanner::Json => Some(ArrayFormat::Json),
+                HostScanner::Lines => None,
+            });
+        let Some(format) = format else {
+            continue;
+        };
+        let discovered = match format {
+            ArrayFormat::Toml => crate::emit::toml_array_region::existing_array_paths(&text),
+            ArrayFormat::Json => crate::emit::json_array_region::existing_array_paths(&text),
+        };
+        match discovered {
             Ok(existing) if !existing.is_empty() || paths.contains_key(&host) => {
-                crate::emit::toml_array_region::validated_regions(&text).map_err(|refusal| array_plan_refusal(&host, &refusal))?;
-                paths.entry(host.clone()).or_default().extend(existing);
+                match format {
+                    ArrayFormat::Toml => crate::emit::toml_array_region::validated_regions(&text)
+                        .map(|_| ())
+                        .map_err(|refusal| array_plan_refusal(&host, &refusal))?,
+                    ArrayFormat::Json => crate::emit::json_array_region::validated_regions(&text)
+                        .map(|_| ())
+                        .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?,
+                }
+                paths
+                    .entry(host.clone())
+                    .or_insert_with(|| ArrayHost { format, paths: Vec::new() })
+                    .paths
+                    .extend(existing);
                 originals.insert(host, text);
             }
             Err(refusal)
@@ -389,39 +496,66 @@ fn array_host_inputs(
                         .keys()
                         .any(|key| key.host.eq_ignore_ascii_case(&host) && !live.contains(&(host.clone(), key.id.clone()))) =>
             {
-                return Err(array_plan_refusal(&host, &refusal));
+                return Err(match format {
+                    ArrayFormat::Toml => array_plan_refusal(&host, &refusal),
+                    ArrayFormat::Json => json_array_plan_refusal(&host, &refusal),
+                });
             }
             _ => {}
         }
     }
+    validate_array_host_overlaps(repo_root, workspace, manifest, catalog, hosts, &paths)?;
+    Ok((paths, originals))
+}
+
+fn validate_array_host_overlaps(
+    repo_root: &Path,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    catalog: &Catalog,
+    hosts: &HostTextCache,
+    paths: &ArrayHosts,
+) -> Result<(), AppError> {
     for artifact in catalog.artifacts() {
-        if let Artifact::Region(spec) = artifact
-            && spec.syntax != CommentSyntax::Hash
-        {
+        if let Artifact::Region(spec) = artifact {
             for host in region_host_paths(workspace, spec) {
                 let host = (hosts.resolve)(repo_root, host)?;
-                if paths.contains_key(&host) {
+                if let Some(array_host) = paths.get(&host)
+                    && spec.syntax
+                        != match array_host.format {
+                            ArrayFormat::Toml => CommentSyntax::Hash,
+                            ArrayFormat::Json => CommentSyntax::SlashSlash,
+                        }
+                {
                     bail!(
-                        "region '{}' has comment syntax incompatible with its TOML array host: {host}",
-                        spec.id
+                        "region '{}' has comment syntax incompatible with its {} array host: {host}",
+                        spec.id,
+                        array_host.format.name()
                     );
                 }
             }
         }
         if let Artifact::OwnedFile(spec) = artifact {
             let path = (hosts.resolve)(repo_root, spec.path)?;
-            if paths.keys().any(|host| host.eq_ignore_ascii_case(&path)) {
-                bail!("a TOML array host cannot also be an owned file: {}", spec.path);
+            if let Some((_, array_host)) = paths.iter().find(|(host, _)| host.eq_ignore_ascii_case(&path)) {
+                bail!(
+                    "a {} array host cannot also be an owned file: {}",
+                    array_host.format.name(),
+                    spec.path
+                );
             }
         }
     }
     for file in manifest.files.keys() {
         let path = (hosts.resolve)(repo_root, file)?;
-        if paths.keys().any(|host| host.eq_ignore_ascii_case(&path)) {
-            bail!("retire whole-file ownership separately before managing TOML array entries: {file}");
+        if let Some((_, array_host)) = paths.iter().find(|(host, _)| host.eq_ignore_ascii_case(&path)) {
+            bail!(
+                "retire whole-file ownership separately before managing {} array entries: {file}",
+                array_host.format.name()
+            );
         }
     }
-    Ok((paths, originals))
+    Ok(())
 }
 
 /// In-memory accumulator of host-file text, shared across every region
@@ -815,13 +949,23 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
 }
 
 fn array_plan_refusal(host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
-    let guidance = if refusal.remedy == RefusalRemedy::BetweenManagedRegions {
+    structural_array_plan_refusal("TOML", host, refusal)
+}
+
+fn json_array_plan_refusal(host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
+    structural_array_plan_refusal("JSON", host, refusal)
+}
+
+fn structural_array_plan_refusal(format: &str, host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
+    let guidance = if format == "JSON" && refusal.remedy == RefusalRemedy::HostAlreadyUnparsable {
+        "This file does not parse as it stands, before this region is written, so no run can write it until the existing JSON is repaired."
+    } else if refusal.remedy == RefusalRemedy::BetweenManagedRegions {
         "Reconcile the neighboring managed regions in the catalog before retrying; array hosts cannot depend on staged ownership migrations."
     } else {
         refusal_guidance(refusal.remedy)
     };
     app_err!(
-        "Refused TOML array host {host}: {}. No plan was produced; no files were changed. {guidance}",
+        "Refused {format} array host {host}: {}. No plan was produced; no files were changed. {guidance}",
         refusal.reason
     )
 }
@@ -838,6 +982,10 @@ fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
         RefusalRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
         RefusalRemedy::InvalidGeneratedToml => {
             "The generated region is invalid TOML even without repository content. Repair the catalog template \
+             that renders this region before retrying."
+        }
+        RefusalRemedy::InvalidGeneratedJson => {
+            "The generated region is invalid JSON even without repository content. Repair the catalog template \
              that renders this region before retrying."
         }
         RefusalRemedy::HostAlreadyUnparsable => {
@@ -1686,6 +1834,40 @@ mod tests {
         )
     }
 
+    fn json_array_catalog() -> Catalog {
+        Catalog::builder(test_cli())
+            .with_json_array_region(crate::catalog::JsonArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("CloudBuild.json".to_owned()),
+                    id: RegionId::new("anvil-source-root"),
+                    body: "\"build\\\\Extensions\\\\Anvil\",\n".to_owned(),
+                    syntax: CommentSyntax::SlashSlash,
+                },
+                path: vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+            })
+            .build()
+            .unwrap()
+    }
+
+    fn json_array_plan(text: &str, manifest: &Manifest, catalog: &Catalog) -> Result<Plan, AppError> {
+        let mut hosts = memory_hosts();
+        hosts.set("CloudBuild.json", text.to_owned());
+        hosts
+            .newlines
+            .insert("CloudBuild.json".to_owned(), crate::region::text_newline(text));
+        build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            manifest,
+            &[],
+            catalog,
+            &mut hosts,
+        )
+    }
+
     fn memory_hosts() -> HostTextCache {
         HostTextCache {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
@@ -1774,6 +1956,76 @@ mod tests {
     }
 
     #[test]
+    fn json_array_plan_lifecycle_preserves_repository_content_and_schema_one() {
+        let catalog = json_array_catalog();
+        let source = concat!(
+            "{\n",
+            "  // repository\n",
+            "  \"EnlistmentRootPaths\": {\n",
+            "    \"SourceRootDirs\": [\"build\\\\Extensions\\\\Anvil\", \"src\"],\n",
+            "    \"Other\": true,\n",
+            "  },\n",
+            "  \"Tail\": 1,\n",
+            "}\n",
+        );
+        let introduced = json_array_plan(source, &Manifest::default(), &catalog).unwrap();
+        let managed = introduced.items()[0].spliced_host.as_deref().unwrap();
+        assert_eq!(managed.matches("\"build\\\\Extensions\\\\Anvil\"").count(), 1);
+        assert!(managed.contains("// repository"));
+        assert!(managed.contains("\"src\""));
+        assert!(managed.contains("\"Other\": true"));
+        assert!(managed.contains("\"Tail\": 1"));
+        let manifest = introduced.projected_manifest(&Manifest::default());
+        assert_eq!(crate::manifest::SCHEMA_VERSION, 1);
+
+        let synced = json_array_plan(managed, &manifest, &catalog).unwrap();
+        assert_eq!(synced.dry_run_exit_code(), 0);
+
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let retired = json_array_plan(managed, &manifest, &empty).unwrap();
+        let output = retired.items()[0].spliced_host.as_deref().unwrap();
+        assert!(!output.contains("anvil-managed"));
+        assert!(!output.contains("\"build\\\\Extensions\\\\Anvil\""));
+        assert!(output.contains("\"src\""));
+        assert!(output.contains("\"Other\": true"));
+        assert!(output.contains("\"Tail\": 1"));
+        assert_eq!(retired.projected_manifest(&manifest).regions.len(), 0);
+    }
+
+    #[test]
+    fn json_array_invalid_retirement_refuses_before_producing_a_plan() {
+        let source = concat!(
+            "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n",
+            "// >>> anvil-managed: anvil-source-root\n",
+            "\"build\\\\Extensions\\\\Anvil\",\n",
+            "// <<< anvil-managed: anvil-source-root\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region(
+            "CloudBuild.json",
+            "anvil-source-root",
+            checksum_str("  \"build\\\\Extensions\\\\Anvil\",\n"),
+        );
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+
+        let error = json_array_plan(source, &manifest, &empty).unwrap_err().to_string();
+        assert!(error.starts_with("Refused JSON array host CloudBuild.json:"), "{error}");
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn json_array_plan_refuses_existing_whole_file_ownership() {
+        let source = "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[]}}\n";
+        let mut manifest = Manifest::default();
+        manifest.files.insert("CloudBuild.json".to_owned(), checksum_str(source));
+
+        assert_eq!(
+            json_array_plan(source, &manifest, &json_array_catalog()).unwrap_err().to_string(),
+            "retire whole-file ownership separately before managing JSON array entries: CloudBuild.json"
+        );
+    }
+
+    #[test]
     fn toml_array_preflight_leaves_live_ordinary_hosts_alone() {
         let catalog = Catalog::builder(test_cli())
             .with_artifact(Artifact::region(RegionSpec {
@@ -1800,7 +2052,7 @@ mod tests {
                 &mut hosts,
             )
             .unwrap();
-            assert_eq!(paths, ArrayHostPaths::new());
+            assert_eq!(paths, ArrayHosts::new());
             assert_eq!(originals, HashMap::new());
         }
     }

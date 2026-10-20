@@ -54,6 +54,8 @@ pub enum CommentSyntax {
 pub(crate) enum HostScanner {
     /// Only actual TOML comment tokens can carry sentinels.
     Toml,
+    /// Only actual JSONC line-comment tokens can carry sentinels.
+    Json,
     /// Full lines are interpreted using the region's comment syntax.
     Lines,
 }
@@ -62,6 +64,8 @@ impl HostScanner {
     pub(crate) fn for_path(host: &str) -> Self {
         if host.to_ascii_lowercase().ends_with(".toml") {
             Self::Toml
+        } else if host.to_ascii_lowercase().ends_with(".json") {
+            Self::Json
         } else {
             Self::Lines
         }
@@ -70,6 +74,7 @@ impl HostScanner {
     pub(crate) fn find<'a>(self, text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
         match self {
             Self::Toml => find_toml_region(text, id, syntax),
+            Self::Json => find_region_in_lines(text, id, syntax, json_comment_lines(text)),
             Self::Lines => find_region(text, id, syntax),
         }
     }
@@ -77,6 +82,7 @@ impl HostScanner {
     pub(crate) fn repair(self, text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
         match self {
             Self::Toml => repair_toml_markers(text, id, syntax),
+            Self::Json => repair_markers_in_lines(text, id, syntax, json_comment_lines(text)),
             Self::Lines => repair_markers(text, id, syntax),
         }
     }
@@ -84,6 +90,7 @@ impl HostScanner {
     pub(crate) fn remove(self, text: &str, id: &str, syntax: CommentSyntax) -> Result<String, AppError> {
         match self {
             Self::Toml => remove_toml_region(text, id, syntax),
+            Self::Json => crate::emit::json_array_region::remove_json_region(text, id, syntax),
             Self::Lines => remove_region(text, id, syntax),
         }
     }
@@ -91,6 +98,7 @@ impl HostScanner {
     pub(crate) fn insert_after(self, text: &str, id: &str, extra: &str, syntax: CommentSyntax) -> Result<String, AppError> {
         match self {
             Self::Toml => insert_after_located_region(text, id, extra, || self.find(text, id, syntax)),
+            Self::Json => insert_after_located_region(text, id, extra, || self.find(text, id, syntax)),
             Self::Lines => insert_after_region(text, id, extra, syntax),
         }
     }
@@ -98,6 +106,7 @@ impl HostScanner {
     pub(crate) fn ids(self, text: &str, syntax: CommentSyntax) -> Vec<String> {
         match self {
             Self::Toml => toml_region_ids(text, syntax),
+            Self::Json => json_region_ids(text, syntax),
             Self::Lines => managed_region_ids(text, syntax),
         }
     }
@@ -498,6 +507,54 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
     })
 }
 
+/// Full JSONC line comments retain original byte bounds; string contents and
+/// block comments never qualify as ownership sentinels.
+pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> + '_ {
+    let bytes = text.as_bytes();
+    let mut comments = BTreeSet::new();
+    let mut index = 0;
+    let mut string = false;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+        } else if line_comment {
+            if matches!(byte, b'\r' | b'\n') {
+                line_comment = false;
+            }
+        } else if block_comment {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment = false;
+                index += 1;
+            }
+        } else if byte == b'"' {
+            string = true;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            comments.insert(index);
+            line_comment = true;
+            index += 1;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            block_comment = true;
+            index += 1;
+        }
+        index += 1;
+    }
+    iterate_lines(text).filter(move |line| {
+        let content = &text[line.start..line.end];
+        let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
+        comments.contains(&(line.start + leading))
+    })
+}
+
 pub(crate) fn find_region_in_lines<'a>(
     text: &'a str,
     id: &str,
@@ -798,7 +855,7 @@ pub(crate) fn remove_toml_region(text: &str, id: &str, syntax: CommentSyntax) ->
     Ok(remove_located_region(text, region))
 }
 
-fn remove_located_region(text: &str, region: Option<Region<'_>>) -> String {
+pub(crate) fn remove_located_region(text: &str, region: Option<Region<'_>>) -> String {
     let Some(region) = region else {
         return text.to_owned();
     };
@@ -1672,6 +1729,13 @@ pub fn managed_region_ids(text: &str, syntax: CommentSyntax) -> Vec<String> {
 
 pub(crate) fn toml_region_ids(text: &str, syntax: CommentSyntax) -> Vec<String> {
     toml_region_ranges_with_ids(text, syntax).into_iter().map(|(id, _)| id).collect()
+}
+
+pub(crate) fn json_region_ids(text: &str, syntax: CommentSyntax) -> Vec<String> {
+    region_ranges_in_lines(text, syntax, json_comment_lines(text))
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 fn mask_regions(text: &str, ranges: &[ByteRange]) -> String {
