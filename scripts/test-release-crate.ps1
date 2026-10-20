@@ -3,6 +3,7 @@
 
 # Run from the repository root: pwsh -NoProfile -File .\scripts\test-release-crate.ps1
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 $releaseScript = Join-Path $PSScriptRoot 'release-crate.ps1'
 $fixture = Join-Path ([System.IO.Path]::GetTempPath()) "ox-release-test-$([guid]::NewGuid())"
 
@@ -30,6 +31,8 @@ try {
     Invoke-FixtureGit config commit.gpgsign false
     Invoke-FixtureGit config core.autocrlf false
     Invoke-FixtureGit remote add origin https://github.com/microsoft/ox-tools.git
+    # The manifest stays ahead of the tagged releases to detect unintended version changes.
+    # A non-semantic tag must not bound the first release; commits beyond a later tag must stay out.
     '[workspace]' | Set-Content Cargo.toml
     "[package]`nname = `"sample`"`nversion = `"2.0.0`"" | Set-Content crates\sample\Cargo.toml
     'README must not change' | Set-Content crates\sample\README.md

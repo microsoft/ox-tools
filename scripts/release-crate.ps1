@@ -294,7 +294,7 @@ function Invoke-GitCommand {
         [string]$errorMessage = "Git command failed"
     )
 
-    $result = Invoke-Expression "git $command" 2>&1
+    $result = @(Invoke-Expression "git $command" 2>&1)
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$errorMessage. Git command: git $command. Error: $result" -ErrorAction Stop
     }

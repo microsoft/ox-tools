@@ -220,6 +220,8 @@ fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<B
 }
 
 fn parse_configured_test_attribute(value: &str) -> Option<String> {
+    let expected_attribute = format!("#[{value}]");
+    let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
     [
         Edition::Edition2024,
         Edition::Edition2021,
@@ -227,19 +229,18 @@ fn parse_configured_test_attribute(value: &str) -> Option<String> {
         Edition::Edition2015,
     ]
     .into_iter()
-    .find_map(|edition| parse_configured_test_attribute_for_edition(value, edition))
+    .find_map(|edition| parse_configured_test_attribute_for_edition(&source, &expected_attribute, edition))
 }
 
-fn parse_configured_test_attribute_for_edition(value: &str, edition: Edition) -> Option<String> {
-    let expected_attribute = format!("#[{value}]");
-    let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
-    let parse = SourceFile::parse(&source, edition);
+// Validates exactly one path attribute in one edition; the caller owns cross-edition acceptance.
+fn parse_configured_test_attribute_for_edition(source: &str, expected_attribute: &str, edition: Edition) -> Option<String> {
+    let parse = SourceFile::parse(source, edition);
     if !parse.errors().is_empty() {
         return None;
     }
     let tree = parse.tree();
     let attribute = tree.syntax().descendants().find_map(ast::Attr::cast)?;
-    if attribute.syntax().text().to_string() != expected_attribute {
+    if attribute.syntax().text() != expected_attribute {
         return None;
     }
     let ast::Meta::PathMeta(meta) = attribute.meta()? else {
@@ -2542,6 +2543,24 @@ mod tests {
         }
     }
 
+    // Verifies edition fallback independently of source discovery and LCOV filtering.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn configured_test_attributes_accept_paths_from_older_editions() {
+        let expected_attribute = "#[framework::gen]";
+        let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
+        assert!(parse_configured_test_attribute_for_edition(&source, expected_attribute, Edition::Edition2024).is_none());
+        assert_eq!(
+            parse_configured_test_attribute_for_edition(&source, expected_attribute, Edition::Edition2021).as_deref(),
+            Some("framework::gen")
+        );
+        assert_eq!(parse_configured_test_attribute("framework::gen").as_deref(), Some("framework::gen"));
+    }
+
+    // Covers workspace policy, target editions, and exact LCOV output using immutable checked-in files.
     #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
     fn configured_test_attributes_work_across_target_editions() {
@@ -2557,8 +2576,6 @@ mod tests {
             metadata.packages[0].targets[target].src_path = root.join("member/src").join(filename).to_string_lossy().into_owned().into();
         }
 
-        assert!(parse_configured_test_attribute_for_edition("framework::gen", Edition::Edition2024).is_none());
-        assert_eq!(parse_configured_test_attribute("framework::gen").as_deref(), Some("framework::gen"));
         let index = SourceIndex::from_metadata(&metadata).expect("mixed-edition source index builds");
         for filename in ["edition-2021.rs", "edition-2024.rs"] {
             let source = fs::canonicalize(root.join("member/src").join(filename)).expect("canonical edition fixture");
@@ -2573,6 +2590,7 @@ mod tests {
         }
     }
 
+    // Isolates parser attachment and line mapping with controlled LF/CRLF inputs, without file discovery.
     #[test]
     #[cfg_attr(
         miri,
