@@ -158,7 +158,7 @@ fn target_names_do_not_select_packages() {
 }
 
 #[test]
-fn command_dispatch_is_source_qualified_and_root_isolated_in_both_package_modes() {
+fn command_dispatch_is_source_qualified_in_both_package_modes() {
     let checkout = "checkout with spaces";
     for (mode, label) in [(vec![], "alpha"), (vec!["--each-target", "lib"], "alpha::custom_library_name")] {
         let mut options = vec!["-p", "alpha@0.1.0", "--chdir", "--keep-going", "--jobs", "2", "--timeout", "3s"];
@@ -215,6 +215,61 @@ fn command_dispatch_is_source_qualified_and_root_isolated_in_both_package_modes(
         assert_eq!(code, ExitCode::from(17));
         assert_eq!(output, b"");
     }
+}
+
+#[test]
+fn explicit_root_selection_does_not_dispatch_other_default_members() {
+    let checkout = "checkout with spaces";
+    let args = args(&[
+        "-p",
+        "root-package@0.1.0",
+        "--",
+        "cargo",
+        "check",
+        "--offline",
+        "-p",
+        "{cargo-spec}",
+    ]);
+    let mut output = Vec::new();
+    let mut executions = 0;
+    let code = run_workspace_with(
+        &args,
+        selection_without_files,
+        |manifest, toolchain| {
+            assert_eq!((manifest, toolchain), (None, None));
+            let mut workspace = workspace(checkout, "literal-local-id");
+            workspace.default_member_names = std::iter::once("alpha".to_owned()).collect();
+            Ok(workspace)
+        },
+        &mut output,
+        |plan, keep_going, jobs, timeout| {
+            executions += 1;
+            assert!(!keep_going);
+            assert_eq!(jobs.get(), 1);
+            assert_eq!(timeout, None);
+            assert_eq!(
+                plan,
+                &Plan {
+                    invocations: vec![Invocation {
+                        label: Some("root-package".to_owned()),
+                        argv: vec![
+                            "cargo".to_owned(),
+                            "check".to_owned(),
+                            "--offline".to_owned(),
+                            "-p".to_owned(),
+                            expected_selector(checkout, "root-package"),
+                        ],
+                        work_dir: None,
+                    }],
+                }
+            );
+            Ok(ExitCode::SUCCESS)
+        },
+    )
+    .expect("explicit root-package dispatch");
+    assert_eq!(executions, 1);
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(output, b"");
 }
 
 #[test]
