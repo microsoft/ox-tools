@@ -63,8 +63,10 @@ arrive; it does not interrupt request retries or `Retry-After` waits.
 Advisory HTTP failures that exhaust request resilience and
 compressed-size violations do not trigger whole-transfer retries. Failed
 downloads or extraction never replace the last usable database or mark the
-refresh successful. Cache identity includes the archive URL so changing mirrors
-does not reuse another endpoint's freshness marker. Successful publication also
+refresh successful. Cache identity uses a BLAKE3 fingerprint of the complete
+archive URL, including credentials and query parameters, without storing the URL
+itself. Changing mirrors or signed URLs does not reuse another endpoint's
+freshness marker. Successful publication also
 removes the legacy Git checkout; failed refreshes leave it intact. RustSec is
 used only for parsing and queries, with its Git features disabled; advisory
 collection requires neither a Git executable nor RustSec's HTTP transports.

@@ -141,7 +141,7 @@ impl Fixture {
         write_fixture_database(&fixture.dir.path().join("repo"));
         fixture
             .cache()
-            .save(SYNC_MARKER, &(UNREACHABLE_URL, "repo"))
+            .save(SYNC_MARKER, &(blake3::hash(UNREACHABLE_URL.as_bytes()).to_hex().as_str(), "repo"))
             .expect("temporary directories are writable");
 
         fixture
@@ -483,7 +483,7 @@ async fn test_advisory_provider_reports_a_missing_database_directory() {
     let dir = tempfile::tempdir().expect("temporary directories are creatable");
     let cache = Cache::new(dir.path(), Duration::from_hours(8760), false);
     cache
-        .save(SYNC_MARKER, &(UNREACHABLE_URL, "repo"))
+        .save(SYNC_MARKER, &(blake3::hash(UNREACHABLE_URL.as_bytes()).to_hex().as_str(), "repo"))
         .expect("temporary directories are writable");
 
     let error = Provider::new(&cache, Arc::new(NoOpProgress), UNREACHABLE_URL)
@@ -567,7 +567,7 @@ async fn changing_the_archive_endpoint_requires_a_new_download() {
             dir.path().join(snapshot).is_dir(),
             server.received_requests().await.unwrap().len()
         ),
-        (second, true, 2)
+        (blake3::hash(second.as_bytes()).to_hex().to_string(), true, 2)
     );
 }
 

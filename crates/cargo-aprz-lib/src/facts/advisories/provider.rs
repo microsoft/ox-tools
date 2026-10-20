@@ -52,8 +52,8 @@ impl Provider {
 
     async fn with_fetcher<F: DbFetcher>(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<F>) -> Result<Self> {
         let lock = Arc::new(lock_cache(cache.dir()).await?);
-        if let CacheResult::Data((url, directory)) = cache.load::<(String, String)>("last_synced.bin")
-            && url == database_url
+        if let CacheResult::Data((identity, directory)) = cache.load::<(String, String)>("last_synced.bin")
+            && identity == archive_identity(database_url)
         {
             let path = snapshot_path(cache.dir(), &directory)?;
             return Ok(Self {
@@ -217,6 +217,10 @@ fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
     Ok(root.join(directory))
 }
 
+fn archive_identity(url: &str) -> String {
+    blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
 fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Result<()> {
     let previous = match Cache::new(cache.dir(), Duration::MAX, false).load::<(String, String)>("last_synced.bin") {
         CacheResult::Data((_, directory)) if directory.starts_with(".advisories-") => Some(snapshot_path(cache.dir(), &directory)?),
@@ -233,7 +237,7 @@ fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Resul
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| ohno::app_err!("advisory marker filename is not UTF-8"))?;
-    cache.save(filename, &(url, directory))?;
+    cache.save(filename, &(archive_identity(url), directory))?;
     marker
         .persist(cache.dir().join("last_synced.bin"))
         .map_err(|error| error.error)
@@ -641,7 +645,7 @@ mod tests {
         let cache = Cache::new(root.path(), Duration::MAX, false);
         assert!(matches!(
             cache.load::<(String, String)>("last_synced.bin"),
-            CacheResult::Data((url, _)) if url == "new-url"
+            CacheResult::Data((identity, _)) if identity == archive_identity("new-url")
         ));
     }
 
@@ -728,7 +732,7 @@ mod tests {
         let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
             panic!("cleanup failures must not discard the new marker");
         };
-        assert_eq!(marker, ("new-url".to_owned(), name));
+        assert_eq!(marker, (archive_identity("new-url"), name));
     }
 
     #[tokio::test]
@@ -829,7 +833,7 @@ mod tests {
         let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
             panic!("the successful refresh must publish a marker");
         };
-        assert_eq!(marker, ("https://example.invalid/archive.tar.gz".to_owned(), name));
+        assert_eq!(marker, (archive_identity("https://example.invalid/archive.tar.gz"), name));
     }
 
     #[tokio::test]
@@ -851,7 +855,7 @@ mod tests {
 
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1, "the database must be fetched exactly once");
         assert!(
-            matches!(cache.load::<(String, String)>("last_synced.bin"), CacheResult::Data((url, _)) if url == "https://example.invalid/db.git"),
+            matches!(cache.load::<(String, String)>("last_synced.bin"), CacheResult::Data((identity, _)) if identity == archive_identity("https://example.invalid/db.git")),
             "a successful fetch must record the synchronization marker"
         );
         assert_eq!(
@@ -878,7 +882,9 @@ mod tests {
 
         // Seed a database and its synchronization marker, so no fetch is needed.
         write_advisory(&tmp.path().join("repo"), "seeded-crate", "RUSTSEC-2020-0004", None);
-        cache.save("last_synced.bin", &("https://example.invalid/db.git", "repo")).unwrap();
+        cache
+            .save("last_synced.bin", &(archive_identity("https://example.invalid/db.git"), "repo"))
+            .unwrap();
 
         let provider = Provider::with_fetcher(
             &cache,
@@ -897,6 +903,34 @@ mod tests {
 
         let crates = vec![CrateSpec::from_arcs("seeded-crate".into(), Arc::new("1.0.0".parse().unwrap()))];
         assert_eq!(provider.get_advisory_data(crates.into()).await.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn signed_archive_urls_are_fingerprinted_without_losing_cache_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let fetcher = Arc::new(FixtureFetcher::default());
+        let first = "https://test-user:synthetic-password@mirror.invalid/db.tar.gz?token=synthetic-token-one";
+        let second = "https://test-user:synthetic-password@mirror.invalid/db.tar.gz?token=synthetic-token-two";
+
+        for (url, expected_fetches) in [(first, 1), (first, 1), (second, 2)] {
+            Provider::with_fetcher(&cache, Arc::new(RecordingProgress::default()), url, Arc::clone(&fetcher))
+                .await
+                .expect("the fixture fetcher produces a valid database for each signed URL");
+
+            assert_eq!(fetcher.calls.load(Ordering::SeqCst), expected_fetches);
+            let CacheResult::Data((identity, _)) = cache.load::<(String, String)>("last_synced.bin") else {
+                panic!("a successful refresh must publish its archive fingerprint");
+            };
+            assert_eq!(identity, archive_identity(url));
+            let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
+            for secret in ["test-user", "synthetic-password", "synthetic-token-one", "synthetic-token-two"] {
+                assert!(
+                    !marker.windows(secret.len()).any(|window| window == secret.as_bytes()),
+                    "the cache marker must not contain URL credentials"
+                );
+            }
+        }
     }
 
     #[tokio::test]

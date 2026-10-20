@@ -60,6 +60,7 @@ exclude = true
 internals = []
 
 [dependencies]
+blake3 = { workspace = true }
 bytes = { workspace = true }
 camino = { workspace = true }
 cargo_metadata = { workspace = true }

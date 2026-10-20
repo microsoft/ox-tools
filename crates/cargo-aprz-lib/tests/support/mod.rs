@@ -234,6 +234,6 @@ pub fn seed_advisory_db_at(cache_dir: &Path, archive_url: &str) {
 
     let cache = Cache::new(&advisories_dir, Duration::MAX, false);
     cache
-        .save("last_synced.bin", &(archive_url, "repo"))
+        .save("last_synced.bin", &(blake3::hash(archive_url.as_bytes()).to_hex().as_str(), "repo"))
         .expect("writing the advisory sync marker");
 }

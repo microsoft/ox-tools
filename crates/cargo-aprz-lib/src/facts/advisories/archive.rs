@@ -437,10 +437,14 @@ mod tests {
                 clock,
             );
             let mut download = std::pin::pin!(download);
-            while calls.load(Ordering::SeqCst) == 0 {
-                assert!(futures_util::poll!(&mut download).is_pending());
-                tokio::task::yield_now().await;
-            }
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while calls.load(Ordering::SeqCst) == 0 {
+                    assert!(futures_util::poll!(&mut download).is_pending());
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the fake request handler must be reached within the safety deadline");
 
             control.advance(Duration::from_secs(61));
             assert!(futures_util::poll!(&mut download).is_pending());

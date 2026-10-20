@@ -797,7 +797,10 @@ mod portable_tests {
         let advisories_dir = cache_dir.join("advisories");
         write_advisory(&advisories_dir.join("repo"), "fixture-crate", "RUSTSEC-2020-0001");
         Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
-            .save("last_synced.bin", &("https://example.invalid/advisories.tar.gz", "repo"))
+            .save(
+                "last_synced.bin",
+                &(blake3::hash(b"https://example.invalid/advisories.tar.gz").to_hex().as_str(), "repo"),
+            )
             .expect("writing advisory sync marker");
     }
 
@@ -1170,7 +1173,10 @@ mod portable_tests {
         let advisories_dir = cache_dir.path().join("advisories");
         write_advisory(&advisories_dir.join("repo"), "queried-crate", "RUSTSEC-2020-0200");
         Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
-            .save("last_synced.bin", &("https://example.invalid/advisories.tar.gz", "repo"))
+            .save(
+                "last_synced.bin",
+                &(blake3::hash(b"https://example.invalid/advisories.tar.gz").to_hex().as_str(), "repo"),
+            )
             .expect("writing advisory sync marker");
 
         let server_uri = server.uri();
