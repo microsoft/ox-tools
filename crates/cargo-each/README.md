@@ -70,7 +70,7 @@ the local package from a registry copy. Selectors are checkout-local and
 are reconstructed from metadata in each checkout.
 
 Ordinary aggregate `cargo build` and `cargo test` commands do not need
-cargo-each. Cargo's `--workspace` with `--exclude` flags scopes selection
+cargo-each. Cargo’s `--workspace` with `--exclude` flags scopes selection
 to workspace members without ambiguous package specs or checkout-local paths.
 Callers must skip explicitly empty selections rather than exclude every member.
 
@@ -248,3 +248,4 @@ cargo each --workspace --each-target test --target-required-feature loom -- \
 <sub>
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each">source code</a>.
 </sub>
+
