@@ -478,27 +478,32 @@ fn run_streamed_group_with(
     timeout: Option<Duration>,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
-    let started = Instant::now();
     run_streamed_group_control_with(
         invocation,
         timeout,
         spawn,
         |process| process.inner().try_wait(),
         terminate_group,
-        || started.elapsed(),
+        || {
+            let started = Instant::now();
+            move || started.elapsed()
+        },
         thread::sleep,
     )
 }
 
-fn run_streamed_group_control_with<T>(
+fn run_streamed_group_control_with<T, E>(
     invocation: &Invocation,
     timeout: Option<Duration>,
     spawn: impl FnOnce(Command) -> Result<T, String>,
     observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
     terminate: impl FnOnce(T) -> io::Result<()>,
-    elapsed: impl FnMut() -> Duration,
+    start_elapsed: impl FnOnce() -> E,
     sleep: impl FnMut(Duration),
-) -> InvocationResult {
+) -> InvocationResult
+where
+    E: FnMut() -> Duration,
+{
     let (program, command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return InvocationResult::Infrastructure(message),
@@ -509,6 +514,7 @@ fn run_streamed_group_control_with<T>(
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
+    let elapsed = start_elapsed();
     wait_for_process_with(process, timeout, observe, terminate, CHILD_LEADER_OBSERVATION, elapsed, sleep).result
 }
 
@@ -1710,6 +1716,7 @@ mod tests {
     #[test]
     fn streamed_group_runner_observes_success_before_its_deadline_in_process() {
         let elapsed = Cell::new(Duration::ZERO);
+        let spawned = Cell::new(false);
         let process = FakeProcess {
             observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
             termination: None,
@@ -1718,10 +1725,16 @@ mod tests {
         let result = run_streamed_group_control_with(
             &invocation(&["controlled-program"]),
             Some(Duration::from_millis(25)),
-            |_| Ok(process),
+            |_| {
+                spawned.set(true);
+                Ok(process)
+            },
             FakeProcess::observe,
             FakeProcess::terminate,
-            || elapsed.get(),
+            || {
+                assert!(spawned.get(), "the timeout clock starts after spawning");
+                || elapsed.get()
+            },
             |pause| elapsed.set(elapsed.get() + pause),
         );
 
