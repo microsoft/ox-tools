@@ -441,8 +441,16 @@ mod tests {
         for mode in [Mode::PerPackage, Mode::PerTarget] {
             validate_placeholders(&args(&["{cargo-spec}"]), mode).expect("package placeholder");
         }
-        validate_placeholders(&args(&["{cargo-spec}"]), Mode::Once).expect_err("package token is unavailable in once mode");
-        validate_json_placeholders(&args(&["{cargo-spec}"])).expect_err("package token is unavailable in JSON mode");
+        let err = validate_placeholders(&args(&["{cargo-spec}"]), Mode::Once).expect_err("package token is unavailable in once mode");
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{cargo-spec}` cannot be used here: per-package token is not valid in --once mode"
+        );
+        let err = validate_json_placeholders(&args(&["{cargo-spec}"])).expect_err("package token is unavailable in JSON mode");
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{cargo-spec}` cannot be used here: not valid in JSON-record mode"
+        );
     }
 
     #[test]

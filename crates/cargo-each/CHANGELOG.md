@@ -16,10 +16,6 @@
 
   - bump version to 0.6.0
 
-- ♻️ Code Refactoring
-
-  - remove unsupported Cargo compatibility handling
-
 ## [0.5.0] - 2026-10-13
 
 - ⚠️ Breaking
