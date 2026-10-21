@@ -3609,54 +3609,6 @@ fn unscoped_wrapper_exports_impact_off_before_dependencies_run() {
     );
 }
 
-/// `just --dry-run` reports the bodies just runs itself, not the body of a
-/// recipe that one of them launches as a child process. The unscoped wrapper
-/// launches its tier that way, so a plan of the public tier name reveals the
-/// wrapper alone.
-///
-/// The container driver decides whether to mint a GitHub token by matching the
-/// plan for `GITHUB_TOKEN`, so this is why it has to follow each nested target
-/// rather than reading one plan. If this test ever fails because a plan now
-/// reaches through the child process, that expansion can be deleted.
-#[test]
-fn a_wrapped_tier_hides_its_checks_from_a_plan() {
-    const PROBE: &str = "[private]\n[script(\"pwsh\", \"-NoProfile\")]\n_anvil-probe:\n    \
-        if (-not $env:GITHUB_TOKEN) { exit 1 }\n\n\
-        probe: (_anvil-unscoped \"probe\")\n";
-
-    if !tools_available() {
-        return;
-    }
-    let tmp = fixture(&[("helpers.just", HELPERS), ("probe.just", PROBE)], &[]);
-    let root = tmp.path();
-
-    let wrapped = run_just(root, &["--dry-run", "probe"], &[]);
-    let wrapped_plan = format!(
-        "{}{}",
-        String::from_utf8_lossy(&wrapped.stdout),
-        String::from_utf8_lossy(&wrapped.stderr)
-    );
-    assert!(
-        !wrapped_plan.contains("GITHUB_TOKEN"),
-        "a wrapped tier's plan must not reach the recipe it launches, or the driver's expansion is dead code\n{wrapped_plan}"
-    );
-    assert!(
-        wrapped_plan.contains("_anvil-probe"),
-        "the wrapper must still name the recipe it launches, which is what the driver follows\n{wrapped_plan}"
-    );
-
-    let direct = run_just(root, &["--dry-run", "_anvil-probe"], &[]);
-    let direct_plan = format!(
-        "{}{}",
-        String::from_utf8_lossy(&direct.stdout),
-        String::from_utf8_lossy(&direct.stderr)
-    );
-    assert!(
-        direct_plan.contains("GITHUB_TOKEN"),
-        "planning the launched recipe directly must reveal the variable, or this test proves nothing\n{direct_plan}"
-    );
-}
-
 /// The engine derives the ignore file's name from the Dockerfile's, and anvil
 /// maintains that artifact at a fixed canonical path, so the two names have to
 /// agree. A case variant is refused rather than accommodated: building from

@@ -28,6 +28,9 @@ pub(crate) enum CargoCli {
 pub(crate) struct CoverageGateArgs {
     /// Path(s) to the cargo-llvm-cov lcov tracefile(s).
     ///
+    /// Standalone evaluation only; `run` rejects this option. Use
+    /// `--coverage-dir` to select the collected output paths instead.
+    ///
     /// May be repeated (`--lcov a.info --lcov b.info`); the tracefiles are
     /// merged at the line level before gating, so multiple feature-config
     /// exports can be evaluated together. Defaults to a single

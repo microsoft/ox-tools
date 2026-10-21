@@ -25,10 +25,12 @@
 //! removed; feature-gated `test-util` APIs remain measured when they can compile
 //! in a non-test build. Local Cargo target `required-features` are treated as
 //! enabled at the target root, so code that requires one of those features to
-//! be absent is not part of that target's released surface. A dependency
-//! selector such as `dep/feature` also enables Cargo's implicit local `dep`
-//! feature when that feature exists; `dep?/feature` and `dep:dep` do not create
-//! local `cfg(feature = ...)` atoms.
+//! be absent is not part of that target's released surface. Dependency
+//! selectors such as `dep/feature`, `dep?/feature`, and `dep:dep` do not create
+//! local `cfg(feature = ...)` atoms. Dependency-feature availability does not
+//! prove local-feature activation, even for optional or renamed dependencies
+//! exposing a same-named local feature: another feature may activate the
+//! dependency through `dep:dep`.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
@@ -42,8 +44,7 @@
 //! tests or other non-release targets should migrate to the corresponding
 //! `evaluate_unfiltered*` function. The released-surface APIs also treat each
 //! target's local Cargo `required-features` as enabled when classifying its
-//! source, including implicit optional-dependency features exposed by Cargo
-//! metadata.
+//! source. Dependency-qualified requirements do not imply local cfg features.
 //!
 //! ## Configuration
 //!
@@ -105,7 +106,9 @@
 //! test-attributes = ["my_runtime::test"]
 //! ```
 //!
-//! The list has no qualified defaults and cannot be set per package.
+//! The list has no qualified defaults and cannot be set per package. Paths
+//! are accepted if valid in any supported Rust edition, so mixed-edition
+//! workspaces can list older attribute names without raw-identifier spelling.
 //!
 //! ### Target-specific policies
 //!
@@ -167,7 +170,7 @@
 //!
 //! ```text
 //! cargo coverage-gate [EVALUATION OPTIONS]
-//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
+//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [--summary-file <PATH>] [--quiet]
 //! ```
 //!
 //! The bare command retains its existing CLI shape while filtering existing
@@ -208,11 +211,12 @@
 //! directories; private profile isolation does not serialize stable artifact
 //! writers.
 //!
-//! `--lcov` may be repeated; each tracefile is released-surface filtered and
+//! In standalone evaluation, `--lcov` may be repeated; each tracefile is released-surface filtered and
 //! then the tracefiles are merged at the line level
 //! (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 //! (`--all-features`, `--no-default-features`) can be gated together
-//! without a separate, platform-specific merge step.
+//! without a separate, platform-specific merge step. `run` rejects `--lcov`;
+//! its collected paths are selected by `--coverage-dir`.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration or

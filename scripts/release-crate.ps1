@@ -10,30 +10,30 @@
     1. Version Bump: Automatically increment the version (major, minor, or patch) or set a specific version.
     2. Changelog Generation: It generates a CHANGELOG.md file based on git commit history.
 
-    By default, if neither --version nor --bump is specified, the script will bump the minor version
+    By default, if neither -Version nor -Bump is specified, the script will bump the minor version
     and reset the patch version to 0 (e.g., 1.2.3 -> 1.3.0).
 
 .PARAMETER CrateName
     The name of the crate to release. This should match the folder name inside the 'crates' directory.
 
 .PARAMETER Version
-    [Optional] The specific version to set (e.g., "1.2.3"). Can be specified with --version or -v.
+    [Optional] The specific version to set (e.g., "1.2.3"). Can be specified with -Version or -v.
     Passing the crate's current, untagged version refreshes its generated changelog and README.
     Use -BackfillVersion for an already tagged release.
-    This parameter is mutually exclusive with --bump.
+    This parameter is mutually exclusive with -Bump.
 
 .PARAMETER Bump
-    [Optional] The version component to bump: 'major', 'minor', or 'patch'. Can be specified with --bump or -b.
+    [Optional] The version component to bump: 'major', 'minor', or 'patch'. Can be specified with -Bump or -b.
     - major: Increments the major version and resets minor and patch to 0 (e.g., 1.2.3 -> 2.0.0)
     - minor: Increments the minor version and resets patch to 0 (e.g., 1.2.3 -> 1.3.0)
     - patch: Increments the patch version (e.g., 1.2.3 -> 1.2.4)
-    This parameter is mutually exclusive with --version.
+    This parameter is mutually exclusive with -Version.
 
 .PARAMETER BackfillVersion
     [Optional] Reconstructs the changelog section for an existing tagged version without updating
     crate versions or README files. The first semantic version uses the crate's complete history
     through that tag; later versions use the preceding semantic-version tag as the lower bound.
-    This parameter is mutually exclusive with --version and --bump.
+    This parameter is mutually exclusive with -Version and -Bump.
 
 .EXAMPLE
     # Increment the minor version for 'my-crate' (default behavior)
@@ -41,11 +41,11 @@
 
 .EXAMPLE
     # Set a specific version for 'my-crate'
-    .\release-crate.ps1 my-crate --version "2.5.0"
+    .\release-crate.ps1 my-crate -Version "2.5.0"
 
 .EXAMPLE
     # Bump the major version for 'my-crate'
-    .\release-crate.ps1 my-crate --bump major
+    .\release-crate.ps1 my-crate -Bump major
 
 .EXAMPLE
     # Bump the patch version for 'my-crate'
@@ -294,7 +294,7 @@ function Invoke-GitCommand {
         [string]$errorMessage = "Git command failed"
     )
 
-    $result = Invoke-Expression "git $command" 2>&1
+    $result = @(Invoke-Expression "git $command" 2>&1)
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$errorMessage. Git command: git $command. Error: $result" -ErrorAction Stop
     }
@@ -564,8 +564,8 @@ function Write-BackfilledChangelogVersion {
         $existingContent.Insert($insertPosition, $sectionText)
     }
 
-    $newContent | Set-Content $changelogFile -NoNewline
-    Write-Host "✅ Changelog version '$version' reconstructed from '$previousTag..$targetTag'."
+    ($newContent.TrimEnd() + "`n") | Set-Content $changelogFile -NoNewline
+    Write-Host "✅ Changelog version '$version' reconstructed from '$range'."
 }
 
 function Write-Changelog {
@@ -774,7 +774,7 @@ function Show-DependentCratesWarning {
     Write-Host "change in that crate's context, then run:" -ForegroundColor Yellow
     Write-Host ""
     foreach ($dependent in $dependentCrates) {
-        Write-Host "  .\scripts\release-crate.ps1 $dependent --bump <major|minor|patch>" -ForegroundColor DarkGray
+        Write-Host "  .\scripts\release-crate.ps1 $dependent -Bump <major|minor|patch>" -ForegroundColor DarkGray
     }
     Write-Host ""
 }
@@ -805,13 +805,13 @@ if (-not (Test-ValidCrateName -crateName $CrateName)) {
 }
 
 if (-not [string]::IsNullOrEmpty($Version) -and -not [string]::IsNullOrEmpty($Bump)) {
-    Write-Error "The --version and --bump options are mutually exclusive. Please specify only one."
+    Write-Error "The -Version and -Bump options are mutually exclusive. Please specify only one."
     Exit 1
 }
 
 if (-not [string]::IsNullOrEmpty($BackfillVersion) -and
     (-not [string]::IsNullOrEmpty($Version) -or -not [string]::IsNullOrEmpty($Bump))) {
-    Write-Error "The -BackfillVersion option is mutually exclusive with --version and --bump."
+    Write-Error "The -BackfillVersion option is mutually exclusive with -Version and -Bump."
     Exit 1
 }
 
