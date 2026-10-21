@@ -326,6 +326,10 @@ fn build_plan_with_hosts(
                     ArrayFormat::Json => {
                         crate::emit::json_array_region::validate_neighbor_splice(before, after, &array_host.paths)
                             .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                        for spec in &array_host.json_specs {
+                            crate::emit::json_array_region::validate_required_entries(after, spec)
+                                .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                        }
                     }
                 }
                 original_hosts.insert(host, after.clone());
@@ -422,6 +426,7 @@ impl ArrayFormat {
 struct ArrayHost {
     format: ArrayFormat,
     paths: Vec<Vec<String>>,
+    json_specs: Vec<crate::JsonArrayRegionSpec>,
 }
 
 /// Resolved repository paths mapped to their live-and-historical array state.
@@ -444,9 +449,19 @@ fn array_host_inputs(
                 if let Some(path) = path {
                     for host in region_host_paths(workspace, spec) {
                         let host = (hosts.resolve)(repo_root, host)?;
-                        let entry = paths.entry(host).or_insert_with(|| ArrayHost { format, paths: Vec::new() });
+                        let entry = paths.entry(host).or_insert_with(|| ArrayHost {
+                            format,
+                            paths: Vec::new(),
+                            json_specs: Vec::new(),
+                        });
                         debug_assert_eq!(entry.format, format, "validated array specs for one host always share a format");
                         entry.paths.push(path.to_vec());
+                        if format == ArrayFormat::Json {
+                            entry.json_specs.push(crate::JsonArrayRegionSpec {
+                                region: spec.clone(),
+                                path: path.to_vec(),
+                            });
+                        }
                     }
                 }
             }
@@ -466,6 +481,13 @@ fn array_host_inputs(
     }
     let mut originals = HashMap::new();
     let live = live_region_keys(repo_root, workspace, catalog, hosts)?;
+    let mut retiring = BTreeSet::new();
+    for key in manifest.regions.keys() {
+        let host = (hosts.resolve)(repo_root, &key.host)?;
+        if !live.contains(&(host.clone(), key.id.clone())) {
+            retiring.insert((host, key.id.clone()));
+        }
+    }
     for (host, format) in candidates {
         let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
         let discovered = match format {
@@ -484,17 +506,17 @@ fn array_host_inputs(
                 }
                 paths
                     .entry(host.clone())
-                    .or_insert_with(|| ArrayHost { format, paths: Vec::new() })
+                    .or_insert_with(|| ArrayHost {
+                        format,
+                        paths: Vec::new(),
+                        json_specs: Vec::new(),
+                    })
                     .paths
                     .extend(existing);
                 originals.insert(host, text);
             }
             Err(refusal)
-                if paths.contains_key(&host)
-                    || manifest
-                        .regions
-                        .keys()
-                        .any(|key| key.host.eq_ignore_ascii_case(&host) && !live.contains(&(host.clone(), key.id.clone()))) =>
+                if paths.contains_key(&host) || retiring.iter().any(|(retiring_host, _)| retiring_host.eq_ignore_ascii_case(&host)) =>
             {
                 return Err(match format {
                     ArrayFormat::Toml => array_plan_refusal(&host, &refusal),
@@ -2012,6 +2034,81 @@ mod tests {
         let error = json_array_plan(source, &manifest, &empty).unwrap_err().to_string();
         assert!(error.starts_with("Refused JSON array host CloudBuild.json:"), "{error}");
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn json_array_invalid_retirement_resolves_repeated_separators() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("a")).unwrap();
+        let source = concat!(
+            "{\"entries\":[\n",
+            "// >>> anvil-managed: entries\n",
+            "\"managed\",\n",
+            "// <<< anvil-managed: entries\n",
+        );
+        fs::write(tmp.path().join("a").join("config.json"), source).unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("a//config.json", "entries", checksum_str("\"managed\",\n"));
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+
+        let error = build_plan(
+            tmp.path(),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &empty,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.starts_with("Refused JSON array host a/config.json:"), "{error}");
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn json_array_required_entries_refuse_later_neighbor_duplicates_in_both_orders() {
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("CloudBuild.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let neighbor = RegionSpec {
+            host: HostSelector::Path("CloudBuild.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"managed\",\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let source = concat!(
+            "{\"entries\":[\n",
+            "// >>> anvil-managed: settings\n",
+            "\"old\",\n",
+            "// <<< anvil-managed: settings\n",
+            "]}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("CloudBuild.json", "settings", checksum_str("\"old\",\n"));
+        for array_first in [false, true] {
+            let mut builder = Catalog::builder(test_cli());
+            if array_first {
+                builder = builder.with_json_array_region(array.clone());
+            }
+            builder = builder.with_artifact(Artifact::region(neighbor.clone()));
+            if !array_first {
+                builder = builder.with_json_array_region(array.clone());
+            }
+            let error = json_array_plan(source, &manifest, &builder.build().unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("required JSON array entry \"managed\""), "{error}");
+            assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+        }
     }
 
     #[test]

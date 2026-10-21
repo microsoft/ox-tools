@@ -33,6 +33,7 @@ enum JsonValidationCondition {
     ScaffoldMissing,
     SelectedItemNotArray { path: Vec<String> },
     DuplicateProperty { property: String },
+    RequiredEntryCount { entry: String, count: usize },
 }
 
 impl std::fmt::Display for JsonValidationCondition {
@@ -58,6 +59,9 @@ impl std::fmt::Display for JsonValidationCondition {
                     f,
                     "JSON object property {property:?} occurs more than once, so array ownership is ambiguous"
                 )
+            }
+            Self::RequiredEntryCount { entry, count } => {
+                write!(f, "required JSON array entry {entry:?} occurs {count} times after composition")
             }
         }
     }
@@ -561,6 +565,40 @@ pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<S
     Ok(())
 }
 
+pub(crate) fn validate_required_entries(text: &str, spec: &JsonArrayRegionSpec) -> Result<(), ManagedRegionRefusal> {
+    if find_region_in_lines(text, spec.region.id.as_str(), CommentSyntax::SlashSlash, json_comment_lines(text))
+        .map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let parsed = parse(text)?;
+    let root = parsed
+        .value
+        .as_ref()
+        .ok_or_else(|| validation_refusal(JsonValidationCondition::HostNotObject, RefusalRemedy::ArrayShape))?;
+    let array = lookup(root, &spec.path)?.and_then(Value::as_array).ok_or_else(|| {
+        validation_refusal(
+            JsonValidationCondition::SelectedItemNotArray { path: spec.path.clone() },
+            RefusalRemedy::ArrayShape,
+        )
+    })?;
+    for required in body_strings(&spec.region.body)? {
+        let count = array
+            .elements
+            .iter()
+            .filter(|value| value.as_string_lit().is_some_and(|value| value.value == required))
+            .count();
+        if count != 1 {
+            return Err(validation_refusal(
+                JsonValidationCondition::RequiredEntryCount { entry: required, count },
+                RefusalRemedy::ArrayDependency,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_unique_properties(value: &Value<'_>) -> Result<(), ManagedRegionRefusal> {
     if let Some(object) = value.as_object() {
         let mut names = BTreeSet::new();
@@ -875,6 +913,13 @@ mod tests {
                 },
                 "JSON object property \"flag\" occurs more than once, so array ownership is ambiguous",
             ),
+            (
+                JsonValidationCondition::RequiredEntryCount {
+                    entry: "managed".to_owned(),
+                    count: 2,
+                },
+                "required JSON array entry \"managed\" occurs 2 times after composition",
+            ),
         ];
 
         for (condition, expected) in cases {
@@ -1030,12 +1075,26 @@ mod tests {
         let item = plan(Some(source), &Manifest::default()).unwrap();
         let output = item.spliced_host.as_deref().unwrap();
 
-        assert_eq!(output.matches(r#""build\\Extensions\\Anvil""#).count(), 1);
-        assert!(output.contains("// repository comment"));
-        assert!(output.contains("/* retained */ \"src\","));
-        assert!(output.contains("\"Other\": true"));
-        assert!(output.contains("\"Tail\": 1"));
-        assert!(output.contains("// >>> anvil-managed: anvil-source-root"));
+        assert_eq!(
+            output,
+            concat!(
+                "{\n",
+                "  // repository comment\n",
+                "  \"EnlistmentRootPaths\": {\n",
+                "    \"SourceRootDirs\": [\n",
+                "      // >>> anvil-managed: anvil-source-root\n",
+                "      \"build\\\\Extensions\\\\Anvil\",\n",
+                "      // <<< anvil-managed: anvil-source-root\n",
+                "      \n",
+                "      /* retained */ \"src\",\n",
+                "      \n",
+                "    ],\n",
+                "    \"Other\": true,\n",
+                "  },\n",
+                "  \"Tail\": 1,\n",
+                "}\n",
+            )
+        );
         assert_eq!(item.decision, Decision::Write);
 
         let mut manifest = Manifest::default();
@@ -1328,13 +1387,36 @@ mod tests {
     #[test]
     fn malformed_wrong_typed_and_ambiguous_hosts_refuse() {
         let cases = [
-            "{",
-            "{\"EnlistmentRootPaths\": 1}",
-            "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":{}}}",
-            "{\"EnlistmentRootPaths\":{},\"EnlistmentRootPaths\":{}}",
+            ("{", RefusalRemedy::HostAlreadyUnparsable, None),
+            (
+                "{\"EnlistmentRootPaths\": 1}",
+                RefusalRemedy::ArrayShape,
+                Some(JsonValidationCondition::ParentNotObject {
+                    path: vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+                }),
+            ),
+            (
+                "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":{}}}",
+                RefusalRemedy::ArrayShape,
+                Some(JsonValidationCondition::SelectedItemNotArray {
+                    path: vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+                }),
+            ),
+            (
+                "{\"EnlistmentRootPaths\":{},\"EnlistmentRootPaths\":{}}",
+                RefusalRemedy::ArrayShape,
+                Some(JsonValidationCondition::AmbiguousSelector {
+                    path: vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+                    property: "EnlistmentRootPaths".to_owned(),
+                }),
+            ),
         ];
-        for source in cases {
-            assert!(plan(Some(source), &Manifest::default()).is_err(), "{source}");
+        for (source, remedy, condition) in cases {
+            let refusal = plan(Some(source), &Manifest::default()).unwrap_err();
+            assert_eq!(refusal.remedy, remedy, "{source}");
+            if let Some(condition) = condition {
+                assert_eq!(validation_condition(&refusal), &condition, "{source}");
+            }
         }
     }
 
@@ -1516,6 +1598,37 @@ mod tests {
         assert_eq!(
             adopt_entries(owned_separator, array, &spec.region.body).unwrap_err().remedy,
             RefusalRemedy::EnclosingOwnership
+        );
+    }
+
+    #[test]
+    fn required_entry_validation_handles_absent_and_wrong_shaped_regions() {
+        let mut spec = spec();
+        spec.path = vec!["entries".to_owned()];
+        spec.region.id = RegionId::new("entries");
+        spec.region.body = "\"managed\",\n".to_owned();
+
+        validate_required_entries("{\"entries\":[]}", &spec).unwrap();
+
+        let no_root = concat!("// >>> anvil-managed: entries\n", "// <<< anvil-managed: entries\n",);
+        assert_eq!(
+            validation_condition(&validate_required_entries(no_root, &spec).unwrap_err()),
+            &JsonValidationCondition::HostNotObject
+        );
+
+        let wrong_type = concat!(
+            "{\n",
+            "// >>> anvil-managed: entries\n",
+            "\"entries\": {},\n",
+            "// <<< anvil-managed: entries\n",
+            "\"tail\": true\n",
+            "}\n",
+        );
+        assert_eq!(
+            validation_condition(&validate_required_entries(wrong_type, &spec).unwrap_err()),
+            &JsonValidationCondition::SelectedItemNotArray {
+                path: vec!["entries".to_owned()]
+            }
         );
     }
 
