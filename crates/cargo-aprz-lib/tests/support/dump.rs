@@ -599,7 +599,7 @@ impl Dump {
     }
 
     fn users_csv(&self) -> String {
-        let mut writer = csv_writer(&["id", "gh_login", "name", "gh_avatar", "gh_id"]);
+        let mut writer = csv_writer(&["id", "username", "name", "gh_avatar", "gh_id"]);
 
         for user in &self.users {
             write_record(

@@ -4,6 +4,7 @@
 //! `RustSec`vulnerability advisory database fact provider.
 
 mod advisory_data;
+mod archive;
 mod provider;
 
 #[cfg(any(test, feature = "internals"))]

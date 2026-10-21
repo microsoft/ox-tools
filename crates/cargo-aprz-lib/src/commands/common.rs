@@ -180,11 +180,11 @@ pub struct CommonArgs {
     #[arg(long, hide = true, value_name = "URL", env = "APRZ_CODEBERG_URL")]
     pub codeberg_url: Option<String>,
 
-    /// Address of the `RustSec` advisory database git repository.
+    /// Download the `RustSec` advisory database from this `.tar.gz` archive URL.
     ///
-    /// Hidden: intended for local mirrors and for testing against a local repository.
-    #[arg(long, hide = true, value_name = "URL", env = "APRZ_ADVISORY_URL")]
-    pub advisory_url: Option<String>,
+    /// Hidden: intended for archive mirrors and for testing against a mock server.
+    #[arg(long, hide = true, value_name = "URL", env = "APRZ_ADVISORY_ARCHIVE_URL")]
+    pub advisory_archive_url: Option<String>,
 }
 
 impl CommonArgs {
@@ -208,8 +208,8 @@ impl CommonArgs {
         if let Some(url) = &self.codeberg_url {
             endpoints = endpoints.with_codeberg_url(url);
         }
-        if let Some(url) = &self.advisory_url {
-            endpoints = endpoints.with_advisory_url(url);
+        if let Some(url) = &self.advisory_archive_url {
+            endpoints = endpoints.with_advisory_archive_url(url);
         }
 
         endpoints
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), defaults.coverage_url());
         assert_eq!(endpoints.host_url("github.com"), defaults.host_url("github.com"));
         assert_eq!(endpoints.host_url("codeberg.org"), defaults.host_url("codeberg.org"));
-        assert_eq!(endpoints.advisory_url(), defaults.advisory_url());
+        assert_eq!(endpoints.advisory_archive_url(), defaults.advisory_archive_url());
     }
 
     #[test]
@@ -885,7 +885,7 @@ mod tests {
             "http://github.test",
             "--codeberg-url",
             "http://codeberg.test",
-            "--advisory-url",
+            "--advisory-archive-url",
             "http://advisory.test",
         ]);
         let endpoints = parsed.common.endpoints();
@@ -895,7 +895,16 @@ mod tests {
         assert_eq!(endpoints.coverage_url(), "http://coverage.test");
         assert_eq!(endpoints.host_url("github.com"), Some("http://github.test"));
         assert_eq!(endpoints.host_url("codeberg.org"), Some("http://codeberg.test"));
-        assert_eq!(endpoints.advisory_url(), "http://advisory.test");
+        assert_eq!(endpoints.advisory_archive_url(), "http://advisory.test");
+    }
+
+    #[test]
+    fn repository_endpoint_option_has_been_replaced_not_aliased() {
+        let error = ArgsHarness::try_parse_from(["aprz", "--advisory-url", "https://example.invalid/repository.git"])
+            .err()
+            .expect("the obsolete repository endpoint must not be silently accepted");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
