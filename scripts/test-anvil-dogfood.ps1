@@ -55,10 +55,16 @@
     Remove this repository's anvil images and cache volumes before starting,
     forcing a cold build. Use when testing the image definition itself.
 
+.PARAMETER GitHubToken
+    Opt in to forwarding a supplied host GITHUB_TOKEN to container commands,
+    including anvil-aprz and the requested tier. Fails before starting the
+    suite if GITHUB_TOKEN is missing or blank. Never reads host gh credentials.
+
 .EXAMPLE
     ./scripts/test-anvil-dogfood.ps1
     ./scripts/test-anvil-dogfood.ps1 -Engine docker -Tier anvil-pr-fast
     ./scripts/test-anvil-dogfood.ps1 -SkipTier -Clean
+    ./scripts/test-anvil-dogfood.ps1 -GitHubToken -Tier anvil-pr-fast
 #>
 
 [CmdletBinding()]
@@ -68,7 +74,8 @@ param(
     [string[]]$Tier = @('anvil-pr'),
     [switch]$SkipTier,
     [switch]$KeepImages,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$GitHubToken
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,6 +135,19 @@ function Write-Skipped([string]$Name, [string]$Why) {
 }
 
 # ------------------------------------------------------------------ helpers --
+
+function Get-ContainerArguments {
+    param([switch]$GitHubToken)
+
+    $arguments = @('anvil-container')
+    if ($GitHubToken) {
+        if ([string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+            throw '-GitHubToken requires a supplied GITHUB_TOKEN in the host environment.'
+        }
+        $arguments += '--github-token'
+    }
+    $arguments
+}
 
 function Invoke-Native {
     param(
@@ -305,7 +325,7 @@ function Invoke-Suite([string]$EngineName) {
     Assert-That 'anvil-container-status reports an image reference' ([bool]$reference) 'no image: line in status output'
     Write-Step "reference: $reference"
 
-    $up = Invoke-Just -Arguments @('anvil-container', 'just', 'anvil-container-tag') -AllowFailure
+    $up = Invoke-Just -Arguments ($ContainerArguments + @('just', 'anvil-container-tag')) -AllowFailure
     Assert-Equal 'the first run builds the image if it is missing' 0 $up.ExitCode
     if ($up.ExitCode -ne 0) {
         Write-Tail $up.StdErr
@@ -362,13 +382,13 @@ function Invoke-Suite([string]$EngineName) {
 
     # The check whose prebuilt binary exercises both the loader and the
     # advisory API. Kept as its own step so a regression names itself.
-    $aprz = Invoke-Just -Arguments @('anvil-container', 'just', 'anvil-aprz') -AllowFailure
+    $aprz = Invoke-Just -Arguments ($ContainerArguments + @('just', 'anvil-aprz')) -AllowFailure
     Assert-Equal 'anvil-aprz runs inside the image' 0 $aprz.ExitCode
     if ($aprz.ExitCode -ne 0) { Write-Tail "$($aprz.StdOut)`n$($aprz.StdErr)" }
 
     # A check that reads the workspace rather than the network, so a failure
     # points at the mount rather than at connectivity.
-    $fmt = Invoke-Just -Arguments @('anvil-container', 'just', 'anvil-fmt') -AllowFailure
+    $fmt = Invoke-Just -Arguments ($ContainerArguments + @('just', 'anvil-fmt')) -AllowFailure
     Assert-Equal 'anvil-fmt runs inside the image' 0 $fmt.ExitCode
     if ($fmt.ExitCode -ne 0) { Write-Tail "$($fmt.StdOut)`n$($fmt.StdErr)" }
 
@@ -376,7 +396,7 @@ function Invoke-Suite([string]$EngineName) {
 
     $secondReference = Get-ImageReference
     Assert-Equal 'the tag is stable across runs' $reference $secondReference
-    $reuse = Invoke-Just -Arguments @('anvil-container', 'just', 'anvil-fmt') -AllowFailure
+    $reuse = Invoke-Just -Arguments ($ContainerArguments + @('just', 'anvil-fmt')) -AllowFailure
     Assert-Equal 'a later run succeeds' 0 $reuse.ExitCode
     Assert-That 'a later run does not rebuild the image' `
         (-not ("$($reuse.StdOut)`n$($reuse.StdErr)" -match 'building |Step 1/|FROM ')) `
@@ -458,7 +478,7 @@ function Invoke-Suite([string]$EngineName) {
         foreach ($recipe in $Tier) {
             Write-Step "running $recipe (this is the long one)"
             $started = Get-Date
-            $run = Invoke-Just -Arguments @('anvil-container', 'just', $recipe) -AllowFailure
+            $run = Invoke-Just -Arguments ($ContainerArguments + @('just', $recipe)) -AllowFailure
             $took = (Get-Date) - $started
             Assert-Equal ("{0} passes inside the image (took {1:mm\:ss})" -f $recipe, $took) 0 $run.ExitCode
             if ($run.ExitCode -ne 0) { Write-Tail "$($run.StdOut)`n$($run.StdErr)" 40 }
@@ -471,6 +491,7 @@ function Invoke-Suite([string]$EngineName) {
 # -------------------------------------------------------------------- main ----
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$ContainerArguments = @(Get-ContainerArguments -GitHubToken:$GitHubToken)
 
 Write-Host ''
 Write-Host 'anvil containerized execution - dogfood against this repository' -ForegroundColor White

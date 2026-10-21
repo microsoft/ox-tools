@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use compact_str::CompactString;
 use ohno::IntoAppError;
 use rustsec::database::Database;
-use rustsec::repository::git::Repository;
+use tick::FutureExt;
 
 use super::AdvisoryData;
 use crate::facts::ProviderResult;
@@ -27,63 +27,56 @@ pub struct Provider {
 
 const DATABASE_FETCH_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// How the advisory database is brought into the cache directory.
-///
-/// This is a seam: production clones the `RustSec` git repository, while tests substitute a
-/// local database. `rustsec` refuses any database URL that does not start with `https://`,
-/// so without this seam the successful-fetch path could not be exercised offline.
-///
-/// Implementations run on a blocking thread.
+/// How an advisory database is installed into a new staging directory.
 trait DbFetcher: Send + Sync + 'static {
-    fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()>;
+    fn fetch(&self, repo_path: &Path, database_url: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
-/// The production fetcher: clones the advisory database over git.
-struct GitFetcher;
+struct ArchiveFetcher;
 
-impl DbFetcher for GitFetcher {
-    fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
-        fetch_repository(repo_path, database_url, |url, path, ensure_fresh, timeout| {
-            Repository::fetch(url, path, ensure_fresh, timeout)
-        })
+impl DbFetcher for ArchiveFetcher {
+    async fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
+        super::archive::download(
+            repo_path,
+            database_url,
+            DATABASE_FETCH_TIMEOUT,
+            crate::facts::resilient_http::new_client(),
+        )
+        .await
     }
-}
-
-fn fetch_repository(
-    repo_path: &Path,
-    database_url: &str,
-    fetch: impl FnOnce(&str, &Path, bool, Duration) -> core::result::Result<Repository, rustsec::Error>,
-) -> Result<()> {
-    fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
-        .map(|_| ())
-        .map_err(Into::into)
 }
 
 impl Provider {
     pub async fn new(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str) -> Result<Self> {
-        Self::with_fetcher(cache, progress, database_url, Arc::new(GitFetcher)).await
+        Self::with_fetcher(cache, progress, database_url, Arc::new(ArchiveFetcher)).await
     }
 
-    async fn with_fetcher(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<dyn DbFetcher>) -> Result<Self> {
-        let cache_dir = cache.dir();
-        let sync_filename = "last_synced.bin";
-        let repo_path = cache_dir.join("repo");
-
-        let needs_fetch = matches!(cache.load::<()>(sync_filename), CacheResult::Miss);
-
-        if needs_fetch {
-            download_db(&repo_path, database_url, progress.as_ref(), fetcher)
-                .await
-                .into_app_err("downloading the advisory database")?;
-            cache.save(sync_filename, &())?;
+    async fn with_fetcher<F: DbFetcher>(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<F>) -> Result<Self> {
+        let lock = Arc::new(lock_cache(cache.dir()).await?);
+        if let CacheResult::Data((identity, directory)) = cache.load::<(String, String)>("last_synced.bin")
+            && identity == archive_identity(database_url)
+        {
+            let path = snapshot_path(cache.dir(), &directory)?;
+            return Ok(Self {
+                database: Arc::new(open_db(path, progress.as_ref(), lock).await?),
+            });
         }
 
+        let root = cache.dir().to_path_buf();
+        let stage = tokio::task::spawn_blocking(move || tempfile::Builder::new().prefix(".advisories-").tempdir_in(root)).await??;
+        download_db(stage.path(), database_url, progress.as_ref(), fetcher)
+            .await
+            .into_app_err(
+                "downloading the advisory archive; --advisory-archive-url must point to a .tar.gz archive, not a Git repository",
+            )?;
+        let database = open_db(stage.path(), progress.as_ref(), Arc::clone(&lock))
+            .await
+            .into_app_err("validating the downloaded advisory database")?;
+        let cache = cache.clone();
+        let database_url = database_url.to_owned();
+        tokio::task::spawn_blocking(move || with_cache_lock(lock, || publish_snapshot(&cache, stage, &database_url))).await??;
         Ok(Self {
-            database: Arc::new(
-                open_db(&repo_path, progress.as_ref())
-                    .await
-                    .into_app_err("opening the advisory database")?,
-            ),
+            database: Arc::new(database),
         })
     }
 
@@ -153,23 +146,128 @@ where
         .map(|(crate_spec, data)| (crate_spec, ProviderResult::Found(data)))
 }
 
-async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress) -> Result<Database> {
+async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress, lock: Arc<std::fs::File>) -> Result<Database> {
     let cache_path = cache_dir.as_ref().to_path_buf();
 
     run_blocking_with_progress(progress, "Opening the advisory database", "opening", move || {
-        Database::open(&cache_path).map_err(Into::into)
+        with_cache_lock(lock, || Database::open(&cache_path).map_err(Into::into))
     })
     .await
+    .into_app_err("opening the advisory database")
 }
 
-async fn download_db(cache_dir: impl AsRef<Path>, database_url: &str, progress: &dyn Progress, fetcher: Arc<dyn DbFetcher>) -> Result<()> {
-    let cache_path = cache_dir.as_ref().to_path_buf();
-    let database_url = database_url.to_owned();
+fn with_cache_lock<T>(lock: Arc<std::fs::File>, operation: impl FnOnce() -> T) -> T {
+    // Blocking work outlives a cancelled initializer, so it must own its lock guard.
+    let _lock = lock;
+    operation()
+}
 
-    run_blocking_with_progress(progress, "Downloading the advisory database", "downloading", move || {
-        fetcher.fetch(&cache_path, &database_url)
-    })
+async fn download_db<F: DbFetcher>(
+    cache_dir: impl AsRef<Path>,
+    database_url: &str,
+    progress: &dyn Progress,
+    fetcher: Arc<F>,
+) -> Result<()> {
+    let msg = "Downloading the advisory database";
+    log::info!(target: LOG_TARGET, "{msg}");
+    progress.set_indeterminate(Box::new(move || msg.to_owned()));
+    let start = std::time::Instant::now();
+    fetcher.fetch(cache_dir.as_ref(), database_url).await?;
+    log::debug!(target: LOG_TARGET, "Finished downloading the advisory database in {:.3}s", start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+async fn lock_cache(root: &Path) -> Result<std::fs::File> {
+    let lock = open_cache_lock(root).await?;
+    wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &tick::Clock::new_tokio()).await?;
+    Ok(lock)
+}
+
+async fn open_cache_lock(root: &Path) -> Result<std::fs::File> {
+    tokio::fs::create_dir_all(root)
+        .await
+        .into_app_err("creating directory for the advisory cache")?;
+    Ok(tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("archive.lock"))
+        .await?
+        .into_std()
+        .await)
+}
+
+async fn wait_for_cache_lock(lock: &std::fs::File, timeout: Duration, clock: &tick::Clock) -> Result<()> {
+    async {
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(std::fs::TryLockError::WouldBlock) => clock.delay(Duration::from_millis(50)).await,
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
+        }
+    }
+    .timeout(clock, timeout)
     .await
+    .into_app_err("timed out waiting for another advisory cache refresh to finish")??;
+    Ok(())
+}
+
+fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
+    let mut components = Path::new(directory).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(ohno::app_err!(
+            "invalid advisory cache snapshot path; clear the advisory cache and retry"
+        ));
+    }
+    Ok(root.join(directory))
+}
+
+fn archive_identity(url: &str) -> String {
+    blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+/// Publishes a validated staging directory as the current advisory snapshot.
+///
+/// Replacing `last_synced.bin` is the commit point: the staging directory stays owned by
+/// `stage` (and is removed on failure) until then. Removing older data afterwards is
+/// best-effort and cannot undo a published snapshot.
+fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Result<()> {
+    let previous = match Cache::new(cache.dir(), Duration::MAX, false).load::<(String, String)>("last_synced.bin") {
+        CacheResult::Data((_, directory)) if directory.starts_with(".advisories-") => Some(snapshot_path(cache.dir(), &directory)?),
+        _ => None,
+    };
+    let directory = stage
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ohno::app_err!("advisory snapshot directory name is not UTF-8"))?;
+    let marker = tempfile::NamedTempFile::new_in(cache.dir())?;
+    let filename = marker
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ohno::app_err!("advisory marker filename is not UTF-8"))?;
+    cache.save(filename, &(archive_identity(url), directory))?;
+    marker
+        .persist(cache.dir().join("last_synced.bin"))
+        .map_err(|error| error.error)
+        .into_app_err("publishing the advisory cache synchronization marker")?;
+    let published = stage.keep();
+    if let Some(previous) = previous
+        && previous != published
+        && let Err(error) = std::fs::remove_dir_all(&previous)
+    {
+        log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", previous.display());
+    }
+    let legacy = cache.dir().join("repo");
+    if let Err(error) = std::fs::remove_dir_all(&legacy)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", legacy.display());
+    }
+    Ok(())
 }
 
 async fn run_blocking_with_progress<T, F>(progress: &dyn Progress, msg: &str, success_verb: &str, blocking_fn: F) -> Result<T>
@@ -199,24 +297,11 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::sync::Mutex;
+    use std::task::Poll;
+
+    use futures_util::StreamExt;
 
     use super::*;
-
-    #[test]
-    fn git_fetch_requires_a_fresh_database_and_forwards_the_repository_and_timeout() {
-        let repository = Path::new("synthetic/advisories");
-        let url = "https://example.invalid/advisories";
-        let expected = rustsec::Error::new(rustsec::ErrorKind::Io, "scripted fetch failure");
-        let error = fetch_repository(repository, url, |actual_url, path, ensure_fresh, timeout| {
-            assert_eq!(actual_url, url);
-            assert_eq!(path, repository);
-            assert!(ensure_fresh, "accepting a stale advisory database defeats freshness validation");
-            assert_eq!(timeout, Duration::from_mins(1));
-            Err(expected.clone())
-        })
-        .unwrap_err();
-        assert_eq!(error.to_string(), expected.to_string());
-    }
 
     fn write_advisory(root: &Path, package: &str, id: &str, withdrawn: Option<&str>) {
         let dir = root.join("crates").join(package);
@@ -244,6 +329,24 @@ mod tests {
         fs::write(dir.join(format!("{id}.md")), content).unwrap();
     }
 
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("advisories")
+            .join(name)
+    }
+
+    /// Copies the checked-in one-advisory database into a mutable cache location under test.
+    fn seed_database(destination: &Path) {
+        let target = destination.join("crates").join("fixture-crate");
+        fs::create_dir_all(&target).unwrap();
+        for entry in fs::read_dir(fixture("database").join("crates").join("fixture-crate")).unwrap() {
+            let entry = entry.unwrap();
+            fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    }
+
     /// Test fetcher: writes a miniature advisory database where the real one would be cloned,
     /// and records how many times it was asked to.
     #[derive(Debug, Default)]
@@ -252,7 +355,7 @@ mod tests {
     }
 
     impl DbFetcher for FixtureFetcher {
-        fn fetch(&self, repo_path: &Path, _database_url: &str) -> Result<()> {
+        async fn fetch(&self, repo_path: &Path, _database_url: &str) -> Result<()> {
             let _ = self.calls.fetch_add(1, Ordering::SeqCst);
             write_advisory(repo_path, "fetched-crate", "RUSTSEC-2020-0003", None);
             Ok(())
@@ -263,8 +366,147 @@ mod tests {
     struct NoOpFetcher;
 
     impl DbFetcher for NoOpFetcher {
-        fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
+        async fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedArchiveFetcher {
+        failures: usize,
+        stall: bool,
+        // Counters only record handler calls and completed partial writes. Assertions read
+        // them after the download finishes, so they publish no other memory.
+        calls: Arc<AtomicUsize>,
+        written: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedArchiveFetcher {
+        fn new(failures: usize, stall: bool) -> Self {
+            Self {
+                failures,
+                stall,
+                calls: Arc::new(AtomicUsize::new(0)),
+                written: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    async fn wait_for_partial_write(destination: &Path, prefix: &[u8]) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let file = fs::read_dir(destination)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.is_file())
+                    .expect("the downloader creates its attempt file before polling the body");
+                if tokio::fs::read(file).await.unwrap() == prefix {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .into_app_err("timed out waiting for the expected partial archive write")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_write_observation_is_bounded_for_missing_or_incorrect_bytes() {
+        for attempt in ["partial-write/empty", "partial-write/wrong-prefix"] {
+            let attempt = fixture(attempt);
+            let observation = wait_for_partial_write(&attempt, b"partial archive data");
+            let mut observation = std::pin::pin!(observation);
+            assert!(futures_util::poll!(&mut observation).is_pending());
+
+            tokio::time::advance(Duration::from_secs(10)).await;
+            let error = observation.await.expect_err("absent or incorrect bytes must not wait indefinitely");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("timed out waiting for the expected partial archive write"),
+                "{error}"
+            );
+        }
+    }
+
+    impl DbFetcher for ScriptedArchiveFetcher {
+        async fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
+            const BODY_FAILED: usize = 1;
+            const BODY_STALLED: usize = 2;
+
+            let destination = repo_path.to_path_buf();
+            let failures = self.failures;
+            let stall = self.stall;
+            let calls = Arc::clone(&self.calls);
+            let written = Arc::clone(&self.written);
+            // The body stream stores the event after its partial write is observed on disk; the
+            // poll loop below swaps it out to decide when to advance the clock. The filesystem
+            // write is awaited before the store, so the event carries no other data and SeqCst
+            // is used only to keep this single-flag handshake obviously correct.
+            let event = Arc::new(AtomicUsize::new(0));
+            let handler = fetch::fake::FakeHandler::from_fn({
+                let event = Arc::clone(&event);
+                move |_| {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                    if attempt >= failures {
+                        return fetch::HttpResponseBuilder::new_fake()
+                            .bytes(bytes::Bytes::from_static(include_bytes!(
+                                "../../../tests/fixtures/advisories/root.tar.gz"
+                            )))
+                            .build();
+                    }
+                    let destination = destination.clone();
+                    let written = Arc::clone(&written);
+                    let event = Arc::clone(&event);
+                    let prefix = b"partial archive data";
+                    let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from_static(prefix).into()) }).chain(
+                        futures_util::stream::once(async move {
+                            // The stream is polled again only after write_all. Wait for Tokio's
+                            // buffered filesystem write to reach disk before failing or stalling.
+                            wait_for_partial_write(&destination, prefix)
+                                .await
+                                .expect("each attempt must write the expected prefix before the scripted body fails or stalls");
+                            written.fetch_add(1, Ordering::SeqCst);
+                            if stall {
+                                event.store(BODY_STALLED, Ordering::SeqCst);
+                                return std::future::pending().await;
+                            }
+                            event.store(BODY_FAILED, Ordering::SeqCst);
+                            Err(fetch::HttpError::from(std::io::Error::other("scripted body failure")))
+                        }),
+                    );
+                    fetch::HttpResponseBuilder::new_fake().stream(stream).build()
+                }
+            });
+            let control = tick::ClockControl::new();
+            let clock = control.to_clock();
+            let client = fetch::HttpClient::builder_fake(handler, &clock).minimal_pipeline().build();
+
+            let download = super::super::archive::download_with_clock(repo_path, database_url, DATABASE_FETCH_TIMEOUT, client, clock);
+            let mut download = std::pin::pin!(download);
+            let mut timed_out = false;
+            std::future::poll_fn(|cx| {
+                let result = download.as_mut().poll(cx);
+                if result.is_pending() {
+                    // Advance only after the partial write is observed, never during filesystem I/O.
+                    match event.swap(0, Ordering::SeqCst) {
+                        BODY_STALLED => {
+                            control.advance(DATABASE_FETCH_TIMEOUT + Duration::from_secs(1));
+                            timed_out = true;
+                        }
+                        BODY_FAILED => control.advance(Duration::from_secs(10)),
+                        _ if timed_out => {
+                            control.advance(Duration::from_secs(10));
+                            timed_out = false;
+                        }
+                        _ => return Poll::Pending,
+                    }
+                    cx.waker().wake_by_ref();
+                }
+                result
+            })
+            .await
         }
     }
 
@@ -382,6 +624,295 @@ mod tests {
         assert!(!progress.use_colors(), "the recorder inherits the default, which is no color");
     }
 
+    /// Attempts the cache lock once, without waiting.
+    async fn try_lock_cache(root: &Path) -> Result<std::fs::File> {
+        let lock = open_cache_lock(root).await?;
+        wait_for_cache_lock(&lock, Duration::ZERO, &tick::ClockControl::new().to_clock()).await?;
+        Ok(lock)
+    }
+
+    #[tokio::test]
+    async fn cache_lock_waits_on_the_injected_clock_until_released() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let lock = open_cache_lock(root.path()).await.unwrap();
+        let wait = wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &clock);
+        let mut wait = std::pin::pin!(wait);
+
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        control.advance(Duration::from_millis(50));
+        assert!(
+            futures_util::poll!(&mut wait).is_pending(),
+            "a held lock keeps the contender waiting"
+        );
+        drop(owner);
+        assert!(
+            futures_util::poll!(&mut wait).is_pending(),
+            "the contender retries only after its poll interval"
+        );
+        control.advance(Duration::from_millis(50));
+
+        assert!(matches!(futures_util::poll!(&mut wait), Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn cache_lock_contention_has_a_bounded_actionable_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let _owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let lock = open_cache_lock(root.path()).await.unwrap();
+        let wait = wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &clock);
+        let mut wait = std::pin::pin!(wait);
+
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        control.advance(DATABASE_FETCH_TIMEOUT);
+
+        let Poll::Ready(Err(error)) = futures_util::poll!(&mut wait) else {
+            panic!("a second owner must not wait beyond the deadline");
+        };
+        assert!(error.to_string().contains("waiting for another advisory cache refresh"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cancelled_cache_publication_keeps_the_lock_until_blocking_work_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let previous = root.path().join(".advisories-old");
+        seed_database(&previous);
+        cache.save("last_synced.bin", &("old-url", ".advisories-old")).unwrap();
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        seed_database(stage.path());
+        let snapshot = stage.path().to_path_buf();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(async move {
+            let lock = Arc::new(lock_cache(cache.dir()).await?);
+            tokio::task::spawn_blocking(move || {
+                let result = with_cache_lock(lock, || {
+                    started_tx.send(()).expect("the test waits for publication to start");
+                    release_rx.recv().expect("the test releases the publication worker");
+                    publish_snapshot(&cache, stage, "new-url")
+                });
+                finished_tx.send(()).expect("the test waits for the publication worker to finish");
+                result
+            })
+            .await?
+        });
+
+        started_rx.await.unwrap();
+        caller.abort();
+        let cancelled = caller.await.unwrap_err();
+        let contender = try_lock_cache(root.path()).await;
+        let blocked = contender.is_err();
+        drop(contender);
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        let _next_lock = try_lock_cache(root.path())
+            .await
+            .expect("publication must release the lock when its worker finishes");
+
+        assert!(cancelled.is_cancelled());
+        assert!(blocked, "a competing initializer must not lock during detached publication");
+        assert!(snapshot.join("crates").is_dir());
+        assert!(!previous.exists(), "the detached worker must finish old-snapshot cleanup");
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        assert!(matches!(
+            cache.load::<(String, String)>("last_synced.bin"),
+            CacheResult::Data((identity, _)) if identity == archive_identity("new-url")
+        ));
+    }
+
+    #[test]
+    fn cache_snapshot_paths_cannot_escape_the_cache_root() {
+        let error = snapshot_path(Path::new("cache"), "../outside").expect_err("the marker cannot reference a parent directory");
+
+        assert!(error.to_string().contains("invalid advisory cache snapshot path"), "{error}");
+    }
+
+    #[test]
+    fn marker_publication_failure_removes_the_unpublished_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("last_synced.bin")).unwrap();
+        seed_database(&root.path().join("repo"));
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        let snapshot = stage.path().to_path_buf();
+
+        let error = publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
+            .expect_err("a directory cannot be replaced by the marker file");
+
+        assert!(error.to_string().contains("publishing the advisory cache"), "{error}");
+        assert_eq!((snapshot.exists(), root.path().join("last_synced.bin").is_dir()), (false, true));
+        assert_eq!(Database::open(&root.path().join("repo")).unwrap().iter().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_archive_migration_removes_the_legacy_git_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        seed_database(&root.path().join("repo"));
+        cache.save("last_synced.bin", &()).unwrap();
+
+        let provider = Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.test/database.tar.gz",
+            Arc::new(FixtureFetcher::default()),
+        )
+        .await
+        .expect("a legacy marker must be replaced by a validated archive snapshot");
+
+        assert!(!root.path().join("repo").exists());
+        assert_eq!(provider.database.iter().next().unwrap().metadata.package.as_str(), "fetched-crate");
+        assert!(matches!(
+            cache.load::<(String, String)>("last_synced.bin"),
+            CacheResult::Data((_, directory)) if directory.starts_with(".advisories-")
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_archive_migration_preserves_the_legacy_git_checkout_and_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        seed_database(&root.path().join("repo"));
+        cache.save("last_synced.bin", &()).unwrap();
+        let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
+
+        Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.test/database.tar.gz",
+            Arc::new(NoOpFetcher),
+        )
+        .await
+        .expect_err("a missing staged database cannot replace the legacy checkout");
+
+        assert_eq!(fs::read(root.path().join("last_synced.bin")).unwrap(), marker);
+        assert_eq!(Database::open(&root.path().join("repo")).unwrap().iter().count(), 1);
+    }
+
+    #[test]
+    fn legacy_checkout_cleanup_failure_does_not_undo_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        fs::write(root.path().join("repo"), "not a directory").unwrap();
+        cache.save("last_synced.bin", &()).unwrap();
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
+
+        publish_snapshot(&cache, stage, "new-url").expect("legacy cleanup is best-effort after publication");
+
+        let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
+            panic!("cleanup failures must not discard the new marker");
+        };
+        assert_eq!(marker, (archive_identity("new-url"), name));
+    }
+
+    #[tokio::test]
+    async fn archive_body_error_retries_from_a_clean_file_before_publication() {
+        assert_archive_body_retry(false).await;
+    }
+
+    #[tokio::test]
+    async fn archive_body_timeout_retries_from_a_clean_file_before_publication() {
+        assert_archive_body_retry(true).await;
+    }
+
+    async fn assert_archive_body_retry(stall: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let fetcher = Arc::new(ScriptedArchiveFetcher::new(1, stall));
+
+        let provider = Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.test/database.tar.gz",
+            Arc::clone(&fetcher),
+        )
+        .await
+        .expect("a complete retry must replace the partial attempt");
+
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fetcher.written.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.database.iter().next().unwrap().metadata.package.as_str(), "archive-crate");
+        let CacheResult::Data((_, directory)) = cache.load::<(String, String)>("last_synced.bin") else {
+            panic!("the validated retry must publish a marker");
+        };
+        let snapshot = root.path().join(directory);
+        assert_eq!(Database::open(&snapshot).unwrap().iter().count(), 1);
+        assert_eq!(
+            fs::read_dir(snapshot)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            ["crates"]
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_archive_body_retries_preserve_the_previous_database_and_marker() {
+        for stall in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = Cache::new(root.path(), Duration::MAX, false);
+            let old_name = ".advisories-old";
+            let previous = root.path().join(old_name);
+            seed_database(&previous);
+            cache.save("last_synced.bin", &("old-url", old_name)).unwrap();
+            let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
+            let advisory_path = previous.join("crates").join("fixture-crate").join("RUSTSEC-2020-0001.md");
+            let advisory = fs::read(&advisory_path).unwrap();
+            let fetcher = Arc::new(ScriptedArchiveFetcher::new(usize::MAX, stall));
+
+            let error = Provider::with_fetcher(
+                &cache,
+                Arc::new(RecordingProgress::default()),
+                "https://example.test/database.tar.gz",
+                Arc::clone(&fetcher),
+            )
+            .await
+            .expect_err("four incomplete transfers must exhaust body retries");
+
+            let message = if stall { "download timed out" } else { "scripted body failure" };
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(fetcher.calls.load(Ordering::SeqCst), 4);
+            assert_eq!(fetcher.written.load(Ordering::SeqCst), 4);
+            assert_eq!(fs::read(root.path().join("last_synced.bin")).unwrap(), marker);
+            assert_eq!(fs::read(advisory_path).unwrap(), advisory);
+            assert_eq!(Database::open(&previous).unwrap().iter().count(), 1);
+            assert_eq!(
+                fs::read_dir(root.path())
+                    .unwrap()
+                    .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+                    .count(),
+                1,
+                "failed attempts must leave no staging directories"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_to_clean_an_old_snapshot_does_not_undo_a_successful_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let old_name = ".advisories-old";
+        fs::write(root.path().join(old_name), "not a directory").unwrap();
+        cache.save("last_synced.bin", &("old-url", old_name)).unwrap();
+        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
+        let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
+
+        publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
+            .expect("old snapshot cleanup is optional once the new snapshot is published");
+
+        let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
+            panic!("the successful refresh must publish a marker");
+        };
+        assert_eq!(marker, (archive_identity("https://example.invalid/archive.tar.gz"), name));
+    }
+
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
     async fn a_successful_fetch_marks_the_database_as_synchronized() {
@@ -394,14 +925,14 @@ mod tests {
             &cache,
             Arc::clone(&progress) as Arc<dyn Progress>,
             "https://example.invalid/db.git",
-            Arc::clone(&fetcher) as Arc<dyn DbFetcher>,
+            Arc::clone(&fetcher),
         )
         .await
         .expect("the fixture fetcher always produces a valid database");
 
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1, "the database must be fetched exactly once");
         assert!(
-            matches!(cache.load::<()>("last_synced.bin"), CacheResult::Data(())),
+            matches!(cache.load::<(String, String)>("last_synced.bin"), CacheResult::Data((identity, _)) if identity == archive_identity("https://example.invalid/db.git")),
             "a successful fetch must record the synchronization marker"
         );
         assert_eq!(
@@ -428,13 +959,15 @@ mod tests {
 
         // Seed a database and its synchronization marker, so no fetch is needed.
         write_advisory(&tmp.path().join("repo"), "seeded-crate", "RUSTSEC-2020-0004", None);
-        cache.save("last_synced.bin", &()).unwrap();
+        cache
+            .save("last_synced.bin", &(archive_identity("https://example.invalid/db.git"), "repo"))
+            .unwrap();
 
         let provider = Provider::with_fetcher(
             &cache,
             Arc::new(RecordingProgress::default()),
             "https://example.invalid/db.git",
-            Arc::clone(&fetcher) as Arc<dyn DbFetcher>,
+            Arc::clone(&fetcher),
         )
         .await
         .expect("a seeded database opens successfully");
@@ -447,6 +980,34 @@ mod tests {
 
         let crates = vec![CrateSpec::from_arcs("seeded-crate".into(), Arc::new("1.0.0".parse().unwrap()))];
         assert_eq!(provider.get_advisory_data(crates.into()).await.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn signed_archive_urls_are_fingerprinted_without_losing_cache_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path(), Duration::MAX, false);
+        let fetcher = Arc::new(FixtureFetcher::default());
+        let first = "https://test-user:synthetic-password@mirror.invalid/db.tar.gz?token=synthetic-token-one";
+        let second = "https://test-user:synthetic-password@mirror.invalid/db.tar.gz?token=synthetic-token-two";
+
+        for (url, expected_fetches) in [(first, 1), (first, 1), (second, 2)] {
+            Provider::with_fetcher(&cache, Arc::new(RecordingProgress::default()), url, Arc::clone(&fetcher))
+                .await
+                .expect("the fixture fetcher produces a valid database for each signed URL");
+
+            assert_eq!(fetcher.calls.load(Ordering::SeqCst), expected_fetches);
+            let CacheResult::Data((identity, _)) = cache.load::<(String, String)>("last_synced.bin") else {
+                panic!("a successful refresh must publish its archive fingerprint");
+            };
+            assert_eq!(identity, archive_identity(url));
+            let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
+            for secret in ["test-user", "synthetic-password", "synthetic-token-one", "synthetic-token-two"] {
+                assert!(
+                    !marker.windows(secret.len()).any(|window| window == secret.as_bytes()),
+                    "the cache marker must not contain URL credentials"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -562,7 +1123,8 @@ mod tests {
         let seeded = tmp.path().join("seeded");
         write_advisory(&seeded, "seeded-crate", "RUSTSEC-2020-0100", None);
         let progress = RecordingProgress::default();
-        let _database = open_db(&seeded, &progress).await.unwrap();
+        let lock = Arc::new(lock_cache(tmp.path()).await.unwrap());
+        let _database = open_db(&seeded, &progress, lock).await.unwrap();
 
         let downloaded = tmp.path().join("downloaded");
         download_db(

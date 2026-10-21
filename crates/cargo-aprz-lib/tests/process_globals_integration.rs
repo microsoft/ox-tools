@@ -22,7 +22,7 @@ mod support;
 mod cargo_subprocess_resource {}
 
 use support::dump::Dump;
-use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db};
+use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db_at};
 
 /// Exercises the defaults that every other test bypasses: the platform cache directory, an
 /// enabled log level (which installs the logger and disables the progress delay), forced colors
@@ -49,7 +49,7 @@ async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
         std::env::set_var("XDG_CACHE_HOME", &cache_root);
     }
     let app_cache = cache_root.join("cargo-aprz");
-    seed_advisory_db(&app_cache);
+    seed_advisory_db_at(&app_cache, &services.uri());
 
     let service_uri = services.uri();
     let dump_uri = dump_url(&dump);
@@ -75,7 +75,7 @@ async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
         "integration-github-token",
         "--codeberg-url",
         &service_uri,
-        "--advisory-url",
+        "--advisory-archive-url",
         &service_uri,
     ];
     #[cfg(target_os = "windows")]

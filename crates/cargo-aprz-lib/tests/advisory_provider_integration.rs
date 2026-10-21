@@ -10,9 +10,7 @@
 //! layout the real database uses — inside a temporary directory, and seeds the provider's
 //! cache with it so no test touches the network.
 //!
-//! The provider's own download step is exercised only through its failure paths: `rustsec`
-//! refuses any database URL that does not start with `https://`, so a successful clone
-//! cannot be simulated locally.
+//! Archive transport and extraction are exercised with checked-in archive fixtures.
 
 #![cfg(not(miri))]
 
@@ -22,8 +20,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cargo_aprz_lib::internals::facts::advisories::{AdvisoryCounts, AdvisoryData, Provider};
-use cargo_aprz_lib::internals::facts::cache::Cache;
-use cargo_aprz_lib::internals::facts::{CrateSpec, DEFAULT_ADVISORY_URL, Progress, ProviderResult};
+use cargo_aprz_lib::internals::facts::cache::{Cache, CacheResult};
+use cargo_aprz_lib::internals::facts::{CrateSpec, DEFAULT_ADVISORY_ARCHIVE_URL, Progress, ProviderResult};
 use semver::Version;
 use tempfile::TempDir;
 
@@ -41,7 +39,7 @@ impl Progress for NoOpProgress {
 
 /// An address on the loopback interface where nothing listens, so connecting to it fails
 /// immediately without ever leaving the machine.
-const UNREACHABLE_URL: &str = "https://127.0.0.1:1/advisory-db.git";
+const UNREACHABLE_URL: &str = "https://127.0.0.1:1/advisory-db.tar.gz";
 
 /// The marker the provider writes once it has synchronized the database.
 const SYNC_MARKER: &str = "last_synced.bin";
@@ -141,7 +139,10 @@ impl Fixture {
         };
 
         write_fixture_database(&fixture.dir.path().join("repo"));
-        fixture.cache().save(SYNC_MARKER, &()).expect("temporary directories are writable");
+        fixture
+            .cache()
+            .save(SYNC_MARKER, &(blake3::hash(UNREACHABLE_URL.as_bytes()).to_hex().as_str(), "repo"))
+            .expect("temporary directories are writable");
 
         fixture
     }
@@ -453,7 +454,7 @@ async fn test_advisory_provider_fetches_when_the_marker_is_missing() {
         .expect_err("an unreachable database URL must not yield a provider");
 
     let message = format!("{error:#}");
-    assert!(message.contains("downloading the advisory database"), "unexpected error: {message}");
+    assert!(message.contains("downloading the advisory archive"), "unexpected error: {message}");
     assert!(
         !dir.path().join(SYNC_MARKER).exists(),
         "a failed fetch must not mark the database as synchronized"
@@ -462,16 +463,16 @@ async fn test_advisory_provider_fetches_when_the_marker_is_missing() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
-async fn test_advisory_provider_rejects_a_non_git_database_url() {
+async fn test_advisory_provider_rejects_an_invalid_archive_url() {
     let dir = tempfile::tempdir().expect("temporary directories are creatable");
     let cache = Cache::new(dir.path(), Duration::from_hours(8760), false);
 
-    let error = Provider::new(&cache, Arc::new(NoOpProgress), "not-a-git-repository")
+    let error = Provider::new(&cache, Arc::new(NoOpProgress), "not-an-archive-url")
         .await
-        .expect_err("a URL that is not a git repository must not yield a provider");
+        .expect_err("an invalid archive URL must not yield a provider");
 
     let message = format!("{error:#}");
-    assert!(message.contains("downloading the advisory database"), "unexpected error: {message}");
+    assert!(message.contains("downloading the advisory archive"), "unexpected error: {message}");
 }
 
 #[tokio::test]
@@ -481,7 +482,9 @@ async fn test_advisory_provider_reports_a_missing_database_directory() {
     // it must fail rather than silently reporting every crate as advisory-free.
     let dir = tempfile::tempdir().expect("temporary directories are creatable");
     let cache = Cache::new(dir.path(), Duration::from_hours(8760), false);
-    cache.save(SYNC_MARKER, &()).expect("temporary directories are writable");
+    cache
+        .save(SYNC_MARKER, &(blake3::hash(UNREACHABLE_URL.as_bytes()).to_hex().as_str(), "repo"))
+        .expect("temporary directories are writable");
 
     let error = Provider::new(&cache, Arc::new(NoOpProgress), UNREACHABLE_URL)
         .await
@@ -492,9 +495,172 @@ async fn test_advisory_provider_reports_a_missing_database_directory() {
 }
 
 #[test]
-fn default_advisory_url_points_at_the_rustsec_database() {
-    assert!(
-        DEFAULT_ADVISORY_URL.starts_with("https://"),
-        "the advisory database is cloned over https, got {DEFAULT_ADVISORY_URL}"
+fn default_advisory_archive_url_points_at_the_rustsec_archive() {
+    assert_eq!(
+        DEFAULT_ADVISORY_ARCHIVE_URL,
+        "https://github.com/RustSec/advisory-db/archive/refs/heads/main.tar.gz"
     );
+}
+
+const ARCHIVE: &[u8] = include_bytes!("fixtures/advisories/wrapped.tar.gz");
+
+async fn archive_server() -> wiremock::MockServer {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/database.tar.gz"))
+        .and(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::header("user-agent", "cargo-aprz"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(ARCHIVE))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn downloads_redirected_archives_and_reuses_the_validated_snapshot() {
+    let server = archive_server().await;
+    wiremock::Mock::given(wiremock::matchers::path("/archive"))
+        .respond_with(wiremock::ResponseTemplate::new(302).insert_header("location", "/database.tar.gz"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+    let url = format!("{}/archive", server.uri());
+
+    let provider = Provider::new(&cache, Arc::new(NoOpProgress), &url).await.unwrap();
+    let reused = Provider::new(&cache, Arc::new(NoOpProgress), &url).await.unwrap();
+    let data = data_for(&provider, "archive-crate", "1.0.0").await;
+    let cached = data_for(&reused, "archive-crate", "1.0.0").await;
+
+    assert_eq!(
+        (
+            data.per_version.unmaintained_warning_count,
+            cached.per_version.unmaintained_warning_count,
+            server.received_requests().await.unwrap().len()
+        ),
+        (1, 1, 2)
+    );
+}
+
+#[tokio::test]
+async fn changing_the_archive_endpoint_requires_a_new_download() {
+    let server = archive_server().await;
+    wiremock::Mock::given(wiremock::matchers::path("/other.tar.gz"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(ARCHIVE))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+    let first = format!("{}/database.tar.gz", server.uri());
+    let second = format!("{}/other.tar.gz", server.uri());
+
+    Provider::new(&cache, Arc::new(NoOpProgress), &first).await.unwrap();
+    Provider::new(&cache, Arc::new(NoOpProgress), &second).await.unwrap();
+
+    let CacheResult::Data((endpoint, snapshot)) = cache.load::<(String, String)>(SYNC_MARKER) else {
+        panic!("successful downloads must publish a snapshot");
+    };
+    assert_eq!(
+        (
+            endpoint,
+            dir.path().join(snapshot).is_dir(),
+            server.received_requests().await.unwrap().len()
+        ),
+        (blake3::hash(second.as_bytes()).to_hex().to_string(), true, 2)
+    );
+}
+
+#[tokio::test]
+async fn failed_refresh_preserves_the_previous_snapshot_and_marker() {
+    let server = archive_server().await;
+    wiremock::Mock::given(wiremock::matchers::path("/broken.tar.gz"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(include_bytes!("fixtures/advisories/invalid-database.tar.gz")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+    let first = format!("{}/database.tar.gz", server.uri());
+    Provider::new(&cache, Arc::new(NoOpProgress), &first).await.unwrap();
+    let marker_before = fs::read(dir.path().join(SYNC_MARKER)).unwrap();
+    let broken = format!("{}/broken.tar.gz", server.uri());
+
+    let error = Provider::new(&cache, Arc::new(NoOpProgress), &broken).await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("parsing the advisory archive"), "{error:#}");
+    assert_eq!(fs::read(dir.path().join(SYNC_MARKER)).unwrap(), marker_before);
+    let previous = Provider::new(&cache, Arc::new(NoOpProgress), &first).await.unwrap();
+    assert_eq!(
+        data_for(&previous, "archive-crate", "1.0.0")
+            .await
+            .per_version
+            .unmaintained_warning_count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn simultaneous_initializations_share_one_archive_download() {
+    let server = archive_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+    let url = format!("{}/database.tar.gz", server.uri());
+
+    let (first, second) = tokio::join!(
+        Provider::new(&cache, Arc::new(NoOpProgress), &url),
+        Provider::new(&cache, Arc::new(NoOpProgress), &url),
+    );
+    first.expect("the first cache user must initialize");
+    second.expect("the second cache user must reuse the published database");
+
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn ignored_cache_forces_a_complete_refresh() {
+    let server = archive_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+    let url = format!("{}/database.tar.gz", server.uri());
+    Provider::new(&cache, Arc::new(NoOpProgress), &url).await.unwrap();
+    let ignored = Cache::new(dir.path(), Duration::MAX, true);
+
+    Provider::new(&ignored, Arc::new(NoOpProgress), &url).await.unwrap();
+
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn invalid_archive_does_not_create_a_freshness_marker() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(include_bytes!("fixtures/advisories/symlink.tar.gz")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+
+    let error = Provider::new(&cache, Arc::new(NoOpProgress), &server.uri()).await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("not links"), "{error:#}");
+    assert!(!dir.path().join(SYNC_MARKER).exists());
+}
+
+#[tokio::test]
+async fn archive_http_errors_include_the_status_and_do_not_publish_a_marker() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(wiremock::ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(dir.path(), Duration::MAX, false);
+
+    let error = Provider::new(&cache, Arc::new(NoOpProgress), &server.uri()).await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("HTTP 404"), "{error:#}");
+    assert!(!dir.path().join(SYNC_MARKER).exists());
 }

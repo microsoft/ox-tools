@@ -981,7 +981,7 @@ impl Provider {
                     if let Some(&user_index) = users.get(user_id) {
                         let row = self.table_mgr.users_table().get(user_index);
                         Some(Owner {
-                            login: row.gh_login.into(),
+                            login: row.username.into(),
                             kind: PublicOwnerKind::User,
                             name: (!row.name.is_empty()).then(|| row.name.into()),
                         })

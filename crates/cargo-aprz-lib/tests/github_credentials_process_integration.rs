@@ -23,7 +23,7 @@ use std::process::Command;
 use chrono::Utc;
 use serde_json::json;
 use support::dump::Dump;
-use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db};
+use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db_at};
 use url::Url;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -130,7 +130,7 @@ async fn run_credential_scenario() {
     let services = failing_server(404).await;
     let temp = tempfile::tempdir().expect("creating test directory");
     let cache = temp.path().join("cache");
-    seed_advisory_db(&cache);
+    seed_advisory_db_at(&cache, &services.uri());
 
     for request_path in [
         "/repos/fake-org/schemeless-repo-crate",
@@ -179,7 +179,7 @@ async fn run_credential_scenario() {
         "--github-token-from-gh",
         "--codeberg-url",
         &service_url,
-        "--advisory-url",
+        "--advisory-archive-url",
         &service_url,
     ];
     let mut host = TestHost::new();
