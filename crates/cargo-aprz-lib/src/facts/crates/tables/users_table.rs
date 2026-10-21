@@ -3,6 +3,7 @@
 
 use super::{UserId, define_table};
 
+/// A `users.csv` row from either current (`username`) or legacy (`gh_login`) dumps.
 #[derive(Debug, serde::Deserialize)]
 pub struct CsvUserRow<'a> {
     #[serde(borrow)]
@@ -15,6 +16,7 @@ pub struct CsvUserRow<'a> {
     name: &'a str,
 }
 
+/// A cached user row with one normalized identity, keeping the existing binary layout.
 #[derive(Debug, Clone)]
 pub struct UserRow<'a> {
     pub id: UserId,

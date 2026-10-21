@@ -221,6 +221,11 @@ fn archive_identity(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
 }
 
+/// Publishes a validated staging directory as the current advisory snapshot.
+///
+/// Replacing `last_synced.bin` is the commit point: the staging directory stays owned by
+/// `stage` (and is removed on failure) until then. Removing older data afterwards is
+/// best-effort and cannot undo a published snapshot.
 fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Result<()> {
     let previous = match Cache::new(cache.dir(), Duration::MAX, false).load::<(String, String)>("last_synced.bin") {
         CacheResult::Data((_, directory)) if directory.starts_with(".advisories-") => Some(snapshot_path(cache.dir(), &directory)?),
@@ -317,6 +322,24 @@ mod tests {
         fs::write(dir.join(format!("{id}.md")), content).unwrap();
     }
 
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("advisories")
+            .join(name)
+    }
+
+    /// Copies the checked-in one-advisory database into a mutable cache location under test.
+    fn seed_database(destination: &Path) {
+        let target = destination.join("crates").join("fixture-crate");
+        fs::create_dir_all(&target).unwrap();
+        for entry in fs::read_dir(fixture("database").join("crates").join("fixture-crate")).unwrap() {
+            let entry = entry.unwrap();
+            fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    }
+
     /// Test fetcher: writes a miniature advisory database where the real one would be cloned,
     /// and records how many times it was asked to.
     #[derive(Debug, Default)]
@@ -345,6 +368,8 @@ mod tests {
     struct ScriptedArchiveFetcher {
         failures: usize,
         stall: bool,
+        // Counters only record handler calls and completed partial writes. Assertions read
+        // them after the download finishes, so they publish no other memory.
         calls: Arc<AtomicUsize>,
         written: Arc<AtomicUsize>,
     }
@@ -380,10 +405,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn partial_write_observation_is_bounded_for_missing_or_incorrect_bytes() {
-        for contents in [b"".as_slice(), b"wrong prefix".as_slice()] {
-            let destination = tempfile::tempdir().unwrap();
-            fs::write(destination.path().join("attempt"), contents).unwrap();
-            let observation = wait_for_partial_write(destination.path(), b"partial archive data");
+        for attempt in ["partial-write/empty", "partial-write/wrong-prefix"] {
+            let attempt = fixture(attempt);
+            let observation = wait_for_partial_write(&attempt, b"partial archive data");
             let mut observation = std::pin::pin!(observation);
             assert!(futures_util::poll!(&mut observation).is_pending());
 
@@ -409,38 +433,44 @@ mod tests {
             let stall = self.stall;
             let calls = Arc::clone(&self.calls);
             let written = Arc::clone(&self.written);
+            // The body stream stores the event after its partial write is observed on disk; the
+            // poll loop below swaps it out to decide when to advance the clock. The filesystem
+            // write is awaited before the store, so the event carries no other data and SeqCst
+            // is used only to keep this single-flag handshake obviously correct.
             let event = Arc::new(AtomicUsize::new(0));
-            let body_event = Arc::clone(&event);
-            let handler = fetch::fake::FakeHandler::from_fn(move |_| {
-                let attempt = calls.fetch_add(1, Ordering::SeqCst);
-                if attempt >= failures {
-                    return fetch::HttpResponseBuilder::new_fake()
-                        .bytes(bytes::Bytes::from_static(include_bytes!(
-                            "../../../tests/fixtures/advisories/root.tar.gz"
-                        )))
-                        .build();
+            let handler = fetch::fake::FakeHandler::from_fn({
+                let event = Arc::clone(&event);
+                move |_| {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                    if attempt >= failures {
+                        return fetch::HttpResponseBuilder::new_fake()
+                            .bytes(bytes::Bytes::from_static(include_bytes!(
+                                "../../../tests/fixtures/advisories/root.tar.gz"
+                            )))
+                            .build();
+                    }
+                    let destination = destination.clone();
+                    let written = Arc::clone(&written);
+                    let event = Arc::clone(&event);
+                    let prefix = b"partial archive data";
+                    let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from_static(prefix).into()) }).chain(
+                        futures_util::stream::once(async move {
+                            // The stream is polled again only after write_all. Wait for Tokio's
+                            // buffered filesystem write to reach disk before failing or stalling.
+                            wait_for_partial_write(&destination, prefix)
+                                .await
+                                .expect("each attempt must write the expected prefix before the scripted body fails or stalls");
+                            written.fetch_add(1, Ordering::SeqCst);
+                            if stall {
+                                event.store(BODY_STALLED, Ordering::SeqCst);
+                                return std::future::pending().await;
+                            }
+                            event.store(BODY_FAILED, Ordering::SeqCst);
+                            Err(fetch::HttpError::from(std::io::Error::other("scripted body failure")))
+                        }),
+                    );
+                    fetch::HttpResponseBuilder::new_fake().stream(stream).build()
                 }
-                let destination = destination.clone();
-                let written = Arc::clone(&written);
-                let event = Arc::clone(&body_event);
-                let prefix = b"partial archive data";
-                let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from_static(prefix).into()) }).chain(
-                    futures_util::stream::once(async move {
-                        // The stream is polled again only after write_all. Wait for Tokio's
-                        // buffered filesystem write to reach disk before failing or stalling.
-                        wait_for_partial_write(&destination, prefix)
-                            .await
-                            .expect("each attempt must write the expected prefix before the scripted body fails or stalls");
-                        written.fetch_add(1, Ordering::SeqCst);
-                        if stall {
-                            event.store(BODY_STALLED, Ordering::SeqCst);
-                            return std::future::pending().await;
-                        }
-                        event.store(BODY_FAILED, Ordering::SeqCst);
-                        Err(fetch::HttpError::from(std::io::Error::other("scripted body failure")))
-                    }),
-                );
-                fetch::HttpResponseBuilder::new_fake().stream(stream).build()
             });
             let control = tick::ClockControl::new();
             let clock = control.to_clock();
@@ -604,10 +634,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = Cache::new(root.path(), Duration::MAX, false);
         let previous = root.path().join(".advisories-old");
-        write_advisory(&previous, "old-crate", "RUSTSEC-2020-0001", None);
+        seed_database(&previous);
         cache.save("last_synced.bin", &("old-url", ".advisories-old")).unwrap();
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
-        write_advisory(stage.path(), "new-crate", "RUSTSEC-2020-0002", None);
+        seed_database(stage.path());
         let snapshot = stage.path().to_path_buf();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -660,7 +690,7 @@ mod tests {
     fn marker_publication_failure_removes_the_unpublished_snapshot() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("last_synced.bin")).unwrap();
-        write_advisory(&root.path().join("repo"), "legacy-crate", "RUSTSEC-2020-0001", None);
+        seed_database(&root.path().join("repo"));
         let cache = Cache::new(root.path(), Duration::MAX, false);
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let snapshot = stage.path().to_path_buf();
@@ -677,7 +707,7 @@ mod tests {
     async fn successful_archive_migration_removes_the_legacy_git_checkout() {
         let root = tempfile::tempdir().unwrap();
         let cache = Cache::new(root.path(), Duration::MAX, false);
-        write_advisory(&root.path().join("repo"), "legacy-crate", "RUSTSEC-2020-0001", None);
+        seed_database(&root.path().join("repo"));
         cache.save("last_synced.bin", &()).unwrap();
 
         let provider = Provider::with_fetcher(
@@ -701,7 +731,7 @@ mod tests {
     async fn failed_archive_migration_preserves_the_legacy_git_checkout_and_marker() {
         let root = tempfile::tempdir().unwrap();
         let cache = Cache::new(root.path(), Duration::MAX, false);
-        write_advisory(&root.path().join("repo"), "legacy-crate", "RUSTSEC-2020-0001", None);
+        seed_database(&root.path().join("repo"));
         cache.save("last_synced.bin", &()).unwrap();
         let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
 
@@ -783,10 +813,10 @@ mod tests {
             let cache = Cache::new(root.path(), Duration::MAX, false);
             let old_name = ".advisories-old";
             let previous = root.path().join(old_name);
-            write_advisory(&previous, "previous-crate", "RUSTSEC-2020-0001", None);
+            seed_database(&previous);
             cache.save("last_synced.bin", &("old-url", old_name)).unwrap();
             let marker = fs::read(root.path().join("last_synced.bin")).unwrap();
-            let advisory_path = previous.join("crates").join("previous-crate").join("RUSTSEC-2020-0001.md");
+            let advisory_path = previous.join("crates").join("fixture-crate").join("RUSTSEC-2020-0001.md");
             let advisory = fs::read(&advisory_path).unwrap();
             let fetcher = Arc::new(ScriptedArchiveFetcher::new(usize::MAX, stall));
 

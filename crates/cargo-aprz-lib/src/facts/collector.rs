@@ -794,13 +794,14 @@ mod portable_tests {
     }
 
     fn mark_advisory_cache_fresh(cache_dir: &std::path::Path) {
+        mark_advisory_cache_fresh_for(cache_dir, "https://example.invalid/advisories.tar.gz");
+    }
+
+    fn mark_advisory_cache_fresh_for(cache_dir: &std::path::Path, archive_url: &str) {
         let advisories_dir = cache_dir.join("advisories");
         write_advisory(&advisories_dir.join("repo"), "fixture-crate", "RUSTSEC-2020-0001");
         Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
-            .save(
-                "last_synced.bin",
-                &(blake3::hash(b"https://example.invalid/advisories.tar.gz").to_hex().as_str(), "repo"),
-            )
+            .save("last_synced.bin", &(blake3::hash(archive_url.as_bytes()).to_hex().as_str(), "repo"))
             .expect("writing advisory sync marker");
     }
 
@@ -1062,26 +1063,32 @@ mod portable_tests {
         let server = MockServer::start().await;
         mount_minimal_dump(&server).await;
         let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
-        mark_advisory_cache_fresh(cache_dir.path());
         let endpoints = local_endpoints(&server).with_advisory_archive_url("not a valid archive URL");
+        mark_advisory_cache_fresh_for(cache_dir.path(), endpoints.advisory_archive_url());
 
-        let result = Collector::new(
-            None,
-            None,
-            cache_dir.path(),
-            core::time::Duration::from_hours(1),
-            core::time::Duration::from_hours(1),
-            core::time::Duration::from_hours(1),
-            core::time::Duration::from_hours(1),
-            core::time::Duration::from_hours(1),
-            true,
-            Arc::new(BugLabelMatcher::default()),
-            NoOpProgress,
-            &endpoints,
-        )
-        .await;
+        for ignore_cached in [false, true] {
+            let result = Collector::new(
+                None,
+                None,
+                cache_dir.path(),
+                core::time::Duration::from_hours(1),
+                core::time::Duration::from_hours(1),
+                core::time::Duration::from_hours(1),
+                core::time::Duration::from_hours(1),
+                core::time::Duration::from_hours(1),
+                ignore_cached,
+                Arc::new(BugLabelMatcher::default()),
+                NoOpProgress,
+                &endpoints,
+            )
+            .await;
 
-        assert!(result.is_err(), "ignoring the fresh advisory marker must force a fetch");
+            assert_eq!(
+                result.is_err(),
+                ignore_cached,
+                "only cache bypass must force a fetch of the configured invalid endpoint"
+            );
+        }
     }
 
     #[tokio::test]

@@ -216,6 +216,7 @@ where
     resilient_download_with_clock(name, input, timeout, download_fn, Clock::new_tokio()).await
 }
 
+/// Retries `download_fn` and gives each attempt its own `timeout` deadline.
 pub(crate) async fn resilient_download_with_clock<In, Out, Fut, F>(
     name: &'static str,
     input: In,
@@ -236,9 +237,9 @@ where
         input,
         move |input| {
             let clock = clock.clone();
-            let download = download_fn.clone();
+            let download_fn = download_fn.clone();
             async move {
-                download(input)
+                download_fn(input)
                     .timeout(&clock, timeout_duration)
                     .await
                     .into_app_err("download timed out")?
@@ -249,6 +250,10 @@ where
     .await
 }
 
+/// Retries failed `download_fn` attempts without imposing any deadline.
+///
+/// Callers choose their own timeout boundary; the advisory archive times only its body
+/// transfer so Fetch's request retries and server-requested waits are not cut short.
 pub(crate) async fn retry_download_with_clock<In, Out, Fut, F>(
     name: &'static str,
     input: In,

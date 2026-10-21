@@ -120,6 +120,10 @@ fn unpack(input: impl Read, destination: &Path) -> Result<()> {
     unpack_with_limits(input, destination, MAX_UNPACKED_BYTES, MAX_ENTRIES)
 }
 
+/// Unpacks an untrusted gzip-compressed tar stream into a private directory.
+///
+/// Declared entry sizes are budgeted before any file is written, while the decoder
+/// separately caps every decoded byte, including tar headers and padding.
 fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_entries: usize) -> Result<()> {
     let decoder = MultiGzDecoder::new(input).take(max_bytes + 1);
     let mut archive = Archive::new(decoder);
@@ -135,6 +139,7 @@ fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_
         declared_bytes += entry.size();
         let kind = entry.header().entry_type();
         if kind.is_pax_global_extensions() {
+            // GitHub archives start with global PAX metadata, which is not a filesystem entry.
             continue;
         }
         if !kind.is_dir() && !kind.is_file() {
@@ -155,6 +160,8 @@ fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_
             bail!("advisory archive contains an unsafe path that escapes the extraction directory");
         }
     }
+    // Tar traversal stops at the end-of-archive marker. Draining the rest validates every
+    // remaining gzip member and trailer; the extra budget byte detects decoded overflow.
     let mut decoder = archive.into_inner();
     std::io::copy(&mut decoder, &mut std::io::sink())?;
     if decoder.limit() == 0 {
@@ -180,20 +187,25 @@ fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    // The atomics below only count fake-handler calls. Tests read them after awaiting the
+    // download (or alongside polling it on the same task), so they publish no other memory;
+    // SeqCst is kept for simplicity rather than because any ordering is required.
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use std::io::Write;
     use std::sync::Arc;
 
     use super::*;
 
-    fn extract_fixture(name: &str) -> Result<rustsec::database::Database> {
-        let stage = tempfile::tempdir()?;
-        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
             .join("advisories")
-            .join(name);
-        extract(File::open(source)?, stage.path())?;
+            .join(name)
+    }
+
+    fn extract_fixture(name: &str) -> Result<rustsec::database::Database> {
+        let stage = tempfile::tempdir()?;
+        extract(File::open(fixture(name))?, stage.path())?;
 
         Ok(rustsec::database::Database::open(stage.path())?)
     }
@@ -226,43 +238,21 @@ mod tests {
         );
     }
 
-    fn multi_member_archive() -> Vec<u8> {
-        let mut archive = tar::Builder::new(Vec::new());
-        let mut split = 0;
-        for id in ["RUSTSEC-2020-0001", "RUSTSEC-2020-0002"] {
-            let advisory = format!(
-                "```toml\n[advisory]\nid = \"{id}\"\npackage = \"archive-crate\"\ndate = \"2020-01-01\"\n\
-                 [versions]\npatched = []\n```\n\n# Test advisory\n\nTest advisory body.\n"
-            );
-            let mut header = tar::Header::new_gnu();
-            header.set_size(advisory.len() as u64);
-            header.set_mode(0o644);
-            archive
-                .append_data(&mut header, format!("crates/archive-crate/{id}.md"), advisory.as_bytes())
-                .unwrap();
-            if split == 0 {
-                split = archive.get_ref().len();
-            }
-        }
-        let tar = archive.into_inner().unwrap();
-        let mut compressed = Vec::new();
-        for member in [&tar[..split], &tar[split..]] {
-            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(member).unwrap();
-            compressed.extend(encoder.finish().unwrap());
-        }
-        compressed
-    }
+    const MULTI_MEMBER: &[u8] = include_bytes!("../../../tests/fixtures/advisories/multi-member.tar.gz");
 
     #[test]
     #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn reads_advisories_across_gzip_member_boundaries() {
-        let stage = tempfile::tempdir().unwrap();
-        let archive = multi_member_archive();
+        let mut first_member = Vec::new();
+        flate2::read::GzDecoder::new(MULTI_MEMBER).read_to_end(&mut first_member).unwrap();
+        let contains = |needle: &[u8]| first_member.windows(needle.len()).any(|window| window == needle);
+        assert!(
+            contains(b"RUSTSEC-2020-0001") && !contains(b"RUSTSEC-2020-0002"),
+            "the fixture must place a gzip member boundary between its two advisory entries"
+        );
 
-        extract(archive.as_slice(), stage.path()).expect("gzip members form one complete tar archive");
+        let database = extract_fixture("multi-member.tar.gz").expect("gzip members form one complete tar archive");
 
-        let database = rustsec::database::Database::open(stage.path()).unwrap();
         let mut ids = database.iter().map(|advisory| advisory.metadata.id.to_string()).collect::<Vec<_>>();
         ids.sort();
         assert_eq!(ids, ["RUSTSEC-2020-0001", "RUSTSEC-2020-0002"]);
@@ -272,11 +262,9 @@ mod tests {
     #[cfg_attr(miri, ignore = "requires native filesystem operations")]
     fn rejects_a_corrupt_later_gzip_member_before_publishing_database_files() {
         let stage = tempfile::tempdir().unwrap();
-        let mut compressed = multi_member_archive();
-        let checksum = compressed.len() - 8;
-        compressed[checksum] ^= 1;
 
-        extract(compressed.as_slice(), stage.path()).expect_err("a later member's checksum must be validated");
+        extract(File::open(fixture("corrupt-later-member.tar.gz")).unwrap(), stage.path())
+            .expect_err("a later member's checksum must be validated");
 
         assert!(
             !stage.path().join("crates").exists(),
@@ -288,9 +276,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "requires native filesystem operations")]
     fn uncompressed_size_limit_covers_all_gzip_members() {
         let stage = tempfile::tempdir().unwrap();
-        let compressed = multi_member_archive();
 
-        unpack_with_limits(compressed.as_slice(), stage.path(), 2048, MAX_ENTRIES)
+        unpack_with_limits(MULTI_MEMBER, stage.path(), 2048, MAX_ENTRIES)
             .expect_err("the combined tar entries and padding exceed the budget");
     }
 
@@ -306,13 +293,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
     fn preserves_the_optional_rust_advisory_collection() {
         let stage = tempfile::tempdir().unwrap();
-        let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("advisories")
-            .join("with-rust.tar.gz");
 
-        extract(File::open(archive).unwrap(), stage.path()).expect("an optional rust/ collection is supported");
+        extract(File::open(fixture("with-rust.tar.gz")).unwrap(), stage.path()).expect("an optional rust/ collection is supported");
 
         assert!(stage.path().join("rust").is_dir());
     }
@@ -333,13 +315,15 @@ mod tests {
     #[cfg_attr(miri, ignore = "requires Tokio filesystem workers")]
     async fn rejects_oversized_content_length_before_reading_the_body() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let recorded = Arc::clone(&calls);
-        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn(move |_| {
-            recorded.fetch_add(1, Ordering::SeqCst);
-            fetch::HttpResponseBuilder::new_fake()
-                .status(fetch::StatusCode::OK)
-                .header("content-length", "67108865")
-                .build()
+        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                fetch::HttpResponseBuilder::new_fake()
+                    .status(fetch::StatusCode::OK)
+                    .header("content-length", "67108865")
+                    .build()
+            }
         }));
         let destination = tempfile::tempdir().unwrap();
 
@@ -362,10 +346,12 @@ mod tests {
     async fn http_status_failures_do_not_restart_the_whole_transfer() {
         for status in [fetch::StatusCode::NOT_FOUND, fetch::StatusCode::INTERNAL_SERVER_ERROR] {
             let calls = Arc::new(AtomicUsize::new(0));
-            let recorded = Arc::clone(&calls);
-            let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn(move |_| {
-                recorded.fetch_add(1, Ordering::SeqCst);
-                fetch::HttpResponseBuilder::new_fake().status(status).build()
+            let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn({
+                let calls = Arc::clone(&calls);
+                move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    fetch::HttpResponseBuilder::new_fake().status(status).build()
+                }
             }));
             let destination = tempfile::tempdir().unwrap();
 
@@ -388,10 +374,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "requires Tokio timers and filesystem workers")]
     async fn exhausted_request_errors_do_not_restart_the_whole_transfer() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let recorded = Arc::clone(&calls);
-        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_error_fn(move |_| {
-            recorded.fetch_add(1, Ordering::SeqCst);
-            fetch::HttpError::from(std::io::Error::other("request resilience exhausted"))
+        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_error_fn({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                fetch::HttpError::from(std::io::Error::other("request resilience exhausted"))
+            }
         }));
         let destination = tempfile::tempdir().unwrap();
 
@@ -415,19 +403,21 @@ mod tests {
             let control = tick::ClockControl::new();
             let clock = tick::Clock::from(control.clone());
             let calls = Arc::new(AtomicUsize::new(0));
-            let recorded = Arc::clone(&calls);
-            let handler = fetch::fake::FakeHandler::from_fn(move |_| {
-                if recorded.fetch_add(1, Ordering::SeqCst) == 0 {
-                    fetch::HttpResponseBuilder::new_fake()
-                        .status(status)
-                        .header("retry-after", "120")
-                        .build()
-                } else {
-                    fetch::HttpResponseBuilder::new_fake()
-                        .bytes(bytes::Bytes::from_static(include_bytes!(
-                            "../../../tests/fixtures/advisories/root.tar.gz"
-                        )))
-                        .build()
+            let handler = fetch::fake::FakeHandler::from_fn({
+                let calls = Arc::clone(&calls);
+                move |_| {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        fetch::HttpResponseBuilder::new_fake()
+                            .status(status)
+                            .header("retry-after", "120")
+                            .build()
+                    } else {
+                        fetch::HttpResponseBuilder::new_fake()
+                            .bytes(bytes::Bytes::from_static(include_bytes!(
+                                "../../../tests/fixtures/advisories/root.tar.gz"
+                            )))
+                            .build()
+                    }
                 }
             });
             let client = resilient_http::configure_request_resilience(fetch::HttpClient::builder_fake(handler, &clock)).build();
@@ -474,14 +464,16 @@ mod tests {
     #[cfg_attr(miri, ignore = "requires Tokio filesystem workers")]
     async fn streamed_compressed_size_violations_are_not_retried() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let recorded = Arc::clone(&calls);
-        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn(move |_| {
-            recorded.fetch_add(1, Ordering::SeqCst);
-            fetch::HttpResponseBuilder::new_fake()
-                .stream(futures_util::stream::iter(
-                    (0..65).map(|_| Ok(bytes::Bytes::from(vec![0_u8; 1024 * 1024]).into())),
-                ))
-                .build()
+        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                fetch::HttpResponseBuilder::new_fake()
+                    .stream(futures_util::stream::iter(
+                        (0..65).map(|_| Ok(bytes::Bytes::from(vec![0_u8; 1024 * 1024]).into())),
+                    ))
+                    .build()
+            }
         }));
         let destination = tempfile::tempdir().unwrap();
 
@@ -535,11 +527,17 @@ mod tests {
         };
     }
 
-    rejected_archive!(
-        rejects_malformed_advisories,
-        "invalid-database.tar.gz",
-        "parsing the advisory archive"
-    );
+    #[test]
+    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
+    fn rejects_malformed_advisories() {
+        let error = extract_fixture("invalid-database.tar.gz").expect_err("invalid archive must not be accepted");
+
+        let cause = error
+            .find_source::<rustsec::Error>()
+            .unwrap_or_else(|| panic!("the RustSec parser must reject the advisory: {error:#}"));
+        assert_eq!(cause.kind(), rustsec::ErrorKind::Parse, "{error:#}");
+    }
+
     rejected_archive!(rejects_missing_database, "missing-crates.tar.gz", "must contain crates/");
     rejected_archive!(rejects_empty_database, "empty-database.tar.gz", "contains no advisories");
     rejected_archive!(rejects_parent_paths, "parent-path.tar.gz", "unsafe path");
