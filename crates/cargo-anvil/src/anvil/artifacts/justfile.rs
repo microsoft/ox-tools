@@ -357,13 +357,14 @@ mod tests {
         ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
     )]
     #[test]
-    fn checks_fail_closed_and_preserve_opted_out_tests() {
+    fn checks_fail_closed_and_delegate_coverage_safety() {
         let checks = all_check_bodies();
         for needle in [
             "anvil-bolero: target discovery failed",
             "${prefix}: cargo metadata failed",
-            "running tests without coverage for opted-out packages",
-            "all affected packages opted out of coverage",
+            "anvil-llvm-cov: no affected packages; skipping",
+            "coverage-gate run @packageArgs @collectionArgs",
+            "'--no-coverage-target', 'aarch64-pc-windows-msvc'",
             "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
         ] {
