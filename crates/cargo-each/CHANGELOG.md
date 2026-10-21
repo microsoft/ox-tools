@@ -10,7 +10,6 @@
 
 - 🐛 Bug Fixes
 
-  - resolve metadata Cargo explicitly through rustup
   - make identity regressions deterministic
 
 - ✔️ Tasks
@@ -19,7 +18,6 @@
 
 - ♻️ Code Refactoring
 
-  - remove aggregate listing and metadata-toolchain APIs
   - remove unsupported Cargo compatibility handling
 
 ## [0.5.0] - 2026-10-13
