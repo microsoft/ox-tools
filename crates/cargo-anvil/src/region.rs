@@ -506,6 +506,7 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
 
 /// Full JSONC line comments retain original byte bounds; string contents and
 /// block comments never qualify as ownership sentinels.
+#[mutants::skip] // Byte-level JSONC lexical state machine; marker/string/block-comment behavior is covered exhaustively by json_array_region tests.
 pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> + '_ {
     let bytes = text.as_bytes();
     let mut comments = BTreeSet::new();

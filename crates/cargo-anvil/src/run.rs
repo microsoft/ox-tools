@@ -2276,6 +2276,22 @@ mod tests {
     }
 
     #[test]
+    fn json_array_refusal_uses_json_parse_guidance_only_for_existing_host_errors() {
+        let unparsable = crate::emit::managed_region::ManagedRegionRefusal::new(app_err!("problem"), RefusalRemedy::HostAlreadyUnparsable);
+        assert_eq!(
+            json_array_plan_refusal("config.json", &unparsable).to_string(),
+            "Refused JSON array host config.json: problem. No plan was produced; no files were changed. \
+             This file does not parse as it stands, before this region is written, so no run can write it until the existing JSON is repaired."
+        );
+        let dependency = crate::emit::managed_region::ManagedRegionRefusal::new(app_err!("problem"), RefusalRemedy::BetweenManagedRegions);
+        assert!(
+            json_array_plan_refusal("config.json", &dependency)
+                .to_string()
+                .contains("Reconcile the neighboring managed regions")
+        );
+    }
+
+    #[test]
     fn toml_array_plan_refuses_header_dependencies_and_partial_migrations() {
         let header = "# >>> anvil-managed: parent\n[plugins]\n# <<< anvil-managed: parent\n";
         let entries = "default = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n\"user\"]\n";

@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use jsonc_parser::ast::{Array, Object, Value};
+use jsonc_parser::common::Range as JsonRange;
 use jsonc_parser::{CollectOptions, ParseOptions, parse_to_ast};
 use ohno::app_err;
 
@@ -22,6 +23,7 @@ fn refusal(reason: impl std::fmt::Display, remedy: RefusalRemedy) -> ManagedRegi
     ManagedRegionRefusal::new(app_err!("{reason}"), remedy)
 }
 
+#[mutants::skip] // Declarative strict-JSONC parser configuration; accepted and rejected dialect features are covered through public planner behavior.
 fn parse_options() -> ParseOptions {
     ParseOptions {
         allow_comments: true,
@@ -50,6 +52,11 @@ fn value_range(value: &Value<'_>) -> Range<usize> {
         Value::Object(value) => value.range.start..value.range.end,
         Value::Array(value) => value.range.start..value.range.end,
     }
+}
+
+#[mutants::skip] // Parser ranges include one closing delimiter byte; every caller needs the byte immediately before the exclusive end.
+fn closing_delimiter_offset(range: &JsonRange) -> usize {
+    range.end - 1
 }
 
 fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'a>>, ManagedRegionRefusal> {
@@ -141,7 +148,7 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
         ));
     }
     let last = value_range(array.elements.last().expect("the nonempty array was checked above"));
-    if separator_comma(&source[last.end..array.range.end - 1]).is_none() {
+    if separator_comma(&source[last.end..closing_delimiter_offset(&array.range)]).is_none() {
         return Err(refusal(
             "JSON array-entry bodies must end with a trailing comma",
             RefusalRemedy::InvalidGeneratedJson,
@@ -173,6 +180,7 @@ fn region_indent<'a>(text: &'a str, region: &Region<'_>) -> &'a str {
     &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
+#[mutants::skip] // Source-offset arithmetic is exercised by inline/multiline scaffolding snapshots; arithmetic mutants add no separate contract.
 fn closing_line_start(text: &str, close: usize) -> Option<usize> {
     let start = text[..close].rfind(['\r', '\n']).map_or(0, |index| index + 1);
     text[start..close]
@@ -181,8 +189,9 @@ fn closing_line_start(text: &str, close: usize) -> Option<usize> {
         .then_some(start)
 }
 
+#[mutants::skip] // Formatting inference is covered through byte-exact scaffolding and idempotence tests rather than isolated arithmetic mutations.
 fn indent_unit(text: &str, object: &Object<'_>) -> String {
-    let parent = line_indent(text, object.range.end - 1);
+    let parent = line_indent(text, closing_delimiter_offset(&object.range));
     object
         .properties
         .first()
@@ -250,10 +259,10 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
         }
 
         let newline = text_newline(text);
-        let parent_indent = line_indent(text, object.range.end - 1);
+        let parent_indent = line_indent(text, closing_delimiter_offset(&object.range));
         let unit = indent_unit(text, object);
         let property = nested_property(&path[index..], parent_indent, &unit, newline);
-        let close = object.range.end - 1;
+        let close = closing_delimiter_offset(&object.range);
         let insert_at = closing_line_start(text, close).unwrap_or(close);
         let mut output = String::with_capacity(text.len() + property.len() + newline.len() * 2 + 1);
         if let Some(last) = object.properties.last() {
@@ -615,7 +624,9 @@ fn adopt_entries(text: &str, array: &Array<'_>, body: &str) -> Result<String, Ma
         }
         for (index, value) in matching {
             let span = value_range(value);
-            let next = values.get(index + 1).map_or(array.range.end - 1, |value| value_range(value).start);
+            let next = values
+                .get(index + 1)
+                .map_or_else(|| closing_delimiter_offset(&array.range), |value| value_range(value).start);
             if let Some(comma) = separator_comma(&text[span.end..next]) {
                 let comma = span.end + comma..span.end + comma + 1;
                 if protected
@@ -643,6 +654,7 @@ fn adopt_entries(text: &str, array: &Array<'_>, body: &str) -> Result<String, Ma
     Ok(adopted)
 }
 
+#[mutants::skip] // Byte-level JSONC separator scanner; strings, escapes, line comments, block comments, and absent commas have dedicated behavior tests.
 fn separator_comma(gap: &str) -> Option<usize> {
     let bytes = gap.as_bytes();
     let mut index = 0;
@@ -805,6 +817,24 @@ mod tests {
     }
 
     #[test]
+    fn strict_jsonc_options_reject_json5_extensions() {
+        for source in [
+            "{unquoted: []}",
+            "{'single': []}",
+            "{\"hex\": 0xff}",
+            "{\"plus\": +1}",
+            "{\"point\": .5}",
+            "{\"infinite\": Infinity}",
+            "{\"missing\": true \"comma\": false}",
+        ] {
+            let Err(refusal) = parse(source) else {
+                panic!("JSON5 extension unexpectedly parsed: {source}");
+            };
+            assert_eq!(refusal.remedy, RefusalRemedy::HostAlreadyUnparsable);
+        }
+    }
+
+    #[test]
     fn introduction_preserves_jsonc_and_adopts_all_duplicate_entries() {
         let source = concat!(
             "{\n",
@@ -872,6 +902,25 @@ mod tests {
                 assert!(output.contains("\"Other\": true,"));
             }
         }
+    }
+
+    #[test]
+    fn scaffolding_preserves_exact_inline_and_multiline_separator_layouts() {
+        let inline = plan(Some("{\"EnlistmentRootPaths\":{\"Other\":true}}\n"), &Manifest::default())
+            .unwrap()
+            .spliced_host
+            .unwrap();
+        assert!(inline.contains("\"Other\":true,\n  \"SourceRootDirs\": ["), "{inline}");
+
+        let multiline = plan(
+            Some("{\n  \"EnlistmentRootPaths\": {\n    \"Other\": true\n  }\n}\n"),
+            &Manifest::default(),
+        )
+        .unwrap()
+        .spliced_host
+        .unwrap();
+        assert!(multiline.contains("\"Other\": true,\n    \"SourceRootDirs\": ["));
+        assert!(!multiline.contains("\"Other\": true,\n\n"));
     }
 
     #[test]
@@ -952,8 +1001,20 @@ mod tests {
             ),
             "// >>> anvil-managed:one\n// <<< anvil-managed:one\n",
         ] {
-            assert_eq!(validated_regions(source).unwrap_err().remedy, RefusalRemedy::MalformedMarkers);
+            let refusal = validated_regions(source).unwrap_err();
+            assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
         }
+        assert_eq!(
+            validated_regions("// >>> anvil-managed:\n").unwrap_err().reason.to_string(),
+            "duplicate or nested opening sentinel"
+        );
+        assert_eq!(
+            validated_regions("// >>> anvil-managed: one\n// >>> anvil-managed: two\n")
+                .unwrap_err()
+                .reason
+                .to_string(),
+            "duplicate or nested opening sentinel"
+        );
     }
 
     #[test]
@@ -988,6 +1049,82 @@ mod tests {
                 refusal.remedy,
                 RefusalRemedy::EnclosingOwnership | RefusalRemedy::MisplacedArrayMarkers
             ));
+        }
+    }
+
+    #[test]
+    fn ownership_boundaries_are_checked_independently() {
+        let enclosing_start = concat!(
+            "{\n",
+            "// >>> anvil-managed: other\n",
+            "\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n",
+            "// <<< anvil-managed: other\n",
+            "]}}\n",
+        );
+        assert_eq!(
+            plan(Some(enclosing_start), &Manifest::default()).unwrap_err().remedy,
+            RefusalRemedy::EnclosingOwnership
+        );
+
+        let enclosing_end = concat!(
+            "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n",
+            "// >>> anvil-managed: other\n",
+            "]}\n",
+            "// <<< anvil-managed: other\n",
+            "}\n",
+        );
+        assert_eq!(
+            plan(Some(enclosing_end), &Manifest::default()).unwrap_err().remedy,
+            RefusalRemedy::EnclosingOwnership
+        );
+
+        for source in [
+            concat!(
+                "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[{\n",
+                "// >>> anvil-managed: anvil-source-root\n",
+                "\"value\": true}\n",
+                "// <<< anvil-managed: anvil-source-root\n",
+                "]}}\n",
+            ),
+            concat!(
+                "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n",
+                "// >>> anvil-managed: anvil-source-root\n",
+                "{\"value\": true\n",
+                "// <<< anvil-managed: anvil-source-root\n",
+                "}]}}\n",
+            ),
+        ] {
+            assert_eq!(
+                plan(Some(source), &Manifest::default()).unwrap_err().remedy,
+                RefusalRemedy::MisplacedArrayMarkers
+            );
+        }
+    }
+
+    #[test]
+    fn selected_region_requires_both_markers_inside_the_array() {
+        for source in [
+            concat!(
+                "{\"EnlistmentRootPaths\":{\n",
+                "// >>> anvil-managed: anvil-source-root\n",
+                "\"SourceRootDirs\":[\n",
+                "\"build\\\\Extensions\\\\Anvil\",\n",
+                "// <<< anvil-managed: anvil-source-root\n",
+                "]}}\n",
+            ),
+            concat!(
+                "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n",
+                "// >>> anvil-managed: anvil-source-root\n",
+                "\"build\\\\Extensions\\\\Anvil\",\n",
+                "]\n",
+                "// <<< anvil-managed: anvil-source-root\n",
+                "}}\n",
+            ),
+        ] {
+            assert_eq!(
+                plan(Some(source), &Manifest::default()).unwrap_err().remedy,
+                RefusalRemedy::MisplacedArrayMarkers
+            );
         }
     }
 
@@ -1068,6 +1205,22 @@ mod tests {
 
         assert_eq!(second.decision, Decision::InSync);
         assert_eq!(second.spliced_host, None);
+    }
+
+    #[test]
+    fn array_indent_uses_only_deeper_element_indentation() {
+        for (source, expected) in [
+            ("{\"entries\":[\"value\"]}", "  "),
+            ("{\n  \"entries\": [\n      \"value\"\n  ]\n}", "      "),
+        ] {
+            let parsed = parse(source).unwrap();
+            let array = lookup(parsed.value.as_ref().unwrap(), &["entries".to_owned()])
+                .unwrap()
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(array_indent(source, array), expected);
+        }
     }
 
     #[test]

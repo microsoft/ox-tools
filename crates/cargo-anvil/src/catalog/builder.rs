@@ -702,6 +702,35 @@ mod tests {
     }
 
     #[test]
+    fn without_json_array_artifact_preserves_other_selector_identities() {
+        let array = |host: &str, id: &'static str| JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let removed = array("config.json", "entries");
+        let same_host = array("config.json", "other");
+        let same_id = array("other.json", "entries");
+        let catalog = Catalog::builder(CliMeta::new("tool"))
+            .with_json_array_region(removed.clone())
+            .with_json_array_region(same_host.clone())
+            .with_json_array_region(same_id.clone())
+            .build()
+            .unwrap()
+            .into_builder()
+            .without_artifact(Artifact::region(removed.region))
+            .build()
+            .unwrap();
+
+        assert_eq!(catalog.json_array_path(&same_host.region), Some(same_host.path.as_slice()));
+        assert_eq!(catalog.json_array_path(&same_id.region), Some(same_id.path.as_slice()));
+    }
+
+    #[test]
     fn without_owned_file_preserves_array_selector_and_checksum_contribution() {
         let array = TomlArrayRegionSpec {
             region: RegionSpec {
