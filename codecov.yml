@@ -9,7 +9,3 @@ coverage:
         target: 98.7
         threshold: "0"
         base: auto
-ignore:
-- "crates/testing_aids/**/*"
-# this is a temporary fix, for some reason codecov ignores cfg option in the file itself
-- "crates/ohno/src/test_util.rs"

@@ -253,8 +253,14 @@ dictionary format expected by cargo-spellcheck.
 
 [`cargo-coverage-gate`][__link25]
 metadata controls workspace and package thresholds, target-specific policy,
-and intentional exclusions. Coverage enforcement is local to the generated
-check; a hosted coverage service is optional reporting rather than the
+and intentional exclusions. The generated check delegates both supported
+feature configurations to `cargo coverage-gate run`, which filters coverage
+to released Cargo library and binary surfaces before atomically publishing
+`target/coverage/lcov-all-features.info` and
+`target/coverage/lcov-no-default.info`. The local gate and hosted reporting
+consume those exact files, so ordinary test modules, assertion guards, and
+test-only helpers need no `coverage(off)` annotations merely to stay out of
+production coverage. Hosted coverage remains reporting rather than the
 source of the verdict.
 
 #### Miri
@@ -402,7 +408,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbcTEnTcXGBR8b8HCcaHW-17wbcqtabVxu0F8bRsUJJTz--cNhZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbxc87d-_xbmwbebKG73ENiN4bRLXU-Dta3A8bVUY1XRcx-ZJhZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/

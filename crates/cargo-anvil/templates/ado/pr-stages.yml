@@ -128,8 +128,10 @@ stages:
       # stays as a sibling task on each OS job -- it's a results
       # publish (not a pipeline artifact), so 1ESPT permits it at step
       # level and we don't need to route it through `artifacts:`.
-      # lcov-*.info files are produced by the anvil-llvm-cov recipe (one per
-      # feature config). Publishing from every OS leg matters because
+      # Released-surface-filtered lcov-*.info files are produced and gated by
+      # cargo-coverage-gate inside the anvil-llvm-cov recipe (one per feature
+      # config), so ADO receives the exact reports behind the local verdict.
+      # Publishing from every OS leg matters because
       # OS-gated code is only exercised on its native target; a single-leg
       # upload would systematically under-report coverage of
       # cfg(target_os = ...) branches. ADO's PublishCodeCoverageResults@2
