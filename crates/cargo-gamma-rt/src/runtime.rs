@@ -2043,11 +2043,22 @@ fn selected() -> u32 {
     let value = ACTIVE.load(Ordering::Acquire);
 
     #[cfg(all(any(unix, windows), not(miri)))]
+    reject_uninstalled(value);
+
+    value
+}
+
+/// Keeps the immediate-termination path separate from the normally returning selection load.
+///
+/// Termination cannot flush coverage counters, while the caller remains instrumented and executes
+/// for every ordinary guard lookup.
+#[cfg(all(any(unix, windows), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[inline]
+fn reject_uninstalled(value: u32) {
     if value == UNINSTALLED {
         uninstalled_guard();
     }
-
-    value
 }
 
 /// Terminates when a guard observes [`UNINSTALLED`], rather than silently reporting the safe-looking
@@ -2592,6 +2603,9 @@ mod tests {
             census_path_length(EnvironmentReadOutcome::Found(NonZeroUsize::new(1).expect("one is non-zero"))),
             Ok(NonZeroUsize::new(1).expect("one is non-zero"))
         );
+        assert_eq!(CensusRequest::from(CensusPathError::Absent), CensusRequest::Absent);
+        assert_eq!(CensusRequest::from(CensusPathError::Unusable), CensusRequest::Unusable);
+        assert_eq!(CensusRequest::from(CensusPathError::Environment), CensusRequest::Error);
     }
 
     #[cfg(any(unix, windows))]

@@ -258,10 +258,12 @@
 //! to released Cargo library and binary surfaces before atomically publishing
 //! `target/coverage/lcov-all-features.info` and
 //! `target/coverage/lcov-no-default.info`. The local gate and hosted reporting
-//! consume those exact files, so ordinary test modules, assertion guards, and
-//! test-only helpers need no `coverage(off)` annotations merely to stay out of
-//! production coverage. Hosted coverage remains reporting rather than the
-//! source of the verdict.
+//! consume those exact files, so provably test-only regions such as
+//! `#[cfg(test)]` modules and their assertion guards or helpers need no
+//! `coverage(off)` annotations merely to stay out of production coverage.
+//! Feature-exposed helpers such as `cfg(feature = "test-util")` remain part of
+//! the released surface and are still counted. Hosted coverage remains
+//! reporting rather than the source of the verdict.
 //!
 //! ### Miri
 //!

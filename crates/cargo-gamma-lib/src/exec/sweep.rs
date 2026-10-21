@@ -6598,34 +6598,48 @@ mod tests {
 
     #[test]
     fn a_partial_census_kill_settles_before_the_whole_binary_timeout() {
-        const SCRIPT: &[&str] = &[
-            "when-arg:tests::t0|print:test tests::t0 ... FAILED",
-            "when-arg:tests::t0|exit:1",
-            "sleep:10000",
-            "exit:0",
-        ];
-
-        let (_directory, work, plan, mut binaries) = helper_harness(SCRIPT);
-        binaries[0].budget = Some(Duration::from_secs(3));
-        let reachable: Vec<&TestBinary> = binaries.iter().collect();
-        let census = Census::partial(&binaries[0].path, plan.mutants[0].ordinal, 1, 4);
+        let (work, _plan, _) = policy_harness(Vec::new());
+        let [binary, _] = ranked_binaries();
+        let census = Census::partial(&binary.path, 7, 1, 4);
         let tally = Tally::default();
-
-        let judgement = judge(
-            &work,
-            plan.mutants[0].ordinal,
-            &reachable,
-            None,
-            None,
-            Sweep {
-                timeout_floor: Duration::ZERO,
-                stall: Stall::NONE,
-                jobs: 1,
+        let expected = Attempt {
+            active: Some(7),
+            timeout: binary.budget,
+            stall: Stall::NONE,
+            request: MemoryRequest {
                 meter: false,
-                confirm: false,
-                census: &census,
+                limit: binary.memory,
             },
-            &tally,
+            only: Only::All,
+            census: None,
+        };
+        let judgement = judge_script(
+            vec![(
+                "earlier",
+                Only::These(&["tests::t0"]),
+                Verdict::Failed(None),
+                ReachObservation::Reached,
+            )],
+            expected,
+            false,
+            || {
+                judge(
+                    &work,
+                    7,
+                    &[&binary],
+                    None,
+                    None,
+                    Sweep {
+                        timeout_floor: Duration::ZERO,
+                        stall: Stall::NONE,
+                        jobs: 1,
+                        meter: false,
+                        confirm: false,
+                        census: &census,
+                    },
+                    &tally,
+                )
+            },
         );
 
         assert!(matches!(judgement, Judgement::Reached(Outcome::Killed, Some(_), None)));

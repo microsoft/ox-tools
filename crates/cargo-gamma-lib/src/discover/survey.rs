@@ -292,7 +292,6 @@ impl Survey {
         Self::for_build_with_cache_inputs(args, shard, cargo, false)
     }
 
-    #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
     // #[gamma::skip(all, reason = "survey construction integrates Cargo metadata, filesystem discovery, and process toolchain state; deterministic component tests cover normalization while isolated mutations are platform-dependent")]
     pub(crate) fn for_build_with_cache_inputs(
         args: &SelectArgs,
@@ -304,14 +303,26 @@ impl Survey {
 
         let features = features::from_extra(&args.features, &cargo.extra);
         let metadata = load_metadata(&args.dir, &features)?;
+        Self::from_metadata(args, shard, cargo, &features, &metadata, cache_inputs)
+    }
+
+    #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
+    fn from_metadata(
+        args: &SelectArgs,
+        shard: Option<(u32, u32)>,
+        cargo: &CargoOptions,
+        features: &FeatureArgs,
+        metadata: &Metadata,
+        cache_inputs: bool,
+    ) -> Result<Self> {
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
         let target = Utf8PathBuf::from(metadata.target_directory.as_str());
         let external_inputs = if cache_inputs {
-            external_path_inputs(&args.dir, &features, &root)?
+            external_path_inputs(&args.dir, features, &root)?
         } else {
             ExternalPathInputs::default()
         };
-        let enabled = features::enabled(&metadata, &features);
+        let enabled = features::enabled(metadata, features);
         let mut files: Vec<TargetFile> = Vec::new();
         let mut seen: HashSet<Utf8PathBuf> = HashSet::default();
         let mut exclusion_files: Vec<TargetFile> = Vec::new();
@@ -333,11 +344,11 @@ impl Survey {
         let collecting_walked = checking_patterns || diff.is_some();
         let mut walked: Vec<Utf8PathBuf> = Vec::new();
 
-        if let Some(named) = unknown_packages(&metadata, args) {
+        if let Some(named) = unknown_packages(metadata, args) {
             return Err(error!("no package named `{named}` in this workspace").usage());
         }
 
-        let selected = selected_packages(&metadata, args);
+        let selected = selected_packages(metadata, args);
 
         for package in metadata.workspace_packages() {
             let mutating = selected.contains(package.name.as_str());
@@ -471,12 +482,12 @@ impl Survey {
             files,
             declaration_files,
             by_package,
-            reach: reachable(&metadata),
+            reach: reachable(metadata),
             selected: sorted(selected),
-            tests: test_targets(&metadata),
-            library_tests: library_tests(&metadata),
-            library_packages: library_packages(&metadata),
-            compile_fail: compile_fail_targets(&metadata),
+            tests: test_targets(metadata),
+            library_tests: library_tests(metadata),
+            library_packages: library_packages(metadata),
+            compile_fail: compile_fail_targets(metadata),
             roots,
             specs,
             cfgs,
@@ -4277,25 +4288,28 @@ mod tests {
     }
 
     #[test]
-    fn survey_retains_cargos_resolved_target_directory() {
-        let (_directory, root) = workspace();
-        let configured_target = root.join("configured-target");
+    fn survey_retains_the_injected_cargo_target_directory() {
+        let root = Utf8PathBuf::from("synthetic/workspace");
+        let target = Utf8PathBuf::from("synthetic/distinct-metadata-target");
+        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+            "packages": [],
+            "workspace_members": [],
+            "workspace_default_members": [],
+            "resolve": null,
+            "workspace_root": root,
+            "target_directory": target,
+            "build_directory": target,
+            "metadata": {},
+            "version": 1
+        }))
+        .expect("fixture metadata parses");
+        let args = SelectArgs {
+            dir: root,
+            ..SelectArgs::default()
+        };
 
-        write(
-            &root,
-            ".cargo/config.toml",
-            &format!("[build]\ntarget-dir = '{}'\n", configured_target.as_str()),
-        );
-        assert_offline_configuration(&root);
-
-        let mut command = cargo_metadata::MetadataCommand::new();
-        let metadata = command
-            .current_dir(&root)
-            .no_deps()
-            .exec()
-            .expect("Cargo resolves the fixture metadata");
-        let target = Utf8PathBuf::from(metadata.target_directory.as_str());
-        let survey = survey(&root, SelectArgs::default());
+        let survey = Survey::from_metadata(&args, None, &CargoOptions::default(), &FeatureArgs::default(), &metadata, false)
+            .expect("the injected metadata must survey");
 
         assert_eq!(survey.target, target);
     }

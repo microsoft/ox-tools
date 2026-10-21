@@ -399,15 +399,6 @@ if ($args -contains 'semver-checks') {
 if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
-if ($args -contains 'coverage-gate' -and $args -contains 'run') {
-    if ($env:FAKE_COVERAGE_GATE_WRITE_REPORTS) {
-        $coverageDir = [System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'target', 'coverage')
-        [System.IO.Directory]::CreateDirectory($coverageDir) | Out-Null
-        Set-Content -LiteralPath ([System.IO.Path]::Combine($coverageDir, 'lcov-all-features.info')) -Value 'TN:'
-        Set-Content -LiteralPath ([System.IO.Path]::Combine($coverageDir, 'lcov-no-default.info')) -Value 'TN:'
-    }
-    exit [int]$env:FAKE_COVERAGE_GATE_EXIT
-}
 if ($args -contains 'nextest') {
     if ($env:FAKE_NEXTEST_EXIT -eq '4' -and $args -contains '--no-tests=pass') {
         exit 0
@@ -2834,166 +2825,39 @@ fn semver_includes_libraries_restricted_to_named_registries() {
 }
 
 #[test]
-fn coverage_run_delegates_collection_filtering_publication_and_gate() {
-    if !tools_available() {
-        return;
+fn coverage_recipe_delegation_contract_is_exact() {
+    let normalized = LLVM_COV.replace("\r\n", "\n");
+    let start = normalized
+        .find("anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact\n")
+        .expect("coverage recipe declaration");
+    let end = normalized.find("# --- pr-test members").expect("coverage recipe footer");
+    let actual = &normalized[start..end];
+    let expected = r#"anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
+    if ($include -eq '--skip') {
+        Write-Host 'anvil-llvm-cov: no affected packages; skipping'
+        exit 0
     }
-    let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
-        &[
-            "anvil-component-nightly-llvm-tools-validate-prereqs",
-            "anvil-tool-cargo-llvm-cov-validate-prereqs",
-            "anvil-tool-cargo-nextest-validate-prereqs",
-            "anvil-tool-cargo-coverage-gate-validate-prereqs",
-            "anvil-component-nightly-llvm-tools-install",
-            "anvil-tool-cargo-llvm-cov-install installer",
-            "anvil-tool-cargo-nextest-install installer",
-            "anvil-tool-cargo-coverage-gate-install installer",
-            "anvil-impact",
-        ],
-    );
-    let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package measured@0.1.0");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_COVERAGE_GATE_WRITE_REPORTS", OsStr::new("1")),
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "delegated coverage run should succeed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(&log).unwrap().trim(),
-        "+nightly-test coverage-gate run --package measured@0.1.0 \
-         --configuration all-features --configuration no-default-features \
-         --coverage-dir target/coverage --no-coverage-target aarch64-pc-windows-msvc"
-    );
-    for configuration in ["all-features", "no-default"] {
-        assert!(
-            tmp.path().join(format!("target/coverage/lcov-{configuration}.info")).is_file(),
-            "cargo-coverage-gate must publish the stable {configuration} report path"
-        );
-    }
-    assert!(
-        !LLVM_COV.contains("Invoke-AnvilLcovReport") && !LLVM_COV.contains("min-lines-percent"),
-        "collection recovery and zero-threshold handling must stay delegated to cargo-coverage-gate"
-    );
-}
+    # An empty selector list is cargo-coverage-gate's full-workspace mode.
+    # Impact-selected values remain version-qualified (`name@version`) so
+    # collection resolves the intended workspace member unambiguously.
+    $packageArgs = @(if ($include -and $include -ne '--workspace') { -split $include })
+    $collectionArgs = @(
+        '--configuration', 'all-features',
+        '--configuration', 'no-default-features',
+        '--coverage-dir', 'target/coverage',
+        '--no-coverage-target', 'aarch64-pc-windows-msvc'
+    )
+    & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-#[test]
-fn coverage_run_maps_unscoped_impact_to_gate_workspace_selection() {
-    if !tools_available() {
-        return;
-    }
-
-    let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
-        &[
-            "anvil-component-nightly-llvm-tools-validate-prereqs",
-            "anvil-tool-cargo-llvm-cov-validate-prereqs",
-            "anvil-tool-cargo-nextest-validate-prereqs",
-            "anvil-tool-cargo-coverage-gate-validate-prereqs",
-            "anvil-component-nightly-llvm-tools-install",
-            "anvil-tool-cargo-llvm-cov-install installer",
-            "anvil-tool-cargo-nextest-install installer",
-            "anvil-tool-cargo-coverage-gate-install installer",
-            "anvil-impact",
-        ],
-    );
-    let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--workspace");
-    let output = run_just(tmp.path(), &["anvil-llvm-cov"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
-    assert!(
-        output.status.success(),
-        "workspace coverage run should succeed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let call = fs::read_to_string(&log).unwrap();
-    assert!(call.contains("coverage-gate run"), "calls:\n{call}");
-    assert!(
-        !call.contains("--workspace"),
-        "the gate selects the workspace when no package selectors are present:\n{call}"
-    );
-    assert!(
-        !call.contains("--package"),
-        "the unscoped run must not synthesize package selectors:\n{call}"
-    );
-}
-
-#[test]
-fn coverage_run_propagates_failures_after_reports_are_published() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
-        &[
-            "anvil-component-nightly-llvm-tools-validate-prereqs",
-            "anvil-tool-cargo-llvm-cov-validate-prereqs",
-            "anvil-tool-cargo-nextest-validate-prereqs",
-            "anvil-tool-cargo-coverage-gate-validate-prereqs",
-            "anvil-component-nightly-llvm-tools-install",
-            "anvil-tool-cargo-llvm-cov-install installer",
-            "anvil-tool-cargo-nextest-install installer",
-            "anvil-tool-cargo-coverage-gate-install installer",
-            "anvil-impact",
-        ],
-    );
-    seed_include(tmp.path(), "affected", "--package measured@0.1.0");
-    let failed = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[
-            ("FAKE_COVERAGE_GATE_WRITE_REPORTS", OsStr::new("1")),
-            ("FAKE_COVERAGE_GATE_EXIT", OsStr::new("7")),
-        ],
-    );
-    assert_failed(&failed, "coverage-gate policy or operational failure");
-    assert!(
-        tmp.path().join("target/coverage/lcov-all-features.info").is_file()
-            && tmp.path().join("target/coverage/lcov-no-default.info").is_file(),
-        "completed filtered reports must remain available to cloud publishers after a gate failure"
-    );
-}
-
-#[test]
-fn coverage_run_skips_without_invoking_the_gate_when_impact_is_empty() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
-        &[
-            "anvil-component-nightly-llvm-tools-validate-prereqs",
-            "anvil-tool-cargo-llvm-cov-validate-prereqs",
-            "anvil-tool-cargo-nextest-validate-prereqs",
-            "anvil-tool-cargo-coverage-gate-validate-prereqs",
-            "anvil-component-nightly-llvm-tools-install",
-            "anvil-tool-cargo-llvm-cov-install installer",
-            "anvil-tool-cargo-nextest-install installer",
-            "anvil-tool-cargo-coverage-gate-install installer",
-            "anvil-impact",
-        ],
-    );
-    let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--skip");
-    let output = run_just(tmp.path(), &["anvil-llvm-cov"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
-    assert!(
-        output.status.success(),
-        "empty impact should remain a successful no-op:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!log.exists(), "the coverage gate must not run for an empty affected tier");
-    assert!(
-        !tmp.path().join("target/coverage").exists(),
-        "a no-impact run must not leave consumer-visible reports"
-    );
+"#;
+    assert_eq!(actual, expected);
+    assert!(!normalized.contains("Invoke-AnvilLcovReport"));
+    assert!(!normalized.contains("min-lines-percent"));
 }
 
 // --- container-specific behaviour ------------------------------------------

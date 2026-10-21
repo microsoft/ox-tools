@@ -364,7 +364,11 @@ mod tests {
             "${prefix}: cargo metadata failed",
             "anvil-llvm-cov: no affected packages; skipping",
             "coverage-gate run @packageArgs @collectionArgs",
+            "'--configuration', 'all-features'",
+            "'--configuration', 'no-default-features'",
+            "'--coverage-dir', 'target/coverage'",
             "'--no-coverage-target', 'aarch64-pc-windows-msvc'",
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
             "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
         ] {

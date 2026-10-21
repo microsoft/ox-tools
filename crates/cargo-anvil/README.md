@@ -258,10 +258,12 @@ feature configurations to `cargo coverage-gate run`, which filters coverage
 to released Cargo library and binary surfaces before atomically publishing
 `target/coverage/lcov-all-features.info` and
 `target/coverage/lcov-no-default.info`. The local gate and hosted reporting
-consume those exact files, so ordinary test modules, assertion guards, and
-test-only helpers need no `coverage(off)` annotations merely to stay out of
-production coverage. Hosted coverage remains reporting rather than the
-source of the verdict.
+consume those exact files, so provably test-only regions such as
+`#[cfg(test)]` modules and their assertion guards or helpers need no
+`coverage(off)` annotations merely to stay out of production coverage.
+Feature-exposed helpers such as `cfg(feature = "test-util")` remain part of
+the released surface and are still counted. Hosted coverage remains
+reporting rather than the source of the verdict.
 
 #### Miri
 
@@ -415,7 +417,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbDCLpYpZAj1IbInX45v6xSUsbksr57Bw9hjUbP32o2YzBydNhZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbVPt5hcl4jg0bO-xn2q1qf4wbZaq9yAOOqX0byhWdWgxtBathZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
