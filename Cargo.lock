@@ -1719,6 +1719,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2 0.2.21",
+]
 
 [[package]]
 name = "heck"
@@ -2845,7 +2848,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19170a50990d08388cf9abef93e188c699cd20f4a5652b865c4721ce6a305625"
 dependencies = [
  "allocation_hints",
- "allocator-api2",
+ "allocator-api2 0.2.21",
  "hashbrown 0.17.1",
  "libc",
  "seismograph",
