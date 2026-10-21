@@ -34,10 +34,12 @@ semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
 removed; feature-gated `test-util` APIs remain measured when they can compile
 in a non-test build. Local Cargo target `required-features` are treated as
 enabled at the target root, so code that requires one of those features to
-be absent is not part of that target’s released surface. A dependency
-selector such as `dep/feature` also enables Cargo’s implicit local `dep`
-feature when that feature exists; `dep?/feature` and `dep:dep` do not create
-local `cfg(feature = ...)` atoms.
+be absent is not part of that target’s released surface. Dependency
+selectors such as `dep/feature`, `dep?/feature`, and `dep:dep` do not create
+local `cfg(feature = ...)` atoms. Dependency-feature availability does not
+prove local-feature activation, even for optional or renamed dependencies
+exposing a same-named local feature: another feature may activate the
+dependency through `dep:dep`.
 Numeric failures show exact covered/coverable counts and uncovered ranges;
 `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 and `NO DATA` explains that no records were attributed. Location lists are
@@ -51,8 +53,7 @@ than every attributed LCOV line. Existing callers that deliberately include
 tests or other non-release targets should migrate to the corresponding
 `evaluate_unfiltered*` function. The released-surface APIs also treat each
 target’s local Cargo `required-features` as enabled when classifying its
-source, including implicit optional-dependency features exposed by Cargo
-metadata.
+source. Dependency-qualified requirements do not imply local cfg features.
 
 ### Configuration
 
@@ -114,7 +115,9 @@ never inferred from a final `test`/`bench` path segment:
 test-attributes = ["my_runtime::test"]
 ```
 
-The list has no qualified defaults and cannot be set per package.
+The list has no qualified defaults and cannot be set per package. Paths
+are accepted if valid in any supported Rust edition, so mixed-edition
+workspaces can list older attribute names without raw-identifier spelling.
 
 #### Target-specific policies
 
@@ -176,7 +179,7 @@ Codecov / ADO numbers confusing.
 
 ```text
 cargo coverage-gate [EVALUATION OPTIONS]
-cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
+cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [--summary-file <PATH>] [--quiet]
 ```
 
 The bare command retains its existing CLI shape while filtering existing
@@ -217,11 +220,12 @@ that publication pipeline. Concurrent collection must use distinct coverage
 directories; private profile isolation does not serialize stable artifact
 writers.
 
-`--lcov` may be repeated; each tracefile is released-surface filtered and
+In standalone evaluation, `--lcov` may be repeated; each tracefile is released-surface filtered and
 then the tracefiles are merged at the line level
 (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 (`--all-features`, `--no-default-features`) can be gated together
-without a separate, platform-specific merge step.
+without a separate, platform-specific merge step. `run` rejects `--lcov`;
+its collected paths are selected by `--coverage-dir`.
 
 Exit codes: `0` if every gated package meets its threshold, `1` if any
 gated package falls below its threshold, and `2` for configuration or
@@ -265,18 +269,18 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbPP5nJ_sBrK4biqgfHAs2dFsbuNyTxNXeRQUbLtObzOnAy5xhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbwlmojYDIyYMba0uqyl_RRzwbljrPD6Ga7BkbuQWacKUxYI5hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjFzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate.html
- [__link10]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link11]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link12]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/enum.Verdict.html
- [__link13]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
- [__link2]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.filter_lcov.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.filter_lcov_many.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate.html
- [__link7]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link8]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link9]: https://docs.rs/cargo-coverage-gate/0.7.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate.html
+ [__link10]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link11]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link12]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/enum.Verdict.html
+ [__link13]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.filter_lcov.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.filter_lcov_many.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate.html
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link9]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/struct.EvaluatedReport.html

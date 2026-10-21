@@ -853,12 +853,20 @@ mod tests {
             "every shared Cargo-tool installation must provision stable first"
         );
         assert!(
-            TOOLS_JUST.contains("& just _install-tool-core cargo-bolero"),
-            "platform-gated installers must use the already-provisioned core helper"
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}"#),
+            "the bolero installer must invoke the generated just executable for its core helper"
         );
         assert!(
-            TOOLS_JUST.contains("& just _install-tool-core cargo-mutants"),
-            "platform-gated installers must use the already-provisioned core helper"
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}"#),
+            "the mutants installer must invoke the generated just executable for its core helper"
+        );
+        assert!(
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-bolero {{cargo_bolero_version}}"#),
+            "the bolero prerequisite check must invoke the generated just executable"
+        );
+        assert!(
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}"#),
+            "the mutants prerequisite check must invoke the generated just executable"
         );
         for component in ["clippy", "rustfmt"] {
             let expected = format!("anvil-component-default-{component}-install: anvil-toolchain-stable-install");

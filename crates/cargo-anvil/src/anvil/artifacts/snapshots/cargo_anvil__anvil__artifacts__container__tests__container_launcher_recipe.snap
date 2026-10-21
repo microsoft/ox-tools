@@ -1,0 +1,318 @@
+---
+source: crates/cargo-anvil/src/anvil/artifacts/container.rs
+expression: body
+---
+    $ErrorActionPreference = 'Stop'
+    # `*command` joins its parts with spaces, so the string is split back into
+    # argv here. Whitespace is the only separator, so an argument containing a
+    # space does not survive; pass such a value through the environment.
+    $argv = @('{{ replace(command, "'", "''") }}' -split '\s+' | Where-Object { $_ })
+    $forwardGithubToken = $argv.Count -gt 0 -and $argv[0] -ceq '--github-token'
+    if ($forwardGithubToken) {
+        $argv = @($argv | Select-Object -Skip 1)
+        if ([string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+            Write-Error "anvil-container: --github-token requires an explicitly supplied GITHUB_TOKEN; no host credential is acquired automatically"
+            exit 1
+        }
+    }
+    if ($env:ANVIL_IN_CONTAINER -eq '1') {
+        if ($argv.Count -eq 0) {
+            # The no-argument form asks for a shell in the image, and this is
+            # that shell. Nothing runs, so exiting 0 would report success for a
+            # request that was not carried out.
+            [Console]::Error.WriteLine("anvil: already inside the container; run the command directly")
+            exit 1
+        }
+        # `just` resolves to the binary running this tree rather than to PATH:
+        # ANVIL_IN_CONTAINER is a documented control a developer can set on a
+        # host, and a caller who invoked `just` by absolute path with its
+        # directory off PATH would otherwise fail here.
+        $exe = if ($argv[0] -eq 'just') { '{{ replace(just_executable(), "'", "''") }}' } else { $argv[0] }
+        & $exe @($argv | Select-Object -Skip 1)
+        exit $LASTEXITCODE
+    }
+
+    $engine = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-engine
+
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $engine = "$engine".Trim()
+    $engineCmd = $engine -split '\|'
+    $engineExe = $engineCmd[0]
+    $enginePrefix = @($engineCmd | Select-Object -Skip 1)
+    $image = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-container-image) | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
+    $engineRoot = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $repoRoot
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engineRoot = "$engineRoot".Trim()
+
+    # Map the caller's working directory to its in-container equivalent so
+    # relative paths keep working from a subdirectory. `invocation_directory()`
+    # would be wrong here: with `cygpath` on PATH it reports a Cygwin-style
+    # path, which shares no prefix with the native `justfile_directory()` above.
+    # `GetRelativePath` then walks out with `..` segments and the run is placed
+    # outside the mount, so it fails on a path that does not exist in the
+    # container. The `_native` form is the one that agrees with the root.
+    $rel = [System.IO.Path]::GetRelativePath($repoRoot, '{{ replace(invocation_directory_native(), "'", "''") }}') -replace '\\', '/'
+    # `-eq '..'` or a `../` prefix, not a bare `..` prefix: `GetRelativePath`
+    # returns a plain relative path for anything inside the root, so a directory
+    # named `..data` -- the shape a projected mount uses -- is inside and must
+    # not be refused.
+    if ($rel -eq '..' -or $rel.StartsWith('../')) {
+        Write-Error "anvil: run this from inside the repository; $rel is outside $repoRoot"
+        exit 1
+    }
+    $containerCwd = if ($rel -eq '.' -or [string]::IsNullOrEmpty($rel)) {
+        '{{anvil_container_workdir}}'
+    } else {
+        '{{anvil_container_workdir}}/' + $rel
+    }
+
+    $interactive = $argv.Count -eq 0
+    $runArgs = @('run', '--rm', '--platform', 'linux/amd64')
+    $runArgs += $interactive ? '-it' : '-i'
+    $runArgs += @('-v', "${engineRoot}:{{anvil_container_workdir}}")
+
+    # A checkout whose `.git` is a file keeps its real git directory elsewhere:
+    # a linked worktree points into the main clone, `--separate-git-dir` and a
+    # submodule point somewhere else again. The path recorded there is a host
+    # path that does not exist inside the container, so git resolves neither
+    # HEAD nor origin/main. Mount the common git directory and replace the
+    # checkout's `.git` with one naming that mount; the `commondir` file in a
+    # worktree's entry is relative, so it resolves under it.
+    #
+    # The predicate is the shape of `.git`, not whether the git directory
+    # differs from the common one: `--separate-git-dir` redirects without
+    # differing, and testing for a difference skips it and leaves git pointed at
+    # a path the container cannot see.
+    #
+    # The redirection lives in the checkout rather than in GIT_DIR/GIT_WORK_TREE
+    # so that it stays scoped to it. Those variables are ambient: every process
+    # in the container inherits them, and a git command run elsewhere -- `git
+    # init` in a test's scratch directory -- would operate on this repository
+    # instead of its own.
+    #
+    # An ordinary clone keeps its git directory inside the checkout, where the
+    # bind mount already carries it, and takes none of this.
+    #
+    # Guarded on git being present: the run path needs it only to answer this
+    # question, and a host with a working engine but no git on PATH keeps
+    # working rather than failing on a call it does not need.
+    $gitFile = $null
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $gitDir = & git rev-parse --git-dir 2>$null
+        $gitCommon = & git rev-parse --git-common-dir 2>$null
+        if ($LASTEXITCODE -eq 0 -and $gitDir -and $gitCommon -and
+            (Test-Path -LiteralPath (Join-Path $repoRoot '.git') -PathType Leaf)) {
+            $gitDirAbs = (Resolve-Path -LiteralPath $gitDir).Path
+            $gitCommonAbs = (Resolve-Path -LiteralPath $gitCommon).Path
+            $rel = [System.IO.Path]::GetRelativePath($gitCommonAbs, $gitDirAbs) -replace '\\', '/'
+            # One mount has to carry both directories, so the git directory must
+            # sit under the common one. `git worktree` always places it there and
+            # a redirect without a separate worktree entry makes the two equal;
+            # anything else cannot be expressed as a single mount, and emitting a
+            # path that climbs out of it would fail inside the container instead.
+            if ($rel -eq '.') {
+                # git-dir equal to common-dir means there is no separate worktree
+                # entry: a `--separate-git-dir` clone or a submodule. A submodule
+                # also records `core.worktree`, resolved relative to the git
+                # directory, and remounting the git directory moves what that
+                # relative path resolves to. The value belongs to the repository,
+                # so it is not ours to rewrite, and git inside the container
+                # would otherwise report a worktree that does not exist -- which
+                # is why this is refused here rather than left to fail there.
+                $coreWorktree = & git -C $repoRoot config --get core.worktree 2>$null
+                if ($LASTEXITCODE -eq 0 -and $coreWorktree) {
+                    Write-Error "anvil: this checkout sets core.worktree ($coreWorktree) and keeps its git directory outside itself, which is the shape of a submodule. The git directory has to be remounted for the container, and that moves what core.worktree resolves against, so git inside the container would not find the worktree. Run the container from the superproject, or from an ordinary clone."
+                    exit 1
+                }
+                $containerGitDir = '/anvil/gitdir'
+            } elseif ($rel.StartsWith('../') -or [System.IO.Path]::IsPathRooted($rel)) {
+                Write-Error "anvil: this checkout's git directory ($gitDirAbs) is not inside its common git directory ($gitCommonAbs), so the two cannot be mounted as one tree. Run the container from an ordinary clone or a git worktree checkout."
+                exit 1
+            } else {
+                $containerGitDir = "/anvil/gitdir/$rel"
+            }
+            $engineGitCommon = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitCommonAbs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $engineGitCommon = "$engineGitCommon".Trim()
+            # LF and no trailing newline: git parses this file strictly.
+            $gitFile = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-gitfile-$([System.Guid]::NewGuid().ToString('N'))"
+            [System.IO.File]::WriteAllText($gitFile, "gitdir: $containerGitDir`n")
+            $engineGitFile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitFile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $engineGitFile = "$engineGitFile".Trim()
+            $runArgs += @('-v', "${engineGitCommon}:/anvil/gitdir")
+            $runArgs += @('-v', "${engineGitFile}:{{anvil_container_workdir}}/.git:ro")
+        }
+    }
+
+    # Cache only what is content-addressed: the downloaded registry and the git
+    # checkouts. Deliberately NOT $CARGO_HOME or $RUSTUP_HOME themselves --
+    # those hold the installed tools and toolchains, and a named volume is
+    # populated from the image only when it is first created. Mounting them
+    # would pin the first image's binaries over every later one, so a tool bump
+    # would change the tag, build a new image, and still run the old tools.
+    $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
+    $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
+    # Match the caller's uid/gid on Linux. Without this everything the run
+    # writes under the bind mount -- target/, generated files -- lands as root
+    # on the host, and the next native cargo build or git clean fails with
+    # EACCES a long way from the cause.
+    #
+    # The question is how the *selected engine* maps users, not what the host
+    # OS is. Docker Desktop on Windows and macOS maps ownership itself, and
+    # `id` is not there to ask. But an engine living inside WSL does not: the
+    # repository is reached over `/mnt/c`, which presents every file as the
+    # distribution's default user while the container runs as root, so git
+    # refuses the checkout as dubiously owned and every history-reading check
+    # fails. That engine is Linux however Windows the host is, so it takes the
+    # Linux path -- asking the distribution for the uid, since the host has no
+    # `id`.
+    $mapsOwnership = ($IsWindows -or $IsMacOS) -and -not $engine.StartsWith('wsl.exe|')
+    if (-not $mapsOwnership) {
+        if ($engine.StartsWith('wsl.exe|')) {
+            $hostUid = (& wsl.exe --exec id -u); $hostGid = (& wsl.exe --exec id -g)
+        } else {
+            $hostUid = (id -u); $hostGid = (id -g)
+        }
+        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') {
+            $runArgs += @('--user', "${hostUid}:${hostGid}")
+            # That uid has no passwd entry, so the engine leaves HOME as `/`.
+            # Anything falling back to $HOME for a cache then writes to a
+            # read-only root and fails a long way from the cause.
+            $runArgs += @('-e', 'HOME=/tmp')
+        }
+    }
+    $runArgs += @('-e', 'ANVIL_IN_CONTAINER=1')
+
+    # Run-time credentials come from the optional hook. Forwarded by NAME, never
+    # as NAME=VALUE: the engine copies the value out of the environment it
+    # already inherits, so a credential never appears in the host's process
+    # command line, where endpoint telemetry records and retains it for far
+    # longer than a short-lived token is meant to live.
+    # $forwardedEnv is every name passed with -e; $hookEnv is the subset this
+    # process set, and so the subset it must unset again.
+    $forwardedEnv = @()
+    $hookEnv = @()
+
+    if ($forwardGithubToken) {
+        $forwardedEnv += 'GITHUB_TOKEN'
+        $runArgs += @('-e', 'GITHUB_TOKEN')
+    }
+
+    # The recipe contract's own inputs. These are read by generated checks --
+    # `anvil-pr-title` reads PR_TITLE, `_anvil-base-ref` reads BASE_REF and its
+    # CI equivalents, `anvil-impact` reads ANVIL_IMPACT to decide whether to
+    # compute scoping, consume a downloaded cache, or skip, and the Miri runner
+    # reads ANVIL_MIRI_JOBS to cap artifact workers -- so dropping them at the
+    # boundary makes the same command mean different things inside and out.
+    # anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with a
+    # skip notice, so a title a native run rejects passes in a container and the
+    # tier still reports green. ANVIL_IMPACT is the other: a CI group job exports
+    # `consume`, and a container that did not inherit it would recompute scoping
+    # from a diff instead of trusting the artifact the group downloaded.
+    #
+    # Forwarded by name and only when set, so an unset variable stays unset
+    # rather than arriving as an empty string, which several of these treat as
+    # a value.
+    # ANVIL_IMPACT_INPUT_DIR is deliberately NOT forwarded. `-e NAME` passes the
+    # host value unchanged, and the override is a host path that need not exist
+    # inside the container, so forwarding it cannot be made correct in general.
+    # Dropping it silently is worse: the container would fall back to
+    # target/anvil/impact and could scope off a different package list than the
+    # native run while still reporting green. Reject the combination instead --
+    # an explicit input that cannot be honored must fail, never fall back.
+    # Only under consume, because that is the only mode that reads the override;
+    # with ANVIL_IMPACT off or unset the variable is ignored, so a containerized
+    # run cannot diverge and there is nothing to reject.
+    if ($env:ANVIL_IMPACT -eq 'consume' -and (Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR') -and -not [string]::IsNullOrEmpty($env:ANVIL_IMPACT_INPUT_DIR)) {
+        Write-Error "anvil-container: ANVIL_IMPACT=consume and ANVIL_IMPACT_INPUT_DIR is set ($env:ANVIL_IMPACT_INPUT_DIR), but containerized checks cannot honor the override -- it names a host directory that need not exist inside the container, and forwarding it would let the run scope off a different cache than the native run. Unset it to run this check in a container, or run the check natively to use the injected cache."
+        exit 1
+    }
+
+    foreach ($name in @(
+        'PR_TITLE',
+        'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
+        'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS')) {
+        if ((Test-Path -LiteralPath "Env:$name") -and -not [string]::IsNullOrEmpty((Get-Item -LiteralPath "Env:$name").Value)) {
+            $forwardedEnv += $name
+            $runArgs += @('-e', $name)
+        }
+    }
+
+    $hookPath = Join-Path $repoRoot '.anvil/container/hooks.ps1'
+    if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
+        # Fail-closed like Anvil-BuildSecrets: a run that cannot obtain its
+        # credentials fails inside the container in a far less obvious way.
+        try {
+            . $hookPath
+        } catch {
+            Write-Error "anvil: failed to load .anvil/container/hooks.ps1: $($_.Exception.Message)"
+            exit 1
+        }
+        if (Get-Command Anvil-RunEnv -CommandType Function -ErrorAction SilentlyContinue) {
+            [Console]::Error.WriteLine("anvil: running Anvil-RunEnv from .anvil/container/hooks.ps1")
+            try {
+                $hook = @(Anvil-RunEnv | Where-Object { $_ }) | Select-Object -Last 1
+            } catch {
+                Write-Error "anvil: Anvil-RunEnv failed: $($_.Exception.Message)"
+                exit 1
+            }
+            $hookVars = if ($null -ne $hook) { $hook.Env } else { $null }
+            if ($null -eq $hookVars -or $hookVars.Keys.Count -eq 0) {
+                Write-Error "anvil: Anvil-RunEnv returned no variables; omit the function if the run needs none"
+                exit 1
+            }
+            foreach ($name in $hookVars.Keys) {
+                if ($name -ieq 'GITHUB_TOKEN') {
+                    if (-not $forwardGithubToken) {
+                        Write-Error "anvil-container: GITHUB_TOKEN is reserved; Anvil-RunEnv cannot forward it without --github-token"
+                        exit 1
+                    }
+                    # The explicit host input is authoritative, not the hook.
+                    continue
+                }
+                if ([string]::IsNullOrWhiteSpace($hookVars[$name])) {
+                    Write-Error "anvil: Anvil-RunEnv returned an empty value for '$name'"
+                    exit 1
+                }
+                Set-Item -LiteralPath "Env:$name" -Value $hookVars[$name]
+                $hookEnv += $name
+                $forwardedEnv += $name
+                $runArgs += @('-e', $name)
+            }
+            # Names only, never values: a hook with a broad idea of what to
+            # forward should be visible, since everything inside the
+            # container can read it -- including third-party build scripts.
+            [Console]::Error.WriteLine("anvil: forwarding env: $($hookVars.Keys -join ', ')")
+        }
+    }
+
+    try {
+        # --pull=never: the reference names content that is already here, either
+        # built locally or fetched by the resolve hook, so a miss is a bug to
+        # surface rather than an invitation to fetch something unrelated.
+        $runArgs += @('--pull=never', '-w', $containerCwd, $image)
+        if (-not $interactive) { $runArgs += $argv }
+        # WSLENV exports the forwarded names into the WSL environment, which is
+        # where the engine reads their values from when it runs there. Without
+        # it, `-e NAME` reaches an engine that cannot see NAME and forwards
+        # nothing, leaving the variable unset inside the container.
+        #
+        # It is not restored afterwards because there is nothing to restore to:
+        # `just` runs a [script(...)] recipe as its own pwsh process, so this
+        # assignment dies with that process and never reaches the caller's
+        # shell. The `finally` below unsets the credential names for hygiene
+        # within this process, not to protect the parent.
+        if ($engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0) {
+            $env:WSLENV = (@($env:WSLENV) + ($forwardedEnv | ForEach-Object { "$_/u" }) | Where-Object { $_ }) -join ':'
+        }
+        & $engineExe @enginePrefix @runArgs
+        exit $LASTEXITCODE
+    } finally {
+        foreach ($name in $hookEnv) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        if ($gitFile) { Remove-Item -LiteralPath $gitFile -Force -ErrorAction SilentlyContinue }
+    }

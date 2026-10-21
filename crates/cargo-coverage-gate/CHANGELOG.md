@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-20
+
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: preserve alternate dependency activation paths
+  - cargo-coverage-gate: honor dependency and edition metadata
+
 ## [0.7.0] - 2026-10-19
 
 - ⚠️ Breaking

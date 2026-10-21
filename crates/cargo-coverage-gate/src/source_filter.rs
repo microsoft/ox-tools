@@ -9,6 +9,7 @@
 //! rules. Within released files, syntax ranges guarded exclusively by test
 //! configuration are removed from every line-bearing LCOV record.
 
+use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
@@ -221,13 +222,25 @@ fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<B
 fn parse_configured_test_attribute(value: &str) -> Option<String> {
     let expected_attribute = format!("#[{value}]");
     let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
-    let parse = SourceFile::parse(&source, Edition::CURRENT);
+    [
+        Edition::Edition2024,
+        Edition::Edition2021,
+        Edition::Edition2018,
+        Edition::Edition2015,
+    ]
+    .into_iter()
+    .find_map(|edition| parse_configured_test_attribute_for_edition(&source, &expected_attribute, edition))
+}
+
+// Validates exactly one path attribute in one edition; the caller owns cross-edition acceptance.
+fn parse_configured_test_attribute_for_edition(source: &str, expected_attribute: &str, edition: Edition) -> Option<String> {
+    let parse = SourceFile::parse(source, edition);
     if !parse.errors().is_empty() {
         return None;
     }
     let tree = parse.tree();
     let attribute = tree.syntax().descendants().find_map(ast::Attr::cast)?;
-    if attribute.syntax().text().to_string() != expected_attribute {
+    if attribute.syntax().text() != expected_attribute {
         return None;
     }
     let ast::Meta::PathMeta(meta) = attribute.meta()? else {
@@ -409,7 +422,7 @@ fn source_roots(
                     Surface::NonReleased
                 },
                 role: SourceRole::CrateRoot,
-                guard: target_required_features_guard(&target.required_features, &package.features),
+                guard: target_required_features_guard(&target.required_features),
                 owning_member: owning_member.clone(),
             });
         }
@@ -425,17 +438,13 @@ fn attributed_path(member_dirs: &MemberDirectories, path: &Path) -> Option<PathB
     })
 }
 
-fn target_required_features_guard(required_features: &[String], package_features: &BTreeMap<String, Vec<String>>) -> CfgFormula {
+fn target_required_features_guard(required_features: &[String]) -> CfgFormula {
     CfgFormula::all(required_features.iter().filter_map(|selector| {
-        if selector.starts_with("dep:") {
+        // Dependency-feature availability does not prove which local feature activated it.
+        if selector.starts_with("dep:") || selector.contains('/') {
             return None;
         }
-        let local_feature = match selector.split_once('/') {
-            Some((dependency, _)) if !dependency.ends_with('?') && package_features.contains_key(dependency) => dependency,
-            Some(_) => return None,
-            None => selector,
-        };
-        Some(CfgFormula::Atom(format!("feature={local_feature}")))
+        Some(CfgFormula::Atom(format!("feature={selector}")))
     }))
 }
 
@@ -601,6 +610,13 @@ fn analyze_source_text(
     edition: Edition,
     test_attributes: &BTreeSet<String>,
 ) -> Result<SourceAnalysis, CoverageGateError> {
+    // rust-analyzer attaches leading comments differently around CRLF blank lines.
+    let source = if source.contains("\r\n") {
+        Cow::Owned(source.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(source)
+    };
+    let source = source.as_ref();
     let parse = SourceFile::parse(source, edition);
     let line_starts = line_starts(source);
     if !parse.errors().is_empty() {
@@ -2435,25 +2451,23 @@ mod tests {
     }
 
     #[test]
-    fn dependency_required_feature_guards_follow_cargo_metadata() {
-        let implicit = BTreeMap::from([("dep".to_owned(), vec!["dep:dep".to_owned()])]);
-        assert_eq!(
-            target_required_features_guard(&["dep/x".to_owned()], &implicit),
-            CfgFormula::Atom("feature=dep".to_owned())
-        );
-        assert_eq!(
-            target_required_features_guard(&["dep/x".to_owned()], &BTreeMap::new()),
-            CfgFormula::Value(true)
-        );
-        assert_eq!(
-            target_required_features_guard(&["dep?/x".to_owned(), "dep:dep".to_owned()], &implicit),
-            CfgFormula::Value(true)
-        );
+    fn dependency_required_feature_guards_do_not_imply_local_activation() {
+        for selectors in [vec![], vec!["dep/x"], vec!["alias/x"], vec!["dep?/x"], vec!["dep:dep"]] {
+            let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(target_required_features_guard(&selectors), CfgFormula::Value(true));
+        }
+        for selectors in [vec!["dep"], vec!["dep/x", "dep"], vec!["dep:dep", "dep"]] {
+            let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(
+                target_required_features_guard(&selectors),
+                CfgFormula::Atom("feature=dep".to_owned())
+            );
+        }
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
-    fn dependency_required_features_enable_implicit_local_features() {
+    fn dependency_required_features_retain_alternate_activation_routes() {
         let root = source_index_fixture_root();
         let mut metadata_value = serde_json::to_value(source_index_fixture_metadata(&root)).expect("fixture metadata serializes");
         metadata_value["packages"][0]["dependencies"] = json!([{
@@ -2464,7 +2478,7 @@ mod tests {
             "rename": null,
             "optional": true,
             "uses_default_features": true,
-            "features": [],
+            "features": ["x"],
             "target": null,
             "registry": null
         }]);
@@ -2477,21 +2491,46 @@ mod tests {
             .into();
         metadata.packages[0].targets[0].required_features = vec!["dep/x".to_owned()];
 
-        let index = SourceIndex::from_metadata(&metadata).expect("dependency-required feature source index builds");
         let source = fs::canonicalize(root.join("member/src/dependency-required-feature-root.rs"))
             .expect("canonical dependency-required feature source");
-        assert_eq!(index.files[&source].test_only_lines, BTreeSet::from([7, 8]));
+        for (optional, renamed, exposes_feature, selector, enables_local) in [
+            (true, false, true, "dep/x", false),
+            (false, false, true, "dep/x", false),
+            (true, true, true, "dep/x", false),
+            (true, false, true, "dep?/x", false),
+            (true, false, false, "dep:dep", false),
+            (true, false, false, "dep/x", false),
+            (true, false, true, "dep", true),
+        ] {
+            metadata.packages[0].dependencies[0].optional = optional;
+            metadata.packages[0].dependencies[0].name = if renamed { "original-package" } else { "dep" }.to_owned();
+            metadata.packages[0].dependencies[0].rename = renamed.then(|| "dep".to_owned());
+            metadata.packages[0].features = if exposes_feature {
+                if optional {
+                    BTreeMap::from([
+                        ("dep".to_owned(), vec!["dep:dep".to_owned()]),
+                        ("bundle".to_owned(), vec!["dep:dep".to_owned()]),
+                    ])
+                } else {
+                    BTreeMap::from([("dep".to_owned(), Vec::new())])
+                }
+            } else {
+                BTreeMap::from([("activate".to_owned(), vec!["dep:dep".to_owned()])])
+            };
+            metadata.packages[0].targets[0].required_features = vec![selector.to_owned()];
+            let index = SourceIndex::from_metadata(&metadata).expect("dependency-required feature source index builds");
+            let expected_removed = if enables_local { BTreeSet::from([7, 8]) } else { BTreeSet::new() };
+            assert_eq!(index.files[&source].test_only_lines, expected_removed, "{selector}");
 
-        let filtered = filter_reports_with_metadata(
-            vec![parse_lcov(
-                "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nDA:7,0\nDA:8,0\nend_of_record\n",
-            )],
-            &metadata,
-        )
-        .expect("dependency-required feature report filters");
-        let report = parse_lcov(&filtered[0]);
-        assert_eq!(
-            report
+            let filtered = filter_reports_with_metadata(
+                vec![parse_lcov(
+                    "TN:\nSF:member/src/dependency-required-feature-root.rs\nDA:4,0\nDA:5,0\nDA:7,0\nDA:8,0\nend_of_record\n",
+                )],
+                &metadata,
+            )
+            .expect("dependency-required feature report filters");
+            let report = parse_lcov(&filtered[0]);
+            let retained = report
                 .sections
                 .values()
                 .next()
@@ -2499,9 +2538,84 @@ mod tests {
                 .lines
                 .keys()
                 .map(|line| line.line)
-                .collect::<Vec<_>>(),
-            [4, 5]
+                .collect::<Vec<_>>();
+            assert_eq!(retained, if enables_local { vec![4, 5] } else { vec![4, 5, 7, 8] }, "{selector}");
+        }
+    }
+
+    // Verifies edition fallback independently of source discovery and LCOV filtering.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn configured_test_attributes_accept_paths_from_older_editions() {
+        let expected_attribute = "#[framework::gen]";
+        let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
+        assert!(parse_configured_test_attribute_for_edition(&source, expected_attribute, Edition::Edition2024).is_none());
+        assert_eq!(
+            parse_configured_test_attribute_for_edition(&source, expected_attribute, Edition::Edition2021).as_deref(),
+            Some("framework::gen")
         );
+        assert_eq!(parse_configured_test_attribute("framework::gen").as_deref(), Some("framework::gen"));
+    }
+
+    // Covers workspace policy, target editions, and exact LCOV output using immutable checked-in files.
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn configured_test_attributes_work_across_target_editions() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.workspace_metadata = json!({"coverage-gate": {"test-attributes": ["framework::gen"]}});
+        for (target, edition, filename) in [
+            (0, CargoEdition::E2021, "edition-2021.rs"),
+            (1, CargoEdition::E2024, "edition-2024.rs"),
+        ] {
+            metadata.packages[0].targets[target].edition = edition;
+            metadata.packages[0].targets[target].kind = vec![TargetKind::Bin];
+            metadata.packages[0].targets[target].src_path = root.join("member/src").join(filename).to_string_lossy().into_owned().into();
+        }
+
+        let index = SourceIndex::from_metadata(&metadata).expect("mixed-edition source index builds");
+        for filename in ["edition-2021.rs", "edition-2024.rs"] {
+            let source = fs::canonicalize(root.join("member/src").join(filename)).expect("canonical edition fixture");
+            assert_eq!(index.files[&source].test_only_lines, BTreeSet::from([4, 5]));
+            let report = format!("TN:\nSF:member/src/{filename}\nDA:4,0\nDA:5,0\nDA:7,1\nend_of_record\n");
+            let filtered = filter_reports_with_metadata(vec![parse_lcov(&report)], &metadata).expect("mixed-edition report filters");
+            let expected_path = root.join("member").join("src").join(filename);
+            assert_eq!(
+                filtered,
+                [format!("TN:\nSF:{}\nDA:7,1\nLF:1\nLH:1\nend_of_record\n", expected_path.display())]
+            );
+        }
+    }
+
+    // Isolates parser attachment and line mapping with controlled LF/CRLF inputs, without file discovery.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn configured_test_attribute_classification_is_independent_of_line_endings() {
+        let attributes = BTreeSet::from(["framework::gen".to_owned()]);
+        for (edition, fixture) in [
+            (
+                Edition::Edition2021,
+                include_str!("../tests/fixtures/source-index/member/src/edition-2021.rs"),
+            ),
+            (
+                Edition::Edition2024,
+                include_str!("../tests/fixtures/source-index/member/src/edition-2024.rs"),
+            ),
+        ] {
+            let lf = fixture.replace("\r\n", "\n");
+            for source in [&lf, &lf.replace('\n', "\r\n")] {
+                let analysis =
+                    analyze_source_text(Path::new("edition.rs"), source, edition, &attributes).expect("configured test attribute parses");
+                assert_eq!(analysis.test_only_lines, BTreeSet::from([4, 5]));
+                assert_eq!(analysis.line_count, 7);
+            }
+        }
     }
 
     #[test]

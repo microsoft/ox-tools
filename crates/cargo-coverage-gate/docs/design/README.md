@@ -105,7 +105,7 @@ want to reproduce the gate locally.
 
 ```text
 cargo coverage-gate [EVALUATION OPTIONS]
-cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
+cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [--summary-file <PATH>] [--quiet]
 ```
 
 The bare command retains its existing invocation shape. In 0.7 it filters one
@@ -119,7 +119,9 @@ configuration, missing tools, failed collection/export, or malformed coverage.
 
 Flags:
 
-- `--lcov <path>` — path to a cargo-llvm-cov lcov tracefile. May be
+- `--lcov <path>` — standalone evaluation only; rejected by `run`, whose
+  collected paths are selected by `--coverage-dir`.
+  Path to a cargo-llvm-cov lcov tracefile. May be
   repeated (`--lcov a.info --lcov b.info`); the tracefiles are merged at
   the line level after each is filtered to released Cargo lib/bin source
   (line sets combined, coverage retained when any input has a hit) before
@@ -239,7 +241,12 @@ test-only functions:
 test-attributes = ["my_runtime::test"]
 ```
 
-The entries are exact Rust attribute paths. The list is workspace-scoped so a
+The entries are exact Rust attribute paths, accepted if syntactically valid
+in any supported Rust edition. Matching normalizes raw identifiers, so a
+mixed-edition workspace can configure `framework::gen` once for both
+`#[framework::gen]` in Rust 2021 and `#[framework::r#gen]` in Rust 2024.
+Source files themselves are still parsed in their Cargo target's edition.
+The list is workspace-scoped so a
 source file shared by multiple packages receives one classification;
 released-surface filtering rejects package-scoped `test-attributes` as a
 configuration error. The explicit `evaluate_unfiltered*` escape hatch does not
@@ -558,10 +565,15 @@ the released Cargo surface:
   conjoined with shared assignments. A Cargo target's local
   `required-features` are also true at its root, so code that can exist only
   when a required feature is absent is not counted as released.
-  A dependency-qualified selector such as `dep/feature` also enables the
-  optional dependency's implicit local `dep` feature when Cargo metadata
-  exposes it. Weak selectors (`dep?/feature`) and explicit `dep:dep`
-  activations do not create local cfg atoms. Correlated occurrences of up to
+  Dependency-qualified selectors such as `dep/feature` check resolved
+  dependency-feature availability, not local-feature activation. Even when
+  metadata identifies an optional dependency (including a renamed alias)
+  and exposes a same-named local feature, another feature such as
+  `bundle = ["dep:dep"]` can activate that dependency without the local
+  feature. Qualified selectors, weak selectors (`dep?/feature`), and
+  explicit `dep:dep` activations therefore create no local cfg atoms.
+  Non-optional dependencies likewise imply no same-named local feature.
+  Correlated occurrences of up to
   twelve distinct non-`test` cfg atoms are evaluated exactly; larger or
   unsupported predicate shapes fall back to conservative retention rather
   than hiding released code.
@@ -570,6 +582,11 @@ Filtering removes matching line records so downstream coverage UIs see the same
 released line surface as the gate. Function and branch records are omitted
 entirely because the proof is line-granular. A source/path/parse state the tool
 cannot classify safely is exit `2`, not a silent exclusion.
+
+Rust source CRLF line endings are normalized to LF before syntax parsing and
+line-offset mapping, so leading-comment attachment and test-only line
+classification do not depend on checkout line endings. LCOV line numbers are
+unchanged.
 
 For each remaining `SF:` section the tool counts:
 
