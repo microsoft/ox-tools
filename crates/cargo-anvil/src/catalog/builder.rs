@@ -11,9 +11,10 @@
 
 use ohno::{AppError, bail};
 
+use crate::JsonArrayRegionSpec;
 use crate::catalog::artifact::Artifact;
 use crate::catalog::meta::CliMeta;
-use crate::catalog::{HostSelector, JsonArrayRegionSpec, RegionId, RegionSpec, TomlArrayRegionSpec};
+use crate::catalog::{HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
 use crate::checksum::checksum_str;
 
 // U+001F (unit separator) cannot appear in paths/ids and is vanishingly
@@ -505,6 +506,13 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("with_json_array_region: an artifact with identity"));
+    }
+
+    #[test]
+    fn json_array_spec_remains_unwind_safe_for_downstream_catalogs() {
+        fn assert_traits<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+
+        assert_traits::<JsonArrayRegionSpec>();
     }
 
     #[test]

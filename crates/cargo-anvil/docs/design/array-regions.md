@@ -14,11 +14,12 @@ entry, comment, delimiter, and formatting byte the repository owns.
 ## Supported input
 
 - TOML hosts have a `.toml` suffix and JSON hosts have a `.json` suffix, case
-  insensitive. Workspace/member manifest selectors remain available. After
-  expansion, duplicate `(host, region id)` identities are errors, including
-  aliases between different selectors. All regions sharing a resolved TOML
-  array host must use hash comments; JSON array hosts use slash-slash comments.
-  Unresolved case aliases for the same array host also refuse.
+  insensitive. Workspace/member manifest selectors are available only for
+  TOML arrays; JSON arrays require a literal path selector. After expansion,
+  duplicate `(host, region id)` identities are errors, including aliases
+  between different selectors. All regions sharing a resolved TOML array host
+  must use hash comments; JSON array hosts use slash-slash comments. Unresolved
+  case aliases for the same array host also refuse.
 - Selectors are nonempty lists of literal key or property components, not
   dotted expressions. Quoted TOML keys and arbitrary JSON property names work.
   TOML parents must be normal tables, not inline tables or arrays of tables;

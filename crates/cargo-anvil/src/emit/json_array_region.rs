@@ -9,18 +9,68 @@ use std::ops::Range;
 use jsonc_parser::ast::{Array, Object, Value};
 use jsonc_parser::common::Range as JsonRange;
 use jsonc_parser::{CollectOptions, ParseOptions, parse_to_ast};
-use ohno::app_err;
 
-use crate::catalog::JsonArrayRegionSpec;
 use crate::emit::managed_region::{ManagedRegionRefusal, ManagedRegionRequest, RefusalRemedy, plan_region_with_splice};
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
-use crate::region::{
-    CommentSyntax, HostScanner, Region, RegionPlacement, find_region_in_lines, json_comment_lines, remove_located_region, text_newline,
-};
+use crate::region::{HostScanner, Region, RegionPlacement, find_region_in_lines, json_comment_lines, remove_located_region, text_newline};
+use crate::{CommentSyntax, JsonArrayRegionSpec};
 
 fn refusal(reason: impl std::fmt::Display, remedy: RefusalRemedy) -> ManagedRegionRefusal {
-    ManagedRegionRefusal::new(app_err!("{reason}"), remedy)
+    ManagedRegionRefusal::new(ohno::app_err!("{reason}"), remedy)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsonValidationCondition {
+    ParentNotObject { path: Vec<String> },
+    AmbiguousSelector { path: Vec<String>, property: String },
+    HostNotObject,
+    GeneratedBodyEmpty,
+    GeneratedEntryNotString,
+    DuplicateGeneratedEntry { entry: String },
+    GeneratedSentinel,
+    GeneratedTrailingCommaMissing,
+    ScaffoldMissing,
+    SelectedItemNotArray { path: Vec<String> },
+    DuplicateProperty { property: String },
+}
+
+impl std::fmt::Display for JsonValidationCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParentNotObject { path } => write!(f, "the parent of JSON array {path:?} is not an object"),
+            Self::AmbiguousSelector { path, property } => {
+                write!(
+                    f,
+                    "the JSON array selector {path:?} is ambiguous because property {property:?} occurs more than once"
+                )
+            }
+            Self::HostNotObject => f.write_str("JSON array hosts must contain an object"),
+            Self::GeneratedBodyEmpty => f.write_str("generated array bodies must contain at least one string entry"),
+            Self::GeneratedEntryNotString => f.write_str("generated array entries must be strings"),
+            Self::DuplicateGeneratedEntry { entry } => write!(f, "generated JSON array entry {entry:?} occurs more than once"),
+            Self::GeneratedSentinel => f.write_str("JSON array-entry bodies must not contain managed-region sentinel comments"),
+            Self::GeneratedTrailingCommaMissing => f.write_str("JSON array-entry bodies must end with a trailing comma"),
+            Self::ScaffoldMissing => f.write_str("the selected JSON property is missing after scaffolding"),
+            Self::SelectedItemNotArray { path } => write!(f, "the selected JSON item {path:?} is not an array"),
+            Self::DuplicateProperty { property } => {
+                write!(
+                    f,
+                    "JSON object property {property:?} occurs more than once, so array ownership is ambiguous"
+                )
+            }
+        }
+    }
+}
+
+#[ohno::error]
+#[display("{}", condition)]
+struct JsonValidationError {
+    condition: JsonValidationCondition,
+}
+
+fn validation_refusal(condition: JsonValidationCondition, remedy: RefusalRemedy) -> ManagedRegionRefusal {
+    ManagedRegionRefusal::new(JsonValidationError::new(condition).into(), remedy)
 }
 
 #[mutants::skip] // Declarative strict-JSONC parser configuration; accepted and rejected dialect features are covered through public planner behavior.
@@ -63,8 +113,8 @@ fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'
     let mut value = root;
     for (index, key) in path.iter().enumerate() {
         let object = value.as_object().ok_or_else(|| {
-            refusal(
-                format!("the parent of JSON array {path:?} is not an object"),
+            validation_refusal(
+                JsonValidationCondition::ParentNotObject { path: path.to_vec() },
                 RefusalRemedy::ArrayShape,
             )
         })?;
@@ -73,15 +123,18 @@ fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'
             return Ok(None);
         };
         if properties.next().is_some() {
-            return Err(refusal(
-                format!("the JSON array selector {path:?} is ambiguous because property {key:?} occurs more than once"),
+            return Err(validation_refusal(
+                JsonValidationCondition::AmbiguousSelector {
+                    path: path.to_vec(),
+                    property: key.clone(),
+                },
                 RefusalRemedy::ArrayShape,
             ));
         }
         value = &property.value;
         if index + 1 != path.len() && value.as_object().is_none() {
-            return Err(refusal(
-                format!("the parent of JSON array {path:?} is not an object"),
+            return Err(validation_refusal(
+                JsonValidationCondition::ParentNotObject { path: path.to_vec() },
                 RefusalRemedy::ArrayShape,
             ));
         }
@@ -91,10 +144,17 @@ fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'
 
 /// Validate the template independently of repository state.
 pub(crate) fn validate_spec(spec: &JsonArrayRegionSpec) -> Result<(), ManagedRegionRefusal> {
-    if let crate::catalog::HostSelector::Path(host) = &spec.region.host
-        && !host.to_ascii_lowercase().ends_with(".json")
-    {
-        return Err(refusal("JSON array hosts must have a .json suffix", RefusalRemedy::ArrayShape));
+    match &spec.region.host {
+        crate::HostSelector::Path(host) if host.to_ascii_lowercase().ends_with(".json") => {}
+        crate::HostSelector::Path(_) => {
+            return Err(refusal("JSON array hosts must have a .json suffix", RefusalRemedy::ArrayShape));
+        }
+        _ => {
+            return Err(refusal(
+                "JSON array regions require a literal path host selector",
+                RefusalRemedy::ArrayShape,
+            ));
+        }
     }
     if spec.path.is_empty() || spec.region.syntax != CommentSyntax::SlashSlash {
         return Err(refusal(
@@ -116,8 +176,8 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
         .and_then(Value::as_array)
         .expect("a successfully parsed source beginning with '[' has an array root");
     if array.elements.is_empty() {
-        return Err(refusal(
-            "generated array bodies must contain at least one string entry",
+        return Err(validation_refusal(
+            JsonValidationCondition::GeneratedBodyEmpty,
             RefusalRemedy::InvalidGeneratedJson,
         ));
     }
@@ -125,16 +185,20 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
         .elements
         .iter()
         .map(|value| {
-            value
-                .as_string_lit()
-                .map(|value| value.value.to_string())
-                .ok_or_else(|| refusal("generated array entries must be strings", RefusalRemedy::InvalidGeneratedJson))
+            value.as_string_lit().map(|value| value.value.to_string()).ok_or_else(|| {
+                validation_refusal(
+                    JsonValidationCondition::GeneratedEntryNotString,
+                    RefusalRemedy::InvalidGeneratedJson,
+                )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut unique = BTreeSet::new();
     if let Some(duplicate) = strings.iter().find(|value| !unique.insert(value.as_str())) {
-        return Err(refusal(
-            format!("generated JSON array entry {duplicate:?} occurs more than once"),
+        return Err(validation_refusal(
+            JsonValidationCondition::DuplicateGeneratedEntry {
+                entry: (*duplicate).clone(),
+            },
             RefusalRemedy::InvalidGeneratedJson,
         ));
     }
@@ -142,15 +206,15 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
         let comment = source[line.start..line.end].trim();
         comment.starts_with("// >>> anvil-managed:") || comment.starts_with("// <<< anvil-managed:")
     }) {
-        return Err(refusal(
-            "JSON array-entry bodies must not contain managed-region sentinel comments",
+        return Err(validation_refusal(
+            JsonValidationCondition::GeneratedSentinel,
             RefusalRemedy::InvalidGeneratedJson,
         ));
     }
     let last = value_range(array.elements.last().expect("the nonempty array was checked above"));
     if separator_comma(&source[last.end..closing_delimiter_offset(&array.range)]).is_none() {
-        return Err(refusal(
-            "JSON array-entry bodies must end with a trailing comma",
+        return Err(validation_refusal(
+            JsonValidationCondition::GeneratedTrailingCommaMissing,
             RefusalRemedy::InvalidGeneratedJson,
         ));
     }
@@ -206,9 +270,9 @@ fn nested_property(path: &[String], base_indent: &str, unit: &str, newline: &str
     let mut output = String::new();
     for (index, key) in path.iter().enumerate() {
         let indent = format!("{base_indent}{}", unit.repeat(index + 1));
-        let encoded = serde_json::to_string(key).expect("serializing a string to JSON cannot fail");
+        let key = serde_json::to_string(key).expect("serializing a string to JSON cannot fail");
         output.push_str(&indent);
-        output.push_str(&encoded);
+        output.push_str(&key);
         if index + 1 == path.len() {
             output.push_str(": []");
         } else {
@@ -236,21 +300,24 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
     let root = parsed
         .value
         .as_ref()
-        .ok_or_else(|| refusal("JSON array hosts must contain an object", RefusalRemedy::ArrayShape))?;
+        .ok_or_else(|| validation_refusal(JsonValidationCondition::HostNotObject, RefusalRemedy::ArrayShape))?;
     let regions = validated_regions(text)?;
     let mut value = root;
     for (index, key) in path.iter().enumerate() {
         let object = value.as_object().ok_or_else(|| {
-            refusal(
-                format!("the parent of JSON array {path:?} is not an object"),
+            validation_refusal(
+                JsonValidationCondition::ParentNotObject { path: path.to_vec() },
                 RefusalRemedy::ArrayShape,
             )
         })?;
         let mut properties = object.properties.iter().filter(|property| property.name.as_str() == key);
         if let Some(property) = properties.next() {
             if properties.next().is_some() {
-                return Err(refusal(
-                    format!("the JSON array selector {path:?} is ambiguous because property {key:?} occurs more than once"),
+                return Err(validation_refusal(
+                    JsonValidationCondition::AmbiguousSelector {
+                        path: path.to_vec(),
+                        property: key.clone(),
+                    },
                     RefusalRemedy::ArrayShape,
                 ));
             }
@@ -294,8 +361,8 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
         parse(&output)?;
         return Ok(output);
     }
-    Err(refusal(
-        "the selected JSON property is missing after scaffolding",
+    Err(validation_refusal(
+        JsonValidationCondition::ScaffoldMissing,
         RefusalRemedy::ArrayScaffold,
     ))
 }
@@ -362,8 +429,8 @@ pub(crate) fn plan_json_array_region(
     };
     let root = parsed.value.as_ref().expect("the selected path existed in a parsed JSON value");
     let array = lookup(root, &spec.path)?.and_then(Value::as_array).ok_or_else(|| {
-        refusal(
-            format!("the selected JSON item {:?} is not an array", spec.path),
+        validation_refusal(
+            JsonValidationCondition::SelectedItemNotArray { path: spec.path.clone() },
             RefusalRemedy::ArrayShape,
         )
     })?;
@@ -459,6 +526,7 @@ fn contains_interior(span: &Range<usize>, offset: usize) -> bool {
 pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<String>]) -> Result<(), ManagedRegionRefusal> {
     let original = parse(before)?;
     let updated = parse(after).map_err(|refusal| ManagedRegionRefusal::new(refusal.reason, RefusalRemedy::BetweenManagedRegions))?;
+    validated_regions(after)?;
     if let Some(root) = &updated.value {
         validate_unique_properties(root)?;
     }
@@ -499,8 +567,8 @@ fn validate_unique_properties(value: &Value<'_>) -> Result<(), ManagedRegionRefu
         for property in &object.properties {
             let name = property.name.as_str();
             if !names.insert(name) {
-                return Err(refusal(
-                    format!("JSON object property {name:?} occurs more than once, so array ownership is ambiguous"),
+                return Err(validation_refusal(
+                    JsonValidationCondition::DuplicateProperty { property: name.to_owned() },
                     RefusalRemedy::ArrayShape,
                 ));
             }
@@ -516,21 +584,21 @@ fn validate_unique_properties(value: &Value<'_>) -> Result<(), ManagedRegionRefu
 
 /// Recover selectors from existing array-contained markers.
 pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, ManagedRegionRefusal> {
-    fn visit(
-        value: &Value<'_>,
-        path: &mut Vec<String>,
+    fn visit<'a>(
+        value: &'a Value<'a>,
+        path: &mut Vec<&'a str>,
         markers: &[usize],
         paths: &mut Vec<Vec<String>>,
     ) -> Result<(), ManagedRegionRefusal> {
         if let Some(array) = value.as_array()
             && markers.iter().any(|offset| (array.range.start..array.range.end).contains(offset))
         {
-            paths.push(path.clone());
+            paths.push(path.iter().map(|component| (*component).to_owned()).collect());
         }
         if let Some(object) = value.as_object() {
             for property in &object.properties {
                 let name = property.name.as_str();
-                path.push(name.to_owned());
+                path.push(name);
                 visit(&property.value, path, markers, paths)?;
                 path.pop();
             }
@@ -569,6 +637,13 @@ pub(crate) fn offset_inside_array(text: &str, offset: usize) -> bool {
         .is_some_and(|root| visit(&root, offset))
 }
 
+/// Conservatively map source identity across one splice.
+///
+/// Offsets are UTF-8 byte offsets. Only bytes in the common prefix and the
+/// non-overlapping common suffix retain identity; every offset in the changed
+/// interval maps to `None`, even when replacement text happens to contain the
+/// same bytes. This prevents a replacement array from masquerading as the
+/// original repository-owned selector during neighboring-region validation.
 fn splice_offset_map(before: &str, after: &str) -> impl Fn(usize) -> Option<usize> + use<> {
     let prefix: usize = before
         .chars()
@@ -715,9 +790,9 @@ pub(crate) fn remove_json_region(text: &str, id: &str, syntax: CommentSyntax) ->
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::catalog::{Catalog, CliMeta, HostSelector, RegionId, RegionSpec};
     use crate::checksum::checksum_str;
     use crate::decision::Decision;
+    use crate::{Catalog, CliMeta, HostSelector, RegionId, RegionSpec};
 
     const ENTRY: &str = r#""build\\Extensions\\Anvil","#;
 
@@ -735,6 +810,76 @@ mod tests {
 
     fn plan(text: Option<&str>, manifest: &Manifest) -> Result<PlanItem, ManagedRegionRefusal> {
         plan_json_array_region(manifest, text, "CloudBuild.json", &spec())
+    }
+
+    fn validation_condition(refusal: &ManagedRegionRefusal) -> &JsonValidationCondition {
+        &refusal
+            .reason
+            .downcast_ref::<JsonValidationError>()
+            .expect("planner-defined validation failures retain their typed leaf")
+            .condition
+    }
+
+    #[test]
+    fn validation_conditions_render_specific_context() {
+        let cases = [
+            (
+                JsonValidationCondition::ParentNotObject {
+                    path: vec!["outer".to_owned(), "entries".to_owned()],
+                },
+                "the parent of JSON array [\"outer\", \"entries\"] is not an object",
+            ),
+            (
+                JsonValidationCondition::AmbiguousSelector {
+                    path: vec!["entries".to_owned()],
+                    property: "entries".to_owned(),
+                },
+                "the JSON array selector [\"entries\"] is ambiguous because property \"entries\" occurs more than once",
+            ),
+            (JsonValidationCondition::HostNotObject, "JSON array hosts must contain an object"),
+            (
+                JsonValidationCondition::GeneratedBodyEmpty,
+                "generated array bodies must contain at least one string entry",
+            ),
+            (
+                JsonValidationCondition::GeneratedEntryNotString,
+                "generated array entries must be strings",
+            ),
+            (
+                JsonValidationCondition::DuplicateGeneratedEntry {
+                    entry: "managed".to_owned(),
+                },
+                "generated JSON array entry \"managed\" occurs more than once",
+            ),
+            (
+                JsonValidationCondition::GeneratedSentinel,
+                "JSON array-entry bodies must not contain managed-region sentinel comments",
+            ),
+            (
+                JsonValidationCondition::GeneratedTrailingCommaMissing,
+                "JSON array-entry bodies must end with a trailing comma",
+            ),
+            (
+                JsonValidationCondition::ScaffoldMissing,
+                "the selected JSON property is missing after scaffolding",
+            ),
+            (
+                JsonValidationCondition::SelectedItemNotArray {
+                    path: vec!["entries".to_owned()],
+                },
+                "the selected JSON item [\"entries\"] is not an array",
+            ),
+            (
+                JsonValidationCondition::DuplicateProperty {
+                    property: "flag".to_owned(),
+                },
+                "JSON object property \"flag\" occurs more than once, so array ownership is ambiguous",
+            ),
+        ];
+
+        for (condition, expected) in cases {
+            assert_eq!(condition.to_string(), expected);
+        }
     }
 
     #[test]
@@ -780,6 +925,24 @@ mod tests {
     }
 
     #[test]
+    fn json_array_specs_require_literal_json_paths() {
+        for host in [
+            HostSelector::EachMemberManifest,
+            HostSelector::WorkspaceCargoToml,
+            HostSelector::SingleCrateCargoToml,
+        ] {
+            let mut invalid = spec();
+            invalid.region.host = host;
+            let refusal = validate_spec(&invalid).unwrap_err();
+            assert_eq!(refusal.remedy, RefusalRemedy::ArrayShape);
+            assert_eq!(
+                refusal.reason.to_string(),
+                "JSON array regions require a literal path host selector"
+            );
+        }
+    }
+
+    #[test]
     fn parser_helpers_cover_json_value_shapes_and_lookup_outcomes() {
         let parsed = parse(r#"{"values":["text",1,true,null,{},[]],"scalar":1}"#).unwrap();
         let root = parsed.value.as_ref().unwrap();
@@ -796,6 +959,12 @@ mod tests {
         assert_eq!(lookup(root, &["missing".to_owned()]).unwrap(), None);
         let error = lookup(root, &["scalar".to_owned(), "child".to_owned()]).unwrap_err();
         assert_eq!(error.remedy, RefusalRemedy::ArrayShape);
+        assert_eq!(
+            validation_condition(&error),
+            &JsonValidationCondition::ParentNotObject {
+                path: vec!["scalar".to_owned(), "child".to_owned()]
+            }
+        );
         let scalar = parse("1").unwrap().value.unwrap();
         assert_eq!(
             lookup(&scalar, &["child".to_owned()]).unwrap_err().remedy,
@@ -814,6 +983,14 @@ mod tests {
             let refusal = body_strings(body).unwrap_err();
             assert_eq!(refusal.remedy, expected);
         }
+        assert_eq!(
+            validation_condition(&body_strings("1,\n").unwrap_err()),
+            &JsonValidationCondition::GeneratedEntryNotString
+        );
+        assert_eq!(
+            validation_condition(&body_strings("\"managed\",\n// >>> anvil-managed: nested\n").unwrap_err()),
+            &JsonValidationCondition::GeneratedSentinel
+        );
     }
 
     #[test]
@@ -1226,6 +1403,7 @@ mod tests {
     #[test]
     fn neighboring_splice_validation_covers_parse_absence_and_rebinding() {
         let path = vec!["entries".to_owned()];
+        validate_neighbor_splice("", "", std::slice::from_ref(&path)).unwrap();
         assert_eq!(
             validate_neighbor_splice("{", "{}", std::slice::from_ref(&path)).unwrap_err().remedy,
             RefusalRemedy::HostAlreadyUnparsable

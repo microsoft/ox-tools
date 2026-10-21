@@ -508,49 +508,42 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
 /// block comments never qualify as ownership sentinels.
 #[mutants::skip] // Byte-level JSONC lexical state machine; marker/string/block-comment behavior is covered exhaustively by json_array_region tests.
 pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> + '_ {
-    let bytes = text.as_bytes();
-    let mut comments = BTreeSet::new();
-    let mut index = 0;
-    let mut string = false;
-    let mut escaped = false;
-    let mut line_comment = false;
-    let mut block_comment = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                string = false;
-            }
-        } else if line_comment {
-            if matches!(byte, b'\r' | b'\n') {
-                line_comment = false;
-            }
-        } else if block_comment {
-            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                block_comment = false;
+    iterate_lines(text)
+        .scan((false, false, false), move |(string, escaped, block_comment), line| {
+            let content = &text[line.start..line.end];
+            let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
+            let bytes = content.as_bytes();
+            let full_line_comment =
+                !*string && !*block_comment && bytes.get(leading) == Some(&b'/') && bytes.get(leading + 1) == Some(&b'/');
+            let mut index = 0;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                if *string {
+                    if *escaped {
+                        *escaped = false;
+                    } else if byte == b'\\' {
+                        *escaped = true;
+                    } else if byte == b'"' {
+                        *string = false;
+                    }
+                } else if *block_comment {
+                    if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        *block_comment = false;
+                        index += 1;
+                    }
+                } else if byte == b'"' {
+                    *string = true;
+                } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+                    break;
+                } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    *block_comment = true;
+                    index += 1;
+                }
                 index += 1;
             }
-        } else if byte == b'"' {
-            string = true;
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            comments.insert(index);
-            line_comment = true;
-            index += 1;
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            block_comment = true;
-            index += 1;
-        }
-        index += 1;
-    }
-    iterate_lines(text).filter(move |line| {
-        let content = &text[line.start..line.end];
-        let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
-        comments.contains(&(line.start + leading))
-    })
+            Some(full_line_comment.then_some(line))
+        })
+        .flatten()
 }
 
 pub(crate) fn find_region_in_lines<'a>(

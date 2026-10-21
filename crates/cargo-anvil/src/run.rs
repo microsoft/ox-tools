@@ -360,7 +360,7 @@ fn plan_catalog_artifact(
         }
         Artifact::Region(spec) => {
             if let Some(path) = catalog.json_array_path(spec) {
-                let array = crate::catalog::JsonArrayRegionSpec {
+                let array = crate::JsonArrayRegionSpec {
                     region: spec.clone(),
                     path: path.to_vec(),
                 };
@@ -413,11 +413,18 @@ impl ArrayFormat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One resolved host participating in structural array ownership checks.
+///
+/// `paths` combines selectors from live catalog declarations with selectors
+/// recovered from historical on-disk regions, so retirement receives the same
+/// delimiter and rebinding protection as introduction and updates. `format`
+/// selects the parser and compatible marker syntax for the host.
 struct ArrayHost {
     format: ArrayFormat,
     paths: Vec<Vec<String>>,
 }
 
+/// Resolved repository paths mapped to their live-and-historical array state.
 type ArrayHosts = std::collections::BTreeMap<String, ArrayHost>;
 
 fn array_host_inputs(
@@ -942,21 +949,22 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
 }
 
 fn array_plan_refusal(host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
-    structural_array_plan_refusal("TOML", host, refusal)
+    structural_array_plan_refusal(ArrayFormat::Toml, host, refusal)
 }
 
 fn json_array_plan_refusal(host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
-    structural_array_plan_refusal("JSON", host, refusal)
+    structural_array_plan_refusal(ArrayFormat::Json, host, refusal)
 }
 
-fn structural_array_plan_refusal(format: &str, host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
-    let guidance = if format == "JSON" && refusal.remedy == RefusalRemedy::HostAlreadyUnparsable {
+fn structural_array_plan_refusal(format: ArrayFormat, host: &str, refusal: &crate::emit::managed_region::ManagedRegionRefusal) -> AppError {
+    let guidance = if format == ArrayFormat::Json && refusal.remedy == RefusalRemedy::HostAlreadyUnparsable {
         "This file does not parse as it stands, before this region is written, so no run can write it until the existing JSON is repaired."
     } else if refusal.remedy == RefusalRemedy::BetweenManagedRegions {
         "Reconcile the neighboring managed regions in the catalog before retrying; array hosts cannot depend on staged ownership migrations."
     } else {
         refusal_guidance(refusal.remedy)
     };
+    let format = format.name();
     app_err!(
         "Refused {format} array host {host}: {}. No plan was produced; no files were changed. {guidance}",
         refusal.reason
@@ -1829,7 +1837,7 @@ mod tests {
 
     fn json_array_catalog() -> Catalog {
         Catalog::builder(test_cli())
-            .with_json_array_region(crate::catalog::JsonArrayRegionSpec {
+            .with_json_array_region(crate::JsonArrayRegionSpec {
                 region: RegionSpec {
                     host: HostSelector::Path("CloudBuild.json".to_owned()),
                     id: RegionId::new("anvil-source-root"),
@@ -2036,6 +2044,41 @@ mod tests {
             error.contains("JSON object property \"flag\" occurs more than once, so array ownership is ambiguous"),
             "{error}"
         );
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn json_array_plan_refuses_neighbor_that_introduces_nested_markers() {
+        let catalog = json_array_catalog()
+            .into_builder()
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("CloudBuild.json".to_owned()),
+                id: RegionId::new("settings"),
+                body: concat!(
+                    "// >>> anvil-managed: nested\n",
+                    "\"flag\": true,\n",
+                    "// <<< anvil-managed: nested\n",
+                )
+                .to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  \"EnlistmentRootPaths\": {\"SourceRootDirs\": []},\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"old\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  \"tail\": false\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("CloudBuild.json", "settings", checksum_str("  \"old\": true,\n"));
+
+        let error = json_array_plan(source, &manifest, &catalog).unwrap_err().to_string();
+
+        assert!(error.contains("duplicate or nested opening sentinel"), "{error}");
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
     }
 
