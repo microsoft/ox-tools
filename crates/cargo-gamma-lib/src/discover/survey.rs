@@ -4279,15 +4279,22 @@ mod tests {
     #[test]
     fn survey_retains_cargos_resolved_target_directory() {
         let (_directory, root) = workspace();
-        let target = root.join("configured-target");
+        let configured_target = root.join("configured-target");
 
         write(
             &root,
             ".cargo/config.toml",
-            &format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
+            &format!("[build]\ntarget-dir = '{}'\n", configured_target.as_str()),
         );
         assert_offline_configuration(&root);
 
+        let mut command = cargo_metadata::MetadataCommand::new();
+        let metadata = command
+            .current_dir(&root)
+            .no_deps()
+            .exec()
+            .expect("Cargo resolves the fixture metadata");
+        let target = Utf8PathBuf::from(metadata.target_directory.as_str());
         let survey = survey(&root, SelectArgs::default());
 
         assert_eq!(survey.target, target);
