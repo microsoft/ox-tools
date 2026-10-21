@@ -328,6 +328,10 @@ mod tests {
         })
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_just_template_includes_all_catalog_checks() {
         let checks = all_check_bodies();
@@ -348,6 +352,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_fail_closed_and_preserve_opted_out_tests() {
         let checks = all_check_bodies();
@@ -418,6 +426,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn impact_scoped_checks_propagate_scope_resolution_failures() {
         const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
@@ -506,6 +518,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn every_check_matches_its_declared_impact_policy() {
         // Single source of truth for each check's impact policy. The catalog
@@ -822,6 +838,10 @@ mod tests {
         assert!(!TOOLS_JUST.contains("rustup target add --toolchain"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn setup_graph_owns_stable_toolchain_provisioning() {
         assert!(
@@ -833,12 +853,20 @@ mod tests {
             "every shared Cargo-tool installation must provision stable first"
         );
         assert!(
-            TOOLS_JUST.contains("& just _install-tool-core cargo-bolero"),
-            "platform-gated installers must use the already-provisioned core helper"
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}"#),
+            "the bolero installer must invoke the generated just executable for its core helper"
         );
         assert!(
-            TOOLS_JUST.contains("& just _install-tool-core cargo-mutants"),
-            "platform-gated installers must use the already-provisioned core helper"
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}"#),
+            "the mutants installer must invoke the generated just executable for its core helper"
+        );
+        assert!(
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-bolero {{cargo_bolero_version}}"#),
+            "the bolero prerequisite check must invoke the generated just executable"
+        );
+        assert!(
+            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}"#),
+            "the mutants prerequisite check must invoke the generated just executable"
         );
         for component in ["clippy", "rustfmt"] {
             let expected = format!("anvil-component-default-{component}-install: anvil-toolchain-stable-install");
@@ -879,6 +907,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_do_not_invoke_an_implicit_default_cargo() {
         for (path, body) in CHECK_FILES {
@@ -944,6 +976,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn checks_just_has_no_floating_nightly_invocations() {
         let checks = all_check_bodies();

@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -444,6 +444,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "xmlparser",
 ]
 
 [[package]]
@@ -523,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-coverage-gate"
-version = "0.6.0"
+version = "0.7.1"
 dependencies = [
  "assert_cmd",
  "cargo-platform",
@@ -534,9 +535,11 @@ dependencies = [
  "mutants",
  "ohno",
  "predicates",
+ "ra_ap_syntax",
  "semver",
  "serde_json",
  "tempfile",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -3341,9 +3344,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "performables"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb1748f935e30422ad6011fcb465dacb05f5a5e248cb57cf45af6cfd309c7fcd"
+checksum = "c33ccc114be5c94bf9d1068e14c830790cd24c25a5cf654fb9be0d1b758557f2"
 dependencies = [
  "thread_aware_core",
 ]
@@ -4090,9 +4093,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -4176,9 +4179,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seatbelt"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f37bbf969e7ac5e1176f350c66cdf1b2f9f060188426edca0845cbf99231434"
+checksum = "45e6996360da46f660929c573ae437c3921a1c80f48cf3d587cf3079c235071d"
 dependencies = [
  "fastrand",
  "layered",
@@ -4678,9 +4681,9 @@ dependencies = [
 
 [[package]]
 name = "tick"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4113fd2019bd88cdf4d718962b35d128558765719e1bde7dd0755187878131f5"
+checksum = "191bbf2c450bf3bd3e93578bee072575fa7211378d159dd16a234c210c58b92c"
 dependencies = [
  "futures-core",
  "jiff",
@@ -5276,9 +5279,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -5710,6 +5713,12 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xmlparser"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "yaml_serde"

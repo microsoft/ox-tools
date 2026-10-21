@@ -491,6 +491,10 @@ export -f just
         assert!(REPORT_STATUS_ACTION.contains("statusDescription.slice(0, MAX_DESCRIPTION_LENGTH)"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain the full generated-workflow contract scan; focused workflow tests preserve Miri coverage"
+    )]
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));

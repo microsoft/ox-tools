@@ -2012,6 +2012,11 @@ fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
     fs::create_dir_all(path.as_std_path())
 }
 
+#[cfg(test)]
+pub(crate) fn create_private_dir_all_for_test(path: &Utf8Path) {
+    create_private_dir_all(path).expect("the private test directory should be creatable");
+}
+
 /// Refuses a cache directory that is reached through a link.
 ///
 /// Everything under this directory is later handed to cargo as `CARGO_TARGET_DIR` and executed
@@ -4393,12 +4398,12 @@ mod tests {
 
     #[test]
     fn testing_resume_restores_launch_environment_arguments_and_idle_resource_admission() {
-        let directory = crate::testing::workdir("workspace-testing-restore-");
+        let directory = crate::testing::private_system_tempdir("workspace-testing-restore-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).unwrap();
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).unwrap();
         let root = base.join("workspace");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&root).unwrap();
+        create_private_dir_all(&source).unwrap();
+        create_private_dir_all(&root).unwrap();
         fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
         mark_cache_owned_for_test(&source, &base);
         let mut original = Workspace::adopt(root, base.join("target"));
@@ -4447,12 +4452,12 @@ mod tests {
 
     #[test]
     fn resume_validates_each_independent_workspace_shape_before_repairing_the_exact_journal_prefix() {
-        let directory = tempfile::tempdir_in(".").unwrap();
+        let directory = crate::testing::private_system_tempdir("workspace-resume-shapes-");
         let directory = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
         let source = directory.join("source");
         let base = directory.join("cache");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(base.join("workspace")).unwrap();
+        create_private_dir_all(&source).unwrap();
+        create_private_dir_all(&base.join("workspace")).unwrap();
         mark_cache_owned_for_test(&source, &base);
         let journal = base.join("testing-verdicts.jsonl");
         fs::write(&journal, "prefix\nunfinished").unwrap();

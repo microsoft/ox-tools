@@ -17,10 +17,34 @@
 //! optionally, to a Markdown summary file for CI step summaries). A failing
 //! verdict includes actionable details without relying on a later
 //! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
+//! Before aggregation, the CLI and released-surface library APIs filter each
+//! tracefile to the source surface that can ship from Cargo library and binary
+//! targets. Test, example, bench, build-script, and other non-release target
+//! sources are removed. Within a released source file, only items whose `cfg`
+//! semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
+//! removed; feature-gated `test-util` APIs remain measured when they can compile
+//! in a non-test build. Local Cargo target `required-features` are treated as
+//! enabled at the target root, so code that requires one of those features to
+//! be absent is not part of that target's released surface. Dependency
+//! selectors such as `dep/feature`, `dep?/feature`, and `dep:dep` do not create
+//! local `cfg(feature = ...)` atoms. Dependency-feature availability does not
+//! prove local-feature activation, even for optional or renamed dependencies
+//! exposing a same-named local feature: another feature may activate the
+//! dependency through `dep:dep`.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
 //! bounded, with an exact count of omitted locations.
+//!
+//! ## 0.7 migration
+//!
+//! Version 0.7 intentionally changes [`evaluate`], [`evaluate_many`], and
+//! [`evaluate_many_for_target`] to evaluate the released Cargo surface rather
+//! than every attributed LCOV line. Existing callers that deliberately include
+//! tests or other non-release targets should migrate to the corresponding
+//! `evaluate_unfiltered*` function. The released-surface APIs also treat each
+//! target's local Cargo `required-features` as enabled when classifying its
+//! source. Dependency-qualified requirements do not imply local cfg features.
 //!
 //! ## Configuration
 //!
@@ -71,6 +95,21 @@
 //! coverable code. The two keys are mutually exclusive, and
 //! `expect-no-coverable-lines` is package-scoped only.
 //!
+//! ### Qualified test attributes
+//!
+//! Compiler-owned `#[test]` and `#[bench]` attributes are recognized
+//! intrinsically. Qualified framework attributes are exact workspace policy,
+//! never inferred from a final `test`/`bench` path segment:
+//!
+//! ```toml
+//! [workspace.metadata.coverage-gate]
+//! test-attributes = ["my_runtime::test"]
+//! ```
+//!
+//! The list has no qualified defaults and cannot be set per package. Paths
+//! are accepted if valid in any supported Rust edition, so mixed-edition
+//! workspaces can list older attribute names without raw-identifier spelling.
+//!
 //! ### Target-specific policies
 //!
 //! A package can replace its base policy for a Cargo-style target selector:
@@ -119,8 +158,7 @@
 //! `cargo-llvm-cov` exports the same instrumentation run in several
 //! formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
 //! consumes lcov because that is what every other coverage report fed by
-//! the same data sees: Codecov ingests lcov uploads directly, ADO
-//! consumes cobertura that cargo-llvm-cov derives from lcov, and the
+//! the same data sees: Codecov and ADO ingest lcov uploads directly, and the
 //! lcov line semantics ("a line is covered if any region on it was
 //! hit") match the human reading of "did we hit this line". The JSON
 //! export uses a stricter "every region on the line must be hit"
@@ -132,14 +170,17 @@
 //!
 //! ```text
 //! cargo coverage-gate [EVALUATION OPTIONS]
-//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
+//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [--summary-file <PATH>] [--quiet]
 //! ```
 //!
-//! The bare command evaluates existing LCOV files and remains backward
-//! compatible. `cargo coverage-gate run` collects `all-features` and
+//! The bare command retains its existing CLI shape while filtering existing
+//! LCOV files to the released surface before evaluation.
+//! `cargo coverage-gate run` collects `all-features` and
 //! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
-//! writes `lcov-all-features.info` and `lcov-no-default.info` under
-//! `target/coverage`, and evaluates those same files in-process. Collection can
+//! writes released-surface-filtered `lcov-all-features.info` and
+//! `lcov-no-default.info` under `target/coverage`, and evaluates those exact
+//! files in-process. CI integrations can upload those same artifacts to
+//! Codecov or Azure DevOps. Collection can
 //! be limited with repeatable `--package` selectors; no selectors means the
 //! workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
 //! options to customize collection.
@@ -160,23 +201,27 @@
 //! per-invocation scratch, so collection never runs workspace-wide
 //! `cargo llvm-cov clean` or deletes shared report and test artifacts. Ordinary
 //! Cargo and cargo-llvm-cov target variables point at that same private
-//! configuration directory, including metadata-derived test paths. Ordinary
-//! reports write directly to their stable `--coverage-dir` path. On Windows
-//! error 206, the report child uses deterministic Windows quoting and the
-//! validated `llvm-cov export` arguments are retried through a response file.
-//! That exceptional export is staged beside the stable path and published only
-//! after success or a valid no-data conversion. Concurrent collection must use
-//! distinct coverage directories; private profile isolation does not serialize
-//! stable artifact writers.
+//! configuration directory, including metadata-derived test paths. Raw reports
+//! are written inside that scratch space, released-surface filtered, staged
+//! beside their stable `--coverage-dir` paths, and atomically published only
+//! after filtering succeeds. On Windows error 206, the report child uses
+//! deterministic Windows quoting and retries the validated `llvm-cov export`
+//! arguments through a response file in the same scratch space before entering
+//! that publication pipeline. Concurrent collection must use distinct coverage
+//! directories; private profile isolation does not serialize stable artifact
+//! writers.
 //!
-//! `--lcov` may be repeated; the tracefiles are merged at the line level
+//! In standalone evaluation, `--lcov` may be repeated; each tracefile is released-surface filtered and
+//! then the tracefiles are merged at the line level
 //! (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 //! (`--all-features`, `--no-default-features`) can be gated together
-//! without a separate, platform-specific merge step.
+//! without a separate, platform-specific merge step. `run` rejects `--lcov`;
+//! its collected paths are selected by `--coverage-dir`.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration or
-//! operational errors (unparseable lcov, missing data for a gated package, a
+//! operational errors (unparseable lcov, an unreadable/unparseable source or
+//! source path with no Cargo target owner, stale LCOV line numbers, missing data for a gated package, a
 //! `--package` selector that matches no member, failed collection/export, an
 //! out-of-range `min-lines-percent` value, …).
 //!
@@ -199,10 +244,11 @@
 //!
 //! ## Public API
 //!
-//! [`evaluate`] gates one lcov tracefile for the rustc host target, while
-//! [`evaluate_many`] merges multiple tracefiles at line level.
-//! [`evaluate_many_for_target`] evaluates a selected Rust target, which may be
-//! supplied explicitly or omitted to select the rustc host target.
+//! [`filter_lcov`] and [`filter_lcov_many`] produce released-surface LCOV
+//! artifacts without evaluating policy. [`evaluate`], [`evaluate_many`], and
+//! [`evaluate_many_for_target`] apply that filtering before evaluating policy.
+//! Callers that intentionally need unfiltered attribution use the explicitly
+//! named `evaluate_unfiltered*` functions.
 //! Evaluation returns an [`EvaluatedReport`], which renders as plain
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
@@ -227,12 +273,106 @@ mod error;
 mod lcov_cov;
 mod package_glob;
 mod render;
+mod source_filter;
 mod target;
 mod threshold;
 mod verdict;
 mod workspace;
 
 pub use error::CoverageGateError;
+
+/// Filter one LCOV tracefile to the released Cargo library and binary surface.
+///
+/// Cargo target roots and out-of-line module declarations establish source
+/// ownership. Files reachable only from tests, examples, benches, build
+/// scripts, or other non-release targets are removed. Within released files,
+/// line records are removed only when Rust syntax proves they are test-only
+/// (`#[test]`, `#[bench]`, `#[cfg(test)]`, a `cfg` predicate that requires
+/// `test`, or an exact qualified attribute listed in workspace metadata).
+/// Function and branch records are omitted because the proof is line-granular.
+///
+/// This is a workspace operation, not a pure text transform. It runs
+/// `cargo metadata --no-deps`, reads and parses reachable Rust sources, and
+/// resolves relative `SF:` paths against the Cargo workspace root. When
+/// `manifest_path` is `None`, Cargo discovers the workspace from the current
+/// directory. The returned LCOV is parsed and serialized canonically, so
+/// retained `SF:` paths are normalized to the owning member path reported by
+/// Cargo metadata, and record ordering and summary records may differ from the
+/// input.
+///
+/// Qualified framework test macros are configured explicitly:
+///
+/// ```toml
+/// [workspace.metadata.coverage-gate]
+/// test-attributes = ["my_runtime::test"]
+/// ```
+///
+/// There are no qualified default attributes; unknown `*::test` macros remain
+/// measured.
+///
+/// The result is already released-surface filtered. To evaluate that returned
+/// text without repeating source analysis, pass it to [`evaluate_unfiltered`]
+/// (or its multi-input counterpart).
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// let raw = std::fs::read_to_string("target/coverage/lcov.info")?;
+/// let filtered = cargo_coverage_gate::filter_lcov(&raw, Some(Path::new("Cargo.toml")))?;
+/// std::fs::write("target/coverage/lcov-released.info", filtered)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] when Cargo metadata cannot be loaded, the
+/// LCOV input is malformed, any source reachable from a Cargo target root
+/// cannot be resolved/read/parsed, target ownership cannot be determined, or
+/// LCOV line data does not match the current source tree.
+#[cfg_attr(coverage_nightly, coverage(off))]
+// This adapter only selects the real metadata loader; the injected implementation below is mutation-covered.
+#[mutants::skip]
+pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
+    filter_lcov_with_metadata_loader(lcov_text, manifest_path, workspace::load_metadata)
+}
+
+/// Filter multiple independent tracefiles using one Cargo target/source
+/// analysis pass.
+///
+/// The returned vector preserves input order and length.
+/// An empty input returns an empty vector without workspace discovery.
+///
+/// # Errors
+///
+/// For non-empty input, returns [`CoverageGateError`] under the same conditions
+/// as [`filter_lcov`]; any failing input aborts the operation.
+pub fn filter_lcov_many(lcov_texts: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
+    filter_lcov_many_with_metadata_loader(lcov_texts, manifest_path, workspace::load_metadata)
+}
+
+fn filter_lcov_with_metadata_loader(
+    lcov_text: &str,
+    manifest_path: Option<&Path>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<String, CoverageGateError> {
+    let mut filtered = filter_lcov_many_with_metadata_loader(&[lcov_text], manifest_path, load_metadata)?;
+    Ok(filtered.pop().expect("one LCOV input always produces one filtered output"))
+}
+
+fn filter_lcov_many_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<Vec<String>, CoverageGateError> {
+    let reports = source_filter::parse_reports(lcov_texts)?;
+    if reports.is_empty() {
+        return Ok(Vec::new());
+    }
+    let metadata = load_metadata(manifest_path)?;
+    source_filter::filter_reports_with_metadata(reports, &metadata)
+}
 
 /// Outcome of a coverage-gate evaluation.
 ///
@@ -278,10 +418,12 @@ impl EvaluatedReport {
         self.inner.verdict()
     }
 
-    /// Number of source files in the lcov tracefile whose path did not
-    /// match any workspace member. Such files are dropped from the
-    /// per-package aggregation; this count surfaces them as a single
-    /// aggregated warning rather than per-file noise.
+    /// Number of source files whose path was not attributed to a workspace
+    /// member.
+    ///
+    /// Released-surface evaluation rejects paths outside every workspace
+    /// member before aggregation, so its successful reports return zero.
+    /// Unfiltered evaluation may return a nonzero count.
     #[must_use]
     pub fn unattributed_count(&self) -> usize {
         self.inner.unattributed
@@ -306,49 +448,42 @@ impl EvaluatedReport {
     }
 }
 
-/// Evaluate `lcov_text` (a [`cargo-llvm-cov`] lcov tracefile) against
-/// the workspace anchored at `manifest_path` and return the resolved
-/// [`EvaluatedReport`].
+/// Filter and evaluate one LCOV tracefile for the rustc host target.
+///
+/// This applies the same released-surface rules as [`filter_lcov`] before
+/// policy evaluation.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
-/// empty, every workspace member is in scope.
+/// empty, every workspace member is in scope. Package selection limits policy
+/// evaluation, not released-surface discovery: source graphs for every
+/// workspace member are validated before filtering.
 ///
 /// # Errors
 ///
-/// Returns a [`CoverageGateError`] when the tracefile does not parse,
-/// workspace discovery fails, a package selector is unknown, coverage
-/// metadata or target policy is invalid or ambiguous, a configured threshold
-/// is out of range, or required Rust target discovery or cfg queries fail.
-/// The error message identifies which case occurred; callers usually just
-/// propagate it.
+/// Returns [`CoverageGateError`] when LCOV parsing, Cargo metadata, source
+/// resolution/reading/parsing, module ownership, line validation, target
+/// policy resolution, package selection, or verdict evaluation fails.
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
     evaluate_many(std::slice::from_ref(&lcov_text), manifest_path, gated_packages)
 }
 
-/// Evaluate one or more [`cargo-llvm-cov`] lcov tracefiles against the
-/// workspace anchored at `manifest_path` and return the resolved
-/// [`EvaluatedReport`].
+/// Filter and evaluate multiple LCOV tracefiles for the rustc host target.
 ///
-/// The tracefiles are merged at the line level before evaluation (line sets
-/// combined, coverage retained when any input has a hit), so passing the `--all-features` and
-/// `--no-default-features` exports yields the same per-package line
-/// coverage as a single merged report — without a platform-specific lcov
-/// merger. An empty slice is treated as an empty report. Packages with
-/// positive thresholds then report NO DATA, which rolls the overall result
-/// up to [`Verdict::ConfigError`] (process exit code 2). Packages with zero
-/// thresholds pass, while `expect-no-coverable-lines` packages report EMPTY
-/// and pass.
+/// Inputs are filtered independently, then merged at line level. An empty
+/// slice represents an empty coverage report but still validates workspace
+/// policy and package selection.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
-/// empty, every workspace member is in scope.
+/// empty, every workspace member is in scope. Package selection limits policy
+/// evaluation, not released-surface discovery: source graphs for every
+/// workspace member are validated before filtering.
 ///
 /// # Errors
 ///
-/// Returns a [`CoverageGateError`] under the same conditions as
-/// [`evaluate`]; additionally, any tracefile that fails to parse aborts
-/// the merge.
+/// Returns [`CoverageGateError`] under the same conditions as [`evaluate`];
+/// any malformed input aborts the operation.
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 #[inline]
@@ -360,25 +495,115 @@ pub fn evaluate_many(
     evaluate_many_for_target(lcov_texts, manifest_path, gated_packages, None)
 }
 
-/// Evaluate one or more lcov tracefiles for a selected Rust target.
+/// Filter and evaluate multiple LCOV tracefiles for a selected Rust target.
 ///
 /// `target` is a Rust target triple such as `x86_64-pc-windows-msvc`.
-/// When omitted, the rustc host target is used. Target-specific
-/// package policy is resolved before the gated package set is evaluated.
+/// When omitted, target policy uses the rustc host when target resolution is
+/// required.
+///
+/// One `cargo metadata --no-deps` snapshot supplies both source ownership and
+/// coverage policy, so filtering and evaluation cannot observe different
+/// manifests.
 ///
 /// # Errors
 ///
-/// Returns a [`CoverageGateError`] under the same conditions as
-/// [`evaluate_many`]. Target-resolution failures are also reported when target
-/// policy requires a Rust target.
+/// Returns [`CoverageGateError`] under the same conditions as [`evaluate_many`].
+/// Target-resolution failures are also reported when target policy requires a
+/// Rust target.
 pub fn evaluate_many_for_target(
     lcov_texts: &[&str],
     manifest_path: Option<&Path>,
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_many_for_target_with_metadata_loader(lcov_texts, manifest_path, gated_packages, target, workspace::load_metadata)
+}
+
+fn evaluate_many_for_target_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<EvaluatedReport, CoverageGateError> {
+    let reports = source_filter::parse_reports(lcov_texts)?;
+    let metadata = load_metadata(manifest_path)?;
+    evaluate_reports_with_metadata(reports, &metadata, gated_packages, target)
+}
+
+fn evaluate_reports_with_metadata(
+    reports: Vec<lcov::Report>,
+    metadata: &cargo_metadata::Metadata,
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<EvaluatedReport, CoverageGateError> {
+    let filtered = source_filter::filter_reports_with_metadata(reports, metadata)?;
+    let filtered_refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
+    let report = lcov_cov::CoverageReport::from_strs(&filtered_refs)?;
+    let ws = workspace::Workspace::from_metadata(metadata, target)?;
+    let inner = verdict::evaluate(&report, &ws, gated_packages)?;
+    Ok(EvaluatedReport { inner })
+}
+
+/// Evaluate one LCOV tracefile without released-surface filtering.
+///
+/// This escape hatch preserves every LCOV source that can be attributed by
+/// path, including test targets and test-only regions.
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] when LCOV parsing, Cargo metadata, target
+/// policy resolution, package selection, or verdict evaluation fails.
+pub fn evaluate_unfiltered(
+    lcov_text: &str,
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_unfiltered_many(std::slice::from_ref(&lcov_text), manifest_path, gated_packages)
+}
+
+/// Evaluate multiple LCOV tracefiles without released-surface filtering.
+///
+/// Inputs are merged at line level. An empty slice represents an empty report.
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] under the same conditions as
+/// [`evaluate_unfiltered`]; any malformed input aborts the operation.
+pub fn evaluate_unfiltered_many(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_unfiltered_many_for_target(lcov_texts, manifest_path, gated_packages, None)
+}
+
+/// Evaluate multiple unfiltered LCOV tracefiles for a selected Rust target.
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] under the same conditions as
+/// [`evaluate_unfiltered_many`]. Target-resolution failures are also reported
+/// when target policy requires a Rust target.
+pub fn evaluate_unfiltered_many_for_target(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_unfiltered_many_for_target_with_metadata_loader(lcov_texts, manifest_path, gated_packages, target, workspace::load_metadata)
+}
+
+fn evaluate_unfiltered_many_for_target_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let ws = workspace::Workspace::load(manifest_path, target)?;
+    let metadata = load_metadata(manifest_path)?;
+    let ws = workspace::Workspace::from_metadata(&metadata, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
@@ -386,11 +611,68 @@ pub fn evaluate_many_for_target(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::fs;
-
-    use tempfile::tempdir;
+    use serde_json::json;
 
     use super::*;
+
+    fn fixture_metadata() -> cargo_metadata::Metadata {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index");
+        let member = root.join("member");
+        let package_id = "path+file:///coverage-public-wrapper#member@0.1.0";
+        serde_json::from_value(json!({
+            "packages": [{
+                "name": "member",
+                "version": "0.1.0",
+                "authors": [],
+                "id": package_id,
+                "source": null,
+                "description": null,
+                "dependencies": [],
+                "license": null,
+                "license_file": null,
+                "targets": [{
+                    "kind": ["lib"],
+                    "crate_types": ["lib"],
+                    "name": "member",
+                    "src_path": member.join("src/lib.rs"),
+                    "edition": "2024",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }],
+                "features": {},
+                "manifest_path": member.join("Cargo.toml"),
+                "categories": [],
+                "keywords": [],
+                "readme": null,
+                "repository": null,
+                "homepage": null,
+                "documentation": null,
+                "edition": "2024",
+                "metadata": {"coverage-gate": {"min-lines-percent": 100}},
+                "links": null,
+                "publish": null,
+                "default_run": null,
+                "rust_version": null
+            }],
+            "workspace_members": [package_id],
+            "workspace_default_members": [package_id],
+            "resolve": null,
+            "workspace_root": root,
+            "target_directory": root.join("target"),
+            "build_directory": root.join("target"),
+            "metadata": {},
+            "version": 1
+        }))
+        .expect("fixture metadata parses")
+    }
+
+    fn assert_unknown_selector(error: &CoverageGateError, expected: &str) {
+        let cause = std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(|source| source.downcast_ref::<crate::error::UnknownPackageSelectorError>())
+            .expect("unknown selector cause");
+        assert_eq!(cause.selector, expected);
+    }
 
     #[test]
     fn exit_codes() {
@@ -401,8 +683,20 @@ mod tests {
 
     #[test]
     fn evaluate_rejects_malformed_lcov() {
-        let err = evaluate("not lcov", None, &[]).expect_err("malformed lcov must error");
+        let err = evaluate("not lcov", Some(Path::new("missing-workspace/Cargo.toml")), &[])
+            .expect_err("malformed LCOV must fail before workspace discovery");
         assert!(err.to_string().contains("lcov tracefile"));
+        assert!(!err.to_string().contains("workspace metadata"));
+
+        let err = evaluate_unfiltered("not lcov", None, &[]).expect_err("unfiltered evaluation also rejects malformed LCOV");
+        assert!(err.to_string().contains("lcov tracefile"));
+    }
+
+    #[test]
+    fn empty_filter_batch_skips_workspace_discovery() {
+        let filtered =
+            filter_lcov_many(&[], Some(Path::new("missing-workspace/Cargo.toml"))).expect("empty filtering is a documented no-op");
+        assert!(filtered.is_empty());
     }
 
     #[test]
@@ -428,56 +722,40 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata and rustc")]
-    fn evaluate_many_without_explicit_target_resolves_the_host() {
-        let tmp = tempdir().expect("tempdir");
-        fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");
-        fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n",
-        )
-        .expect("write workspace manifest");
-        fs::write(
-            tmp.path().join("alpha/Cargo.toml"),
-            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate.target.'cfg(any(windows, unix))']\n\
-             min-lines-percent = 0\n",
-        )
-        .expect("write member manifest");
-        fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn public_wrappers_forward_manifest_and_package_selectors_in_process() {
+        let manifest = Path::new("/synthetic/workspace/Cargo.toml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index/member/src/lib.rs");
+        let lcov = format!("TN:\nSF:{}\nDA:4,1\nend_of_record\n", source.display());
+        let target = Some("x86_64-unknown-linux-gnu");
 
-        let evaluated = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("host target resolves");
+        let filtered = filter_lcov_with_metadata_loader(&lcov, Some(manifest), |actual| {
+            assert_eq!(actual, Some(manifest));
+            Ok(fixture_metadata())
+        })
+        .expect("filter wrapper succeeds");
+        let filtered = source_filter::parse_reports(&[&filtered]).expect("filtered LCOV parses");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].sections.len(), 1);
+
+        let selected = ["member".to_owned()];
+        let evaluated = evaluate_many_for_target_with_metadata_loader(&[&lcov], Some(manifest), &selected, target, |actual| {
+            assert_eq!(actual, Some(manifest));
+            Ok(fixture_metadata())
+        })
+        .expect("filtered evaluation wrapper succeeds");
         assert_eq!(evaluated.verdict(), Verdict::Pass);
-    }
 
-    #[test]
-    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
-    fn evaluate_forwards_manifest_path_and_package_selectors() {
-        let tmp = tempdir().expect("tempdir");
-        fs::create_dir_all(tmp.path().join("explicit-manifest-only/src")).expect("create member");
-        fs::create_dir_all(tmp.path().join("must-remain-unselected/src")).expect("create unselected member");
-        fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"explicit-manifest-only\", \"must-remain-unselected\"]\n",
-        )
-        .expect("write workspace manifest");
-        fs::write(
-            tmp.path().join("explicit-manifest-only/Cargo.toml"),
-            "[package]\nname = \"explicit-manifest-only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
-        )
-        .expect("write member manifest");
-        fs::write(tmp.path().join("explicit-manifest-only/src/lib.rs"), "").expect("write member source");
-        fs::write(
-            tmp.path().join("must-remain-unselected/Cargo.toml"),
-            "[package]\nname = \"must-remain-unselected\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [package.metadata.coverage-gate]\nmin-lines-percent = 80\n",
-        )
-        .expect("write unselected member manifest");
-        fs::write(tmp.path().join("must-remain-unselected/src/lib.rs"), "").expect("write unselected member source");
+        let unknown = ["missing-member".to_owned()];
+        let error = evaluate_many_for_target_with_metadata_loader(&[&lcov], Some(manifest), &unknown, target, |_| Ok(fixture_metadata()))
+            .expect_err("filtered wrapper forwards package selectors");
+        assert_unknown_selector(&error, "missing-member");
 
-        let evaluated = evaluate("", Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
-            .expect("the public wrapper must use the explicit manifest and preserve package selectors");
-        assert_eq!(evaluated.verdict(), Verdict::Pass);
+        let error = evaluate_unfiltered_many_for_target_with_metadata_loader(&[&lcov], Some(manifest), &unknown, target, |actual| {
+            assert_eq!(actual, Some(manifest));
+            Ok(fixture_metadata())
+        })
+        .expect_err("unfiltered wrapper forwards package selectors");
+        assert_unknown_selector(&error, "missing-member");
     }
 }

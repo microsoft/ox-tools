@@ -10,6 +10,7 @@ use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io};
 
+use cargo_coverage_gate::filter_lcov_many;
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -23,6 +24,14 @@ const NEXTEST_DESCRIPTION: &str = "cargo llvm-cov nextest";
 const WINDOWS_DIAGNOSTIC_UTF8_CONTEXT: &str = "cargo-llvm-cov's Windows command-too-long diagnostic was not UTF-8";
 #[cfg(any(windows, test))]
 const RUSTC_TARGET_LIBDIR_PARENT_ERROR: &str = "rustc target-libdir output had no parent directory";
+
+fn diagnostic_path(path: &Path) -> String {
+    crate::package_glob::diagnostic(&path.display().to_string())
+}
+
+fn missing_lcov_parent_error(path: &Path) -> AppError {
+    AppError::new(format!("LCOV path `{}` has no parent directory", diagnostic_path(path)))
+}
 
 pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Result<ExitCode, AppError> {
     if !args.lcov.is_empty() {
@@ -73,19 +82,19 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         workspace: &workspace,
         selection: &selection,
         args: &collection,
-        #[cfg(windows)]
         scratch_dir: coverage_scratch.path(),
         coverage_target_root: &coverage_target_root,
         target: &effective_target.triple,
         tools: &tools,
         quiet: args.quiet,
     };
-    let mut lcov_paths = Vec::with_capacity(configurations.len());
+    let mut collected = Vec::with_capacity(configurations.len());
     for configuration in configurations {
-        lcov_paths.push(collect_configuration(&execution, configuration)?);
+        collected.push(collect_configuration(&execution, configuration)?);
     }
+    let lcov_paths = filter_and_publish_reports(&execution, &collected)?;
 
-    let evaluation = crate::run::evaluate_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
+    let evaluation = crate::run::evaluate_filtered_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
     combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
 }
 
@@ -186,7 +195,6 @@ struct CollectionExecution<'a> {
     workspace: &'a WorkspaceInfo,
     selection: &'a Selection,
     args: &'a CollectionArgs,
-    #[cfg(windows)]
     scratch_dir: &'a Path,
     coverage_target_root: &'a Path,
     target: &'a str,
@@ -546,15 +554,93 @@ fn plain_configuration_command(
     command
 }
 
-fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<PathBuf, AppError> {
-    let lcov_path = execution
+#[derive(Debug)]
+/// Private raw export and public filtered destination for one feature mode.
+struct CollectedReport {
+    raw_path: PathBuf,
+    stable_path: PathBuf,
+    configuration: FeatureConfiguration,
+}
+
+fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<CollectedReport, AppError> {
+    let stable_path = execution
         .args
         .coverage_dir
         .join(format!("lcov-{}.info", configuration.artifact_name()));
+    let raw_path = execution
+        .scratch_dir
+        .join(format!("raw-lcov-{}.info", configuration.artifact_name()));
 
     run_nextest(execution, configuration)?;
-    run_report(execution, configuration, &lcov_path)?;
-    Ok(lcov_path)
+    run_report(execution, configuration, &raw_path)?;
+    Ok(CollectedReport {
+        raw_path,
+        stable_path,
+        configuration,
+    })
+}
+
+fn filter_and_publish_reports(execution: &CollectionExecution<'_>, collected: &[CollectedReport]) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_with(execution, collected, |raw, manifest| {
+        filter_lcov_many(raw, Some(manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")
+    })
+}
+
+fn filter_and_publish_reports_with(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_with_reader(execution, collected, read_raw_lcov, filter)
+}
+
+fn read_raw_lcov(path: &Path) -> Result<String, AppError> {
+    fs::read_to_string(path).into_app_err(format!("failed to read raw LCOV report `{}`", diagnostic_path(path)))
+}
+
+fn filter_and_publish_reports_with_reader(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    mut read: impl FnMut(&Path) -> Result<String, AppError>,
+    mut filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+) -> Result<Vec<PathBuf>, AppError> {
+    // Finish reading, validating, filtering, and staging the complete batch
+    // before publishing. Each final rename is still an independent atomic
+    // replacement rather than a transaction across all configurations.
+    let raw = collected
+        .iter()
+        .map(|report| read(&report.raw_path))
+        .collect::<Result<Vec<_>, AppError>>()?;
+    for (report, contents) in collected.iter().zip(&raw) {
+        lcov::Report::from_reader(lcov::Reader::new(contents.as_bytes())).into_app_err(format!(
+            "raw LCOV report for feature configuration `{}` at `{}` is not well-formed",
+            report.configuration.artifact_name(),
+            diagnostic_path(&report.raw_path)
+        ))?;
+    }
+    let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
+    let manifest = execution.workspace.root.join("Cargo.toml");
+    let filtered = filter(&raw_refs, &manifest)?;
+    let mut staged = Vec::with_capacity(collected.len());
+    for (index, report) in collected.iter().enumerate() {
+        let contents = filtered
+            .get(index)
+            .expect("filter_lcov_many preserves one output for every input tracefile");
+        let directory = report
+            .stable_path
+            .parent()
+            .ok_or_else(|| missing_lcov_parent_error(&report.stable_path))?;
+        let temporary = TemporaryPath::write(
+            directory,
+            &format!("{}-filtered.info", report.configuration.artifact_name()),
+            contents.as_bytes(),
+        )?;
+        staged.push((temporary, report.stable_path.clone()));
+    }
+    for (temporary, target) in staged {
+        temporary.publish(&target)?;
+    }
+    Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
 }
 
 fn cargo_command(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Command {
@@ -1061,20 +1147,17 @@ fn command_display(command: &Command) -> String {
         .join(" ")
 }
 
-#[cfg(any(windows, test))]
 #[derive(Debug)]
 struct TemporaryPath {
     path: PathBuf,
     armed: bool,
 }
 
-#[cfg(any(windows, test))]
 /// A temporary-file writer boundary that makes durability failures independently testable.
 trait SynchronizedWrite: io::Write {
     fn sync_all(&self) -> io::Result<()>;
 }
 
-#[cfg(any(windows, test))]
 impl SynchronizedWrite for fs::File {
     #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
     fn sync_all(&self) -> io::Result<()> {
@@ -1082,7 +1165,6 @@ impl SynchronizedWrite for fs::File {
     }
 }
 
-#[cfg(any(windows, test))]
 impl TemporaryPath {
     fn new(directory: &Path, label: &str) -> Self {
         let sequence = reserve_temporary_sequence(&TEMPORARY_SEQUENCE);
@@ -1126,7 +1208,6 @@ impl TemporaryPath {
     }
 }
 
-#[cfg(any(windows, test))]
 impl Drop for TemporaryPath {
     fn drop(&mut self) {
         if self.armed {
@@ -1135,7 +1216,6 @@ impl Drop for TemporaryPath {
     }
 }
 
-#[cfg(any(windows, test))]
 fn write_temporary_contents(temporary: &TemporaryPath, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<(), AppError> {
     writer
         .write_all(contents)
@@ -1227,6 +1307,9 @@ mod tests {
 
     use super::*;
 
+    const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+    const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+
     fn member(name: &str, version: &str) -> WorkspaceMember {
         WorkspaceMember {
             name: name.to_owned(),
@@ -1236,6 +1319,16 @@ mod tests {
 
     fn app_error(message: &'static str) -> AppError {
         AppError::new(message)
+    }
+
+    #[test]
+    fn coverage_paths_encode_terminal_controls() {
+        let rendered = diagnostic_path(Path::new("bad\n\r\u{1b}[2J.info"));
+        assert_eq!(rendered, r"bad\n\r\u{1b}[2J.info");
+        assert_eq!(
+            missing_lcov_parent_error(Path::new("lcov.info")).to_string(),
+            "LCOV path `lcov.info` has no parent directory"
+        );
     }
 
     fn process_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
@@ -1363,6 +1456,230 @@ mod tests {
             RUSTC_TARGET_LIBDIR_PARENT_ERROR,
             "rustc target-libdir output had no parent directory"
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn filtered_reports_are_staged_and_published_in_input_order() {
+        let tmp = tempdir().expect("tempdir");
+        let scratch = tmp.path().join("scratch");
+        let coverage = tmp.path().join("coverage");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        fs::create_dir_all(&coverage).expect("create coverage");
+        let workspace = workspace(tmp.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            coverage_dir: coverage.clone(),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = scratch.join("cargo-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch,
+            coverage_target_root: &coverage_target_root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [
+            CollectedReport {
+                raw_path: scratch.join("raw-all.info"),
+                stable_path: coverage.join("lcov-all-features.info"),
+                configuration: FeatureConfiguration::AllFeatures,
+            },
+            CollectedReport {
+                raw_path: scratch.join("raw-no-default.info"),
+                stable_path: coverage.join("lcov-no-default.info"),
+                configuration: FeatureConfiguration::NoDefaultFeatures,
+            },
+        ];
+        fs::write(&collected[0].stable_path, "old all").expect("write old all");
+        fs::write(&collected[1].stable_path, "old no-default").expect("write old no-default");
+
+        let paths = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |path| {
+                if path.ends_with("raw-all.info") {
+                    Ok(RAW_ALL_FEATURES.to_owned())
+                } else {
+                    Ok(RAW_NO_DEFAULT.to_owned())
+                }
+            },
+            |raw, manifest| {
+                assert_eq!(raw, [RAW_ALL_FEATURES, RAW_NO_DEFAULT]);
+                assert_eq!(manifest, tmp.path().join("Cargo.toml"));
+                Ok(vec!["filtered all".to_owned(), "filtered no-default".to_owned()])
+            },
+        )
+        .expect("filter and publish");
+
+        assert_eq!(paths, collected.iter().map(|report| report.stable_path.clone()).collect::<Vec<_>>());
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read all"), "filtered all");
+        assert_eq!(
+            fs::read_to_string(&collected[1].stable_path).expect("read no-default"),
+            "filtered no-default"
+        );
+        assert!(fs::read_dir(&coverage).expect("read coverage directory").all(|entry| {
+            !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".coverage-gate-")
+        }));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn filtered_report_errors_leave_stable_artifacts_unchanged() {
+        let tmp = tempdir().expect("tempdir");
+        let scratch = tmp.path().join("scratch");
+        let coverage = tmp.path().join("coverage");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        fs::create_dir_all(&coverage).expect("create coverage");
+        let workspace = workspace(tmp.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            coverage_dir: coverage.clone(),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = scratch.join("cargo-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch,
+            coverage_target_root: &coverage_target_root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: scratch.join("raw.info"),
+            stable_path: coverage.join("lcov.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        fs::write(&collected[0].stable_path, "old").expect("write old");
+
+        let error = filter_and_publish_reports_with_reader(&execution, &collected, read_raw_lcov, |_, _| {
+            panic!("missing LCOV must fail before filtering")
+        })
+        .expect_err("missing raw LCOV must identify its path");
+        assert!(
+            error.to_string().contains(&format!(
+                "failed to read raw LCOV report `{}`",
+                diagnostic_path(&collected[0].raw_path)
+            )),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
+
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok("not lcov".to_owned()),
+            |_, _| panic!("malformed LCOV must fail before filtering"),
+        )
+        .expect_err("malformed raw LCOV must identify its configuration");
+        let expected = format!(
+            "raw LCOV report for feature configuration `all-features` at `{}` is not well-formed",
+            diagnostic_path(&collected[0].raw_path)
+        );
+        let rendered = error.to_string();
+        let context = rendered
+            .lines()
+            .find(|line| line.starts_with("> raw LCOV report"))
+            .expect("labeled LCOV context");
+        assert!(context.starts_with(&format!("> {expected} (at ")), "{rendered}");
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
+
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Err(app_error("filter failed")),
+        )
+        .expect_err("filter failure must propagate");
+        assert_eq!(error.to_string(), "filter failed");
+        assert_eq!(fs::read_to_string(&collected[0].stable_path).expect("read old"), "old");
+
+        let parentless = [CollectedReport {
+            raw_path: collected[0].raw_path.clone(),
+            stable_path: PathBuf::from(std::path::MAIN_SEPARATOR.to_string()),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &parentless,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Ok(vec!["filtered".to_owned()]),
+        )
+        .expect_err("parentless stable LCOV path must fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "LCOV path `{}` has no parent directory",
+                diagnostic_path(&parentless[0].stable_path)
+            )
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn filtered_report_staging_errors_are_returned() {
+        let tmp = tempdir().expect("tempdir");
+        let scratch = tmp.path().join("scratch");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        let workspace = workspace(tmp.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = scratch.join("cargo-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch,
+            coverage_target_root: &coverage_target_root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: scratch.join("raw.info"),
+            stable_path: tmp.path().join("missing/lcov.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Ok(vec!["filtered".to_owned()]),
+        )
+        .expect_err("missing staging directory must fail");
+        assert!(error.to_string().contains("failed to create temporary file"), "{error}");
     }
 
     #[test]
@@ -1769,7 +2086,6 @@ mod tests {
             workspace: &workspace,
             selection: &explicit,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: Path::new("scratch"),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
@@ -2299,7 +2615,6 @@ mod tests {
             workspace: &workspace,
             selection: &selection,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: Path::new("scratch"),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
@@ -2419,7 +2734,6 @@ mod tests {
             workspace: &workspace,
             selection: &selection,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: tmp.path(),
             coverage_target_root: &coverage_target_root,
             target: "test-target",
@@ -2567,7 +2881,6 @@ mod tests {
             workspace: &workspace,
             selection: &selection,
             args: &args,
-            #[cfg(windows)]
             scratch_dir: tmp.path(),
             coverage_target_root: &coverage_target_root,
             target: "test-target",

@@ -349,6 +349,13 @@ just anvil-container just anvil-clippy
 just anvil-container cargo build
 ```
 
+`GITHUB_TOKEN` is not forwarded by default, and the launcher never acquires
+host GitHub CLI credentials. To use an explicitly supplied token, run
+`just anvil-container --github-token just anvil-aprz` (or omit the command
+for an authenticated shell). A missing token fails before engine resolution.
+Only use credentials with reviewed, trusted code: recipes and hooks run on
+the host, and opt-in prevents accidental exposure, not malicious code.
+
 The image contains the same tool versions used by the generated checks.
 Its tag is derived from the Dockerfile and its ignore file, the generated
 recipe tree, the declared root MSRV, and a root `rust-toolchain` file where
@@ -402,7 +409,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbcTEnTcXGBR8b8HCcaHW-17wbcqtabVxu0F8bRsUJJTz--cNhZIGDa2NhcmdvLWFudmlsZjAuMTQuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb5STqOPWzBuIbGKo1M8rA_gwbnEE39p8Pne4bJAiNAgNsx6thZIGDa2NhcmdvLWFudmlsZjAuMTUuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -422,9 +429,9 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link23]: https://mutants.rs/
  [__link24]: https://crates.io/crates/cargo-hack
  [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.14.1/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.14.1/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.14.1/cargo_anvil/fn.run_app.html
+ [__link26]: https://docs.rs/cargo-anvil/0.15.0/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.15.0/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.15.0/cargo_anvil/fn.run_app.html
  [__link3]: https://crates.io/crates/cargo-each
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather

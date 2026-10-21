@@ -4,7 +4,7 @@
 [package]
 name = "cargo-coverage-gate"
 description = "A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov"
-version = "0.6.0"
+version = "0.7.1"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -26,9 +26,17 @@ all-features = true
 # we are forced to re-expose.
 allowed_external_types = ["ohno::*"]
 
-# Production code is measured while test-only modules and scaffolding opt out with
-# `#[cfg_attr(coverage_nightly, coverage(off))]`. This floor records the lowest cross-platform
-# production result from the coverage-gate CI matrix; raise it only after that matrix improves.
+# `unicode-ident` is a deliberate compatibility bound, never referenced from this crate's
+# code. See the dependency comment below.
+[package.metadata.cargo-udeps.ignore]
+normal = ["unicode-ident"]
+
+[package.metadata.unused-deps]
+allowed = ["unicode-ident"]
+
+# The gate filters test-only source regions and non-release Cargo targets before measuring this
+# crate. The pre-0.7 floor is retained and validated by the cross-platform released-surface CI
+# matrix; raise it only after that matrix improves.
 [package.metadata.coverage-gate]
 min-lines-percent = 99.82758
 
@@ -42,17 +50,16 @@ cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 glob = { workspace = true }
 lcov = { workspace = true }
+mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
+ra_ap_syntax = { workspace = true }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-
-[target.'cfg(windows)'.dependencies]
-# Windows production paths carry mutation annotations; tests on every host annotate test-only helpers.
-mutants = { workspace = true }
-
+# Never named in this crate's code. It bounds the `unicode-ident` selected by
+# `ra_ap_syntax` -> `ra-ap-rustc_lexer`; see the workspace dependency comment.
+unicode-ident = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
-mutants = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 

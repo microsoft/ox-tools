@@ -1689,7 +1689,7 @@ mod tests {
     /// Surveys a real tiny crate with isolated cache/output; compilation is scripted by callers,
     /// while workspace preparation, metadata, baseline execution and publication remain native.
     fn orchestration_fixture(source: &str) -> (tempfile::TempDir, Survey, Selection, Config) {
-        let (directory, root) = fixtures::crate_dir("measure-orchestration-", source);
+        let (directory, root) = fixtures::private_crate_dir("measure-orchestration-", source);
         let arguments = crate::commands::SelectArgs {
             dir: root.clone(),
             mutators: Some("literal.bool_flip".to_owned()),
@@ -1697,11 +1697,13 @@ mod tests {
         };
         let selection = arguments.selection().unwrap();
         let survey = Survey::new(&arguments, None).unwrap();
+        let cache_dir = root.join("target").join("isolated-campaign-cache");
+        crate::exec::create_private_dir_all_for_test(&cache_dir);
         let config = Config {
             jobs: 3,
             test_lib: true,
             nextest: false,
-            cache_dir: Some(root.join("target").join("isolated-campaign-cache")),
+            cache_dir: Some(cache_dir),
             memory: MemoryPolicy {
                 control: MemoryControl::Off,
                 ..MemoryPolicy::default()

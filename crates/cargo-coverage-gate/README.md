@@ -26,10 +26,34 @@ table to stdout (and,
 optionally, to a Markdown summary file for CI step summaries). A failing
 verdict includes actionable details without relying on a later
 coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
+Before aggregation, the CLI and released-surface library APIs filter each
+tracefile to the source surface that can ship from Cargo library and binary
+targets. Test, example, bench, build-script, and other non-release target
+sources are removed. Within a released source file, only items whose `cfg`
+semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
+removed; feature-gated `test-util` APIs remain measured when they can compile
+in a non-test build. Local Cargo target `required-features` are treated as
+enabled at the target root, so code that requires one of those features to
+be absent is not part of that target’s released surface. Dependency
+selectors such as `dep/feature`, `dep?/feature`, and `dep:dep` do not create
+local `cfg(feature = ...)` atoms. Dependency-feature availability does not
+prove local-feature activation, even for optional or renamed dependencies
+exposing a same-named local feature: another feature may activate the
+dependency through `dep:dep`.
 Numeric failures show exact covered/coverable counts and uncovered ranges;
 `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 and `NO DATA` explains that no records were attributed. Location lists are
 bounded, with an exact count of omitted locations.
+
+### 0.7 migration
+
+Version 0.7 intentionally changes [`evaluate`][__link1], [`evaluate_many`][__link2], and
+[`evaluate_many_for_target`][__link3] to evaluate the released Cargo surface rather
+than every attributed LCOV line. Existing callers that deliberately include
+tests or other non-release targets should migrate to the corresponding
+`evaluate_unfiltered*` function. The released-surface APIs also treat each
+target’s local Cargo `required-features` as enabled when classifying its
+source. Dependency-qualified requirements do not imply local cfg features.
 
 ### Configuration
 
@@ -80,6 +104,21 @@ from `min-lines-percent = 0`, which keeps passing if the package grows
 coverable code. The two keys are mutually exclusive, and
 `expect-no-coverable-lines` is package-scoped only.
 
+#### Qualified test attributes
+
+Compiler-owned `#[test]` and `#[bench]` attributes are recognized
+intrinsically. Qualified framework attributes are exact workspace policy,
+never inferred from a final `test`/`bench` path segment:
+
+```toml
+[workspace.metadata.coverage-gate]
+test-attributes = ["my_runtime::test"]
+```
+
+The list has no qualified defaults and cannot be set per package. Paths
+are accepted if valid in any supported Rust edition, so mixed-edition
+workspaces can list older attribute names without raw-identifier spelling.
+
 #### Target-specific policies
 
 A package can replace its base policy for a Cargo-style target selector:
@@ -128,8 +167,7 @@ report `NO DATA`.
 `cargo-llvm-cov` exports the same instrumentation run in several
 formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
 consumes lcov because that is what every other coverage report fed by
-the same data sees: Codecov ingests lcov uploads directly, ADO
-consumes cobertura that cargo-llvm-cov derives from lcov, and the
+the same data sees: Codecov and ADO ingest lcov uploads directly, and the
 lcov line semantics (“a line is covered if any region on it was
 hit”) match the human reading of “did we hit this line”. The JSON
 export uses a stricter “every region on the line must be hit”
@@ -141,14 +179,17 @@ Codecov / ADO numbers confusing.
 
 ```text
 cargo coverage-gate [EVALUATION OPTIONS]
-cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
+cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [--summary-file <PATH>] [--quiet]
 ```
 
-The bare command evaluates existing LCOV files and remains backward
-compatible. `cargo coverage-gate run` collects `all-features` and
+The bare command retains its existing CLI shape while filtering existing
+LCOV files to the released surface before evaluation.
+`cargo coverage-gate run` collects `all-features` and
 `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
-writes `lcov-all-features.info` and `lcov-no-default.info` under
-`target/coverage`, and evaluates those same files in-process. Collection can
+writes released-surface-filtered `lcov-all-features.info` and
+`lcov-no-default.info` under `target/coverage`, and evaluates those exact
+files in-process. CI integrations can upload those same artifacts to
+Codecov or Azure DevOps. Collection can
 be limited with repeatable `--package` selectors; no selectors means the
 workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
 options to customize collection.
@@ -169,23 +210,27 @@ Every feature configuration uses a fresh target beneath private
 per-invocation scratch, so collection never runs workspace-wide
 `cargo llvm-cov clean` or deletes shared report and test artifacts. Ordinary
 Cargo and cargo-llvm-cov target variables point at that same private
-configuration directory, including metadata-derived test paths. Ordinary
-reports write directly to their stable `--coverage-dir` path. On Windows
-error 206, the report child uses deterministic Windows quoting and the
-validated `llvm-cov export` arguments are retried through a response file.
-That exceptional export is staged beside the stable path and published only
-after success or a valid no-data conversion. Concurrent collection must use
-distinct coverage directories; private profile isolation does not serialize
-stable artifact writers.
+configuration directory, including metadata-derived test paths. Raw reports
+are written inside that scratch space, released-surface filtered, staged
+beside their stable `--coverage-dir` paths, and atomically published only
+after filtering succeeds. On Windows error 206, the report child uses
+deterministic Windows quoting and retries the validated `llvm-cov export`
+arguments through a response file in the same scratch space before entering
+that publication pipeline. Concurrent collection must use distinct coverage
+directories; private profile isolation does not serialize stable artifact
+writers.
 
-`--lcov` may be repeated; the tracefiles are merged at the line level
+In standalone evaluation, `--lcov` may be repeated; each tracefile is released-surface filtered and
+then the tracefiles are merged at the line level
 (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 (`--all-features`, `--no-default-features`) can be gated together
-without a separate, platform-specific merge step.
+without a separate, platform-specific merge step. `run` rejects `--lcov`;
+its collected paths are selected by `--coverage-dir`.
 
 Exit codes: `0` if every gated package meets its threshold, `1` if any
 gated package falls below its threshold, and `2` for configuration or
-operational errors (unparseable lcov, missing data for a gated package, a
+operational errors (unparseable lcov, an unreadable/unparseable source or
+source path with no Cargo target owner, stale LCOV line numbers, missing data for a gated package, a
 `--package` selector that matches no member, failed collection/export, an
 out-of-range `min-lines-percent` value, …).
 
@@ -206,14 +251,15 @@ let code = report.verdict().as_exit_code();
 
 ### Public API
 
-[`evaluate`][__link1] gates one lcov tracefile for the rustc host target, while
-[`evaluate_many`][__link2] merges multiple tracefiles at line level.
-[`evaluate_many_for_target`][__link3] evaluates a selected Rust target, which may be
-supplied explicitly or omitted to select the rustc host target.
-Evaluation returns an [`EvaluatedReport`][__link4], which renders as plain
-text via [`EvaluatedReport::render_text`][__link5] or GitHub-flavored Markdown via
-[`EvaluatedReport::render_markdown`][__link6] and reduces to a [`Verdict`][__link7] via
-[`EvaluatedReport::verdict`][__link8]. The accompanying binary loads tracefiles from
+[`filter_lcov`][__link4] and [`filter_lcov_many`][__link5] produce released-surface LCOV
+artifacts without evaluating policy. [`evaluate`][__link6], [`evaluate_many`][__link7], and
+[`evaluate_many_for_target`][__link8] apply that filtering before evaluating policy.
+Callers that intentionally need unfiltered attribution use the explicitly
+named `evaluate_unfiltered*` functions.
+Evaluation returns an [`EvaluatedReport`][__link9], which renders as plain
+text via [`EvaluatedReport::render_text`][__link10] or GitHub-flavored Markdown via
+[`EvaluatedReport::render_markdown`][__link11] and reduces to a [`Verdict`][__link12] via
+[`EvaluatedReport::verdict`][__link13]. The accompanying binary loads tracefiles from
 disk or collects it, then orchestrates rendering plus the appropriate exit
 code.
 
@@ -223,13 +269,18 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbhRIywtbcPucbgi-x55vCO4sb6ZPVaajbFIAbZ7bu2RuADa9hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC42LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbwlmojYDIyYMba0uqyl_RRzwbljrPD6Ga7BkbuQWacKUxYI5hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjFzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.evaluate.html
- [__link2]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link6]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link7]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/enum.Verdict.html
- [__link8]: https://docs.rs/cargo-coverage-gate/0.6.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate.html
+ [__link10]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link11]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link12]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/enum.Verdict.html
+ [__link13]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.filter_lcov.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.filter_lcov_many.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate.html
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link9]: https://docs.rs/cargo-coverage-gate/0.7.1/cargo_coverage_gate/struct.EvaluatedReport.html
