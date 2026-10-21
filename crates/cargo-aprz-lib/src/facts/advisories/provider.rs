@@ -8,6 +8,7 @@ use std::sync::Arc;
 use compact_str::CompactString;
 use ohno::IntoAppError;
 use rustsec::database::Database;
+use tick::FutureExt;
 
 use super::AdvisoryData;
 use crate::facts::ProviderResult;
@@ -177,14 +178,16 @@ async fn download_db<F: DbFetcher>(
 }
 
 async fn lock_cache(root: &Path) -> Result<std::fs::File> {
-    lock_cache_with_timeout(root, DATABASE_FETCH_TIMEOUT).await
+    let lock = open_cache_lock(root).await?;
+    wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &tick::Clock::new_tokio()).await?;
+    Ok(lock)
 }
 
-async fn lock_cache_with_timeout(root: &Path, timeout: Duration) -> Result<std::fs::File> {
+async fn open_cache_lock(root: &Path) -> Result<std::fs::File> {
     tokio::fs::create_dir_all(root)
         .await
         .into_app_err("creating directory for the advisory cache")?;
-    let lock = tokio::fs::OpenOptions::new()
+    Ok(tokio::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -192,19 +195,23 @@ async fn lock_cache_with_timeout(root: &Path, timeout: Duration) -> Result<std::
         .open(root.join("archive.lock"))
         .await?
         .into_std()
-        .await;
-    tokio::time::timeout(timeout, async {
+        .await)
+}
+
+async fn wait_for_cache_lock(lock: &std::fs::File, timeout: Duration, clock: &tick::Clock) -> Result<()> {
+    async {
         loop {
             match lock.try_lock() {
                 Ok(()) => return Ok(()),
-                Err(std::fs::TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(std::fs::TryLockError::WouldBlock) => clock.delay(Duration::from_millis(50)).await,
                 Err(std::fs::TryLockError::Error(error)) => return Err(error),
             }
         }
-    })
+    }
+    .timeout(clock, timeout)
     .await
     .into_app_err("timed out waiting for another advisory cache refresh to finish")??;
-    Ok(lock)
+    Ok(())
 }
 
 fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
@@ -617,15 +624,55 @@ mod tests {
         assert!(!progress.use_colors(), "the recorder inherits the default, which is no color");
     }
 
+    /// Attempts the cache lock once, without waiting.
+    async fn try_lock_cache(root: &Path) -> Result<std::fs::File> {
+        let lock = open_cache_lock(root).await?;
+        wait_for_cache_lock(&lock, Duration::ZERO, &tick::ClockControl::new().to_clock()).await?;
+        Ok(lock)
+    }
+
+    #[tokio::test]
+    async fn cache_lock_waits_on_the_injected_clock_until_released() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let lock = open_cache_lock(root.path()).await.unwrap();
+        let wait = wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &clock);
+        let mut wait = std::pin::pin!(wait);
+
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        control.advance(Duration::from_millis(50));
+        assert!(
+            futures_util::poll!(&mut wait).is_pending(),
+            "a held lock keeps the contender waiting"
+        );
+        drop(owner);
+        assert!(
+            futures_util::poll!(&mut wait).is_pending(),
+            "the contender retries only after its poll interval"
+        );
+        control.advance(Duration::from_millis(50));
+
+        assert!(matches!(futures_util::poll!(&mut wait), Poll::Ready(Ok(()))));
+    }
+
     #[tokio::test]
     async fn cache_lock_contention_has_a_bounded_actionable_failure() {
         let root = tempfile::tempdir().unwrap();
         let _owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let lock = open_cache_lock(root.path()).await.unwrap();
+        let wait = wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &clock);
+        let mut wait = std::pin::pin!(wait);
 
-        let error = lock_cache_with_timeout(root.path(), Duration::ZERO)
-            .await
-            .expect_err("a second owner must not wait indefinitely");
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        control.advance(DATABASE_FETCH_TIMEOUT);
 
+        let Poll::Ready(Err(error)) = futures_util::poll!(&mut wait) else {
+            panic!("a second owner must not wait beyond the deadline");
+        };
         assert!(error.to_string().contains("waiting for another advisory cache refresh"), "{error}");
     }
 
@@ -659,12 +706,12 @@ mod tests {
         started_rx.await.unwrap();
         caller.abort();
         let cancelled = caller.await.unwrap_err();
-        let contender = lock_cache_with_timeout(root.path(), Duration::ZERO).await;
+        let contender = try_lock_cache(root.path()).await;
         let blocked = contender.is_err();
         drop(contender);
         release_tx.send(()).unwrap();
         finished_rx.await.unwrap();
-        let _next_lock = lock_cache_with_timeout(root.path(), Duration::ZERO)
+        let _next_lock = try_lock_cache(root.path())
             .await
             .expect("publication must release the lock when its worker finishes");
 
