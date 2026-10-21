@@ -6,8 +6,10 @@
 //! Minimal GitHub API client for fetching repository and issue data.
 
 use chrono::{DateTime, Utc};
-use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusExt};
+use fetch::{HeaderMap, HeaderValue, HttpResponse, StatusExt};
 use serde::Deserialize;
+
+use crate::facts::resilient_http::LazyHttpClient;
 
 const LOG_TARGET: &str = "   hosting";
 
@@ -82,7 +84,7 @@ pub enum HostingApiResult<T> {
 /// Hosting API client (GitHub, Codeberg, etc.)
 #[derive(Debug, Clone)]
 pub struct Client {
-    transport: HttpClient,
+    transport: LazyHttpClient,
     authorization: Option<HeaderValue>,
     base_url: String,
 }
@@ -98,7 +100,7 @@ impl Client {
     pub fn new(token: Option<&str>, base_url: impl Into<String>) -> crate::Result<Self> {
         let authorization = token.map(authorization_value).transpose()?;
         Ok(Self {
-            transport: crate::facts::resilient_http::new_client(),
+            transport: LazyHttpClient::default(),
             authorization,
             base_url: base_url.into(),
         })
@@ -112,7 +114,8 @@ impl Client {
 
     /// Make an API call and classify the result
     pub async fn api_call(&self, url: &str) -> HostingApiResult<HttpResponse> {
-        let resp = match crate::facts::resilient_http::resilient_get_authorized(&self.transport, url, self.authorization.clone()).await {
+        let resp = match crate::facts::resilient_http::resilient_get_authorized(self.transport.get(), url, self.authorization.clone()).await
+        {
             Ok(r) => r,
             Err(e) => return HostingApiResult::Failed(e, None),
         };
@@ -478,20 +481,20 @@ mod tests {
         assert!(error.to_string().contains("header"), "{error}");
     }
 
-    #[tokio::test]
-    async fn test_client_new_without_token() {
+    #[test]
+    fn test_client_new_without_token() {
         let client = Client::new(None, "https://api.github.com").unwrap();
         assert_eq!(client.base_url(), "https://api.github.com");
     }
 
-    #[tokio::test]
-    async fn test_client_new_with_token() {
+    #[test]
+    fn test_client_new_with_token() {
         let client = Client::new(Some("test_token"), "https://api.github.com").unwrap();
         assert_eq!(client.base_url(), "https://api.github.com");
     }
 
-    #[tokio::test]
-    async fn test_client_base_url() {
+    #[test]
+    fn test_client_base_url() {
         let client = Client::new(None, "https://codeberg.org/api/v1").unwrap();
         assert_eq!(client.base_url(), "https://codeberg.org/api/v1");
     }

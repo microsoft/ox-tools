@@ -15,6 +15,7 @@ use crate::facts::crate_spec::{self, CrateSpec};
 use crate::facts::path_utils::sanitize_path_component;
 use crate::facts::repo_spec::RepoSpec;
 use crate::facts::request_tracker::{RequestTracker, TrackedTopic};
+use crate::facts::resilient_http::LazyHttpClient;
 use crate::facts::throttler::Throttler;
 
 const LOG_TARGET: &str = "  coverage";
@@ -27,7 +28,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: fetch::HttpClient,
+    client: LazyHttpClient,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -36,7 +37,7 @@ pub struct Provider {
 impl Provider {
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
-        let client = crate::facts::resilient_http::new_client();
+        let client = LazyHttpClient::default();
 
         Self {
             client,
@@ -160,7 +161,7 @@ impl Provider {
         let codecov_url = format!("{}/{service}/{owner}/{repo}/branch/{branch}/graph/badge.svg", self.base_url);
         log::debug!(target: LOG_TARGET, "Trying branch '{branch}' for repository '{repo_spec}'");
 
-        let response = crate::facts::resilient_http::resilient_get(&self.client, &codecov_url)
+        let response = crate::facts::resilient_http::resilient_get(self.client.get(), &codecov_url)
             .await
             .into_app_err_with(|| format!("sending HTTP request to {codecov_url}"))?;
 
@@ -324,8 +325,8 @@ mod tests {
         assert_eq!(captures.get(1).unwrap().as_str(), "100");
     }
 
-    #[tokio::test]
-    async fn test_provider_new_default_base_url() {
+    #[test]
+    fn test_provider_new_default_base_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, None);
@@ -335,8 +336,8 @@ mod tests {
         assert!(debug.contains(&expected), "unexpected throttler state: {debug}");
     }
 
-    #[tokio::test]
-    async fn test_provider_new_custom_base_url() {
+    #[test]
+    fn test_provider_new_custom_base_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, Some("https://custom.codecov.io"));

@@ -1359,9 +1359,9 @@ mod tests {
         assert_eq!(repo_data.rate_limit.unwrap().remaining, 5000);
     }
 
-    #[tokio::test]
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime")]
-    async fn test_provider_new() {
+    fn test_provider_new() {
         let provider = Provider::new(
             None,
             None,
@@ -1416,9 +1416,9 @@ mod tests {
         assert_eq!(tracker.topic_state(TrackedTopic::Repos), (5, 0, TopicStatus::Active));
     }
 
-    #[tokio::test]
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime")]
-    async fn test_provider_new_with_tokens() {
+    fn test_provider_new_with_tokens() {
         let provider = Provider::new(
             Some("github_token"),
             Some("codeberg_token"),

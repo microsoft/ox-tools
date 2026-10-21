@@ -7,6 +7,7 @@
 //! with [`seatbelt`] when a response body fails after the headers arrive.
 
 use core::time::Duration;
+use std::sync::{Arc, OnceLock};
 
 use bytes::{Buf, Bytes};
 use fetch::http::header::{AUTHORIZATION, CONTENT_LENGTH, LOCATION, RETRY_AFTER, USER_AGENT};
@@ -22,6 +23,21 @@ use seatbelt::retry::{Backoff, Retry};
 use seatbelt::{RecoveryInfo, ResilienceContext};
 use tick::{Clock, FutureExt};
 use url::Url;
+
+/// Shared transport initialized by the first async request inside Tokio.
+#[derive(Debug, Clone, Default)]
+pub struct LazyHttpClient(Arc<OnceLock<HttpClient>>);
+
+impl LazyHttpClient {
+    pub fn get(&self) -> &HttpClient {
+        self.0.get_or_init(new_client)
+    }
+
+    #[cfg(test)]
+    pub fn from_client(client: HttpClient) -> Self {
+        Self(Arc::new(OnceLock::from(client)))
+    }
+}
 
 /// Construct a streaming transport with request retry and timeout middleware.
 ///
@@ -253,7 +269,7 @@ where
 /// Retries failed `download_fn` attempts without imposing any deadline.
 ///
 /// Callers choose their own timeout boundary; the advisory archive times only its body
-/// transfer so Fetch's request retries and server-requested waits are not cut short.
+/// transfer so request retries and server-requested waits are not cut short.
 pub(crate) async fn retry_download_with_clock<In, Out, Fut, F>(
     name: &'static str,
     input: In,
@@ -364,10 +380,27 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use core::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
 
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn lazy_client_construction_and_cloning_do_not_need_a_runtime() {
+        let client = LazyHttpClient::default();
+        let cloned = client.clone();
+
+        assert!(client.0.get().is_none());
+        assert!(cloned.0.get().is_none());
+        assert!(Arc::ptr_eq(&client.0, &cloned.0));
+    }
+
+    #[tokio::test]
+    async fn lazy_client_clones_share_the_initialized_transport() {
+        let client = LazyHttpClient::default();
+        let cloned = client.clone();
+
+        assert!(core::ptr::eq(client.get(), cloned.get()));
+    }
 
     /// A `Retry-After: 0` header keeps the retry delay at zero so tests stay fast.
     fn immediate_retry_after(status: u16) -> ResponseTemplate {

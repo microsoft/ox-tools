@@ -31,6 +31,9 @@ their prerequisites disappear.
 ## HTTP and advisory acquisition
 
 HTTP requests use the public `fetch` crate's Tokio transport with native TLS.
+Coverage, documentation, and hosting providers can be constructed and cloned
+without a Tokio runtime. They create their shared transport on the first async
+request inside Tokio, using the same request resilience configuration.
 Connections are direct; environment HTTP proxy settings are not consumed.
 Windows and macOS use their platform TLS implementations; Linux builds require
 supported, patched OpenSSL 3 development packages, dynamically linked. The

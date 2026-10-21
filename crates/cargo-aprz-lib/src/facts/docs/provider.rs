@@ -19,6 +19,7 @@ use crate::facts::cache::{Cache, CacheResult};
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::path_utils::sanitize_path_component;
 use crate::facts::request_tracker::{RequestTracker, TrackedTopic};
+use crate::facts::resilient_http::LazyHttpClient;
 use crate::facts::throttler::Throttler;
 
 pub(super) const LOG_TARGET: &str = "      docs";
@@ -33,7 +34,7 @@ const UNREADABLE_BODY_PLACEHOLDER: &str = "<unable to read body>";
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: fetch::HttpClient,
+    client: LazyHttpClient,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -43,7 +44,7 @@ impl Provider {
     /// Create a new docs provider
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
-        let client = crate::facts::resilient_http::new_client();
+        let client = LazyHttpClient::default();
 
         Self {
             client,
@@ -171,7 +172,7 @@ impl Provider {
 
         let url = format!("{}/crate/{crate_name}/{version}/json", self.base_url);
 
-        let response = match crate::facts::resilient_http::resilient_get(&self.client, &url).await {
+        let response = match crate::facts::resilient_http::resilient_get(self.client.get(), &url).await {
             Ok(response) => response,
             Err(error) => return Ok(Err(error)),
         };
@@ -551,8 +552,8 @@ mod tests {
         assert!(Path::new(&filename).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bin")));
     }
 
-    #[tokio::test]
-    async fn test_provider_new_default_url() {
+    #[test]
+    fn test_provider_new_default_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, None);
@@ -561,8 +562,8 @@ mod tests {
         assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
     }
 
-    #[tokio::test]
-    async fn test_provider_new_custom_url() {
+    #[test]
+    fn test_provider_new_custom_url() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, Some("https://custom.docs.rs"));
@@ -629,7 +630,7 @@ mod tests {
                 crate::facts::resilient_http::configure_request_resilience(fetch::HttpClient::builder_fake(handler, &clock)).build();
             let temp = tempfile::tempdir().unwrap();
             let mut provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), None);
-            provider.client = client;
+            provider.client = LazyHttpClient::from_client(client);
 
             let spec = test_crate_spec("anyhow", "1.0.100");
             let mut request = std::pin::pin!(provider.fetch_docs_for_crate_core(&spec));
