@@ -64,6 +64,7 @@ mutators! {
     "arith.div_to_rem",          true , &["AOR"], "replace / with %";
     "arith.rem_to_div",          true,  &["AOR"], "replace % with /";
     "arith.rem_to_mul",          true , &["AOR"], "replace % with *";
+    "arith.rem_to_add",          true,  &["AOR"], "replace % with +";
 
     // Bitwise and shift.
     "bitwise.and_to_or",         true,  &["AOR"], "replace & with |";
@@ -75,6 +76,7 @@ mutators! {
 
     // Compound assignment.
     "assign.add_to_sub",         true,  &["ASR"], "replace += with -=";
+    "assign.add_to_mul",         true,  &["ASR"], "replace += with *=";
     "assign.sub_to_add",         true,  &["ASR"], "replace -= with +=";
     "assign.mul_to_div",         true,  &["ASR"], "replace *= with /=";
     "assign.div_to_mul",         true,  &["ASR"], "replace /= with *=";

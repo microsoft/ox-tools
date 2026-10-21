@@ -323,6 +323,18 @@ original expression.
 
 ### Semantic restraint
 
+The operator catalog includes `%` to `+` and `+=` to `*=`, both enabled by
+default. Each substitution has a distinct mutator name and is selected through
+its family and presets. Compound-assignment replacements rely on compiler
+convergence to exclude unsupported trait operations, including multiplication
+assignment on temporal and textual types. These candidates may add convergence
+rounds before tests run.
+
+`assign.add_to_mul` skips an integer-literal right operand equal to one,
+including suffixes, alternate bases, and parentheses. This limits stalled
+counter mutants and applies even when explicitly selected or used with custom
+assignment operators. Variables, constants, and expressions remain candidates.
+
 Comparisons inside a match arm's `if` guard receive the same relational
 mutations as comparisons elsewhere, while the pattern remains untouched.
 
