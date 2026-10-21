@@ -48,6 +48,7 @@ fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: &[(&str, &st
         "framework": { "name": "cargo-gamma", "version": "0.0.0" },
         "config": {
             "startedAt": started_at,
+            "populationComplete": shard.is_none(),
             "shard": shard.map(|(index, count)| serde_json::json!({ "index": index, "count": count })),
         },
         "files": {

@@ -308,7 +308,6 @@ fn build_transitive_deps<'a>(
                     let features = compute_dep_features(target_pkg, dep_decl, &expanded_root);
                     queue.push((&node_dep.pkg, features));
                 } else {
-                    // #[gamma::skip(call.replace_with_default, call_result.default, tag = "trivial", reason = "HashSet::default() is already the exact default value these replacements produce")]
                     queue.push((&node_dep.pkg, HashSet::default()));
                 }
             }
@@ -342,7 +341,6 @@ fn build_transitive_deps<'a>(
                             let dep_features = compute_dep_features(pkg, dep_decl, &expanded);
                             queue.push((&node_dep.pkg, dep_features));
                         } else {
-                            // #[gamma::skip(call.replace_with_default, call_result.default, tag = "trivial", reason = "HashSet::default() is already the exact default value these replacements produce")]
                             queue.push((&node_dep.pkg, HashSet::default()));
                         }
                     }

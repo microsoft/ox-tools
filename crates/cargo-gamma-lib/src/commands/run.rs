@@ -26,6 +26,11 @@ use crate::testing::pause_after_cache_adoption;
 
 const GITHUB_ACTIONS: &str = "GITHUB_ACTIONS";
 
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod recovery_test_util;
+
 #[cfg(test)]
 fn missing_hints(mode: exec::IncrementalMode, root: &Utf8Path) -> bool {
     mode.is_enabled() && crate::discover::Hints::is_missing(root)
@@ -121,6 +126,11 @@ fn run_info_at(args: &RunArgs, tests: Option<usize>, dropped: &[String], now: Sy
         started_at: seconds_since_epoch(now),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
+        population_complete: args.select.in_diff.is_none()
+            && args.select.mutators.is_none()
+            && args.select.shard_count.is_none()
+            && args.mutants.is_empty()
+            && !args.only_survivors,
         shard: args
             .select
             .shard_count
@@ -151,6 +161,7 @@ fn resumed_report_info(retained: Option<&crate::elements::RunInfo>) -> crate::el
         started_at: 0,
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: true,
+        population_complete: false,
         shard: None,
         tests: None,
         not_built: None,
@@ -571,7 +582,7 @@ fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i3
             let (_, base, lock) = exec::claim_testing_state(&selected, args.measure.cache_dir.as_deref())?;
             let (state, _) = exec::TestingState::load(&base)?;
             drop(lock);
-            Ok(state.session.metered)
+            Ok(!state.is_settled() && state.session.metered)
         },
         || {
             exec::relaunch::relaunch().map_err(|refusal| {
@@ -717,7 +728,6 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
         include_tests: &args.measure.include_tests,
         exclude_tests: &args.measure.exclude_tests,
         test_workspace: args.measure.test_workspace,
-        optimize_test_execution: args.measure.optimize_test_execution,
         whole_test_binaries: args.measure.whole_test_binaries,
         nextest: args.measure.nextest,
         cargo_test_args: &args.measure.cargo_test_args,
@@ -894,7 +904,6 @@ pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
         include_tests: args.measure.include_tests.clone(),
         exclude_tests: args.measure.exclude_tests.clone(),
         test_workspace: args.measure.test_workspace,
-        optimize_test_execution: args.measure.optimize_test_execution,
         whole_test_binaries: args.measure.whole_test_binaries,
         nextest: args.measure.nextest,
         resources: args.measure.resource_concurrency.clone(),
@@ -1014,6 +1023,10 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     if args.resume_testing {
         return resumed_testing(host, args, progress_when, styler);
     }
+    campaign_preflight(args, || {
+        let metadata = crate::discover::load_metadata(&args.select.dir, &args.select.features)?;
+        Ok(exec::campaign_base(&metadata.workspace_root, &metadata.target_directory, None))
+    })?;
     let started = Instant::now();
     let selection = args.select.selection()?;
     let shard = args.select.shard()?;
@@ -1099,6 +1112,9 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     } else {
         None
     };
+    if let Some(prepared) = record.as_ref() {
+        crate::discover::RunRecord::validate_update(&prepared.base)?;
+    }
     #[cfg(any(test, feature = "internals"))]
     let cache_lock_identity = cache_locks.as_ref().map(exec::cache_lock_identity);
     let (cached, _declined, _moved) = reusable_context.as_ref().zip(record.as_ref()).map_or_else(
@@ -1110,7 +1126,9 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     // package sequence to interleave the scan with; it is simply scanned.
     if args.dry_run {
         let mut ordinals = 0;
-        let scanned = survey.scan(None, &selection, &mut ordinals)?;
+        let base = exec::campaign_base(&survey.root, &survey.target, args.measure.cache_dir.as_deref());
+        let exclusions = crate::discover::CompilerExclusions::load(&base, &survey.root)?;
+        let scanned = survey.scan_excluding(None, &selection, &mut ordinals, Some(&exclusions))?;
         let plan = survey.into_plan(scanned);
 
         progress.finish(host);
@@ -1316,11 +1334,26 @@ fn should_claim_cache(persisting_record: bool, dry_run: bool) -> bool {
     persisting_record && !dry_run
 }
 
+fn campaign_preflight(args: &RunArgs, resolve_default: impl FnOnce() -> crate::Result<Utf8PathBuf>) -> crate::Result<()> {
+    if args.dry_run {
+        return Ok(());
+    }
+    let base = match args.measure.cache_dir.as_deref() {
+        Some(cache) => exec::gamma_base(&args.select.dir, Some(cache)),
+        None => resolve_default()?,
+    };
+    crate::discover::RunRecord::validate_update(&base)
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn resumed_testing<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
     resumed_testing_with_support(host, args, progress_when, styler, exec::memory_support, |_| {})
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "resume keeps execution and publication-only recovery in one ordered reporting and lock-cleanup path"
+)]
 fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 'static>(
     host: &mut H,
     args: &RunArgs,
@@ -1333,7 +1366,10 @@ fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 's
     let selected = crate::paths::physical(&args.select.dir)?;
     let (root, base, lock) = exec::claim_testing_state(&selected, args.measure.cache_dir.as_deref())?;
     let (state, valid_bytes) = exec::TestingState::load(&base)?;
-    if state.session.metered {
+    // Settled replay needs no execution capabilities, prepared artifacts, or testing workspace.
+    // Frozen evidence and captured-source provenance remain mandatory, and publication keeps the lock.
+    let publication_only = state.is_settled();
+    if !publication_only && state.session.metered {
         support().map_err(|cause| {
             error!(
                 "cannot resume the campaign's memory-controlled tests on this host; restore memory-control support or start a new campaign"
@@ -1347,18 +1383,37 @@ fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 's
         ));
     }
     validate_resumed_environment(&state.plan.mutants, || state.record.context.validate_inherited_environment())?;
-    state.validate_artifacts()?;
+    crate::discover::RunRecord::validate_update(&base)?;
+    if !publication_only {
+        state.validate_artifacts()?;
+    }
     let record = state.record.clone();
     let retained_info = resumed_report_info(record.report_info.as_ref());
-    let work = exec::Workspace::resume_testing(
-        &state.plan.root,
-        &state.record.base,
-        state.workspace.clone(),
-        lock,
-        valid_bytes,
-        exec::TestingResumeIo::FILESYSTEM,
-    )?;
-    let reporting_args = prepare_resumed_reporting(host, args, &state, &work, styler)?;
+    let retained_session = publication_only.then(|| state.session.clone());
+    let (work, _publication_lock) = if publication_only {
+        (None, Some(lock))
+    } else {
+        (
+            Some(exec::Workspace::resume_testing(
+                &state.plan.root,
+                &state.record.base,
+                state.workspace.clone(),
+                lock,
+                valid_bytes,
+                exec::TestingResumeIo::FILESYSTEM,
+            )?),
+            None,
+        )
+    };
+    let profile = match work.as_ref() {
+        Some(work) => work.reporting_profile(),
+        None => state
+            .workspace
+            .get("cargo")
+            .and_then(|cargo| cargo.get("profile"))
+            .and_then(serde_json::Value::as_str),
+    };
+    let reporting_args = prepare_resumed_reporting(host, args, &state, profile, styler)?;
     let visible = progress_when.resolve(host.is_terminal());
     let mut verdict_log = VerdictLog::default();
     verdict_log.resume(&base)?;
@@ -1380,7 +1435,16 @@ fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 's
         styler.verb("Resuming"),
         quantity(settled, "settled mutant")
     )?;
-    let outcome = exec::resume_testing(state, work, &mut events);
+    let outcome = match work {
+        Some(work) => exec::resume_testing(state, work, &mut events),
+        None => state.complete_testing().map(|()| exec::Measured {
+            plan: state.plan,
+            built: None,
+            learning: Some(state.killers),
+            stuck: state.stuck,
+            dropped: state.dropped,
+        }),
+    };
     let log_failure = events.finish_verdict_log().err();
     if outcome.is_err() {
         events.abandon();
@@ -1399,33 +1463,43 @@ fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 's
     let (base, stored) = publish_completed_record(record, &plan, learning.as_ref())?;
     let reachable = exec::remember_campaign_base(&plan.root, &base);
     let (promotable, suppressible) = postprocessing_advice(&plan.root, &stored, reachable);
-    let mut built = built.ok_or_else(|| error!("resumed testing returned no prepared workspace"))?;
-    built.work.snapshot_report_sources(&plan)?;
+    let mut built = built;
+    let (session, source_root) = if let Some(built) = built.as_mut() {
+        built.work.snapshot_report_sources(&plan)?;
+        (built.session.clone(), built.work.report_source_root())
+    } else {
+        (
+            retained_session.expect("only publication-only recovery completes without a built session"),
+            snapshot_captured_report_sources(&base, &plan)?,
+        )
+    };
     let wall = started.elapsed();
     let mut footer = listings(args, announced, Some(promotable), Some(suppressible));
-    footer.stats = Some(stats(&built.session, wall));
+    footer.stats = Some(stats(&session, wall));
     crate::report::summarize(host, &plan, styler, footer)?;
-    crate::report::session_notes(host, &built.session, false, false, styler)?;
-    let panel = summary_panel(&reporting_args, &plan, &built.session, &stuck, &dropped, wall);
+    crate::report::session_notes(host, &session, false, false, styler)?;
+    let panel = summary_panel(&reporting_args, &plan, &session, &stuck, &dropped, wall);
     emit_reports_from(
         host,
         args,
         &plan,
         &ReportContents {
             retained_info: Some(&retained_info),
-            source_root: Some(&built.work.report_source_root()),
+            source_root: Some(&source_root),
             advice: Some(&panel),
-            tests: built.session.tests,
+            tests: session.tests,
             dropped: &dropped,
         },
         styler,
     )?;
-    emit_advice(host, &reporting_args, &plan, &built.session, wall, styler)?;
-    emit_diag(host, &reporting_args, &plan, Some(&built.session), started, styler)?;
+    emit_advice(host, &reporting_args, &plan, &session, wall, styler)?;
+    emit_diag(host, &reporting_args, &plan, Some(&session), started, styler)?;
     report_dropped(host, &dropped, styler)?;
     report_stuck(host, &stuck, styler)?;
     warn_auxiliary(host, log_failure.as_ref(), styler);
-    if let Err(failure) = built.work.teardown() {
+    if let Some(built) = built.as_mut()
+        && let Err(failure) = built.work.teardown()
+    {
         writeln!(host.error(), "{} {failure}", styler.warning())?;
     }
     Ok(Executed { plan: Some(plan), stuck })
@@ -1438,11 +1512,35 @@ fn validate_resumed_environment(mutants: &[Mutant], validate: impl FnOnce() -> c
     Ok(())
 }
 
+/// Materializes frozen campaign sources for publication-only recovery, independently of the
+/// current checkout and execution artifacts.
+fn snapshot_captured_report_sources(base: &Utf8Path, plan: &Plan) -> crate::Result<Utf8PathBuf> {
+    let root = base.join(".cargo-gamma-report-source");
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(error!("report source directory `{root}` is a link"));
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(&root).map_err(|cause| error!("could not clear report source directory `{root}`").caused_by(cause))?;
+        }
+        Ok(_) => return Err(error!("report source path `{root}` is not a directory")),
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        Err(cause) => return Err(error!("could not inspect report source directory `{root}`").caused_by(cause)),
+    }
+    fs::create_dir(&root).map_err(|cause| error!("could not create report source directory `{root}`").caused_by(cause))?;
+    for file in &plan.files {
+        if let Some(source) = &file.source {
+            crate::elements::write(&root.join(&file.path), source)?;
+        }
+    }
+    Ok(root)
+}
+
 fn prepare_resumed_reporting<H: Host>(
     host: &mut H,
     args: &RunArgs,
     state: &exec::TestingState,
-    work: &exec::Workspace,
+    profile: Option<&str>,
     styler: Styler,
 ) -> crate::Result<RunArgs> {
     if state.record.report_info.is_none() {
@@ -1465,7 +1563,7 @@ fn prepare_resumed_reporting<H: Host>(
         state.settings.mutators.as_deref(),
         &state.plan.mutants,
         state.record.report_info.as_ref().and_then(|info| info.shard.as_ref()),
-        work.reporting_profile(),
+        profile,
     ))
 }
 
@@ -1903,6 +2001,106 @@ mod miri_tests {
         assert!(incremental_enabled(&args));
         args.mutants.push("deadbeefcafe".to_owned());
         assert!(!incremental_enabled(&args));
+    }
+
+    #[test]
+    fn population_authority_is_explicit_and_filtered_runs_cannot_claim_it() {
+        let mut args = RunArgs::default();
+        assert!(run_info(&args, None, &[]).population_complete);
+        args.mutants.push("deadbeefcafe".into());
+        assert!(!run_info(&args, None, &[]).population_complete);
+        args.mutants.clear();
+        args.only_survivors = true;
+        assert!(!run_info(&args, None, &[]).population_complete);
+        args.only_survivors = false;
+        args.select.in_diff = Some("changes.patch".into());
+        assert!(!run_info(&args, None, &[]).population_complete);
+        args.select.in_diff = None;
+        args.select.shard_count = Some(2);
+        args.select.shard_index = Some(0);
+        assert!(!run_info(&args, None, &[]).population_complete);
+        args.select.shard_count = None;
+        args.select.shard_index = None;
+        args.select.files.push("src/*.rs".into());
+        args.select.exclude_files.push("src/generated.rs".into());
+        args.select.packages.push("included-package".into());
+        assert!(run_info(&args, None, &[]).population_complete);
+        for mutators in ["arith.add_to_sub", "all", "@all"] {
+            args.select.mutators = Some(mutators.into());
+            assert!(!run_info(&args, None, &[]).population_complete, "{mutators}");
+        }
+        assert!(!resumed_report_info(None).population_complete);
+    }
+
+    #[test]
+    fn legacy_frozen_run_info_defaults_to_non_authoritative_population_on_resume() {
+        let mut frozen = serde_json::to_value(run_info(&RunArgs::default(), None, &[])).unwrap();
+        assert!(frozen.as_object_mut().unwrap().remove("populationComplete").is_some());
+        let decoded: crate::elements::RunInfo = serde_json::from_value(frozen).unwrap();
+        assert!(!decoded.population_complete);
+        let resumed = resumed_report_info(Some(&decoded));
+        assert!(!resumed.population_complete);
+        let reported = report_info(&RunArgs::default(), Some(&resumed), Some(3), &[]);
+        assert!(!reported.population_complete);
+    }
+
+    #[test]
+    fn exact_id_and_diff_report_metadata_preserve_unchanged_historical_survivors_through_the_wire() {
+        let exact = RunArgs {
+            mutants: vec!["deadbeefcafe".into()],
+            ..RunArgs::default()
+        };
+        let mut diff = RunArgs::default();
+        diff.select.in_diff = Some("changes.patch".into());
+        for args in [exact, diff] {
+            let old = crate::fixtures::report_with(
+                None,
+                100,
+                vec![
+                    crate::fixtures::mutant_result_at("a", 1, "Survived"),
+                    crate::fixtures::mutant_result_at("b", 2, "Survived"),
+                ],
+            );
+            let mut newer = crate::fixtures::report_with(None, 200, vec![crate::fixtures::mutant_result_at("a", 1, "Killed")]);
+            let mut info = run_info(&args, None, &[]);
+            info.started_at = 200;
+            newer.config = Some(info);
+            let wire = crate::elements::to_json(&newer).unwrap();
+            let decoded = serde_json::from_str(&wire).unwrap();
+            let merged = crate::merge::merge(&[("old".into(), old), ("new".into(), decoded)], 300, None);
+            assert_eq!((merged.withdrawn, merged.valid, merged.detected), (0, 2, 1));
+        }
+    }
+
+    #[test]
+    fn mutator_filtered_reports_preserve_other_mutator_survivors_in_the_same_file_through_the_wire() {
+        for selector in ["arith.add_to_sub", "all", "@all"] {
+            let mut args = RunArgs::default();
+            args.select.mutators = Some(selector.into());
+            let mut arithmetic = crate::fixtures::mutant_result_at("arithmetic", 1, "Survived");
+            arithmetic.mutator_name = "arith.add_to_sub".into();
+            let mut relational = crate::fixtures::mutant_result_at("relational", 1, "Survived");
+            relational.mutator_name = "relational.lt_to_le".into();
+            let old = crate::fixtures::report_with(None, 100, vec![arithmetic.clone(), relational]);
+            arithmetic.status = "Killed".into();
+            let mut newer = crate::fixtures::report_with(None, 200, vec![arithmetic]);
+            let mut info = run_info(&args, None, &[]);
+            info.started_at = 200;
+            newer.config = Some(info);
+            let wire = crate::elements::to_json(&newer).unwrap();
+            let decoded: crate::elements::Report = serde_json::from_str(&wire).unwrap();
+            assert!(!decoded.config.as_ref().unwrap().population_complete, "{selector}");
+            let merged = crate::merge::merge(&[("old".into(), old), ("new".into(), decoded)], 300, None);
+            assert_eq!((merged.withdrawn, merged.valid, merged.detected), (0, 2, 1), "{selector}");
+            let report = merged.report.unwrap();
+            let retained = report.files["src/lib.rs"]
+                .mutants
+                .iter()
+                .find(|mutant| mutant.id == "relational")
+                .unwrap();
+            assert_eq!(retained.mutator_name, "relational.lt_to_le");
+            assert_eq!(retained.status, "Survived");
+        }
     }
 
     #[test]
@@ -2378,20 +2576,19 @@ mod tests {
             artifacts: &[serde_json::Value],
         ) -> serde_json::Value {
             serde_json::json!({
-                "version": 1, "tool": env!("CARGO_PKG_VERSION"),
+                "version": 2, "tool": env!("CARGO_PKG_VERSION"),
                 "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 "plan": plan, "confidences": {}, "session": measured,
                 "oracle": { "packages": ["subject"], "package_local": true, "whole_workspace": false },
                 "workspace": {
                     "base": base, "root": prepared, "target": base.join("target"), "runtime": runtime,
                     "libraries": [], "cargo": exec::CargoOptions::default(), "nextest": null, "test_environment": null,
+                    "scheduler_version": 2,
                     "launch": { "loader": null, "stack": "2097152" }, "harness_threads": null,
                     "resources": { "capacities": {}, "binaries": {} }
                 },
                 "settings": { "jobs": 1, "mutators": "all", "timeout_floor": Duration::from_secs(1),
                     "confirm": false, "narrowed": false, "incremental": false },
-                "census": { "binaries": {}, "walked": 0, "listing_launches": 0, "listed_binaries": 0,
-                    "estimated_cost": Duration::ZERO, "walk_admitted": false },
                 "killers": exec::Killers::default(),
                 "record": {
                     "report_info": fixtures::report_with(None, 77, Vec::new()).config,
@@ -2518,7 +2715,7 @@ mod tests {
         }
 
         #[test]
-        fn survivor_resumed_execution_failure_closes_the_dashboard_before_returning_the_actual_phase_publication_error() {
+        fn survivor_resumed_publication_failure_returns_the_actual_phase_error_without_starting_execution_progress() {
             let (_directory, args, _) = survivor_resume_checkpoint();
             let phase = args
                 .measure
@@ -2546,13 +2743,14 @@ mod tests {
             );
             assert!(error.to_string().contains("testing-phase.json"), "{error}");
             let diagnostics = host.sink.err();
-            let final_frame = diagnostics
-                .rsplit("\x1b[?2026h")
-                .next()
-                .expect("the enabled dashboard drew a frame");
             assert!(
-                final_frame.contains("\x1b[J\x1b[?2026l"),
-                "an execution error must erase the active dashboard before returning: {diagnostics}"
+                !diagnostics.contains("\x1b[?2026h"),
+                "publication does not start an execution dashboard"
+            );
+            assert!(diagnostics.contains("Resuming"), "the actual publication path announced recovery");
+            assert!(
+                !diagnostics.contains("\r\x1b[2K"),
+                "publication does not draw an execution progress bar"
             );
         }
 
@@ -2645,6 +2843,9 @@ mod tests {
             for metered in [false, true] {
                 let (_directory, args, mut state) = survivor_resume_checkpoint();
                 state["session"]["metered"] = serde_json::Value::Bool(metered);
+                if metered {
+                    state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
+                }
                 let base = args.measure.cache_dir.as_ref().expect("fixture has a cache");
                 survivor_write_resume_snapshot(base, &state);
                 let called = std::cell::Cell::new(false);
@@ -2683,7 +2884,7 @@ mod tests {
         }
 
         #[test]
-        fn survivor_actual_resumed_terminal_matrix_requires_both_requested_dashboard_and_visible_progress() {
+        fn survivor_actual_resumed_terminal_matrix_does_not_start_execution_progress_for_publication_only() {
             for visible in [false, true] {
                 for dashboard in [false, true] {
                     let (_directory, mut args, _) = survivor_resume_checkpoint();
@@ -2702,32 +2903,11 @@ mod tests {
                         diagnostics.contains("\x1b["),
                         "requested styling reaches the actual resume announcement"
                     );
-                    assert_eq!(diagnostics.contains("\x1b[?2026h"), visible && dashboard, "{diagnostics}");
-                    if visible && dashboard {
-                        let final_frame = diagnostics
-                            .rsplit("\x1b[?2026h")
-                            .next()
-                            .expect("the dashboard drew at least one frame");
-                        assert!(
-                            final_frame.contains("\x1b[J\x1b[?2026l"),
-                            "the final dashboard frame must clear its last painted rows: {final_frame}"
-                        );
-                    } else if visible {
-                        assert!(
-                            diagnostics.contains("\r\x1b[2K"),
-                            "the inline progress bar is erased before later diagnostics: {diagnostics}"
-                        );
-                        let retained_bar = diagnostics
-                            .find("2/2")
-                            .expect("the actual inline bar includes both retained judged outcomes");
-                        let final_erase = diagnostics
-                            .rfind("\r\x1b[2K")
-                            .expect("the active inline bar has a clearing operation");
-                        assert!(
-                            final_erase > retained_bar,
-                            "the resumed caller must erase its retained bar after the final draw: {diagnostics}"
-                        );
-                    }
+                    assert!(
+                        !diagnostics.contains("\x1b[?2026h"),
+                        "publication-only recovery never starts an execution dashboard"
+                    );
+                    assert!(!diagnostics.contains("\r\x1b[2K"), "publication has no execution progress bar");
                     assert!(
                         host.out().contains("unviable"),
                         "the requested bulk unviable listing survives footer construction: {}",
@@ -2786,10 +2966,13 @@ mod tests {
                         "saved campaign belongs to a different workspace"
                     }
                     "artifact" => {
+                        state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
+                        survivor_write_resume_snapshot(base, &state);
                         fs::remove_file(base.join("workspace/src/lib.rs")).expect("an inspected source artifact can actually disappear");
                         "prepared"
                     }
                     "prepared" => {
+                        state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
                         state["workspace"]["target"] = serde_json::json!(base.join("foreign-target"));
                         survivor_write_resume_snapshot(base, &state);
                         "prepared testing workspace does not belong"
@@ -3206,6 +3389,29 @@ mod tests {
     }
 
     #[test]
+    fn incremental_no_disables_context_reuse_not_authoritative_historical_exclusions() {
+        let args = RunArgs {
+            incremental: Some(exec::IncrementalMode::No),
+            ..RunArgs::default()
+        };
+        assert!(incremental_context(&args).is_none());
+        let directory = crate::testing::workdir("incremental-independent-exclusions-");
+        let mut plan = plan_at(Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap());
+        let base = plan.root.join("historical-exclusions");
+        fs::create_dir(&base).unwrap();
+        let mut inventory = crate::discover::CompilerExclusions::load(&base, &plan.root).unwrap();
+        let mutant = &mut plan.mutants[0];
+        mutant.outcome = Outcome::Pending;
+        mutant.ordinal = 1;
+        inventory.remember(core::slice::from_ref(mutant), &crate::HashSet::from_iter([1]), |_| "E0308".into());
+        inventory.store(&base).unwrap();
+        let inventory = crate::discover::CompilerExclusions::load(&base, &plan.root).unwrap();
+        assert_eq!(inventory.exclude(&mut plan.mutants), 1);
+        assert_eq!(plan.mutants[0].outcome, Outcome::CompileError);
+        assert_eq!(plan.mutants[0].ordinal, 0);
+    }
+
+    #[test]
     fn disabled_incremental_still_persists_postprocessing_state_without_adoption() {
         let args = RunArgs {
             incremental: Some(exec::IncrementalMode::No),
@@ -3430,6 +3636,7 @@ mod tests {
                 dir: missing,
                 ..crate::commands::SelectArgs::default()
             },
+            dry_run: true,
             ..RunArgs::default()
         };
         let mut host = Sink::default();
@@ -3534,14 +3741,11 @@ mod tests {
 
     fn plan_at(root: Utf8PathBuf) -> Plan {
         let src = root.join("src");
-        let source = "pub fn less(a: i32, b: i32) -> bool { a < b }\n";
+        let source = include_str!("../../tests/fixtures/completed-recovery/lib.rs");
         crate::testing::write_project(
             root.as_std_path(),
             &[
-                (
-                    "Cargo.toml",
-                    "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-                ),
+                ("Cargo.toml", include_str!("../../tests/fixtures/completed-recovery/Cargo.toml")),
                 ("src/lib.rs", source),
             ],
         );
@@ -4191,16 +4395,12 @@ mod tests {
 
         assert!(!args.diag, "the prose dump was not asked for and must not be the trigger");
         assert!(!err.contains("── diag ─"), "{err}");
-        assert_eq!(parsed["schemaVersion"], "5");
+        assert_eq!(parsed["schemaVersion"], "7");
         assert!(parsed["run"]["wallMs"].is_number(), "{text}");
 
-        // The phase profile is what makes the census's cost and its sweep dividend readable from one
-        // run. The copy, preflight and baseline always ran, so they are always present and named in
-        // camelCase; this session had no census, so that phase is omitted rather than a lying zero.
         assert!(parsed["phases"]["copy"]["elapsedMs"].is_number(), "{text}");
         assert!(parsed["phases"]["preflight"]["elapsedMs"].is_number(), "{text}");
         assert!(parsed["phases"]["baseline"]["elapsedMs"].is_number(), "{text}");
-        assert!(parsed["phases"]["census"].is_null(), "no census ran, so it is omitted: {text}");
 
         assert!(err.contains(&platform_path(&path)), "{err}");
     }
@@ -4252,8 +4452,8 @@ mod tests {
 
         assert!(first_baseline.contains("assertion failed"), "{first_baseline}");
         assert!(second_baseline.contains("time budget exceeded"), "{second_baseline}");
-        assert!(first_diagnostics.contains("\"schemaVersion\": \"5\""), "{first_diagnostics}");
-        assert!(second_diagnostics.contains("\"schemaVersion\": \"5\""), "{second_diagnostics}");
+        assert!(first_diagnostics.contains("\"schemaVersion\": \"7\""), "{first_diagnostics}");
+        assert!(second_diagnostics.contains("\"schemaVersion\": \"7\""), "{second_diagnostics}");
         assert_eq!(
             failure.to_string(),
             format!(
@@ -4300,38 +4500,6 @@ mod tests {
             failure.to_string().contains("could not remove stale baseline failures"),
             "{failure}"
         );
-    }
-
-    /// A run that censused says so in its bundle: the phase carries its own elapsed time, the tests
-    /// it walked, and the binaries it examined, so the census's cost is legible on its own rather
-    /// than folded inside the build's total.
-    #[test]
-    fn a_censused_run_records_the_census_phase_in_its_bundle() {
-        let mut args = RunArgs::default();
-
-        args.measure.jobs = Some(0);
-
-        let plan = plan();
-        let mut session = session();
-
-        session.phases.census = Some(exec::CensusCost {
-            elapsed: Duration::from_secs(8),
-            walked: 1_681,
-            binaries: 30,
-            ..exec::CensusCost::default()
-        });
-
-        let mut host = Sink::default();
-
-        emit_diag(&mut host, &args, &plan, Some(&session), Instant::now(), Styler::new(false)).expect("diag");
-
-        let path = Documents::resolve(&args, &plan.root).diag;
-        let text = fs::read_to_string(&path).expect("bundle file");
-        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
-
-        assert_eq!(parsed["phases"]["census"]["elapsedMs"], 8_000);
-        assert_eq!(parsed["phases"]["census"]["walked"], 1_681);
-        assert_eq!(parsed["phases"]["census"]["binaries"], 30);
     }
 
     /// The promise the file is worth attaching on: nothing in it names the tree it came from.
@@ -4627,7 +4795,6 @@ mod tests {
         args.measure.include_tests = vec!["include-*".to_owned()];
         args.measure.exclude_tests = vec!["exclude-*".to_owned()];
         args.measure.test_workspace = true;
-        args.measure.optimize_test_execution = true;
         args.measure.nextest = true;
         args.limits.build_timeout = Some(11.25);
         args.limits.build_timeout_multiplier = Some(3.5);
@@ -4671,7 +4838,6 @@ mod tests {
         assert_eq!(config.include_tests, ["include-*"]);
         assert_eq!(config.exclude_tests, ["exclude-*"]);
         assert!(config.test_workspace);
-        assert!(config.optimize_test_execution);
         assert!(!config.whole_test_binaries);
         assert!(config.nextest);
         assert_eq!(config.incremental, exec::IncrementalMode::No);

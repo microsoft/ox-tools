@@ -975,6 +975,13 @@ mod tests {
     }
 
     #[test]
+    fn campaign_regression_reference_definition_with_parentheses_resolves_only_that_method_spelling() {
+        let docs = "See [`Alias::call()`] and [`Alias::call`].\n\n[`Alias::call()`]: Self::actual\n";
+        assert_eq!(count_broken_links::<u32>(docs, &links(&["Self::actual"])), 1);
+        assert_eq!(count_broken_links::<u32>(docs, &links(&[])), 3);
+    }
+
+    #[test]
     fn last_path_component_resolves_link() {
         let broken = count_broken_links::<u32>("See [`std::error::Error`].", &links(&["Error"]));
         assert_eq!(broken, 0);

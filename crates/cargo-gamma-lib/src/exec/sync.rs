@@ -25,7 +25,7 @@ use crate::exec::copy::{CopyOptions, Reflinks, copy_tree_with, is_pruned, tracke
 
 /// Outcome of a delta synchronization attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SyncOutcome {
+pub enum SyncOutcome {
     /// The existing tree was updated in place.
     Synchronized,
     /// The existing tree was unsuitable and a full copy was performed instead.
@@ -34,23 +34,31 @@ pub(super) enum SyncOutcome {
 
 const SYNC_SENTINEL: &str = ".gamma-sync-ok";
 
-fn sentinel(root: &Utf8Path) -> Utf8PathBuf {
+#[must_use]
+pub fn sentinel(root: &Utf8Path) -> Utf8PathBuf {
     root.parent().unwrap_or(root).join(SYNC_SENTINEL)
 }
 
-pub(super) fn mark_consistent(root: &Utf8Path) {
+pub fn mark_consistent(root: &Utf8Path) {
     let path = sentinel(root);
     let _written = fs::write(path.as_std_path(), "1");
 }
 
-fn is_consistent(root: &Utf8Path) -> bool {
+#[must_use]
+pub fn is_consistent(root: &Utf8Path) -> bool {
     let path = sentinel(root);
     matches!(fs::read(path.as_std_path()), Ok(content) if content == b"1")
 }
 
-fn clear_sentinel(root: &Utf8Path) {
+fn clear_sentinel(root: &Utf8Path) -> Result<()> {
     let path = sentinel(root);
-    let _removed = fs::remove_file(path.as_std_path());
+    match fs::remove_file(path.as_std_path()) {
+        Ok(()) => Ok(()),
+        Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(()),
+        Err(cause) => {
+            Err(error!("could not invalidate scratch consistency at `{path}`; close files held open there and retry").caused_by(cause))
+        }
+    }
 }
 
 /// Attempts to delta-synchronize `source` into `existing_root`.
@@ -60,16 +68,39 @@ fn clear_sentinel(root: &Utf8Path) {
 ///
 /// Returns which path was taken so the caller can emit appropriate diagnostics.
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<SyncOutcome> {
+pub fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<SyncOutcome> {
     sync_or_copy_with_delta(source, root, skip, options, delta_sync)
 }
 
-fn sync_or_copy_with_delta(
+pub fn sync_or_copy_with_delta(
     source: &Utf8Path,
     root: &Utf8Path,
     skip: &Utf8Path,
     options: CopyOptions,
     synchronize: impl FnOnce(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
+) -> Result<SyncOutcome> {
+    sync_or_copy_with_cleanup(source, root, skip, options, synchronize, |root| fs::remove_dir_all(root))
+}
+
+pub fn sync_or_copy_with_cleanup(
+    source: &Utf8Path,
+    root: &Utf8Path,
+    skip: &Utf8Path,
+    options: CopyOptions,
+    synchronize: impl FnOnce(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
+    clear: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+) -> Result<SyncOutcome> {
+    sync_or_copy_using(source, root, skip, options, synchronize, clear, copy_tree_with)
+}
+
+pub fn sync_or_copy_using(
+    source: &Utf8Path,
+    root: &Utf8Path,
+    skip: &Utf8Path,
+    options: CopyOptions,
+    synchronize: impl FnOnce(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
+    clear: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+    copy: impl Fn(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
 ) -> Result<SyncOutcome> {
     // Taken once for the whole operation and shared by both the delta path and the fresh copy it
     // may fall back to: they write to the same tree, so what one of them learns about cloning there
@@ -77,32 +108,37 @@ fn sync_or_copy_with_delta(
     let reflinks = Reflinks::new();
 
     if !root.as_std_path().is_dir() {
-        copy_tree_with(source, root, skip, options, &reflinks)?;
+        copy(source, root, skip, options, &reflinks)?;
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
 
     if !is_consistent(root) {
         // Prior run was interrupted — cannot trust what is there. Remove and resync.
-        fs::remove_dir_all(root.as_std_path())
-            .map_err(|cause| error!("could not clear the inconsistent scratch tree at `{root}`").caused_by(cause))?;
-        copy_tree_with(source, root, skip, options, &reflinks)?;
+        clear(root).map_err(|cause| error!("could not clear the inconsistent scratch tree at `{root}`").caused_by(cause))?;
+        copy(source, root, skip, options, &reflinks)?;
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
 
     // The tree looks consistent — attempt delta sync.
-    clear_sentinel(root);
+    clear_sentinel(root)?;
 
     match synchronize(source, root, skip, options, &reflinks) {
         Ok(()) => {
             mark_consistent(root);
             Ok(SyncOutcome::Synchronized)
         }
-        Err(_cause) => {
+        Err(delta_failure) => {
             // Delta sync failed. Remove everything and do a clean sync to restore correctness.
-            let _removed = fs::remove_dir_all(root.as_std_path());
-            copy_tree_with(source, root, skip, options, &reflinks)?;
+            clear(root).map_err(|cause| {
+                error!(
+                    "could not clear the scratch tree at `{root}` after synchronization failed ({delta_failure}); \
+                     close files held open in the scratch tree and retry"
+                )
+                .caused_by(cause)
+            })?;
+            copy(source, root, skip, options, &reflinks)?;
             mark_consistent(root);
             Ok(SyncOutcome::FreshCopy)
         }
@@ -116,7 +152,7 @@ fn sync_or_copy_with_delta(
 /// 1. Copies new entries and replaces changed entries.
 /// 2. Removes stale entries that no longer exist in the source.
 /// 3. Leaves unchanged entries untouched (preserving their mtimes for Cargo).
-fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions, reflinks: &Reflinks) -> Result<()> {
+pub fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions, reflinks: &Reflinks) -> Result<()> {
     // Collect the set of relative paths the source tree produces.
     let expected = collect_source_entries(source, skip, options)?;
 
@@ -142,7 +178,7 @@ fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: Copy
 
 /// Collects relative paths from the source tree using the same walk logic as `copy_tree_with`.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn collect_source_entries(source: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<HashSet<Utf8PathBuf>> {
+pub fn collect_source_entries(source: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<HashSet<Utf8PathBuf>> {
     collect_source_entries_with(source, skip, options, tracked_files)
 }
 
@@ -173,7 +209,7 @@ fn configure_source_walk(options: CopyOptions, mut configure: impl FnMut(WalkSet
     }
 }
 
-fn collect_source_entries_with(
+pub fn collect_source_entries_with(
     source: &Utf8Path,
     skip: &Utf8Path,
     options: CopyOptions,
@@ -214,8 +250,7 @@ fn collect_source_entries_with(
                 }
             };
 
-            let Some(path) = Utf8Path::from_path(entry.path()) else {
-                record_invalid_path(failure, entry.path());
+            let Some(path) = source_path(entry.path(), failure) else {
                 return WalkState::Quit;
             };
 
@@ -246,17 +281,24 @@ fn collect_source_entries_with(
 
     // Include tracked files that the ignore walk may have skipped, same as copy_tracked does.
     if let Some(tracked) = tracked(source)? {
-        for relative in tracked {
-            if tracked_path_allowed(source, &relative, skip) {
-                let src = source.join(&relative);
-                if source_entry_exists(&src) {
-                    let _inserted = result.insert(relative);
-                }
-            }
-        }
+        restore_tracked_entries(&mut result, source, skip, tracked, source_entry_exists);
     }
 
     Ok(result)
+}
+
+fn restore_tracked_entries(
+    result: &mut HashSet<Utf8PathBuf>,
+    source: &Utf8Path,
+    skip: &Utf8Path,
+    tracked: Vec<Utf8PathBuf>,
+    mut exists: impl FnMut(&Utf8Path) -> bool,
+) {
+    for relative in tracked {
+        if tracked_path_allowed(source, &relative, skip) && exists(&source.join(&relative)) {
+            let _inserted = result.insert(relative);
+        }
+    }
 }
 
 /// Returns whether any directory on the way to `relative` is one the sync leaves out.
@@ -278,7 +320,7 @@ fn is_pruned_anywhere(root: &Utf8Path, relative: &Utf8Path, excluded: &Utf8Path)
 /// For directories: creates if missing.
 /// For symlinks: recreates if target differs.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
+pub fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let src_meta = fs::symlink_metadata(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
 
     if src_meta.is_dir() {
@@ -306,7 +348,7 @@ fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) ->
 
 /// Synchronizes a regular file, preserving mtime for unchanged files.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata, reflinks: &Reflinks) -> Result<()> {
+pub fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata, reflinks: &Reflinks) -> Result<()> {
     let needs_copy = match fs::symlink_metadata(destination.as_std_path()) {
         Err(_) => true, // Destination does not exist.
         Ok(dst_meta) => {
@@ -345,7 +387,7 @@ fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata,
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn file_differs(source: &Utf8Path, destination: &Utf8Path, src: &fs::Metadata, dst: &fs::Metadata) -> Result<bool> {
+pub fn file_differs(source: &Utf8Path, destination: &Utf8Path, src: &fs::Metadata, dst: &fs::Metadata) -> Result<bool> {
     if different_lengths(src, dst) {
         return Ok(true);
     }
@@ -408,7 +450,7 @@ fn readers_have_same_contents(left: impl Read, right: impl Read) -> std::io::Res
 
 /// Synchronizes a symlink. Recreates it if the target changed or if the destination is not a link.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+pub fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     sync_symlink_with(source, destination, |target, destination, directory| {
         #[cfg(unix)]
         {
@@ -426,7 +468,7 @@ fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     })
 }
 
-fn sync_symlink_with(
+pub fn sync_symlink_with(
     source: &Utf8Path,
     destination: &Utf8Path,
     create: impl FnOnce(&std::path::Path, &std::path::Path, bool) -> std::io::Result<()>,
@@ -474,13 +516,13 @@ fn sync_symlink_with(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn copy_file_for_sync(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
+pub fn copy_file_for_sync(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     copy_file_for_sync_with(source, destination, reflinks, |source, destination| {
         reflink_copy::reflink(source, destination)
     })
 }
 
-fn copy_file_for_sync_with(
+pub fn copy_file_for_sync_with(
     source: &Utf8Path,
     destination: &Utf8Path,
     reflinks: &Reflinks,
@@ -489,7 +531,7 @@ fn copy_file_for_sync_with(
     copy_file_for_sync_with_stamp(source, destination, reflinks, SystemTime::now(), &mut clone_file, stamp_mtime)
 }
 
-fn copy_file_for_sync_with_stamp(
+pub fn copy_file_for_sync_with_stamp(
     source: &Utf8Path,
     destination: &Utf8Path,
     reflinks: &Reflinks,
@@ -521,7 +563,7 @@ fn copy_file_for_sync_with_stamp(
     Ok(())
 }
 
-fn stamp_mtime(path: &Utf8Path, time: SystemTime) -> Result<()> {
+pub fn stamp_mtime(path: &Utf8Path, time: SystemTime) -> Result<()> {
     let file = File::options()
         .write(true)
         .open(path.as_std_path())
@@ -535,13 +577,13 @@ fn stamp_mtime(path: &Utf8Path, time: SystemTime) -> Result<()> {
 /// Walks the scratch tree and removes anything not present in the source. Directories are handled
 /// bottom-up: empty directories left after file removal are pruned.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn remove_stale(root: &Utf8Path, expected: &HashSet<Utf8PathBuf>) -> Result<()> {
+pub fn remove_stale<S: std::hash::BuildHasher>(root: &Utf8Path, expected: &HashSet<Utf8PathBuf, S>) -> Result<()> {
     remove_stale_with_directory(root, expected, |path| fs::remove_dir(path.as_std_path()))
 }
 
-fn remove_stale_with_directory(
+pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
     root: &Utf8Path,
-    expected: &HashSet<Utf8PathBuf>,
+    expected: &HashSet<Utf8PathBuf, S>,
     mut remove_directory: impl FnMut(&Utf8Path) -> std::io::Result<()>,
 ) -> Result<()> {
     // Collect all entries in the scratch tree.
@@ -596,16 +638,24 @@ fn remove_stale_with_directory(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn record_walk_failure(failure: &Mutex<Option<Error>>, cause: ignore::Error) {
+pub fn record_walk_failure(failure: &Mutex<Option<Error>>, cause: ignore::Error) {
     record(failure, error!("could not read the source tree").caused_by(cause));
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Path) {
+pub fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Path) {
     record(
         failure,
         error!("`{}` is not valid UTF-8 and cannot be synchronized", path.display()),
     );
+}
+
+fn source_path<'a>(path: &'a std::path::Path, failure: &Mutex<Option<Error>>) -> Option<&'a Utf8Path> {
+    let source = Utf8Path::from_path(path);
+    if source.is_none() {
+        record_invalid_path(failure, path);
+    }
+    source
 }
 
 fn is_walk_root(relative: &Utf8Path) -> bool {
@@ -621,7 +671,8 @@ fn collection_failure<T>(cause: Error) -> Result<T> {
     Err(cause)
 }
 
-fn tracked_path_allowed(source: &Utf8Path, relative: &Utf8Path, skip: &Utf8Path) -> bool {
+#[must_use]
+pub fn tracked_path_allowed(source: &Utf8Path, relative: &Utf8Path, skip: &Utf8Path) -> bool {
     !is_pruned_anywhere(source, relative, skip)
 }
 
@@ -640,11 +691,13 @@ fn remove_stale_entry(path: &Utf8Path) -> std::io::Result<()> {
     }
 }
 
-fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
+#[must_use]
+pub fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
     metadata.is_dir()
 }
 
-fn metadata_is_symlink(metadata: &fs::Metadata) -> bool {
+#[must_use]
+pub fn metadata_is_symlink(metadata: &fs::Metadata) -> bool {
     metadata.is_symlink()
 }
 
@@ -657,7 +710,8 @@ fn different_lengths(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn link_target_differs(destination: &Utf8Path, source_target: &std::path::Path) -> bool {
+#[must_use]
+pub fn link_target_differs(destination: &Utf8Path, source_target: &std::path::Path) -> bool {
     match fs::read_link(destination.as_std_path()) {
         Ok(target) => target != source_target,
         Err(_) => true,
@@ -668,8 +722,9 @@ const fn should_recreate_link(needs_recreate: bool) -> bool {
     needs_recreate
 }
 
-#[cfg(any(windows, all(test, not(miri))))]
-fn source_link_targets_directory(source: &Utf8Path, target: &std::path::Path) -> bool {
+#[cfg(any(windows, feature = "internals", all(test, not(miri))))]
+#[must_use]
+pub fn source_link_targets_directory(source: &Utf8Path, target: &std::path::Path) -> bool {
     source
         .parent()
         .map_or_else(|| target.is_dir(), |parent| parent.as_std_path().join(target).is_dir())
@@ -730,17 +785,6 @@ fn record(failure: &Mutex<Option<Error>>, cause: Error) {
     }
 }
 
-#[cfg(all(test, windows))]
-pub(super) fn junction_for_test(link: &Utf8Path, target: &Utf8Path) {
-    let link = super::workspace::absolute(link).as_str().replace('/', "\\");
-    let target = super::workspace::absolute(target).as_str().replace('/', "\\");
-    let output = std::process::Command::new("cmd.exe")
-        .args(["/c", "mklink", "/J", &link, &target])
-        .output()
-        .expect("the native Windows regression fixture requires the standard command interpreter");
-    assert!(output.status.success(), "junction creation failed: {output:?}");
-}
-
 #[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -750,30 +794,70 @@ mod tests {
     use std::os::unix::ffi::OsStringExt as _;
     #[cfg(windows)]
     use std::os::windows::ffi::OsStringExt as _;
-    #[cfg(windows)]
-    use std::os::windows::fs::OpenOptionsExt as _;
     use std::process::Command;
     use std::{io, thread};
 
     use super::*;
 
     #[test]
-    fn link_inspection_rejects_a_regular_source_and_distinguishes_directory_and_file_targets() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let source = root.join("ordinary-file");
-        let destination = root.join("untouched-destination");
-        let target = root.join("target");
-        fs::write(&source, "regular source").unwrap();
-        let failure = sync_symlink(&source, &destination).expect_err("a native regular file has no link target");
-        assert_eq!(failure.message(), format!("could not read the link `{source}`"));
-        assert!(!destination.exists());
-        assert!(link_target_differs(&source, std::path::Path::new("not-a-link")));
-        fs::create_dir(&target).unwrap();
-        assert!(source_link_targets_directory(&source, std::path::Path::new("target")));
-        fs::remove_dir(&target).unwrap();
-        fs::write(&target, "now a file").unwrap();
-        assert!(!source_link_targets_directory(&source, std::path::Path::new("target")));
+    fn non_utf8_source_paths_stop_collection_instead_of_disappearing() {
+        #[cfg(windows)]
+        let name = std::ffi::OsString::from_wide(&[0xd800]);
+        #[cfg(unix)]
+        let name = std::ffi::OsString::from_vec(vec![0xff]);
+        let path = std::path::PathBuf::from(name);
+        let failure = Mutex::new(None);
+        assert!(source_path(&path, &failure).is_none());
+        let failure = failure.into_inner().unwrap().unwrap();
+        assert_eq!(
+            failure.message(),
+            format!("`{}` is not valid UTF-8 and cannot be synchronized", path.display())
+        );
+    }
+
+    #[test]
+    fn source_walk_ignores_parent_rules_and_search_only_ignores_but_honors_git_exclude() {
+        let mut settings = Vec::new();
+        configure_source_walk(CopyOptions::default(), |setting, enabled| settings.push((setting, enabled)));
+        for (setting, enabled) in [
+            (WalkSetting::Parents, false),
+            (WalkSetting::Ignore, false),
+            (WalkSetting::GitExclude, true),
+            (WalkSetting::RequireGit, true),
+        ] {
+            assert_eq!(
+                settings
+                    .iter()
+                    .filter(|(observed, _)| *observed == setting)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [(setting, enabled)]
+            );
+        }
+    }
+
+    #[test]
+    fn tracked_overrides_restore_ignored_inputs_but_never_deleted_or_pruned_files() {
+        let source = Utf8Path::new("source");
+        let mut result = HashSet::from([Utf8PathBuf::from(".gitignore")]);
+        let mut inspected = Vec::new();
+        restore_tracked_entries(
+            &mut result,
+            source,
+            &source.join("scratch"),
+            ["forced", "deleted", "target/tracked", "scratch/tracked"]
+                .map(Utf8PathBuf::from)
+                .to_vec(),
+            |path| {
+                inspected.push(path.to_owned());
+                path == source.join("forced")
+            },
+        );
+        assert_eq!(inspected, [source.join("forced"), source.join("deleted")]);
+        assert_eq!(
+            result,
+            HashSet::from([Utf8PathBuf::from(".gitignore"), Utf8PathBuf::from("forced")])
+        );
     }
 
     #[test]
@@ -795,629 +879,6 @@ mod tests {
                 ]
             );
         }
-    }
-
-    #[test]
-    fn source_collection_propagates_a_late_tracked_inventory_failure_after_the_native_walk() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        fs::write(root.join("walked"), "walked bytes").unwrap();
-        let reached = std::cell::Cell::new(false);
-        let failure = collect_source_entries_with(root, &root.join("excluded"), CopyOptions::default(), |source| {
-            assert_eq!(source, root);
-            assert_eq!(fs::read_to_string(source.join("walked")).unwrap(), "walked bytes");
-            reached.set(true);
-            Err(error!("late tracked inventory refusal"))
-        })
-        .expect_err("a successful native walk does not authorize hiding a later tracked-inventory failure");
-        assert!(reached.get());
-        assert_eq!(failure.message(), "late tracked inventory refusal");
-        assert_eq!(fs::read_to_string(root.join("walked")).unwrap(), "walked bytes");
-    }
-
-    #[test]
-    fn stale_directory_removal_tolerates_a_native_disappearance_after_files_have_already_been_removed() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let stale = root.join("stale");
-        fs::create_dir(&stale).unwrap();
-        fs::write(stale.join("old-file"), "old bytes").unwrap();
-        fs::write(root.join("kept"), "kept bytes").unwrap();
-        let calls = std::cell::Cell::new(0);
-        remove_stale_with_directory(root, &HashSet::from_iter([Utf8PathBuf::from("kept")]), |path| {
-            assert_eq!(path, stale);
-            assert!(
-                !stale.join("old-file").exists(),
-                "the real file-removal phase must precede directory removal"
-            );
-            assert!(path.is_dir());
-            calls.set(calls.get() + 1);
-            fs::remove_dir(path)?;
-            fs::remove_dir(path)
-        })
-        .expect("an entry removed after the native walk is already absent, not a failed synchronization");
-        assert_eq!(calls.get(), 1);
-        assert!(!stale.exists());
-        assert_eq!(fs::read_to_string(root.join("kept")).unwrap(), "kept bytes");
-    }
-
-    #[test]
-    fn ordinary_copy_propagates_a_late_stamp_failure_after_placing_the_exact_source_bytes() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let source = root.join("source");
-        let destination = root.join("destination");
-        fs::write(&source, "native copied bytes").unwrap();
-        let reflinks = Reflinks::new();
-        reflinks.unsupported();
-        let reached = std::cell::Cell::new(false);
-        let failure = copy_file_for_sync_with_stamp(
-            &source,
-            &destination,
-            &reflinks,
-            SystemTime::UNIX_EPOCH,
-            |_, _| panic!("a settled unsupported capability must select the actual fs::copy fallback"),
-            |path, _time| {
-                assert_eq!(path, destination);
-                assert_eq!(fs::read_to_string(path).unwrap(), "native copied bytes");
-                reached.set(true);
-                Err(error!("late ordinary-copy stamp refusal"))
-            },
-        )
-        .expect_err("the late fallback stamp result must propagate after genuine native copying");
-        assert!(reached.get());
-        assert_eq!(failure.message(), "late ordinary-copy stamp refusal");
-        assert_eq!(fs::read_to_string(&source).unwrap(), "native copied bytes");
-        assert_eq!(fs::read_to_string(&destination).unwrap(), "native copied bytes");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn the_file_sync_caller_propagates_native_copy_denial_instead_of_accepting_its_old_destination() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let source = root.join("source");
-        let destination = root.join("destination");
-        fs::write(&source, "new").unwrap();
-        fs::write(&destination, "long old bytes").unwrap();
-        let metadata = fs::metadata(&source).unwrap();
-        let locked = File::options().read(true).share_mode(0).open(&destination).unwrap();
-        let failure = sync_file(&source, &destination, &metadata, &Reflinks::new())
-            .expect_err("different lengths require copying, and the native destination lock must refuse it");
-        assert_eq!(failure.message(), format!("could not copy `{source}` to `{destination}`"));
-        drop(locked);
-        assert_eq!(fs::read_to_string(&source).unwrap(), "new");
-        assert_eq!(fs::read_to_string(&destination).unwrap(), "long old bytes");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn file_sync_refuses_a_locked_native_link_before_following_or_overwriting_its_target() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let source = root.join("source");
-        let target = root.join("external");
-        let destination = root.join("destination-link");
-        fs::write(&source, "new").unwrap();
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("sentinel"), "external target bytes").unwrap();
-        junction_for_test(&destination, &target);
-        let metadata = fs::symlink_metadata(&destination).unwrap();
-        assert!(metadata.is_symlink());
-        assert!(!metadata_is_directory(&metadata));
-        // Open the reparse point itself, not its target, with directory-handle support.
-        let locked = File::options()
-            .read(true)
-            .share_mode(1)
-            .custom_flags(0x0220_0000)
-            .open(&destination)
-            .unwrap();
-        let failure = sync_file(&source, &destination, &fs::metadata(&source).unwrap(), &Reflinks::new())
-            .expect_err("deletion-sharing denial must escape the link type-repair branch before native copying");
-        assert_eq!(failure.message(), format!("could not remove stale entry at `{destination}`"));
-        drop(locked);
-        assert!(fs::symlink_metadata(&destination).unwrap().is_symlink());
-        assert_eq!(fs::read_to_string(target.join("sentinel")).unwrap(), "external target bytes");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn native_junction_entries_are_retained_without_recursing_into_their_external_targets_or_inserting_the_walk_root() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let source = root.join("source");
-        let target = root.join("external");
-        fs::create_dir(&source).unwrap();
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("external-child"), "external bytes").unwrap();
-        junction_for_test(&source.join("link"), &target);
-        let entries = collect_source_entries(&source, &source.join("excluded"), CopyOptions::default()).unwrap();
-        assert_eq!(entries, HashSet::from_iter([Utf8PathBuf::from("link")]));
-        assert_eq!(fs::read_to_string(target.join("external-child")).unwrap(), "external bytes");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn matching_native_junctions_are_recognized_as_links_and_never_recreated_or_removed() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let target = root.join("target");
-        let source = root.join("source-link");
-        let destination = root.join("destination-link");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("sentinel"), "target bytes").unwrap();
-        junction_for_test(&source, &target);
-        junction_for_test(&destination, &target);
-        assert!(metadata_is_symlink(&fs::symlink_metadata(&destination).unwrap()));
-        let original = fs::read_link(&destination).unwrap();
-        assert!(!link_target_differs(&destination, &original));
-        sync_symlink_with(&source, &destination, |_, _, _| {
-            panic!("matching junctions must never request link creation")
-        })
-        .unwrap();
-        assert_eq!(fs::read_link(&destination).unwrap(), original);
-        assert_eq!(fs::read_to_string(target.join("sentinel")).unwrap(), "target bytes");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn actual_link_recreation_routes_both_target_kinds_and_propagates_a_late_factory_failure_after_native_type_repair() {
-        for directory_target in [false, true] {
-            for previous_directory in [false, true] {
-                let directory = tempfile::tempdir_in(".").unwrap();
-                let root = Utf8Path::from_path(directory.path()).unwrap();
-                let target = root.join("target");
-                let source = root.join("source-link");
-                let destination = root.join("destination-link");
-                fs::create_dir(&target).unwrap();
-                junction_for_test(&source, &target);
-                if !directory_target {
-                    fs::remove_dir(&target).unwrap();
-                    fs::write(&target, "file target bytes").unwrap();
-                }
-                if previous_directory {
-                    fs::create_dir(&destination).unwrap();
-                    fs::write(destination.join("old-child"), "stale bytes").unwrap();
-                } else {
-                    fs::write(&destination, "stale file").unwrap();
-                }
-                let attempted = std::cell::Cell::new(false);
-                let failure = sync_symlink_with(&source, &destination, |observed, to, is_directory| {
-                    assert_eq!(observed, fs::read_link(&source).unwrap());
-                    assert_eq!(to, destination.as_std_path());
-                    assert_eq!(is_directory, directory_target);
-                    assert!(!destination.exists(), "native type repair must precede the creation callback");
-                    attempted.set(true);
-                    Err(io::Error::other("late link factory refusal"))
-                })
-                .expect_err("a late adapter failure must escape actual link recreation");
-                assert!(attempted.get());
-                assert_eq!(failure.message(), format!("could not recreate the link `{destination}`"));
-                assert!(!destination.exists());
-                assert_eq!(target.is_dir(), directory_target);
-            }
-        }
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn link_recreation_propagates_native_parent_and_stale_entry_removal_failures_before_calling_the_factory() {
-        for shape in ["parent", "file", "directory"] {
-            let directory = tempfile::tempdir_in(".").unwrap();
-            let root = Utf8Path::from_path(directory.path()).unwrap();
-            let target = root.join("target");
-            let source = root.join("source-link");
-            fs::create_dir(&target).unwrap();
-            junction_for_test(&source, &target);
-            let destination = if shape == "parent" {
-                root.join("blocked/new/link")
-            } else {
-                root.join("destination")
-            };
-            let parent = root.join("blocked");
-            let locked_path = if shape == "directory" {
-                destination.join("locked")
-            } else {
-                destination.clone()
-            };
-            let locked = if shape == "parent" {
-                fs::write(&parent, "blocking parent").unwrap();
-                None
-            } else {
-                if shape == "directory" {
-                    fs::create_dir(&destination).unwrap();
-                }
-                fs::write(&locked_path, "locked stale bytes").unwrap();
-                Some(fs::File::options().read(true).share_mode(0).open(&locked_path).unwrap())
-            };
-            let failure = sync_symlink_with(&source, &destination, |_, _, _| {
-                panic!("native repair refusal must precede link creation")
-            })
-            .expect_err("the exact native parent/removal failure must propagate");
-            assert_eq!(
-                failure.message(),
-                match shape {
-                    "parent" => format!("could not create `{}`", destination.parent().unwrap()),
-                    "directory" => format!("could not remove stale directory at `{destination}`"),
-                    _ => format!("could not remove stale entry at `{destination}`"),
-                }
-            );
-            drop(locked);
-            assert_eq!(
-                fs::read_to_string(if shape == "parent" { &parent } else { &locked_path }).unwrap(),
-                if shape == "parent" {
-                    "blocking parent"
-                } else {
-                    "locked stale bytes"
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn delta_failure_clears_the_old_sentinel_and_publishes_only_the_repaired_tree() {
-        let (_temporary, from, to) = tree();
-        fs::write(from.join("new"), "new").unwrap();
-        fs::create_dir_all(&to).unwrap();
-        fs::write(to.join("old"), "old").unwrap();
-        mark_consistent(&to);
-        let outcome = sync_or_copy_with_delta(
-            &from,
-            &to,
-            &from.join("target"),
-            CopyOptions::default(),
-            |source, root, _, _, reflinks| {
-                assert_eq!(source, from);
-                assert_eq!(root, to);
-                assert!(!is_consistent(root), "the previous sentinel must disappear before mutation begins");
-                reflinks.unsupported();
-                Err(error!("injected incomplete delta"))
-            },
-        )
-        .unwrap();
-        assert_eq!(outcome, SyncOutcome::FreshCopy);
-        assert!(is_consistent(&to));
-        assert!(!to.join("old").exists());
-        assert_eq!(fs::read(to.join("new")).unwrap(), b"new");
-    }
-
-    #[test]
-    fn copy_ignored_is_forwarded_through_fresh_and_delta_synchronization() {
-        let (_temporary, from, to) = tree();
-        assert!(
-            Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(&from)
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::write(from.join(".gitignore"), "ignored\n").unwrap();
-        fs::write(from.join("ignored"), "first").unwrap();
-        let skip = from.join("target");
-        assert_eq!(
-            sync_or_copy(&from, &to, &skip, CopyOptions { copy_ignored: true }).unwrap(),
-            SyncOutcome::FreshCopy
-        );
-        assert_eq!(fs::read(to.join("ignored")).unwrap(), b"first");
-        fs::write(from.join("ignored"), "next!").unwrap();
-        assert_eq!(
-            sync_or_copy(&from, &to, &skip, CopyOptions { copy_ignored: true }).unwrap(),
-            SyncOutcome::Synchronized
-        );
-        assert_eq!(fs::read(to.join("ignored")).unwrap(), b"next!");
-    }
-
-    #[test]
-    fn collection_and_each_copy_entry_path_propagate_missing_source_failures() {
-        let (_temporary, from, to) = tree();
-        let missing = from.join("missing");
-        let failure =
-            collect_source_entries(&missing, &from.join("target"), CopyOptions::default()).expect_err("the root cannot be walked");
-        assert_eq!(failure.message(), "could not read the source tree");
-        let failure = delta_sync(&missing, &to, &from.join("target"), CopyOptions::default(), &Reflinks::new())
-            .expect_err("a failed source inventory cannot become a successful delta");
-        assert_eq!(failure.message(), "could not read the source tree");
-        let failure = sync_or_copy(&missing, &to, &from.join("target"), CopyOptions::default()).expect_err("a fresh copy needs a source");
-        assert!(failure.message().contains("source tree"), "{failure}");
-        assert!(!is_consistent(&to));
-        let failure = sync_or_copy(&missing, &to, &from.join("target"), CopyOptions::default())
-            .expect_err("an inconsistent tree still needs a source");
-        assert!(failure.message().contains("source tree"), "{failure}");
-        mark_consistent(&to);
-        let failure = sync_or_copy_with_delta(&missing, &to, &from.join("target"), CopyOptions::default(), |_, _, _, _, _| {
-            Err(error!("delta failed"))
-        })
-        .expect_err("failed repair must propagate the clean-copy error");
-        assert!(failure.message().contains("source tree"), "{failure}");
-        assert!(!is_consistent(&to));
-    }
-
-    #[test]
-    fn clone_not_found_is_terminal_but_unsupported_clones_disable_only_the_shared_operation() {
-        let (_temporary, from, to) = tree();
-        fs::create_dir_all(&to).unwrap();
-        let source = from.join("file");
-        fs::write(&source, "complete source").unwrap();
-        let destination = to.join("file");
-        let reflinks = Reflinks::new();
-        if cfg!(target_env = "musl") {
-            return;
-        }
-        let failure = copy_file_for_sync_with(&source, &destination, &reflinks, |_, _| Err(io::Error::from(ErrorKind::NotFound)))
-            .expect_err("a missing clone input must not fall through to a successful ordinary copy");
-        assert_eq!(failure.message(), format!("could not copy `{source}` to `{destination}`"));
-        assert!(!destination.exists());
-        assert!(reflinks.worth_trying());
-        let shared = reflinks.clone();
-        let mut attempts = 0;
-        copy_file_for_sync_with(&source, &destination, &reflinks, |left, right| {
-            attempts += 1;
-            assert_eq!(left, source.as_std_path());
-            fs::write(right, "partial clone")?;
-            Err(io::Error::from(ErrorKind::Unsupported))
-        })
-        .unwrap();
-        assert_eq!(attempts, 1);
-        assert_eq!(fs::read(&destination).unwrap(), b"complete source");
-        assert!(!reflinks.worth_trying());
-        assert!(!shared.worth_trying());
-        fs::remove_file(&destination).unwrap();
-        copy_file_for_sync_with(&source, &destination, &shared, |_, _| {
-            panic!("the failed clone capability is shared across the operation")
-        })
-        .unwrap();
-        assert_eq!(fs::read(&destination).unwrap(), b"complete source");
-        let missing = from.join("absent-after-cloning-is-disabled");
-        let failure = copy_file_for_sync_with(&missing, &to.join("absent"), &shared, |_, _| panic!("cloning remains disabled"))
-            .expect_err("ordinary copy failures still propagate after clone support was disabled");
-        assert_eq!(failure.message(), format!("could not copy `{missing}` to `{}`", to.join("absent")));
-    }
-
-    #[test]
-    fn successful_clones_are_timestamped_and_do_not_fall_through_to_another_copy() {
-        if cfg!(target_env = "musl") {
-            return;
-        }
-        let (_temporary, from, to) = tree();
-        fs::create_dir_all(&to).unwrap();
-        let destination = to.join("cloned");
-        let copied_at = SystemTime::UNIX_EPOCH + core::time::Duration::from_hours(262_992);
-        copy_file_for_sync_with_stamp(
-            &from.join("source"),
-            &destination,
-            &Reflinks::new(),
-            copied_at,
-            |_, right| {
-                fs::write(right, "cloned bytes")?;
-                File::options()
-                    .write(true)
-                    .open(right)?
-                    .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
-            },
-            stamp_mtime,
-        )
-        .unwrap();
-        assert_eq!(fs::read(&destination).unwrap(), b"cloned bytes");
-        assert_eq!(fs::metadata(&destination).unwrap().modified().unwrap(), copied_at);
-        let bad = to.join("not-a-file");
-        let failure = copy_file_for_sync_with(&from.join("source"), &bad, &Reflinks::new(), |_, right| fs::create_dir(right))
-            .expect_err("even a nominally successful clone must propagate a timestamp-open failure");
-        assert_eq!(failure.message(), format!("could not open copied file `{bad}`"));
-    }
-
-    #[test]
-    fn source_walk_ignores_parent_rules_and_search_only_ignores_but_honors_git_exclude() {
-        let (_temporary, from, _to) = tree();
-        let parent = from.parent().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(parent)
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::write(parent.join(".gitignore"), "from/parent-hidden\n").unwrap();
-        fs::write(from.join(".ignore"), "search-hidden\n").unwrap();
-        for name in ["parent-hidden", "search-hidden", "git-excluded"] {
-            fs::write(from.join(name), name).unwrap();
-        }
-        let files = collect_source_entries(&from, &from.join("target"), CopyOptions::default()).unwrap();
-        assert!(files.contains(Utf8Path::new("parent-hidden")));
-        assert!(files.contains(Utf8Path::new("search-hidden")));
-        assert!(
-            Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(&from)
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::write(from.join(".git/info/exclude"), "git-excluded\n").unwrap();
-        let files = collect_source_entries(&from, &from.join("target"), CopyOptions::default()).unwrap();
-        assert!(!files.contains(Utf8Path::new("git-excluded")));
-        let (_outside, detached, _) = tree();
-        fs::write(detached.join(".gitignore"), "kept\n").unwrap();
-        fs::write(detached.join("kept"), "no repository marker").unwrap();
-        assert!(
-            collect_source_entries(&detached, &detached.join("target"), CopyOptions::default())
-                .unwrap()
-                .contains(Utf8Path::new("kept"))
-        );
-    }
-
-    #[test]
-    fn native_non_utf8_source_entries_stop_the_collection_instead_of_disappearing() {
-        let (_temporary, from, _to) = tree();
-        #[cfg(windows)]
-        let name = { std::ffi::OsString::from_wide(&[0xd800]) };
-        #[cfg(unix)]
-        let name = { std::ffi::OsString::from_vec(vec![0xff]) };
-        fs::write(from.as_std_path().join(name), "native name").unwrap();
-        let failure = collect_source_entries(&from, &from.join("target"), CopyOptions::default())
-            .expect_err("an unrepresentable input is not a successful partial tree");
-        assert!(failure.message().contains("not valid UTF-8"), "{failure}");
-        assert!(failure.message().contains("cannot be synchronized"), "{failure}");
-    }
-
-    #[test]
-    fn tracked_overrides_restore_ignored_inputs_but_never_deleted_or_pruned_files() {
-        let (_temporary, from, _to) = tree();
-        assert!(
-            Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(&from)
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::write(from.join(".gitignore"), "forced\n").unwrap();
-        for name in ["target", "scratch"] {
-            fs::create_dir(from.join(name)).unwrap();
-            fs::write(from.join(name).join("tracked"), "must stay pruned").unwrap();
-        }
-        fs::write(from.join("forced"), "tracked ignored input").unwrap();
-        fs::write(from.join("deleted"), "removed after adding").unwrap();
-        assert!(
-            Command::new("git")
-                .args(["add", "--force", "--", "forced", "deleted", "target/tracked", "scratch/tracked"])
-                .current_dir(&from)
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::remove_file(from.join("deleted")).unwrap();
-        let files = collect_source_entries(&from, &from.join("scratch"), CopyOptions::default()).unwrap();
-        assert_eq!(files, HashSet::from([Utf8PathBuf::from(".gitignore"), Utf8PathBuf::from("forced")]));
-        assert!(!tracked_path_allowed(&from, Utf8Path::new("target/tracked"), &from.join("scratch")));
-        assert!(!tracked_path_allowed(
-            &from,
-            Utf8Path::new("scratch/tracked"),
-            &from.join("scratch")
-        ));
-        assert!(tracked_path_allowed(&from, Utf8Path::new("forced"), &from.join("scratch")));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn share_denials_preserve_inconsistent_trees_and_reject_stale_file_or_directory_removal() {
-        let (_temporary, from, to) = tree();
-        fs::create_dir_all(to.join("stale")).unwrap();
-        let locked = to.join("stale").join("locked");
-        fs::write(&locked, "retain on failure").unwrap();
-        let held = File::options().read(true).share_mode(0).open(&locked).unwrap();
-        let failure = sync_or_copy(&from, &to, &from.join("target"), CopyOptions::default())
-            .expect_err("the inconsistent tree cannot be erased through an exclusive file handle");
-        assert_eq!(
-            failure.message(),
-            format!("could not clear the inconsistent scratch tree at `{to}`")
-        );
-        let failure = remove_stale(&to, &HashSet::new()).expect_err("stale file deletion must propagate sharing violations");
-        assert_eq!(failure.message(), format!("could not remove stale file `{locked}`"));
-        let failure = delta_sync(&from, &to, &from.join("target"), CopyOptions::default(), &Reflinks::new())
-            .expect_err("the delta adapter must propagate its stale-removal failure");
-        assert_eq!(failure.message(), format!("could not remove stale file `{locked}`"));
-        fs::write(from.join("stale"), "replacement file").unwrap();
-        let failure = sync_entry(&from.join("stale"), &to.join("stale"), &Reflinks::new())
-            .expect_err("a file cannot replace a directory with an exclusively held child");
-        assert_eq!(
-            failure.message(),
-            format!("could not remove stale directory at `{}`", to.join("stale"))
-        );
-        drop(held);
-        fs::remove_file(&locked).unwrap();
-        let held = File::options()
-            .read(true)
-            .custom_flags(0x0200_0000)
-            .share_mode(0)
-            .open(to.join("stale"))
-            .unwrap();
-        let failure = remove_stale(&to, &HashSet::new()).expect_err("a locked empty stale directory is neither missing nor nonempty");
-        assert_eq!(
-            failure.message(),
-            format!("could not remove stale directory `{}`", to.join("stale"))
-        );
-        drop(held);
-        remove_stale(&to, &HashSet::new()).unwrap();
-        assert!(to.is_dir());
-    }
-
-    #[test]
-    fn invalid_destination_shapes_preserve_creation_and_delta_entry_errors() {
-        let (_temporary, from, to) = tree();
-        fs::write(from.join("file"), "source").unwrap();
-        fs::write(&to, "destination is not a directory").unwrap();
-        let failure = sync_or_copy(&from, &to, &from.join("target"), CopyOptions::default())
-            .expect_err("an existing ordinary file cannot become a scratch root");
-        assert_eq!(failure.message(), format!("could not create the scratch tree at `{to}`"));
-        let nested = to.join("missing/file");
-        let failure =
-            sync_entry(&from.join("file"), &nested, &Reflinks::new()).expect_err("missing ancestors beneath a file cannot be created");
-        assert_eq!(failure.message(), format!("could not create `{}`", nested.parent().unwrap()));
-        let invalid = Utf8Path::new("invalid\0root");
-        let failure = delta_sync(&from, invalid, &from.join("target"), CopyOptions::default(), &Reflinks::new())
-            .expect_err("valid enumeration must still propagate a later entry-copy failure");
-        assert!(failure.message().contains("invalid\0root"), "{failure}");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn share_denials_propagate_directory_inspection_and_file_comparison_failures() {
-        let (_temporary, from, to) = tree();
-        fs::create_dir_all(from.join("directory")).unwrap();
-        fs::create_dir_all(&to).unwrap();
-        let destination = to.join("directory");
-        fs::write(&destination, "locked type mismatch").unwrap();
-        let held = File::options().read(true).share_mode(0).open(&destination).unwrap();
-        let failure = sync_entry(&from.join("directory"), &destination, &Reflinks::new())
-            .expect_err("a type mismatch must propagate removal failure");
-        assert_eq!(failure.message(), format!("could not remove stale entry at `{destination}`"));
-        drop(held);
-        fs::remove_file(&destination).unwrap();
-        fs::write(from.join("file"), "same").unwrap();
-        fs::write(to.join("file"), "same").unwrap();
-        let held = File::options().read(true).share_mode(0).open(to.join("file")).unwrap();
-        let failure = sync_entry(&from.join("file"), &to.join("file"), &Reflinks::new())
-            .expect_err("an inaccessible equal-length input is not unchanged");
-        assert_eq!(failure.message(), format!("could not read `{}`", to.join("file")));
-        drop(held);
-        let invalid = Utf8Path::new("invalid\0destination");
-        let failure = sync_entry(&from.join("directory"), invalid, &Reflinks::new())
-            .expect_err("an invalid destination is not a nonexistent destination");
-        assert_eq!(failure.message(), format!("could not inspect `{invalid}`"));
-    }
-
-    #[test]
-    fn entry_sync_replaces_directories_and_distinct_file_contents_and_propagates_metadata_failures() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        let source = root.join("source");
-        fs::write(&source, "aaaa").unwrap();
-        for (name, old) in [("same", "aaaa"), ("same-length", "bbbb"), ("shorter", "a")] {
-            let destination = root.join(name);
-            fs::write(&destination, old).unwrap();
-            sync_entry(&source, &destination, &Reflinks::new()).unwrap();
-            assert!(destination.is_file());
-            assert_eq!(fs::read(&destination).unwrap(), b"aaaa");
-        }
-        let directory_destination = root.join("old-directory");
-        fs::create_dir_all(directory_destination.join("nested")).unwrap();
-        fs::write(directory_destination.join("nested/stale"), "old").unwrap();
-        sync_entry(&source, &directory_destination, &Reflinks::new()).unwrap();
-        assert!(directory_destination.is_file());
-        assert_eq!(fs::read(&directory_destination).unwrap(), b"aaaa");
-        let nested = root.join("new/parents/file");
-        sync_entry(&source, &nested, &Reflinks::new()).unwrap();
-        assert_eq!(fs::read(&nested).unwrap(), b"aaaa");
-        let missing = root.join("missing");
-        let failure =
-            sync_entry(&missing, &root.join("unpublished"), &Reflinks::new()).expect_err("a missing source cannot be synchronized");
-        assert_eq!(failure.message(), format!("could not read `{missing}`"));
-        let failure = sync_entry(&source, &source.join("not-a-directory"), &Reflinks::new())
-            .expect_err("a regular file cannot contain the synchronization destination");
-        assert!(failure.message().contains(source.as_str()));
-        assert!(!root.join("unpublished").exists());
     }
 
     #[test]
@@ -1458,51 +919,6 @@ mod tests {
         );
         assert!(readers_have_same_contents(Chunked(b"abcdefg", 1), Chunked(b"abcdefg", 3)).unwrap());
         assert!(!readers_have_same_contents(Chunked(b"abcdefg", 1), Chunked(b"abcXefg", 3)).unwrap());
-    }
-
-    #[test]
-    fn missing_inputs_are_errors_and_do_not_publish_a_consistent_tree() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let base = Utf8Path::from_path(directory.path()).unwrap();
-        let source = base.join("missing-source");
-        let destination = base.join("destination");
-        let reflinks = Reflinks::new();
-        let failure = sync_entry(&source, &destination, &reflinks).expect_err("a missing source cannot be synchronized");
-        assert_eq!(failure.message(), format!("could not read `{source}`"));
-        let failure = stamp_mtime(&destination, SystemTime::UNIX_EPOCH).expect_err("a missing destination cannot be timestamped");
-        assert_eq!(failure.message(), format!("could not open copied file `{destination}`"));
-        let failure = copy_file_for_sync(&source, &destination, &reflinks).expect_err("a missing source cannot be copied");
-        assert_eq!(failure.message(), format!("could not copy `{source}` to `{destination}`"));
-        assert!(!destination.exists());
-        assert!(!is_consistent(&destination));
-        let failed = Mutex::new(None);
-        record_invalid_path(&failed, std::path::Path::new("invalid-source"));
-        let error = failed.lock().unwrap().take();
-        let error = error.unwrap();
-        assert_eq!(error.message(), "`invalid-source` is not valid UTF-8 and cannot be synchronized");
-        record_walk_failure(&failed, ignore::Error::Io(io::Error::from(ErrorKind::PermissionDenied)));
-        let error = failed.lock().unwrap().take();
-        let error = error.unwrap();
-        assert_eq!(error.message(), "could not read the source tree");
-    }
-
-    #[test]
-    fn stale_removal_retains_exactly_expected_descendants() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap();
-        fs::create_dir_all(root.join("stale/deep")).unwrap();
-        fs::write(root.join("stale/deep/gone"), "remove").unwrap();
-        fs::create_dir_all(root.join("kept/deep")).unwrap();
-        fs::write(root.join("kept/deep/present"), "retain").unwrap();
-        fs::write(root.join("gone"), "remove").unwrap();
-        let expected = HashSet::from([Utf8PathBuf::from("kept/deep/present")]);
-        remove_stale(root, &expected).unwrap();
-        assert!(!root.join("stale").exists());
-        assert!(!root.join("gone").exists());
-        assert_eq!(fs::read(root.join("kept/deep/present")).unwrap(), b"retain");
-        remove_stale(root, &HashSet::new()).unwrap();
-        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
-        assert!(root.is_dir());
     }
 
     #[test]
@@ -1563,7 +979,7 @@ mod tests {
         assert!(is_consistent(&to));
         assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "two");
 
-        clear_sentinel(&to);
+        clear_sentinel(&to).unwrap();
         assert!(!is_consistent(&to));
         assert_eq!(
             sync_or_copy(&from, &to, &skip, CopyOptions::default()).unwrap(),
@@ -1866,7 +1282,7 @@ mod tests {
         let _ = sync_or_copy(&from, &to, skip, CopyOptions::default()).unwrap();
 
         // Simulate an interrupted sync by removing the sentinel and leaving extra junk.
-        clear_sentinel(&to);
+        clear_sentinel(&to).unwrap();
         fs::write(to.join("junk.rs").as_std_path(), "stale").unwrap();
 
         let outcome = sync_or_copy(&from, &to, skip, CopyOptions::default()).unwrap();
@@ -2104,3 +1520,11 @@ mod tests {
         assert!(!to.exists(), "collection does not write the destination");
     }
 }
+
+#[cfg(any(test, feature = "internals"))]
+#[doc(hidden)]
+pub mod native_test_util;
+
+#[cfg(all(test, windows))]
+#[doc(hidden)]
+pub(super) use native_test_util::junction_for_test;

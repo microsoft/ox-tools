@@ -18,6 +18,8 @@ use super::super::events::Events;
 use super::super::faults::{self, Fault};
 use super::super::workspace::Workspace;
 use super::messages::cargo_message;
+#[cfg(any(test, feature = "internals"))]
+use super::native_test_util::SCRIPTED_COMPILER;
 use crate::Result;
 use crate::discover::Plan;
 use crate::error::{Error, error};
@@ -57,7 +59,7 @@ pub(super) fn spawn_failure(program: &str, work: &Workspace, cause: io::Error) -
 /// against a compiler blocked writing to it — which would look exactly like the hang this is meant
 /// to catch.
 pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration>, events: &mut dyn Events) -> Result<Option<Output>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internals"))]
     if let Some(output) = SCRIPTED_COMPILER.with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(work, args, budget, events))) {
         return output;
     }
@@ -73,37 +75,6 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
         .stdout(Stdio::piped());
 
     supervise(command, work, budget, events)
-}
-
-#[cfg(test)]
-type ScriptedCompiler = Box<dyn FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>>>;
-
-#[cfg(test)]
-std::thread_local! {
-    static SCRIPTED_COMPILER: std::cell::RefCell<Option<ScriptedCompiler>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-// Supplies synchronous compile results on this thread, bypassing command supervision. Installation
-// cannot nest and resets after the body, including unwinding; it does not cover native supervision.
-pub(in crate::exec) fn with_compiler<T>(
-    runner: impl FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>> + 'static,
-    body: impl FnOnce() -> T,
-) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            SCRIPTED_COMPILER.with_borrow_mut(|runner| {
-                let _ = runner.take();
-            });
-        }
-    }
-    SCRIPTED_COMPILER.with_borrow_mut(|slot| {
-        assert!(slot.is_none(), "a thread cannot install two Cargo runners simultaneously");
-        *slot = Some(Box::new(runner));
-    });
-    let _reset = Reset;
-    body()
 }
 
 /// Runs an already-configured cargo command under containment, and collects what it said.
@@ -164,7 +135,6 @@ pub(super) fn supervise_with_limits(
         }
     };
 
-    // #[gamma::skip(all, reason = "changing the bounded queue by one slot changes reader backpressure timing only; retained bytes and narrated lines are unchanged")]
     let (sender, lines) = mpsc::sync_channel(limits.backlog);
 
     let stdout = subtree

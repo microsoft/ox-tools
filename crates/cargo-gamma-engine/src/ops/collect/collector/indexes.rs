@@ -137,6 +137,7 @@ impl Indexes {
                 };
                 imports
                     .iter()
+                    .filter(|(name, _)| !self.scope_aliases.get(&scope).is_some_and(|aliases| aliases.contains_key(*name)))
                     .map(|(name, path)| (name.clone(), path.clone().map(protect_import)))
                     .collect::<HashMap<_, _>>()
             });
@@ -154,7 +155,180 @@ impl Indexes {
             }
             let _previous = self.scope_imports.insert(scope, local);
         }
+        self.canonicalize_aliases();
     }
+
+    fn canonicalize_aliases(&mut self) {
+        let defaults = super::super::Defaults::default();
+        let declarations = self
+            .scope_aliases
+            .iter()
+            .map(|(scope, aliases)| (scope.clone(), aliases.keys().cloned().collect::<HashSet<_>>()))
+            .collect::<HashMap<_, _>>();
+        let mut scopes = self.scope_imports.keys().cloned().collect::<Vec<_>>();
+        scopes.push(Vec::new());
+        scopes.sort_by_key(Vec::len);
+        scopes.dedup();
+        for scope in scopes {
+            let mut visible = if self.block_scopes.contains(&scope) {
+                self.scope_aliases.get(&scope[..scope.len() - 1]).cloned().unwrap_or_default()
+            } else {
+                HashMap::default()
+            };
+            let local = self.scope_aliases.get(&scope).cloned().unwrap_or_default();
+            let local_names = local.keys().cloned().collect::<Vec<_>>();
+            visible.extend(local);
+            let mut imports = self.scope_imports.get(&scope).unwrap_or(&self.root_imports).clone();
+            for (name, definition) in &visible {
+                if definition.is_none() && !imports.contains_key(name) {
+                    let block_local = (0..=scope.len())
+                        .rev()
+                        .find(|&length| declarations.get(&scope[..length]).is_some_and(|names| names.contains(name)))
+                        .is_some_and(|length| self.block_scopes.contains(&scope[..length]));
+                    let _old = imports.insert(name.clone(), (!block_local).then(|| vec!["self".to_owned(), name.clone()]));
+                }
+            }
+            // Freeze each declaration's names before expanding it under another alias's parameters.
+            for expand_aliases in [false, true] {
+                let (names, unresolved) = if expand_aliases {
+                    alias_order(&visible, &local_names, &imports)
+                } else {
+                    (local_names.clone(), HashSet::default())
+                };
+                for name in unresolved {
+                    if let Some(Some(alias)) = visible.get_mut(&name) {
+                        alias.target = syn::parse_quote!(_);
+                    }
+                }
+                for name in &names {
+                    let Some(mut alias) = visible.get(name).cloned().flatten() else {
+                        continue;
+                    };
+                    let shadowed = alias
+                        .parameters
+                        .iter()
+                        .map(|parameter| (parameter, visible.insert(parameter.clone(), None), imports.remove(parameter)))
+                        .collect::<Vec<_>>();
+                    let types = super::types::Types {
+                        abstracts: &[],
+                        defaulted: &[],
+                        imports: &imports,
+                        defaults: &defaults,
+                        aliases: Some(&visible),
+                        self_type: None,
+                        self_associated: None,
+                    };
+                    alias.target = complete_type(if expand_aliases {
+                        types.canonical_type(&alias.target)
+                    } else {
+                        types.declaration_type(&alias.target)
+                    });
+                    for (parameter, previous_alias, previous_import) in shadowed.into_iter().rev() {
+                        if let Some(previous) = previous_alias {
+                            let _old = visible.insert(parameter.clone(), previous);
+                        } else {
+                            let _old = visible.remove(parameter);
+                        }
+                        if let Some(previous) = previous_import {
+                            let _old = imports.insert(parameter.clone(), previous);
+                        }
+                    }
+                    let _old = visible.insert(name.clone(), Some(alias));
+                }
+            }
+            let _old = self.scope_aliases.insert(scope, visible);
+        }
+    }
+}
+
+pub(super) fn complete_type(ty: Type) -> Type {
+    struct Inferred(bool);
+    impl<'ast> Visit<'ast> for Inferred {
+        fn visit_type_infer(&mut self, _i: &'ast syn::TypeInfer) {
+            self.0 = true;
+        }
+    }
+    let mut inferred = Inferred(false);
+    inferred.visit_type(&ty);
+    if inferred.0 { syn::parse_quote!(_) } else { ty }
+}
+
+/// Orders alias dependencies with [Kahn's algorithm].
+///
+/// The residual set includes cycles and every alias blocked by them, not just cycle members.
+/// None has a fully normalized definition, so all must remain unknown.
+///
+/// [Kahn's algorithm]: https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
+fn alias_order(
+    aliases: &HashMap<String, Option<Alias>>,
+    local: &[String],
+    imports: &HashMap<String, Option<Vec<String>>>,
+) -> (Vec<String>, HashSet<String>) {
+    struct Dependencies<'a> {
+        local: &'a HashSet<String>,
+        parameters: &'a [String],
+        imports: &'a HashMap<String, Option<Vec<String>>>,
+        found: HashSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for Dependencies<'_> {
+        fn visit_type_path(&mut self, i: &'ast syn::TypePath) {
+            if i.qself.is_none()
+                && i.path.leading_colon.is_none()
+                && i.path.segments.len() == 1
+                && let Some(segment) = i.path.segments.first()
+            {
+                let name = segment.ident.to_string();
+                if self.local.contains(&name) && !self.parameters.contains(&name) && !self.imports.contains_key(&name) {
+                    let _new = self.found.insert(name);
+                }
+            }
+            visit::visit_type_path(self, i);
+        }
+    }
+
+    let local: HashSet<_> = local
+        .iter()
+        .filter(|name| aliases.get(*name).is_some_and(Option::is_some))
+        .cloned()
+        .collect();
+    let mut pending = HashMap::default();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::default();
+    for name in &local {
+        let alias = aliases[name].as_ref().expect("local contains only names with an alias definition");
+        let mut dependencies = Dependencies {
+            local: &local,
+            parameters: &alias.parameters,
+            imports,
+            found: HashSet::default(),
+        };
+        dependencies.visit_type(&alias.target);
+        let _old = pending.insert(name.clone(), dependencies.found.len());
+        for dependency in dependencies.found {
+            dependents.entry(dependency).or_default().push(name.clone());
+        }
+    }
+
+    let mut ready = pending
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut ordered = Vec::with_capacity(local.len());
+    while let Some(name) = ready.pop() {
+        let _completed = pending.remove(&name);
+        for dependent in dependents.get(&name).into_iter().flatten() {
+            let count = pending
+                .get_mut(dependent)
+                .expect("each dependent remains pending until all its recorded dependencies complete");
+            *count -= 1;
+            if *count == 0 {
+                ready.push(dependent.clone());
+            }
+        }
+        ordered.push(name);
+    }
+    (ordered, pending.into_keys().collect())
 }
 
 fn protect_import(mut path: Vec<String>) -> Vec<String> {
@@ -338,13 +512,18 @@ impl Walk<'_> {
             return;
         }
 
-        self.returned(&signature.ident.to_string(), &signature.output);
+        if signature.asyncness.is_some() {
+            let _previous = self.indexes.returns.insert(signature.ident.to_string(), None);
+        } else if !self.indexes.returns.get(&signature.ident.to_string()).is_some_and(Option::is_none) {
+            self.returned(&signature.ident.to_string(), &signature.output);
+        }
         let parameters = signature
             .inputs
             .iter()
             .filter_map(|input| match input {
                 FnArg::Typed(typed) if !self.cfg.skip_gate(&typed.attrs) => Some((*typed.ty).clone()),
-                FnArg::Receiver(_) | FnArg::Typed(_) => None,
+                FnArg::Receiver(receiver) if !self.cfg.skip_gate(&receiver.attrs) => Some(syn::parse_quote!(Self)),
+                _ => None,
             })
             .collect::<Vec<_>>();
         let name = signature.ident.to_string();
@@ -1533,6 +1712,154 @@ mod tests {
                 walk.alias("Shared", &generics, &target);
                 assert!(walk.indexes.scope_aliases[&scope]["Shared"].is_none());
                 assert!(walk.indexes.aliases["Shared"].is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn alias_parameter_overlays_restore_shared_aliases_imports_and_absent_names() {
+        let mut file = syn::parse_file(
+            "use std::vec::Vec;
+             type Existing = usize;
+             type AliasParameter<Existing> = (Existing, bool);
+             type ImportParameter<Vec> = (Vec, bool);
+             type AbsentParameter<Missing> = (Missing, bool);
+             type Both<Existing, Vec> = (Existing, Vec);
+             type Concrete = Existing;
+             type Imported = Vec<Existing>;",
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let indexes = indexes_in(&file, &Selection::parse("fn_value").unwrap(), &CfgSet::unconditional());
+            let aliases = &indexes.scope_aliases[&Vec::new()];
+            for (name, expected) in [
+                ("Existing", parse_quote!(::core::primitive::usize)),
+                ("AliasParameter", parse_quote!((Existing, ::core::primitive::bool))),
+                ("ImportParameter", parse_quote!((Vec, ::core::primitive::bool))),
+                ("AbsentParameter", parse_quote!((Missing, ::core::primitive::bool))),
+                ("Both", parse_quote!((Existing, Vec))),
+                ("Concrete", parse_quote!(::core::primitive::usize)),
+                ("Imported", parse_quote!(std::vec::Vec<::core::primitive::usize>)),
+            ] {
+                assert_eq!(aliases[name].as_ref().unwrap().target, expected, "{name}");
+            }
+            assert_eq!(aliases["Both"].as_ref().unwrap().parameters, ["Existing", "Vec"]);
+            file.items.reverse();
+        }
+    }
+
+    #[test]
+    fn review_forwarded_io_aliases_preserve_nested_payloads() {
+        let file = syn::parse_file(
+            "type Wrapped<T> = std::io::Result<Vec<T>>;
+             type Forward<T> = Wrapped<T>;
+             type Again<T> = Forward<T>;",
+        )
+        .unwrap();
+        let cfg = CfgSet::unconditional();
+        let mut raw = walk(false, true, &cfg);
+        raw.visit_file(&file);
+        let defaults = crate::ops::collect::Defaults::of(&file);
+        let types = super::super::types::Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: &raw.indexes.root_imports,
+            defaults: &defaults,
+            aliases: Some(&raw.indexes.scope_aliases[&Vec::new()]),
+            self_type: None,
+            self_associated: None,
+        };
+        assert_eq!(types.declaration_type(&parse_quote!(Wrapped<T>)), parse_quote!(Wrapped<T>));
+        let indexes = indexes_in(&file, &Selection::everything(), &CfgSet::unconditional());
+        let aliases = &indexes.scope_aliases[&Vec::new()];
+        for name in ["Wrapped", "Forward", "Again"] {
+            assert_eq!(
+                aliases[name].as_ref().unwrap().target,
+                parse_quote!(std::result::Result<Vec<T>, std::io::Error>),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_block_types_shadow_inherited_imports_without_rebinding_parent_aliases() {
+        let file = syn::parse_file(
+            "use core::primitive::u8 as Number;
+             type Parent = Number;
+             fn f() {
+                 type Number = i16;
+                 type Local = Number;
+                 type Retained = Parent;
+             }
+             fn g() {
+                 struct Number;
+                 type Local = Number;
+             }",
+        )
+        .unwrap();
+        let indexes = indexes_in(&file, &Selection::everything(), &CfgSet::unconditional());
+        let mut found = 0;
+        for (scope, aliases) in &indexes.scope_aliases {
+            if !indexes.block_scopes.contains(scope) || !aliases.contains_key("Local") {
+                continue;
+            }
+            found += 1;
+            let local = &aliases["Local"].as_ref().unwrap().target;
+            if aliases.contains_key("Retained") {
+                assert_eq!(*local, parse_quote!(::core::primitive::i16));
+                assert_eq!(aliases["Retained"].as_ref().unwrap().target, parse_quote!(::core::primitive::u8));
+            } else {
+                assert_eq!(*local, parse_quote!(_));
+            }
+        }
+        assert_eq!(found, 2);
+    }
+
+    #[test]
+    fn alias_parameters_do_not_capture_sibling_nominal_or_imported_targets() {
+        for (source, fixed) in [
+            (
+                "struct T; type Fixed = T; type Pair<T> = (Fixed, T); type Chained<T> = Pair<T>;
+                 type Slice = [T]; type Pointer = *const T; type Nested<T> = (&'static Slice, Pointer, [Fixed; 1], T);",
+                parse_quote!(self::T),
+            ),
+            (
+                "use std::string::String as T; type Fixed = T; type Pair<T> = (Fixed, T); type Chained<T> = Pair<T>;
+                 type Slice = [T]; type Pointer = *const T; type Nested<T> = (&'static Slice, Pointer, [Fixed; 1], T);",
+                parse_quote!(std::string::String),
+            ),
+            (
+                "type T = u16; type Fixed = T; type Pair<T> = (Fixed, T); type Chained<T> = Pair<T>;
+                 type Slice = [T]; type Pointer = *const T; type Nested<T> = (&'static Slice, Pointer, [Fixed; 1], T);",
+                parse_quote!(::core::primitive::u16),
+            ),
+        ] {
+            let mut file = syn::parse_file(source).unwrap();
+            for _ in 0..2 {
+                let indexes = indexes_in(&file, &Selection::parse("fn_value").unwrap(), &CfgSet::unconditional());
+                let aliases = &indexes.scope_aliases[&Vec::new()];
+                assert_eq!(aliases["Fixed"].as_ref().unwrap().target, fixed);
+                assert_eq!(
+                    aliases["Nested"].as_ref().unwrap().target,
+                    parse_quote!((&'static [#fixed], *const #fixed, [#fixed; 1], T))
+                );
+                let defaults = crate::ops::collect::Defaults::of(&file);
+                let types = super::super::types::Types {
+                    abstracts: &[],
+                    defaulted: &[],
+                    imports: &indexes.root_imports,
+                    defaults: &defaults,
+                    aliases: Some(aliases),
+                    self_type: None,
+                    self_associated: None,
+                };
+                for (name, usage) in [("Pair", parse_quote!(Pair<u8>)), ("Chained", parse_quote!(Chained<u8>))] {
+                    assert_eq!(aliases[name].as_ref().unwrap().target, parse_quote!((#fixed, T)), "{name}");
+                    assert_eq!(types.instantiate_alias(&usage), Some(parse_quote!((#fixed, u8))), "{name}");
+                    let values = super::super::values::values_for(&usage, 4, &types);
+                    assert_eq!(values.is_empty(), source.starts_with("struct T"), "{name}");
+                }
+                file.items.reverse();
             }
         }
     }

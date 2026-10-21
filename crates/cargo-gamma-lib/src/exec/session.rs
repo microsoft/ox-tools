@@ -125,8 +125,7 @@ pub struct Session {
     /// What each phase of the run cost, gathered a clock at a time as the phases finish.
     ///
     /// The aggregates above cannot be taken apart after the fact — [`Self::build`] folds the copy,
-    /// the preflight and the compile into one number, and whether the per-test census pays for
-    /// itself is invisible while its cost hides inside that same figure. Only a clock started at
+    /// the preflight and the compile into one number. Only a clock started at
     /// each phase can say where the time went, so each is timed once, as it runs, and left here for
     /// the diagnostic reporter to surface. Nothing else reads it, and the run behaves identically whether or
     /// not anyone ever does.
@@ -135,12 +134,15 @@ pub struct Session {
 
 /// What each phase of a run cost, so a fixed or testing total can be read apart into its parts.
 ///
-/// The copy and the preflight are components of [`Session::build`]; the census and the sweep are
-/// components of the testing window. Neither set sums to its aggregate — compiling sits between the
-/// copy and the baseline, and bookkeeping sits between the census and the sweep — so this is a
-/// profile of where a slow run is slow, not a reconciliation of the totals it lives beside.
+/// Copy and preflight timings are components of [`Session::build`]. Compilation and bookkeeping
+/// account for the remaining preparation time; the sweep records mutant execution separately.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Phases {
+    /// Frozen pre-sweep exact hints for the entire testable population, not assignment-time hints.
+    ///
+    /// Absent in older campaigns; their original coverage cannot be reconstructed on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_hints: Option<InitialHints>,
     /// What duplicating the workspace into the scratch tree cost, before a line of it was
     /// instrumented. Part of [`Session::build`].
     pub copy: Duration,
@@ -149,100 +151,27 @@ pub struct Phases {
     /// of [`Session::build`].
     pub preflight: Duration,
 
-    /// Why census work was absent or how far an attempted census got.
-    pub census_status: CensusStatus,
-
-    /// What the census cost and covered, or `None` when it was disabled or declined.
-    ///
-    /// Absent rather than zero: a run with no census did not spend zero time censusing, it did not
-    /// census, and the difference is the whole question of whether turning the census on was worth
-    /// it.
-    pub census: Option<CensusCost>,
-
     /// What the sweep cost and how it spent its launches, or `None` when nothing was swept.
     pub sweep: Option<SweepCost>,
 }
 
-/// Whether case-level reachability optimization ran and produced complete evidence.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CensusStatus {
-    /// The user did not request the experimental optimization.
-    #[default]
-    Disabled,
-
-    /// The economic gate determined that census work could not repay itself.
-    Declined,
-
-    /// Census work ran but retained only checked positive hints.
-    Incomplete,
-
-    /// Census work completed and may safely exclude tests.
-    Complete,
-}
-
-impl CensusStatus {
-    /// Stable diagnostic spelling.
-    #[must_use]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::Declined => "declined",
-            Self::Incomplete => "incomplete",
-            Self::Complete => "complete",
-        }
-    }
-}
-
-/// What the per-test census cost and covered.
-///
-/// The census spends a subprocess per test to learn which tests can reach which sites, and is
-/// repaid during the sweep by running fewer tests per mutant. Whether that trade is positive
-/// depends on the workspace, and these figures show which way it went rather than folding the cost
-/// invisibly into the build.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct CensusCost {
-    /// How long the whole census took, across every binary and every test.
-    pub elapsed: Duration,
-
-    /// How many sample subprocesses the census actually launched: one per test run, not counting
-    /// the tests of a binary skipped after it spoiled, nor the per-binary listing runs.
-    pub walked: usize,
-
-    /// How many test binaries the census examined.
-    pub binaries: usize,
-
-    /// Candidate binaries and unique binary-local sites presented to the economic gate.
-    pub candidate_binaries: usize,
-    pub candidate_sites: usize,
-
-    /// Test-listing subprocesses launched before sampling.
-    pub listing_launches: usize,
-    pub listed_binaries: usize,
-
-    /// Listing-time proxy used by the economic gate and whether it admitted sampling.
-    pub estimated_cost: Duration,
-    pub walk_admitted: bool,
-
-    /// Conservative upper bound on sweep time the census could avoid.
-    pub maximum_savings: Duration,
-
-    /// Candidate binaries that yielded complete or partial evidence.
-    pub complete_binaries: usize,
-    pub incomplete_binaries: usize,
-}
-
-/// What the sweep cost and how it spent its subprocess launches.
+/// Sweep wall time, legacy run counters and file-only attempt accounting.
 ///
 /// The launch count is what turns the cost model's `build + Σ(launch + prefix)` from a formula into
-/// a measurement; the probe count is what says whether the killer hints and the census are earning
+/// a measurement; the probe count is what says whether the killer hints are earning
 /// their keep, since a probe is a launch the run only made because a hint pointed at it.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SweepCost {
+    /// Local-only confirmation identities: complete in summaries, incremental in journal entries.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub confirmed_initial_killers: std::collections::BTreeSet<crate::model::MutantId>,
+    /// Attempt accounting added after legacy launch counters; absent in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<SweepAccounting>,
     /// How long the sweep took, across every mutant and every binary it ran.
     pub elapsed: Duration,
 
-    /// How many test-binary subprocesses the sweep launched in total.
+    /// Legacy requested binary runs, excluding additional confirmation attempts.
     pub launches: usize,
 
     /// How many of those launches were hint-directed probes rather than ordinary binary runs.
@@ -252,7 +181,7 @@ pub struct SweepCost {
     pub exact_probes: usize,
     pub exact_hits: usize,
 
-    /// Inferred item, binary, census and reach-cluster test selections attempted and confirmed.
+    /// Inferred item, binary and reach-cluster test selections attempted and confirmed.
     #[serde(rename = "generalized_probes")]
     pub inferred_probes: usize,
     #[serde(rename = "generalized_hits")]
@@ -267,7 +196,6 @@ pub struct SweepCost {
     pub item_candidates: usize,
     pub reach_candidates: usize,
     pub file_candidates: usize,
-    pub census_candidates: usize,
     pub item_probes: usize,
     pub item_hits: usize,
     pub reach_probes: usize,
@@ -277,17 +205,10 @@ pub struct SweepCost {
     pub item_rejected: usize,
     pub reach_rejected: usize,
     pub file_rejected: usize,
-    pub census_probes: usize,
-    pub census_hits: usize,
 
     /// Final reachability decisions made before canonical binary execution.
     pub whole_selections: usize,
-    pub case_selections: usize,
-    pub hinted_selections: usize,
-    pub hinted_fallbacks: usize,
     pub uncovered_selections: usize,
-    pub available_tests: usize,
-    pub selected_tests: usize,
 
     /// Package wall-clock spans measured from the beginning of the sweep.
     pub packages: Vec<PackageSweepCost>,
@@ -307,18 +228,183 @@ pub struct PackageSweepCost {
     pub settled_ms: u64,
 }
 
+/// Exact identities captured before any mutant was assigned, retained only in local campaign state.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct InitialHints {
+    pub population: usize,
+    pub killers: crate::HashMap<crate::model::MutantId, crate::discover::Killer>,
+}
+
+impl InitialHints {
+    pub(super) fn capture(plan: &crate::discover::Plan, killers: &super::killers::Killers) -> Self {
+        let mutants = plan
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.ordinal != 0 && mutant.outcome == crate::model::Outcome::Pending);
+        let mut captured = Self::default();
+        for mutant in mutants {
+            captured.population += 1;
+            if let Some(killer) = killers.hint(&mutant.id) {
+                captured.killers.insert(mutant.id.clone(), killer.clone());
+            }
+        }
+        captured
+    }
+}
+
+/// Summed binary-attempt costs, including concurrent workers, never campaign wall time.
+///
+/// Runner launch attempts are recorded before execution and may fail before spawning a child.
+/// Results and elapsed time follow at settlement. Interrupted attempts may lack both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AttemptCost {
+    /// Runner invocations, including pre-spawn refusals; not physical subprocess creations.
+    #[serde(rename = "launchAttempts", alias = "launches")]
+    pub launches: usize,
+    pub execution_ms: u64,
+    pub hits: usize,
+    pub misses: usize,
+    pub inconclusive: usize,
+}
+
+impl AttemptCost {
+    pub(super) fn add(&mut self, other: &Self) {
+        self.launches = self.launches.saturating_add(other.launches);
+        self.execution_ms = self.execution_ms.saturating_add(other.execution_ms);
+        self.hits = self.hits.saturating_add(other.hits);
+        self.misses = self.misses.saturating_add(other.misses);
+        self.inconclusive = self.inconclusive.saturating_add(other.inconclusive);
+    }
+}
+
+/// File-only sweep accounting. Legacy counters keep their historical meanings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SweepAccounting {
+    /// False when earlier campaign segments predate this accounting, not an indication of settlement.
+    pub complete: bool,
+    /// Unknown for legacy campaigns; coverage is frozen once, not added on resume.
+    pub initial_population: Option<usize>,
+    pub initial_exact_hints: Option<usize>,
+    /// Distinct mutants whose initially recorded test actually failed, independent of verdict credit.
+    pub initial_killer_confirmed: Option<usize>,
+    pub exact: AttemptCost,
+    pub inferred: AttemptCost,
+    pub fallback: AttemptCost,
+    /// Additional executions for resource, kill and enumeration confirmation.
+    ///
+    /// Disjoint from the three primary execution tiers above.
+    pub confirmation: AttemptCost,
+    pub duplicate_launches_avoided: usize,
+    pub live_refresh_failures: usize,
+}
+
+impl SweepAccounting {
+    pub(super) fn segment(initial: Option<&InitialHints>, complete: bool) -> Self {
+        Self {
+            complete,
+            initial_population: initial.map(|hints| hints.population),
+            initial_exact_hints: initial.map(|hints| hints.killers.len()),
+            initial_killer_confirmed: initial.map(|_| 0),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn add(&mut self, current: &Self) {
+        self.complete &= current.complete;
+        self.exact.add(&current.exact);
+        self.inferred.add(&current.inferred);
+        self.fallback.add(&current.fallback);
+        self.confirmation.add(&current.confirmation);
+        self.duplicate_launches_avoided = self.duplicate_launches_avoided.saturating_add(current.duplicate_launches_avoided);
+        self.live_refresh_failures = self.live_refresh_failures.saturating_add(current.live_refresh_failures);
+    }
+
+    fn combine(previous: Option<Self>, current: Option<Self>) -> Option<Self> {
+        match (previous, current) {
+            (Some(mut prior), Some(current)) => {
+                prior.add(&current);
+                Some(prior)
+            }
+            (None, Some(mut current)) => {
+                current.complete = false;
+                current.initial_population = None;
+                current.initial_exact_hints = None;
+                current.initial_killer_confirmed = None;
+                Some(current)
+            }
+            (Some(mut prior), None) => {
+                prior.complete = false;
+                Some(prior)
+            }
+            (None, None) => None,
+        }
+    }
+}
+
 impl SweepCost {
+    pub(crate) fn live_json(&self) -> serde_json::Result<String> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Live<'a> {
+            accounting: Option<&'a SweepAccounting>,
+            schema_version: u32,
+            sweep_wall_ms: u64,
+        }
+        serde_json::to_string_pretty(&Live {
+            accounting: self.accounting.as_ref(),
+            schema_version: 1,
+            sweep_wall_ms: u64::try_from(self.elapsed.as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
     pub(super) fn combine(previous: Option<Self>, current: Option<Self>) -> Option<Self> {
+        let keyed_confirmations = match (&previous, &current) {
+            (Some(previous), Some(current)) => [previous, current].into_iter().all(|cost| {
+                cost.accounting
+                    .as_ref()
+                    .and_then(|accounting| accounting.initial_killer_confirmed)
+                    .unwrap_or(0)
+                    <= cost.confirmed_initial_killers.len()
+            }),
+            _ => true,
+        };
+        let mut total = Self::combine_checkpoint(previous, current);
+        if let Some(accounting) = total.as_mut().and_then(|cost| cost.accounting.as_mut()) {
+            accounting.complete &= keyed_confirmations;
+        }
+        total
+    }
+
+    /// Combines cumulative counters whose confirmation identities are journaled separately.
+    pub(super) fn combine_checkpoint(previous: Option<Self>, current: Option<Self>) -> Option<Self> {
         let Some(mut total) = previous else { return current };
         let Some(current) = current else { return Some(total) };
+        let previous_confirmed = total
+            .accounting
+            .as_ref()
+            .and_then(|cost| cost.initial_killer_confirmed)
+            .unwrap_or(0);
+        let current_confirmed = current
+            .accounting
+            .as_ref()
+            .and_then(|cost| cost.initial_killer_confirmed)
+            .unwrap_or(0);
         let offset = u64::try_from(total.elapsed.as_millis()).unwrap_or(u64::MAX);
         total.elapsed = total.elapsed.saturating_add(current.elapsed);
+        total.accounting = SweepAccounting::combine(total.accounting, current.accounting);
+        total.confirmed_initial_killers.extend(current.confirmed_initial_killers);
+        if let Some(accounting) = &mut total.accounting
+            && let Some(confirmed) = &mut accounting.initial_killer_confirmed
+        {
+            *confirmed = total.confirmed_initial_killers.len().max(previous_confirmed).max(current_confirmed);
+        }
         macro_rules! add_counts {
             ($($field:ident),+ $(,)?) => {
                 $(total.$field = total.$field.saturating_add(current.$field);)+
             };
         }
-
         add_counts!(
             launches,
             probes,
@@ -332,7 +418,6 @@ impl SweepCost {
             item_candidates,
             reach_candidates,
             file_candidates,
-            census_candidates,
             item_probes,
             item_hits,
             reach_probes,
@@ -342,15 +427,8 @@ impl SweepCost {
             item_rejected,
             reach_rejected,
             file_rejected,
-            census_probes,
-            census_hits,
             whole_selections,
-            case_selections,
-            hinted_selections,
-            hinted_fallbacks,
             uncovered_selections,
-            available_tests,
-            selected_tests,
             launches_saved,
             reach_launches_saved,
         );
@@ -380,7 +458,184 @@ impl SweepCost {
 mod tests {
     use core::time::Duration;
 
-    use super::{PackageSweepCost, SweepCost};
+    use super::{AttemptCost, PackageSweepCost, SweepAccounting, SweepCost};
+
+    #[test]
+    fn live_sweep_json_preserves_nulls_field_names_and_pretty_output() {
+        let mut cost = SweepCost {
+            elapsed: Duration::from_millis(123),
+            ..SweepCost::default()
+        };
+        assert_eq!(
+            cost.live_json().unwrap(),
+            "{\n  \"accounting\": null,\n  \"schemaVersion\": 1,\n  \"sweepWallMs\": 123\n}"
+        );
+        cost.elapsed = Duration::MAX;
+        cost.accounting = Some(SweepAccounting {
+            complete: true,
+            initial_population: Some(11),
+            initial_exact_hints: Some(7),
+            initial_killer_confirmed: Some(3),
+            exact: AttemptCost {
+                launches: 5,
+                execution_ms: 17,
+                hits: 2,
+                misses: 1,
+                inconclusive: 2,
+            },
+            duplicate_launches_avoided: 4,
+            live_refresh_failures: 6,
+            ..SweepAccounting::default()
+        });
+        let live: serde_json::Value = serde_json::from_str(&cost.live_json().unwrap()).unwrap();
+        let empty = serde_json::json!({
+            "launchAttempts": 0, "executionMs": 0, "hits": 0, "misses": 0, "inconclusive": 0
+        });
+        assert_eq!(
+            live,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "sweepWallMs": u64::MAX,
+                "accounting": {
+                    "complete": true,
+                    "initialPopulation": 11,
+                    "initialExactHints": 7,
+                    "initialKillerConfirmed": 3,
+                    "exact": {"launchAttempts": 5, "executionMs": 17, "hits": 2, "misses": 1, "inconclusive": 2},
+                    "inferred": empty,
+                    "fallback": empty,
+                    "confirmation": empty,
+                    "duplicateLaunchesAvoided": 4,
+                    "liveRefreshFailures": 6
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn telemetry_unkeyed_historical_confirmation_totals_are_preserved_without_inventing_new_confirmations() {
+        let previous = SweepCost {
+            accounting: Some(SweepAccounting {
+                complete: true,
+                initial_population: Some(20),
+                initial_exact_hints: Some(10),
+                initial_killer_confirmed: Some(5),
+                ..SweepAccounting::default()
+            }),
+            ..SweepCost::default()
+        };
+        let current = SweepCost {
+            confirmed_initial_killers: ["possibly-repeated", "possibly-new"].into_iter().map(Into::into).collect(),
+            accounting: Some(SweepAccounting {
+                complete: true,
+                initial_killer_confirmed: Some(2),
+                ..SweepAccounting::default()
+            }),
+            ..SweepCost::default()
+        };
+        let combined = SweepCost::combine(Some(previous), Some(current)).unwrap().accounting.unwrap();
+        assert_eq!(
+            combined.initial_killer_confirmed,
+            Some(5),
+            "unknown overlap cannot justify either resetting or inflating a saved total"
+        );
+        assert!(
+            !combined.complete,
+            "unkeyed historical confirmations are only a preserved lower bound"
+        );
+    }
+
+    #[test]
+    fn telemetry_resume_adds_work_but_never_adds_population_coverage_or_resets_legacy_costs() {
+        let accounting = SweepAccounting {
+            complete: true,
+            initial_population: Some(100),
+            initial_exact_hints: Some(80),
+            initial_killer_confirmed: Some(3),
+            exact: AttemptCost {
+                launches: 7,
+                execution_ms: 700,
+                misses: 4,
+                ..AttemptCost::default()
+            },
+            confirmation: AttemptCost {
+                launches: 3,
+                execution_ms: 100,
+                ..AttemptCost::default()
+            },
+            duplicate_launches_avoided: 2,
+            ..SweepAccounting::default()
+        };
+        let prior = SweepCost {
+            elapsed: Duration::from_millis(100),
+            launches: 17,
+            accounting: Some(accounting.clone()),
+            confirmed_initial_killers: ["a", "b", "c"].into_iter().map(Into::into).collect(),
+            ..SweepCost::default()
+        };
+        let segment = SweepCost {
+            elapsed: Duration::from_millis(50),
+            launches: 4,
+            accounting: Some(SweepAccounting {
+                initial_killer_confirmed: Some(6),
+                ..accounting
+            }),
+            confirmed_initial_killers: ["a", "b", "c", "d", "e", "f"].into_iter().map(Into::into).collect(),
+            ..SweepCost::default()
+        };
+        let total = SweepCost::combine(Some(prior), Some(segment)).unwrap();
+        let actual = total.accounting.as_ref().unwrap();
+        assert!(actual.complete);
+        assert_eq!(
+            (
+                actual.initial_population,
+                actual.initial_exact_hints,
+                actual.initial_killer_confirmed
+            ),
+            (Some(100), Some(80), Some(6))
+        );
+        assert_eq!(
+            (actual.exact.launches, actual.exact.execution_ms, actual.exact.misses),
+            (14, 1400, 8)
+        );
+        assert_eq!(
+            (
+                actual.confirmation.launches,
+                actual.confirmation.execution_ms,
+                actual.duplicate_launches_avoided
+            ),
+            (6, 200, 4)
+        );
+        assert_eq!(
+            total.elapsed,
+            Duration::from_millis(150),
+            "summed concurrent attempts are not wall time"
+        );
+        let restored: SweepCost = serde_json::from_value(serde_json::to_value(&total).unwrap()).unwrap();
+        let settled = SweepCost::combine(Some(restored), None).unwrap();
+        assert_eq!(
+            serde_json::to_value(&settled).unwrap(),
+            serde_json::to_value(&total).unwrap(),
+            "settled resume adds nothing"
+        );
+        let mut legacy = serde_json::to_value(&total).unwrap();
+        legacy.as_object_mut().unwrap().remove("accounting");
+        let legacy: SweepCost = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.accounting.is_none());
+        let resumed = SweepCost::combine(Some(legacy), Some(total)).unwrap();
+        assert_eq!(resumed.launches, 42, "old counters are retained, not silently reset");
+        let incomplete = resumed.accounting.unwrap();
+        assert!(!incomplete.complete, "new observations cannot recover legacy costs");
+        assert_eq!(
+            (
+                incomplete.initial_population,
+                incomplete.initial_exact_hints,
+                incomplete.initial_killer_confirmed
+            ),
+            (None, None, None),
+            "legacy coverage remains unknown"
+        );
+    }
 
     fn cost(count: usize, elapsed: u64, packages: &[(&str, usize, u64, u64)]) -> SweepCost {
         let mut value = serde_json::to_value(SweepCost::default()).unwrap();

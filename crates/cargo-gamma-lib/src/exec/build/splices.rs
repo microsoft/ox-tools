@@ -34,7 +34,7 @@ pub(super) struct Instrumented {
 /// original once and then never touches this again, so caching it would hold the whole tree in
 /// memory to serve a case that does not recur.
 #[derive(Debug, Default)]
-pub(super) struct Splices {
+pub struct Splices {
     /// The tree these splices describe, so a workspace swapped underneath is not trusted.
     pub(super) root: Utf8PathBuf,
 

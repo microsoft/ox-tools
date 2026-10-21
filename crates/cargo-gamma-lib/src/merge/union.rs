@@ -186,11 +186,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
 
 /// The mutant-identity scheme a report belongs to.
 fn identity_version(report: &Report) -> u32 {
-    report
-        .config
-        .as_ref()
-        .and_then(|config| config.mutant_id_version)
-        .unwrap_or(MUTANT_ID_VERSION)
+    report.identity_version()
 }
 
 struct Candidate<'report> {
@@ -301,9 +297,8 @@ fn verdict_rank<'name, 'lineage>(
 
 /// The complete set of mutant ids each file currently admits, where an input says so.
 ///
-/// Only an unsharded report can answer this: it lists every mutant of every file it covers, so an
-/// id it does not mention is an id the code no longer produces. A sharded report lists one slice of
-/// the population, and reading its silence as a withdrawal would erase most of the rotation.
+/// Only an explicitly complete, unsharded, unmerged report can answer this. A partial or legacy
+/// report contributes observations, but reading its silence as withdrawal could erase live mutants.
 ///
 /// Two unsharded reports with the same timestamp describe the same commit, so one is as good as the
 /// other; the tie is settled by [`rank`] rather than by which was named first, which is what keeps
@@ -331,7 +326,11 @@ fn populations<'report>(
     let mut newest: HashMap<&str, Population<'_>> = HashMap::new();
 
     for (name, report) in reports.iter().copied() {
-        if report.config.as_ref().is_some_and(|config| config.shard.is_some() || config.merged) {
+        if !report
+            .config
+            .as_ref()
+            .is_some_and(|config| config.population_complete && config.shard.is_none() && !config.merged)
+        {
             continue;
         }
 
@@ -566,11 +565,18 @@ fn merged_tests(reports: &[&(String, Report)]) -> Option<usize> {
         .filter(|_| !reports.is_empty())
 }
 
-fn merged_not_built(reports: &[&(String, Report)]) -> Option<usize> {
-    let count = reports
-        .iter()
-        .filter_map(|(_, report)| report.config.as_ref()?.not_built)
-        .fold(0, usize::saturating_add);
+fn merged_not_built(files: &std::collections::BTreeMap<String, FileResult>) -> Option<usize> {
+    let count = files
+        .values()
+        .flat_map(|file| &file.mutants)
+        .filter(|mutant| {
+            mutant.status == "Ignored"
+                && mutant
+                    .status_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with(crate::elements::NOT_BUILT_PREFIX))
+        })
+        .count();
 
     (count > 0).then_some(count)
 }
@@ -670,6 +676,7 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
         .into_iter()
         .collect();
 
+    let not_built = merged_not_built(&merged_files);
     Some(Report {
         schema_version: base.schema_version.clone(),
         thresholds: base.thresholds,
@@ -680,9 +687,10 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
             started_at: newest,
             mutant_id_version: Some(identity_version(base)),
             merged: true,
+            population_complete: false,
             shard: None,
             tests: merged_tests(reports),
-            not_built: merged_not_built(reports),
+            not_built,
             dropped_test_packages,
             merge_provenance: Some(provenance),
         }),
@@ -1039,7 +1047,7 @@ mod tests {
     #[test]
     fn explicitly_mixed_identity_schemes_are_isolated_instead_of_unioning_their_ids() {
         let mut legacy = report(Some((0, 2)), 100, vec![mutant("legacy-id", 1, "Survived")]);
-        legacy.config.as_mut().expect("config").mutant_id_version = Some(MUTANT_ID_VERSION - 1);
+        legacy.config.as_mut().expect("config").mutant_id_version = Some(6);
         let current = report(Some((1, 2)), 200, vec![mutant("current-id", 1, "Killed")]);
 
         let merged = merge(&[("legacy".to_owned(), legacy), ("current".to_owned(), current)], 300, None);
@@ -1058,23 +1066,37 @@ mod tests {
     }
 
     #[test]
-    fn unstamped_reports_use_the_current_identity_scheme() {
+    fn review_unstamped_reports_do_not_share_current_identities() {
         let mut unstamped = report(Some((0, 2)), 100, vec![mutant("unstamped-id", 1, "Survived")]);
         unstamped.config.as_mut().expect("config").mutant_id_version = None;
         let current = report(Some((1, 2)), 200, vec![mutant("current-id", 1, "Killed")]);
 
         let merged = merge(&[("unstamped".to_owned(), unstamped), ("current".to_owned(), current)], 300, None);
 
-        assert!(merged.identity_incompatible.is_empty());
-        assert_eq!(merged.valid, 2);
+        assert_eq!(merged.identity_incompatible, ["unstamped"]);
+        assert_eq!(merged.valid, 1);
         assert_eq!(merged.detected, 1);
     }
 
     #[test]
-    fn an_unstamped_report_has_exactly_the_current_identity_version() {
+    fn review_unstamped_reports_keep_the_historical_identity_version() {
         let unstamped = fixtures::report();
 
-        assert_eq!(identity_version(&unstamped), MUTANT_ID_VERSION);
+        assert_eq!(identity_version(&unstamped), 5);
+    }
+
+    #[test]
+    fn review_unstamped_and_explicit_scheme_five_reports_still_merge() {
+        let mut unstamped = report(Some((0, 2)), 100, vec![mutant("old", 1, "Survived")]);
+        unstamped.config.as_mut().expect("config").mutant_id_version = None;
+        let mut stamped = report(Some((1, 2)), 200, vec![mutant("new", 2, "Killed")]);
+        stamped.config.as_mut().expect("config").mutant_id_version = Some(5);
+        let merged = merge(&[("unstamped".into(), unstamped), ("stamped".into(), stamped)], 300, None);
+
+        assert!(merged.identity_incompatible.is_empty());
+        assert_eq!(merged.valid, 2);
+        assert_eq!(merged.detected, 1);
+        assert_eq!(identity_version(merged.report.as_ref().unwrap()), 5);
     }
 
     #[test]
@@ -1589,7 +1611,9 @@ mod tests {
     #[test]
     fn run_metadata_is_aggregated_and_survives_staging() {
         let configured = |id: &str, tests: Option<usize>, not_built: Option<usize>, dropped: &[&str]| {
-            let mut report = report(Some((0, 2)), 100, vec![mutant(id, 1, "Killed")]);
+            let mut result = mutant(id, 1, if not_built.is_some() { "Ignored" } else { "Killed" });
+            result.status_reason = not_built.map(|_| format!("{}compiler budget exhausted", crate::elements::NOT_BUILT_PREFIX));
+            let mut report = report(Some((0, 2)), 100, vec![result]);
             let config = report.config.as_mut().expect("run info");
 
             config.tests = tests;
@@ -1610,7 +1634,7 @@ mod tests {
         let config = merged.config.as_ref().expect("config");
 
         assert_eq!(config.tests, Some(8));
-        assert_eq!(config.not_built, Some(5));
+        assert_eq!(config.not_built, Some(2));
         assert_eq!(config.dropped_test_packages, ["broken", "extra", "slow"]);
 
         let staged = merge(
@@ -1626,7 +1650,7 @@ mod tests {
         let config = staged.config.expect("config");
 
         assert_eq!(config.tests, None);
-        assert_eq!(config.not_built, Some(5));
+        assert_eq!(config.not_built, Some(2));
         assert_eq!(config.dropped_test_packages, ["broken", "extra", "later", "slow"]);
     }
 
@@ -1643,12 +1667,87 @@ mod tests {
         let maximum_named = ("maximum".to_owned(), maximum);
         let maximum_refs = [&maximum_named];
         assert_eq!(merged_tests(&maximum_refs), Some(usize::MAX));
-        assert_eq!(merged_not_built(&maximum_refs), None);
+        assert_eq!(merged_not_built(&maximum_named.1.files), None);
 
         let one = configured(Some(1), Some(1));
         let one_named = ("one".to_owned(), one);
         let one_refs = [&one_named];
-        assert_eq!(merged_not_built(&one_refs), Some(1));
+        assert_eq!(merged_tests(&one_refs), Some(1));
+        assert_eq!(
+            merged_not_built(&one_named.1.files),
+            None,
+            "metadata alone cannot create a not-built observation"
+        );
+    }
+
+    #[test]
+    fn retained_not_built_counts_deduplicate_supersede_and_survive_staging() {
+        let mut not_built = mutant("a", 1, "Ignored");
+        not_built.status_reason = Some(format!("{}unavailable", crate::elements::NOT_BUILT_PREFIX));
+        let old = report(Some((0, 2)), 100, vec![not_built]);
+        let duplicate = merge(&[("a".into(), old.clone()), ("b".into(), old.clone())], 300, None)
+            .report
+            .unwrap();
+        assert_eq!(duplicate.config.as_ref().unwrap().not_built, Some(1));
+        let newest = report(Some((0, 2)), 200, vec![mutant("a", 1, "Killed"), mutant("b", 2, "Killed")]);
+        let direct = merge(&[("a".into(), old), ("new".into(), newest.clone())], 300, None)
+            .report
+            .unwrap();
+        let staged = merge(&[("stage".into(), duplicate), ("new".into(), newest)], 300, None)
+            .report
+            .unwrap();
+        for merged in [&direct, &staged] {
+            assert_eq!(merged.config.as_ref().unwrap().not_built, None);
+            assert_eq!(merged.files["src/lib.rs"].mutants.len(), 2);
+        }
+    }
+
+    #[test]
+    fn partial_and_legacy_reports_cannot_withdraw_unchanged_survivors() {
+        for complete in [Some(false), None] {
+            let old = report(None, 100, vec![mutant("a", 1, "Survived"), mutant("b", 2, "Survived")]);
+            let newer = report(None, 200, vec![mutant("a", 1, "Killed")]);
+            let mut newer = serde_json::to_value(newer).unwrap();
+            if let Some(complete) = complete {
+                newer["config"]["populationComplete"] = complete.into();
+            } else {
+                newer["config"].as_object_mut().unwrap().remove("populationComplete");
+            }
+            let newer = serde_json::from_value(newer).unwrap();
+            let merged = merge(&[("old".into(), old), ("partial".into(), newer)], 300, None);
+            assert_eq!(merged.withdrawn, 0);
+            assert_eq!(merged.valid, 2);
+            assert_eq!(merged.detected, 1);
+            assert!(!merged.report.unwrap().config.unwrap().population_complete);
+        }
+    }
+
+    #[test]
+    fn a_complete_empty_population_retires_the_last_historical_identity() {
+        for complete in [true, false] {
+            let old = report(None, 100, vec![mutant("last", 1, "Survived")]);
+            let mut empty = report(None, 200, Vec::new());
+            empty.files.get_mut("src/lib.rs").unwrap().source = "pub struct Marker;".into();
+            empty.config.as_mut().unwrap().population_complete = complete;
+            let merged = merge(&[("old".into(), old), ("empty".into(), empty)], 300, None);
+            assert_eq!(merged.withdrawn, usize::from(complete));
+            assert_eq!(merged.valid, 0);
+            assert_eq!(merged.incompatible, usize::from(!complete));
+        }
+    }
+
+    #[test]
+    fn shard_and_merge_flags_preclude_population_authority_even_with_an_explicit_complete_flag() {
+        for sharded in [true, false] {
+            let old = report(None, 100, vec![mutant("a", 1, "Survived"), mutant("b", 2, "Survived")]);
+            let mut newer = report(None, 200, vec![mutant("a", 1, "Killed")]);
+            let config = newer.config.as_mut().unwrap();
+            config.population_complete = true;
+            config.shard = sharded.then_some(crate::elements::ShardInfo { index: 0, count: 2 });
+            config.merged = !sharded;
+            let merged = merge(&[("old".into(), old), ("partial".into(), newer)], 300, None);
+            assert_eq!((merged.withdrawn, merged.valid, merged.detected), (0, 2, 1));
+        }
     }
 
     #[test]

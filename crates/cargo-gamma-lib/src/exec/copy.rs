@@ -59,38 +59,46 @@ pub(super) fn visible_vcs_metadata(path: &Utf8Path) -> Vec<Utf8PathBuf> {
 /// on. A later operation starts with a fresh latch because the path may have been rebound to a
 /// different filesystem and no cross-operation state is needed for correctness.
 #[derive(Clone, Debug)]
-pub(super) struct Reflinks {
+pub struct Reflinks {
     works: Arc<AtomicBool>,
+}
+
+impl Default for Reflinks {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Reflinks {
     /// Starts an independent operation that has not observed a clone failure.
-    pub(super) fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             works: Arc::new(AtomicBool::new(true)),
         }
     }
 
     /// Whether a clone is worth attempting for the next file.
-    pub(super) fn worth_trying(&self) -> bool {
+    #[must_use]
+    pub fn worth_trying(&self) -> bool {
         reflink_supported() && self.works.load(Ordering::Relaxed)
     }
 
     /// Records that this destination cannot clone, so the rest of the copy stops asking.
-    pub(super) fn unsupported(&self) {
+    pub fn unsupported(&self) {
         self.works.store(false, Ordering::Relaxed);
     }
 }
 
 /// How much of a tree a copy takes.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct CopyOptions {
+pub struct CopyOptions {
     /// Whether files version control ignores are copied along with the rest.
     ///
     /// The escape hatch for a tree whose `.gitignore` excludes something the build genuinely reads
     /// — a generated module, a fixture — where editing a shared ignore file to suit one tool is
     /// not an option.
-    pub(super) copy_ignored: bool,
+    pub copy_ignored: bool,
 }
 
 /// Copies a source tree, skipping build output, version control and the scratch directory itself.
@@ -284,6 +292,12 @@ fn copy_tracked_with(
 /// ignore walk's answer stands on its own.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn tracked_files(root: &Utf8Path) -> Result<Option<Vec<Utf8PathBuf>>> {
+    #[cfg(feature = "internals")]
+    if let Some(output) =
+        super::sync::native_test_util::SCRIPTED_TRACKED.with_borrow_mut(|reader| reader.as_mut().map(|reader| reader(root)))
+    {
+        return output;
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(root.as_std_path())

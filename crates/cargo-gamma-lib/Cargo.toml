@@ -35,7 +35,7 @@ min-lines-percent = 97.6
 # directly. Test targets that need it declare it in `required-features`; test commands must still
 # enable it explicitly. Never enable it from outside this crate.
 internals = ["dep:tempfile"]
-# Opts into real-toolchain system checks of the embedded project generator.
+# Opts into real-toolchain generator checks and existing native link-provisioning smoke tests.
 system-tests = ["internals"]
 # Selects the dedicated Loom integration target. The scheduler itself is still activated by
 # `RUSTFLAGS="--cfg loom"` in the repository check.
@@ -87,7 +87,9 @@ bolero-engine = { workspace = true, features = ["any"] }
 # cross-crate agreement tests available without adding a registry or release-order dependency.
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
+chrono = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
+tick = { workspace = true, features = ["test-util"] }
 
 [[test]]
 name = "agreement"
@@ -95,6 +97,14 @@ required-features = ["internals"]
 
 [[test]]
 name = "cli"
+required-features = ["internals"]
+
+[[test]]
+name = "compiler_exclusions"
+required-features = ["internals"]
+
+[[test]]
+name = "discovery"
 required-features = ["internals"]
 
 [[test]]
@@ -114,12 +124,24 @@ name = "loom"
 required-features = ["loom"]
 
 [[test]]
+name = "native_build"
+required-features = ["internals"]
+
+[[test]]
+name = "mutation_correctness"
+required-features = ["internals"]
+
+[[test]]
 name = "project"
 required-features = ["internals"]
 
 [[test]]
 name = "offline_builds"
 required-features = ["system-tests"]
+
+[[test]]
+name = "recovery_native"
+required-features = ["internals"]
 
 [[test]]
 name = "regressions"
@@ -134,8 +156,20 @@ name = "schema_conformance"
 required-features = ["internals"]
 
 [[test]]
+name = "scheduler_native"
+required-features = ["internals"]
+
+[[test]]
 name = "session"
 required-features = ["internals"]
+
+[[test]]
+name = "sync_native"
+required-features = ["internals"]
+
+[[test]]
+name = "sync_native_smoke"
+required-features = ["system-tests"]
 
 [[test]]
 name = "units"

@@ -210,7 +210,6 @@ where
     // Folded in binary order so the aggregate is deterministic regardless of worker completion.
     for (entry, taken) in binaries.iter_mut().zip(measured) {
         let Some((took, observation)) = taken else {
-            // #[gamma::skip(loop.continue_to_break, reason = "successful sweep_binaries_with returns one positional Some per binary; a worker panic unwinds its scope rather than returning partial measurements")]
             continue;
         };
 
@@ -338,7 +337,6 @@ where
                             stall: Stall::NONE,
                             request,
                             only: Only::All,
-                            census: None,
                         },
                     );
 
@@ -1591,7 +1589,6 @@ mod tests {
                 assert_eq!(attempt.stall, Stall::NONE);
                 assert_eq!(attempt.request.limit, Some(999));
                 assert!(matches!(attempt.only, Only::All));
-                assert!(attempt.census.is_none());
 
                 if binary.target == "first" {
                     Observation {

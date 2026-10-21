@@ -672,6 +672,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn campaign_regression_corrupt_cached_repo_removal_errors_are_propagated() {
+        let path = Path::new("cached-repo");
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = prepare_cached_repo(
+            path,
+            |candidate| {
+                let expected = [path.to_path_buf(), path.join(".git")];
+                assert_eq!(expected.get(calls.borrow().len()), Some(&candidate.to_path_buf()));
+                calls.borrow_mut().push(candidate.to_path_buf());
+                candidate == path
+            },
+            |candidate, context| {
+                assert_eq!(candidate, path);
+                assert_eq!(context, "removing potentially corrupt cached repository 'cached-repo'");
+                Err(ohno::app_err!("scripted cache removal failure"))
+            },
+            |message| {
+                assert_eq!(
+                    message,
+                    "Cached repository path 'cached-repo' exists but .git directory missing, re-cloning"
+                );
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "scripted cache removal failure");
+        assert_eq!(calls.into_inner(), [path.to_path_buf(), path.join(".git")]);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn campaign_regression_corrupt_cached_repo_rejects_non_utf8_before_warning_or_removal() {
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&[0xd800]))
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]))
+        };
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = prepare_cached_repo(
+            &path,
+            |candidate| {
+                let expected = [path.clone(), path.join(".git")];
+                assert_eq!(expected.get(calls.borrow().len()), Some(&candidate.to_path_buf()));
+                calls.borrow_mut().push(candidate.to_path_buf());
+                candidate == path.as_path()
+            },
+            |_, _| panic!("an invalid UTF-8 path must be rejected before removal"),
+            |_| panic!("an invalid UTF-8 path must be rejected before warning"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "invalid UTF-8 in repository path");
+        assert_eq!(calls.into_inner(), [path.clone(), path.join(".git")]);
+    }
+
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_get_repo_nonexistent_remote() {

@@ -29,16 +29,16 @@ use crate::{HashMap, HashSet};
 
 /// One `mod name;` declaration that pulls in another file.
 #[derive(Debug, Clone)]
-pub(super) struct Declaration {
+pub struct Declaration {
     /// The file it resolves to, absolute.
-    pub(super) target: Utf8PathBuf,
+    pub target: Utf8PathBuf,
 
     /// Whether the selected configuration, or an enclosing module, excludes this declaration.
     ///
     /// This includes test scaffolding and a `cfg` condition that does not hold. Both kinds of file
     /// are walked to carry the exclusion to their children, but neither can contribute mutants
     /// unless another live declaration reaches it.
-    pub(super) excluded: bool,
+    pub excluded: bool,
 }
 
 /// Finds the file declarations a parsed file makes.
@@ -46,7 +46,7 @@ pub(super) struct Declaration {
 /// `path` is the file the declarations were written in, absolute, since a `mod` resolves relative
 /// to where it appears.
 #[must_use]
-pub(super) fn declarations(path: &Utf8Path, ast: &syn::File, cfg: &CfgSet) -> Vec<Declaration> {
+pub fn declarations(path: &Utf8Path, ast: &syn::File, cfg: &CfgSet) -> Vec<Declaration> {
     declarations_with(path, ast, cfg, |target| target.as_std_path().is_file())
 }
 
@@ -68,7 +68,7 @@ fn declarations_with(path: &Utf8Path, ast: &syn::File, cfg: &CfgSet, is_file: im
 /// `lib.rs`, `main.rs` and `mod.rs` own the directory they sit in; any other file owns a
 /// subdirectory named after it. This is the rule the compiler applies, and getting it wrong would
 /// silently resolve a declaration to nothing.
-fn owned_directory(path: &Utf8Path) -> Option<Utf8PathBuf> {
+pub(super) fn owned_directory(path: &Utf8Path) -> Option<Utf8PathBuf> {
     let parent = path.parent()?;
     let stem = path.file_stem()?;
 
@@ -127,7 +127,7 @@ fn walk(
 }
 
 /// Reads the path a `#[path = "…"]` attribute points at.
-fn path_attribute(attrs: &[Attribute]) -> Option<String> {
+pub(super) fn path_attribute(attrs: &[Attribute]) -> Option<String> {
     attrs.iter().find_map(|attr| {
         let Meta::NameValue(pair) = &attr.meta else { return None };
 
@@ -153,10 +153,20 @@ fn path_attribute(attrs: &[Attribute]) -> Option<String> {
 /// `include!`, or by a `mod` behind a `cfg` this cannot evaluate, and dropping mutants on a guess
 /// would quietly shrink the population.
 #[must_use]
-pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Vec<Declaration>)]) -> HashSet<Utf8PathBuf> {
-    let edges: HashMap<&Utf8Path, &[Declaration]> = declared.iter().map(|(from, list)| (from.as_path(), list.as_slice())).collect();
+pub fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Vec<Declaration>)]) -> HashSet<Utf8PathBuf> {
+    let mut edges: HashMap<Utf8PathBuf, Vec<Declaration>> = HashMap::default();
+    for (from, list) in declared {
+        edges
+            .entry(identity(from))
+            .or_default()
+            .extend(list.iter().map(|declaration| Declaration {
+                target: identity(&declaration.target),
+                excluded: declaration.excluded,
+            }));
+    }
 
     let mut live: HashSet<Utf8PathBuf> = HashSet::default();
+    let roots: Vec<_> = roots.iter().map(|root| identity(root)).collect();
     let mut queue: Vec<&Utf8Path> = roots.iter().map(Utf8PathBuf::as_path).collect();
 
     while let Some(file) = queue.pop() {
@@ -166,7 +176,7 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
             continue;
         }
 
-        for declaration in edges.get(file).copied().unwrap_or(&[]) {
+        for declaration in edges.get(file).map_or(&[][..], Vec::as_slice) {
             if !declaration.excluded {
                 queue.push(declaration.target.as_path());
             }
@@ -176,9 +186,9 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
     // Everything below an excluded module is absent too, so the exclusion follows every edge from
     // there rather than stopping at the file the declaration named.
     let mut excluded: HashSet<Utf8PathBuf> = HashSet::default();
-    let mut queue: Vec<&Utf8Path> = declared
-        .iter()
-        .flat_map(|(_from, list)| list)
+    let mut queue: Vec<&Utf8Path> = edges
+        .values()
+        .flatten()
         .filter(|declaration| declaration.excluded)
         .map(|declaration| declaration.target.as_path())
         .collect();
@@ -190,12 +200,18 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
             continue;
         }
 
-        for declaration in edges.get(file).copied().unwrap_or(&[]) {
+        for declaration in edges.get(file).map_or(&[][..], Vec::as_slice) {
             queue.push(declaration.target.as_path());
         }
     }
 
     excluded
+}
+
+/// Existing files share an OS identity; unresolved declarations cannot prove an alias.
+#[must_use]
+pub fn identity(path: &Utf8Path) -> Utf8PathBuf {
+    path.canonicalize_utf8().unwrap_or_else(|_cause| path.to_owned())
 }
 
 #[cfg(test)]
@@ -482,7 +498,7 @@ mod tests {
         assert!(active[0].excluded);
         assert_eq!(inactive.len(), 1, "{inactive:?}");
         assert!(!inactive[0].excluded);
-        assert!(excluded_files(&[declaring], &declared).contains(&target));
+        assert!(excluded_files(&[declaring], &declared).contains(&identity(&target)));
     }
 
     #[test]

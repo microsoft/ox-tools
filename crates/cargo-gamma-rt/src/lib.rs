@@ -26,8 +26,8 @@
 //!
 //! # What a guard looks like
 //!
-//! [`a`] is the only function the instrumented source calls. Guard shape follows what Rust accepts
-//! at the mutation site:
+//! [`a`] selects the active guard branch. Guard shape follows what Rust accepts at the mutation
+//! site:
 //!
 //! ```text
 //! // an expression, whose value the mutant replaces
@@ -112,9 +112,9 @@
 //! acquire the startup environment is different: the runtime emits [`ENVIRONMENT_ERROR_MARKER`]
 //! and exits, so the parent cannot mistake a mutant that never activated for a survivor.
 //!
-//! That distinction covers [`CENSUS_VAR`] as well as [`ACTIVE_VAR`]. With no active mutant it
-//! requests a baseline census; alongside a positive active ordinal it records whether that active
-//! guard was reached without changing mutant selection. A variable this process could not *read*
+//! That distinction covers [`REACH_VAR`] as well as [`ACTIVE_VAR`]. Alongside a positive active
+//! ordinal it records whether that active guard was reached without changing mutant selection.
+//! With no active mutant it records no guards. A variable this process could not *read*
 //! is a startup failure, not an absent one. A read interrupted by a signal is retried rather than
 //! counted as a failure, since an interruption is not evidence of anything.
 //!
@@ -139,24 +139,19 @@
 //!   not a proof of memory safety or proof that forbidden foreign mutation did not occur.
 //!
 //! ```rust
-//! use gamma_rt::{ACTIVE_VAR, CENSUS_VAR, NONE, a, active, any};
+//! use gamma_rt::{ACTIVE_VAR, NONE, a, active, any};
 //!
-//! // Stated for an ordinary process. A census is its own mode: it activates no mutant, so
-//! // `active` reports `NONE`, and every guard answers `false` while recording the site it stands
-//! // at — including the sites this example would walk past.
-//! if std::env::var_os(CENSUS_VAR).is_none_or(|path| path.is_empty()) {
-//!     // In an ordinary process nothing is selected, so every guard takes its original arm.
-//!     if active() == NONE {
-//!         assert!(!any());
-//!         assert!(!a(NONE));
-//!         assert!(!a(1));
-//!         assert!(!a(9_999));
-//!     }
+//! // With no mutant selected, every guard takes its original arm.
+//! if active() == NONE {
+//!     assert!(!any());
+//!     assert!(!a(NONE));
+//!     assert!(!a(1));
+//!     assert!(!a(9_999));
+//! }
 //!
-//!     // Only a positive ordinal can select a mutant.
-//!     if active() != NONE {
-//!         assert!(a(active()));
-//!     }
+//! // Only a positive ordinal can select a mutant.
+//! if active() != NONE {
+//!     assert!(a(active()));
 //! }
 //!
 //! assert_eq!(ACTIVE_VAR, "GAMMA_ACTIVE");
@@ -168,7 +163,8 @@
 //!
 //! # Runtime entry points
 //!
-//! [`a`] is what the guards call, and the only runtime entry point instrumented source contains.
+//! Guards call [`a`] to select a branch. Type-preserving replacements can additionally call
+//! [`default_after`], [`increment`], [`decrement`], or [`panic_on_failure`].
 //! [`active`] and [`any`] are there for the tool's own diagnostics and for anyone inspecting a
 //! scratch tree by hand:
 //!
@@ -186,9 +182,9 @@
 //!
 //! # Making two iterators one type
 //!
-//! [`Either`] is the one other thing instrumented source mentions, and it exists because the guard
-//! is an `if`. A function returning `impl Iterator<Item = T>` returns a single concrete type that
-//! its body picks, so `if a(n) { core::iter::empty() } else { ..the real body.. }` has arms of two
+//! [`Either`] exists because the guard is an `if`. A function returning `impl Iterator<Item = T>`
+//! returns a single concrete type that its body picks, so
+//! `if a(n) { core::iter::empty() } else { ..the real body.. }` has arms of two
 //! different types and will not compile. Wrapping each arm in a variant makes them one type:
 //!
 //! ```text
@@ -216,15 +212,17 @@
 //! how nearly every `no_std` library is tested anyway.
 
 mod either;
+mod mutation;
 mod runtime;
 
 #[cfg(feature = "embedding")]
 #[doc(hidden)]
 pub mod embedded {
     /// Runtime source files embedded by the coordinator into each scratch workspace.
-    pub const SOURCES: [(&str, &str); 3] = [
+    pub const SOURCES: [(&str, &str); 4] = [
         ("lib.rs", include_str!("lib.rs")),
         ("either.rs", include_str!("either.rs")),
+        ("mutation.rs", include_str!("mutation.rs")),
         ("runtime.rs", include_str!("runtime.rs")),
     ];
 
@@ -240,10 +238,10 @@ pub mod embedded {
 
 #[doc(inline)]
 pub use either::Either;
+#[doc(inline)]
+pub use mutation::{Boundary, PanicOnFailure, decrement, default_after, increment, panic_on_failure};
 #[cfg(all(loom, feature = "loom"))]
 #[doc(hidden)]
 pub use runtime::run_loom_models;
 #[doc(inline)]
-pub use runtime::{
-    ACTIVE_VAR, CENSUS_VAR, ENVIRONMENT_ERROR_MARKER, MAX_CENSUS_SITES, NONE, OVERFLOW, PRE_INSTALL_ERROR_MARKER, SEAL, a, active, any,
-};
+pub use runtime::{ACTIVE_VAR, ENVIRONMENT_ERROR_MARKER, NONE, OVERFLOW, PRE_INSTALL_ERROR_MARKER, REACH_VAR, SEAL, a, active, any};

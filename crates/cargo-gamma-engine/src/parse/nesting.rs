@@ -50,6 +50,7 @@ enum Previous {
     Other,
     Expression,
     Operator,
+    Prefix,
 }
 
 impl Previous {
@@ -127,7 +128,9 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 ladders[depth] += 1;
                 set_bool(&mut awaiting_else, depth, false);
 
-                if ladders[depth] > path_limit || link(&mut path, &mut peak, depth, path_limit) {
+                if base.get(depth).copied().unwrap_or_default().saturating_add(ladders[depth]) > path_limit
+                    || link(&mut path, &mut peak, depth, path_limit)
+                {
                     return Some(at);
                 }
                 previous = Previous::Other;
@@ -167,7 +170,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             previous = if matches!(byte, b'?' | b'>') {
                 Previous::Operator
             } else {
-                Previous::Other
+                Previous::Prefix
             };
             at += 1;
             continue;
@@ -197,7 +200,8 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             }
 
             b'{' => {
-                let inherited = base.get(depth).copied().unwrap_or_default().saturating_add(CHAIN_FACTOR);
+                let enclosing = if previous == Previous::Prefix { &path } else { &base };
+                let inherited = enclosing.get(depth).copied().unwrap_or_default().saturating_add(CHAIN_FACTOR);
                 depth += 1;
 
                 if inherited > path_limit {
@@ -364,6 +368,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn public_shape_guard_accumulates_unary_cost_across_mixed_groups() {
+        // Each level adds its unary run plus CHAIN_FACTOR for the delimiter. The chosen total
+        // equals NESTING_LIMIT * CHAIN_FACTOR while group depth remains below NESTING_LIMIT;
+        // one extra prefix exceeds the cumulative allowance, including with mixed delimiters.
+        for (open, close) in [("(", ")"), ("[", "]"), ("{", "}")] {
+            let boundary = format!("{}true{}", format!("{}{open}", "!".repeat(12)).repeat(16), close.repeat(16));
+            assert!(!crate::parse::exceeds_nesting_limit(&boundary), "{open}");
+            assert!(crate::parse::exceeds_nesting_limit(&format!("!{boundary}")), "{open}");
+        }
+        let mixed = format!("{}true{}", "!!!!!!!!!!!!(!!!!!!!!!!!!{".repeat(8), "})".repeat(8));
+        assert!(!crate::parse::exceeds_nesting_limit(&mixed));
+        assert!(crate::parse::exceeds_nesting_limit(&format!("!{mixed}")));
+    }
+
+    #[test]
     fn macro_token_else_markers_only_count_after_a_current_closing_block() {
         for (text, limit) in [
             ("m!((---else))", 3),
@@ -402,7 +421,7 @@ mod tests {
             let siblings = format!("{at_limit}{separator}{at_limit}");
             assert_eq!(beyond(&siblings, &[], 2), None, "{separator:?}");
         }
-        let nested = ladder(NonZeroUsize::new(12).unwrap());
+        let nested = ladder(NonZeroUsize::new(8).unwrap());
         for text in [
             format!("({nested}); ({nested})"),
             format!("{{{nested}}} {{{nested}}}"),
@@ -521,8 +540,8 @@ mod tests {
             ("[]", None),
             ("[][]", Some(2)),
             ("{{", Some(1)),
-            ("++++ {}", None),
-            ("++++ {}+", Some(7)),
+            ("++++ {}", Some(5)),
+            ("++++ {}+", Some(5)),
             ("++++ 1 \"x\" +", None),
             ("++++ 1 value +", None),
             ("++++ 1 2 +", None),
@@ -551,10 +570,11 @@ mod tests {
             let over = format!("{ladder} else if ready {{}}");
             assert_eq!(beyond_limit(&over, limit), Some(ladder.len() + 1), "{over}");
             if limit >= 3 {
-                let nested = format!("{{{ladder}}}");
+                let inner = format!("if ready {{}}{}", " else if ready {}".repeat(links - CHAIN_FACTOR));
+                let nested = format!("{{{inner}}}");
                 assert_eq!(beyond_limit(&nested, limit), None, "{nested}");
-                let nested_over = format!("{{{ladder} else if ready {{}}}}");
-                assert_eq!(beyond_limit(&nested_over, limit), Some(ladder.len() + 2), "{nested_over}");
+                let nested_over = format!("{{{inner} else if ready {{}}}}");
+                assert_eq!(beyond_limit(&nested_over, limit), Some(inner.len() + 2), "{nested_over}");
             }
             for separator in [";", ",", " unrelated ", " as T;"] {
                 let siblings = format!("{ladder}{separator}{ladder}");

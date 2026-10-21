@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 
+use syn::visit::{self, Visit};
 use syn::{GenericArgument, GenericParam, Generics, Path, PathArguments, ReturnType, Type, TypeParamBound, WherePredicate};
 
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
@@ -14,48 +15,169 @@ use super::values::{Kind, primitive_kind, resolve_type, strip, type_argument_val
 use crate::ops::collect::Defaults;
 use crate::{HashMap, HashSet};
 
+pub(super) const LOCAL_MODULE: &str = "<gamma-local-module>";
+pub(super) const BLOCK_TYPES: &str = "<gamma-block-types>";
+pub(super) const SOURCE_FILE: &str = "<gamma-source-file>";
+/// Conservative default for input plus projected output syntax work before cloning.
+///
+/// This is not a measured capacity or a Rust type-size limit; exhaustion leaves unknown evidence.
+pub(super) const TYPE_EXPANSION_LIMIT: usize = 4096;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_tests;
+
 #[derive(Clone, PartialEq)]
 pub(super) struct Alias {
     pub(super) parameters: Vec<String>,
     pub(super) target: Type,
 }
 
-fn substitute_type(ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
+pub(super) fn substitute_type(ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
+    let mut budget = TYPE_EXPANSION_LIMIT;
+    substitute_type_with_budget(ty, substitutions, &mut budget)
+}
+
+pub(super) fn substitute_type_with_budget(ty: &Type, substitutions: &HashMap<String, Type>, remaining: &mut usize) -> Type {
+    let Some(input_size) = type_size(ty, None, *remaining) else {
+        return syn::parse_quote!(_);
+    };
+    let Some(output_size) = type_size(ty, Some(substitutions), *remaining - input_size) else {
+        return syn::parse_quote!(_);
+    };
+    // Retain the input's cost too: unsupported syntactic positions are cloned unchanged.
+    *remaining -= input_size + output_size;
+    let mut substituted = ty.clone();
+    substitute_type_in_place(&mut substituted, substitutions);
+    substituted
+}
+
+fn substituted_parameter<'a>(ty: &Type, substitutions: &'a HashMap<String, Type>) -> Option<&'a Type> {
+    if let Type::Path(path) = ty
+        && path.qself.is_none()
+        && let Some(first) = path.path.segments.first()
+        && let Some(replacement @ Type::Infer(_)) = substitutions.get(&first.ident.to_string())
+    {
+        return Some(replacement);
+    }
     if let Type::Path(path) = ty
         && path.qself.is_none()
         && let Some(ident) = path.path.get_ident()
         && let Some(replacement) = substitutions.get(&ident.to_string())
     {
-        return replacement.clone();
+        return Some(replacement);
     }
+    None
+}
 
-    let mut substituted = ty.clone();
-    match &mut substituted {
-        Type::Array(array) => *array.elem = substitute_type(&array.elem, substitutions),
-        Type::Group(group) => *group.elem = substitute_type(&group.elem, substitutions),
-        Type::Paren(paren) => *paren.elem = substitute_type(&paren.elem, substitutions),
+fn substitute_type_in_place(ty: &mut Type, substitutions: &HashMap<String, Type>) {
+    if let Some(replacement) = substituted_parameter(ty, substitutions) {
+        *ty = replacement.clone();
+        return;
+    }
+    match ty {
+        Type::Array(array) => substitute_type_in_place(&mut array.elem, substitutions),
+        Type::Group(group) => substitute_type_in_place(&mut group.elem, substitutions),
+        Type::Paren(paren) => substitute_type_in_place(&mut paren.elem, substitutions),
         Type::Path(path) => {
             for segment in &mut path.path.segments {
                 if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
                     for argument in &mut arguments.args {
                         if let GenericArgument::Type(inner) = argument {
-                            *inner = substitute_type(inner, substitutions);
+                            substitute_type_in_place(inner, substitutions);
                         }
                     }
                 }
             }
         }
-        Type::Ptr(pointer) => *pointer.elem = substitute_type(&pointer.elem, substitutions),
-        Type::Reference(reference) => *reference.elem = substitute_type(&reference.elem, substitutions),
-        Type::Slice(slice) => *slice.elem = substitute_type(&slice.elem, substitutions),
+        Type::Ptr(pointer) => substitute_type_in_place(&mut pointer.elem, substitutions),
+        Type::Reference(reference) => substitute_type_in_place(&mut reference.elem, substitutions),
+        Type::Slice(slice) => substitute_type_in_place(&mut slice.elem, substitutions),
         Type::Tuple(tuple) => {
             for element in &mut tuple.elems {
-                *element = substitute_type(element, substitutions);
+                substitute_type_in_place(element, substitutions);
             }
         }
         _ => {}
     }
-    substituted
+}
+
+fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: usize) -> Option<usize> {
+    struct Budget<'a> {
+        substitutions: Option<&'a HashMap<String, Type>>,
+        remaining: usize,
+        depth: usize,
+        exceeded: bool,
+    }
+
+    impl Budget<'_> {
+        fn enter(&mut self) -> bool {
+            // This conservative depth default bounds recursive visitors independently of node work;
+            // it is not a measured stack capacity or a guarantee about platform stack sizes.
+            if self.exceeded || self.remaining == 0 || self.depth == 64 {
+                self.exceeded = true;
+                return false;
+            }
+            self.remaining -= 1;
+            self.depth += 1;
+            true
+        }
+    }
+
+    impl<'ast> Visit<'ast> for Budget<'ast> {
+        fn visit_type(&mut self, i: &'ast Type) {
+            if self.exceeded {
+                return;
+            }
+            if let Some(replacement) = self.substitutions.and_then(|substitutions| substituted_parameter(i, substitutions)) {
+                // Substitution does not recurse into a parameter's replacement.
+                let substitutions = self.substitutions.take();
+                self.visit_type(replacement);
+                self.substitutions = substitutions;
+            } else if self.enter() {
+                visit::visit_type(self, i);
+                self.depth -= 1;
+            }
+        }
+
+        fn visit_path_segment(&mut self, i: &'ast syn::PathSegment) {
+            if self.enter() {
+                visit::visit_path_segment(self, i);
+                self.depth -= 1;
+            }
+        }
+
+        fn visit_expr(&mut self, i: &'ast syn::Expr) {
+            if self.enter() {
+                visit::visit_expr(self, i);
+                self.depth -= 1;
+            }
+        }
+
+        fn visit_attribute(&mut self, i: &'ast syn::Attribute) {
+            if self.enter() {
+                visit::visit_attribute(self, i);
+                self.depth -= 1;
+            }
+        }
+    }
+
+    let mut budget = Budget {
+        substitutions,
+        remaining: limit,
+        depth: 0,
+        exceeded: false,
+    };
+    budget.visit_type(ty);
+    (!budget.exceeded).then_some(limit - budget.remaining)
+}
+
+pub(super) fn reserve_type(ty: &Type, remaining: &mut usize) -> bool {
+    let Some(size) = type_size(ty, None, *remaining) else {
+        return false;
+    };
+    *remaining -= size;
+    true
 }
 
 /// What the value-choosing functions know about the file they are reasoning inside.
@@ -87,13 +209,64 @@ pub(super) struct Types<'a> {
 }
 
 impl Types<'_> {
+    fn source_path(&self, ty: &Type) -> Option<(&str, &[String], Vec<String>)> {
+        if self.imports.contains_key("*") || matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some()) {
+            return None;
+        }
+        let path = resolved_type_path(ty, self.imports)?;
+        if self
+            .imports
+            .get(BLOCK_TYPES)
+            .and_then(Option::as_ref)
+            .is_some_and(|names| path.first().is_some_and(|name| names.contains(name)))
+        {
+            return None;
+        }
+        let source = self.imports.get(SOURCE_FILE)?.as_ref()?.first()?.as_str();
+        let inline = self
+            .imports
+            .get(LOCAL_MODULE)
+            .and_then(Option::as_ref)
+            .map_or(&[][..], Vec::as_slice);
+        Some((source, inline, path))
+    }
+
+    fn source_default(&self, ty: &Type) -> Option<bool> {
+        let (source, inline, path) = self.source_path(ty)?;
+        self.defaults.source_default(source, inline, &path)
+    }
+
+    pub(super) fn source_is_enum(&self, ty: &Type) -> bool {
+        self.source_path(ty)
+            .is_some_and(|(source, inline, path)| self.defaults.source_is_enum(source, inline, &path))
+    }
+
+    pub(super) fn source_same_type(&self, left: &Path, right: &Path) -> bool {
+        let as_type = |path: &Path| {
+            Type::Path(syn::TypePath {
+                attrs: Vec::new(),
+                qself: None,
+                path: path.clone(),
+            })
+        };
+        let left = as_type(left);
+        let right = as_type(right);
+        let Some((source, inline, left)) = self.source_path(&left) else {
+            return false;
+        };
+        let Some((_, _, right)) = self.source_path(&right) else {
+            return false;
+        };
+        self.defaults.source_same_type(source, inline, &left, &right)
+    }
+
     /// Resolves a source-visible path to a declaration name in the current package.
     ///
     /// Bare unimported names and unrenamed imports rooted at `crate`, `self`, or `super` are local.
     /// Written qualified paths and renamed imports remain unknown: the name-only index cannot
     /// distinguish declarations in different modules with the same final identifier.
     fn package_type_name(&self, ty: &Type) -> Option<String> {
-        if self.imports.contains_key("*") {
+        if self.imports.contains_key("*") || self.block_type(ty) {
             return None;
         }
 
@@ -113,25 +286,105 @@ impl Types<'_> {
     }
 
     fn package_has_default(&self, ty: &Type) -> bool {
-        self.package_type_name(ty).is_some_and(|name| self.defaults.has_default_name(&name))
+        if self.block_type(ty) {
+            return false;
+        }
+        if self.defaults.has_labeled_sources() {
+            return self.source_default(ty) == Some(true);
+        }
+        resolved_type_path(ty, self.imports).is_some_and(|path| self.defaults.has_local_default(&path))
+            || self.package_type_name(ty).is_some_and(|name| self.defaults.has_default_name(&name))
     }
 
     fn package_declares_default(&self, ty: &Type) -> bool {
-        self.package_type_name(ty)
-            .is_some_and(|name| self.defaults.declares_default_name(&name))
+        if self.block_type(ty) {
+            return false;
+        }
+        if self.defaults.has_labeled_sources() {
+            return self.source_default(ty) == Some(true);
+        }
+        self.defaults.is_complete() && resolved_type_path(ty, self.imports).is_some_and(|path| self.defaults.has_local_default(&path))
+            || self
+                .package_type_name(ty)
+                .is_some_and(|name| self.defaults.declares_default_name(&name))
+    }
+
+    fn block_type(&self, ty: &Type) -> bool {
+        resolved_type_path(ty, self.imports).is_some_and(|path| {
+            self.imports
+                .get(BLOCK_TYPES)
+                .and_then(Option::as_ref)
+                .is_some_and(|names| path.first().is_some_and(|name| names.contains(name)))
+        })
     }
 
     fn package_lacks_default(&self, ty: &Type) -> bool {
+        if self.defaults.has_labeled_sources() {
+            return self.source_default(ty) == Some(false);
+        }
+        if !self.imports.contains_key("*")
+            && let Some(mut path) = resolved_type_path(ty, self.imports)
+            && !self
+                .imports
+                .get(BLOCK_TYPES)
+                .and_then(Option::as_ref)
+                .is_some_and(|names| path.first().is_some_and(|name| names.contains(name)))
+            && !matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some())
+        {
+            let explicit_local = path.first().is_some_and(|root| matches!(root.as_str(), "crate" | "self" | "super"));
+            let mut module = self.imports.get(LOCAL_MODULE).and_then(Option::as_ref).cloned().unwrap_or_default();
+            match path.first().map(String::as_str) {
+                Some("crate") => module.clear(),
+                Some("self") => {
+                    let _root = path.remove(0);
+                }
+                Some("super") => {
+                    while path.first().is_some_and(|name| name == "super") {
+                        if module.pop().is_none() {
+                            return false;
+                        }
+                        let _parent = path.remove(0);
+                    }
+                }
+                _ => {}
+            }
+            module.extend(path);
+            if explicit_local && module.first().is_none_or(|root| root != "crate") {
+                module.insert(0, "crate".to_owned());
+            }
+            let alias = module
+                .last()
+                .is_some_and(|name| self.aliases.is_some_and(|aliases| aliases.get(name).is_some_and(Option::is_some)));
+            if (!alias || self.defaults.local_default(&module) == Some(false)) && self.defaults.lacks_local_path(&module) {
+                return true;
+            }
+        }
+        if self.defaults.has_single_source_evidence() {
+            return false;
+        }
         let name = self.package_type_name(ty);
         name.is_some_and(|name| self.defaults.lacks_default_name(&name))
     }
 
     fn package_defines(&self, ty: &Type) -> bool {
+        if self.defaults.has_labeled_sources() {
+            return self
+                .source_path(ty)
+                .is_some_and(|(source, inline, path)| self.defaults.source_defines(source, inline, &path));
+        }
         self.package_type_name(ty).is_some_and(|name| self.defaults.defines(&name))
     }
 
-    fn instantiate_alias(&self, ty: &Type) -> Option<Type> {
+    pub(super) fn instantiate_alias(&self, ty: &Type) -> Option<Type> {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.instantiate_alias_with_budget(ty, &mut budget)
+    }
+
+    fn instantiate_alias_with_budget(&self, ty: &Type, remaining: &mut usize) -> Option<Type> {
         let aliases = self.aliases?;
+        if !reserve_type(ty, remaining) {
+            return Some(syn::parse_quote!(_));
+        }
         let mut resolved = ty.clone();
         let mut visited = HashSet::default();
         let mut changed = false;
@@ -145,7 +398,7 @@ impl Types<'_> {
             }
 
             let name = path.path.segments[0].ident.to_string();
-            if self.imports.contains_key(&name) || self.defaults.defines(&name) {
+            if self.imports.contains_key(&name) || self.abstracts.contains(&name) || self.defaulted.contains(&name) {
                 return changed.then_some(resolved);
             }
             // #[gamma::skip(cond.always_false, tag = "timeout", reason = "removing cycle detection makes mutually recursive generic aliases resolve forever")]
@@ -162,7 +415,7 @@ impl Types<'_> {
                 .zip(arguments)
                 .map(|(parameter, argument)| (parameter.clone(), argument.clone()))
                 .collect();
-            resolved = substitute_type(&alias.target, &substitutions);
+            resolved = substitute_type_with_budget(&alias.target, &substitutions, remaining);
             changed = true;
         }
     }
@@ -181,7 +434,7 @@ impl Types<'_> {
             let Some(name) = (path.path.segments.len() == 1).then(|| path.path.segments[0].ident.to_string()) else {
                 return resolved;
             };
-            if self.imports.contains_key(&name) || self.defaults.defines(&name) {
+            if self.imports.contains_key(&name) || self.abstracts.contains(&name) || self.defaulted.contains(&name) {
                 return resolved;
             }
             // #[gamma::skip(cond.always_false, tag = "timeout", reason = "removing cycle detection makes mutually recursive aliases resolve forever")]
@@ -210,7 +463,118 @@ impl Types<'_> {
         }
     }
 
+    // All normalization entry points use a separate conservative reconstruction-work allowance.
+    // Its matching scale with visitor depth does not make the two budgets shared accounting.
+    pub(super) fn source_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, false, true, &mut budget)
+    }
+
+    pub(super) fn canonical_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, true, true, &mut budget)
+    }
+
+    pub(super) fn declaration_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, true, false, &mut budget)
+    }
+
+    fn source_type_at(&self, ty: &Type, remaining: &mut usize, freeze_primitives: bool, expand_aliases: bool, budget: &mut usize) -> Type {
+        if *remaining == 0 {
+            return syn::parse_quote!(_);
+        }
+        *remaining -= 1;
+        if !reserve_type(ty, budget) {
+            return syn::parse_quote!(_);
+        }
+        let alias = expand_aliases.then(|| self.instantiate_alias_with_budget(ty, budget)).flatten();
+        let ty = alias.as_ref().unwrap_or(ty);
+        if self.is_io_result_path(ty)
+            && let Some(inner) = payload(ty, 0)
+        {
+            let inner = self.source_type_at(inner, remaining, freeze_primitives, expand_aliases, budget);
+            return syn::parse_quote!(std::result::Result<#inner, std::io::Error>);
+        }
+        let mut resolved = ty.clone();
+        match &mut resolved {
+            Type::Path(path) if path.qself.is_none() => {
+                let Some(first) = path.path.segments.first() else {
+                    return syn::parse_quote!(_);
+                };
+                let name = first.ident.to_string();
+                if self.abstracts.contains(&name)
+                    || self.defaulted.contains(&name)
+                    || self
+                        .imports
+                        .get(BLOCK_TYPES)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|names| names.contains(&name))
+                {
+                    return syn::parse_quote!(_);
+                }
+                let Some(mut names) = resolved_type_path(ty, self.imports) else {
+                    return syn::parse_quote!(_);
+                };
+                let bare_primitive = names.len() == 1
+                    && primitive_kind(&name).is_some()
+                    && !self.defaults.defines(&name)
+                    && !self.imports.contains_key(&name)
+                    && !self.aliases.is_some_and(|aliases| aliases.contains_key(&name));
+                if freeze_primitives && bare_primitive && self.imports.contains_key("*") {
+                    return syn::parse_quote!(_);
+                }
+                let qualified_primitive = matches!(names.as_slice(), [root, module, primitive]
+                    if matches!(root.as_str(), "std" | "core")
+                        && module == "primitive"
+                        && primitive_kind(primitive).is_some());
+                let primitive = freeze_primitives && (bare_primitive || qualified_primitive);
+                if primitive {
+                    let name = names.pop().expect("a primitive path has a terminal type name");
+                    names = vec!["core".to_owned(), "primitive".to_owned(), name];
+                }
+                if names.len() == 1
+                    && (self.defaults.defines(&name) || self.aliases.is_some_and(|aliases| aliases.get(&name).is_some_and(Option::is_none)))
+                    && let Some(Some(module)) = self.imports.get(LOCAL_MODULE)
+                {
+                    names.splice(..0, core::iter::once("crate".to_owned()).chain(module.iter().cloned()));
+                }
+                if let Ok(mut qualified) = syn::parse_str::<Path>(&names.join("::")) {
+                    qualified.leading_colon = path.path.leading_colon.or_else(|| primitive.then(Default::default));
+                    if let (Some(last), Some(original)) = (qualified.segments.last_mut(), path.path.segments.last()) {
+                        last.arguments = original.arguments.clone();
+                        if let PathArguments::AngleBracketed(arguments) = &mut last.arguments {
+                            for argument in &mut arguments.args {
+                                if let GenericArgument::Type(inner) = argument {
+                                    *inner = self.source_type_at(inner, remaining, freeze_primitives, expand_aliases, budget);
+                                }
+                            }
+                        }
+                    }
+                    path.path = qualified;
+                }
+            }
+            Type::Reference(reference) => {
+                *reference.elem = self.source_type_at(&reference.elem, remaining, freeze_primitives, expand_aliases, budget);
+            }
+            Type::Tuple(tuple) => {
+                for element in &mut tuple.elems {
+                    *element = self.source_type_at(element, remaining, freeze_primitives, expand_aliases, budget);
+                }
+            }
+            Type::Array(array) => *array.elem = self.source_type_at(&array.elem, remaining, freeze_primitives, expand_aliases, budget),
+            Type::Ptr(pointer) => *pointer.elem = self.source_type_at(&pointer.elem, remaining, freeze_primitives, expand_aliases, budget),
+            Type::Slice(slice) => *slice.elem = self.source_type_at(&slice.elem, remaining, freeze_primitives, expand_aliases, budget),
+            Type::Paren(paren) => *paren.elem = self.source_type_at(&paren.elem, remaining, freeze_primitives, expand_aliases, budget),
+            Type::Group(group) => *group.elem = self.source_type_at(&group.elem, remaining, freeze_primitives, expand_aliases, budget),
+            _ => {}
+        }
+        resolved
+    }
     pub(super) fn payload<'a>(&'a self, ty: &'a Type, index: usize) -> Option<Cow<'a, Type>> {
+        if self.is_io_result(ty) && index == 1 {
+            return Some(Cow::Owned(syn::parse_quote!(std::io::Error)));
+        }
         if let Some(resolved) = self.instantiate_alias(ty) {
             return payload(&resolved, index).map(|payload| Cow::Owned(payload.clone()));
         }
@@ -220,14 +584,29 @@ impl Types<'_> {
         Some(Cow::Borrowed(payload))
     }
 
+    pub(super) fn value_kind(&self, ty: &Type) -> Kind {
+        if type_argument_values(ty).is_empty() {
+            return resolve_type(ty);
+        }
+        if self.supports_option_api(ty) {
+            Kind::Option
+        } else if self.supports_result_api(ty) {
+            Kind::Result
+        } else {
+            resolve_type(ty)
+        }
+    }
+
     /// Returns positive source-visible evidence that a value of `ty` can be defaulted.
     pub(super) fn has_default(&self, ty: &Type) -> bool {
+        let instantiated = self.instantiate_alias(ty);
+        let ty = instantiated.as_ref().unwrap_or(ty);
         let ty = self.resolve_alias(ty);
         let concrete = self
             .concrete_self_type(ty)
             .or_else(|| self.concrete_self_associated_type(ty))
             .unwrap_or(ty);
-        let kind = resolve_type(concrete);
+        let kind = self.value_kind(concrete);
         if matches!(kind, Kind::Collection | Kind::Map) && !self.supports_collection_api(concrete) {
             return self.renamed_collection_has_default(concrete);
         }
@@ -292,7 +671,10 @@ impl Types<'_> {
                 }) {
                     return true;
                 }
-                if path.path.segments.last().is_some_and(|segment| segment.ident == "RandomState") {
+                if resolved_type_path(concrete, self.imports).is_some_and(|segments| {
+                    matches!(segments.as_slice(), [root, collections, module, name]
+                        if root == "std" && collections == "collections" && module == "hash_map" && name == "RandomState")
+                }) {
                     return true;
                 }
                 path.path
@@ -305,16 +687,24 @@ impl Types<'_> {
     }
 
     pub(super) fn has_proven_default(&self, ty: &Type) -> bool {
+        let instantiated = self.instantiate_alias(ty);
+        let ty = instantiated.as_ref().unwrap_or(ty);
         let ty = self.resolve_alias(ty);
         let concrete = self
             .concrete_self_type(ty)
             .or_else(|| self.concrete_self_associated_type(ty))
             .unwrap_or(ty);
-        let kind = resolve_type(concrete);
+        let kind = self.value_kind(concrete);
         if matches!(strip(concrete), Type::Path(path)
             if path.path.get_ident().is_some_and(|ident| self.defaulted.contains(&ident.to_string())))
         {
             return true;
+        }
+        if self
+            .package_type_name(concrete)
+            .is_some_and(|name| self.defaults.generic_default_is_unproven(&name))
+        {
+            return false;
         }
         if self.package_declares_default(concrete) || self.local_generic_default(concrete) {
             return true;
@@ -485,12 +875,72 @@ impl Types<'_> {
         type_arguments(segment) == base_arity
     }
 
+    pub(super) fn collection_elements_proven(&self, ty: &Type) -> bool {
+        if !matches!(
+            self.standard_type_name(ty).as_deref(),
+            Some("HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "BinaryHeap")
+        ) {
+            return true;
+        }
+        self.payload(ty, 0).is_some_and(|element| self.collection_key_proven(&element, 64))
+    }
+
+    fn collection_key_proven(&self, ty: &Type, remaining: usize) -> bool {
+        if remaining == 0 {
+            return false;
+        }
+        let instantiated = self.instantiate_alias(ty);
+        let ty = self.resolve_alias(instantiated.as_ref().unwrap_or(ty));
+        match self.value_kind(ty) {
+            kind @ (Kind::Bool | Kind::Signed | Kind::Unsigned) => self.supports_primitive_kind(ty, kind),
+            Kind::String => self.supports_string_api(ty),
+            Kind::Option => {
+                self.supports_option_api(ty)
+                    && self
+                        .payload(ty, 0)
+                        .is_some_and(|inner| self.collection_key_proven(&inner, remaining - 1))
+            }
+            Kind::Result => {
+                self.supports_result_api(ty)
+                    && [0, 1].into_iter().all(|index| {
+                        self.payload(ty, index)
+                            .is_some_and(|inner| self.collection_key_proven(&inner, remaining - 1))
+                    })
+            }
+            Kind::Unit | Kind::Tuple => {
+                matches!(strip(ty), Type::Tuple(tuple)
+                    if tuple.elems.iter().all(|inner| self.collection_key_proven(inner, remaining - 1)))
+            }
+            Kind::Array => self.collection_key_proven(&array_type(ty).elem, remaining - 1),
+            Kind::Wrapper => {
+                self.supports_wrapper_api(ty)
+                    && self
+                        .payload(ty, 0)
+                        .is_some_and(|inner| self.collection_key_proven(&inner, remaining - 1))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn supports_option_api(&self, ty: &Type) -> bool {
         self.supports_standard_type(ty, "Option", "option", &["std", "core"])
     }
 
     pub(super) fn supports_result_api(&self, ty: &Type) -> bool {
-        self.supports_standard_type(ty, "Result", "result", &["std", "core"])
+        self.supports_standard_type(ty, "Result", "result", &["std", "core"]) || self.is_io_result(ty)
+    }
+
+    fn is_io_result(&self, ty: &Type) -> bool {
+        self.is_io_result_path(self.resolve_alias(ty))
+    }
+
+    fn is_io_result_path(&self, ty: &Type) -> bool {
+        self.unshadowed_path(ty).is_some_and(|path| {
+            matches!(
+                path.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+                ["std", "io", "Result"]
+            )
+        })
     }
 
     pub(super) fn supports_string_api(&self, ty: &Type) -> bool {
@@ -638,6 +1088,23 @@ impl Types<'_> {
 
     pub(super) fn standard_type_name(&self, ty: &Type) -> Option<String> {
         resolved_type_path(ty, self.imports)?.last().cloned()
+    }
+
+    pub(super) fn unshadowed_type_path(&self, ty: &Type) -> Option<Vec<String>> {
+        self.unshadowed_path(self.resolve_alias(ty))
+    }
+
+    fn unshadowed_path(&self, ty: &Type) -> Option<Vec<String>> {
+        let path = resolved_type_path(ty, self.imports)?;
+        let first = path.first()?;
+        if !self.standard_root_unshadowed(&path)
+            || self.abstracts.contains(first)
+            || self.defaulted.contains(first)
+            || path.len() == 1 && (self.defaults.defines(first) || self.imports.contains_key("*"))
+        {
+            return None;
+        }
+        Some(path)
     }
 
     pub(super) fn supports_default_trait(&self, ty: &Type) -> bool {
@@ -907,6 +1374,28 @@ impl Types<'_> {
     }
 
     pub(super) fn standard_iterator_bounded_parameters(generics: &Generics, imports: &HashMap<String, Option<Vec<String>>>) -> Vec<String> {
+        Self::bounded_parameters(generics, |path| Self::is_standard_iterator_path(path, imports))
+    }
+
+    pub(super) fn is_standard_reader_path(path: &Path, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
+        let ty = Type::Path(syn::TypePath {
+            attrs: Vec::new(),
+            qself: None,
+            path: path.clone(),
+        });
+        resolved_type_path(&ty, imports).is_some_and(|path| {
+            matches!(
+                path.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+                ["std", "io", "Read" | "BufRead"]
+            )
+        })
+    }
+
+    pub(super) fn standard_reader_bounded_parameters(generics: &Generics, imports: &HashMap<String, Option<Vec<String>>>) -> Vec<String> {
+        Self::bounded_parameters(generics, |path| Self::is_standard_reader_path(path, imports))
+    }
+
+    fn bounded_parameters(generics: &Generics, accepts: impl Fn(&Path) -> bool) -> Vec<String> {
         let mut bounded = HashSet::default();
         for parameter in &generics.params {
             let GenericParam::Type(parameter) = parameter else {
@@ -914,7 +1403,7 @@ impl Types<'_> {
             };
             if parameter.bounds.iter().any(|bound| {
                 matches!(bound, TypeParamBound::Trait(bound)
-                    if Self::is_standard_iterator_path(&bound.path, imports))
+                    if accepts(&bound.path))
             }) {
                 let _added = bounded.insert(parameter.ident.to_string());
             }
@@ -932,7 +1421,7 @@ impl Types<'_> {
                 };
                 if predicate.bounds.iter().any(|bound| {
                     matches!(bound, TypeParamBound::Trait(bound)
-                        if Self::is_standard_iterator_path(&bound.path, imports))
+                        if accepts(&bound.path))
                 }) {
                     let _added = bounded.insert(ident.to_string());
                 }
@@ -986,16 +1475,47 @@ impl Types<'_> {
     /// Two independent readings say so, and either is enough: an error type from another crate,
     /// which effectively never has one, or a type this workspace defines and gives none.
     pub(super) fn lacks_default(&self, ty: &Type) -> bool {
+        let instantiated = self.instantiate_alias(ty);
+        let ty = instantiated.as_ref().unwrap_or(ty);
         let concrete = self
             .concrete_self_type(ty)
             .or_else(|| self.concrete_self_associated_type(ty))
             .unwrap_or(ty);
         let concrete = self.resolve_alias(concrete);
 
-        matches!(strip(concrete), Type::Path(path) if path.path.is_ident("str"))
+        match strip(concrete) {
+            Type::Path(_) if self.supports_result_api(concrete) => return true,
+            Type::Never(_) => return true,
+            Type::Tuple(tuple) if tuple.elems.iter().any(|element| self.lacks_default(element)) => return true,
+            Type::Array(array) => {
+                if let syn::Expr::Lit(length) = &array.len
+                    && let syn::Lit::Int(length) = &length.lit
+                    && length.base10_parse::<usize>().is_ok_and(|length| length > 0)
+                    && self.lacks_default(&array.elem)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        if self.supports_wrapper_api(concrete)
+            && payload(concrete, 0).is_some_and(|inner| !self.is_unsized_str(inner) && self.lacks_default(inner))
+        {
+            return true;
+        }
+
+        self.is_unsized_str(concrete)
             || is_foreign_error(concrete, self.imports)
             || Self::is_standard_without_default(concrete, self.imports)
             || self.package_lacks_default(concrete)
+    }
+
+    fn is_unsized_str(&self, ty: &Type) -> bool {
+        self.unshadowed_type_path(ty).is_some_and(|path| {
+            matches!(path.as_slice(), [name] if name == "str")
+                || matches!(path.as_slice(), [root, module, name]
+                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == "str")
+        })
     }
 
     fn is_standard_without_default(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
@@ -1007,11 +1527,15 @@ impl Types<'_> {
                 || matches!(segments.as_slice(), [root, module, name]
                     if matches!(root.as_str(), "std" | "core") && module == "cmp" && name == "Ordering")
                 || matches!(segments.as_slice(), [root, module, name]
-                    if root == "std" && module == "process" && matches!(name.as_str(), "Command" | "Stdio"))
+                    if root == "std" && module == "process" && matches!(name.as_str(), "Command" | "Stdio" | "Output" | "Child"))
                 || matches!(segments.as_slice(), [root, module, name]
                     if root == "std" && module == "fs" && name == "File")
                 || matches!(segments.as_slice(), [root, module, name]
-                    if root == "std" && module == "sync" && name == "MutexGuard")
+                    if root == "std" && module == "sync" && matches!(name.as_str(), "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Barrier"))
+                || matches!(segments.as_slice(), [root, module, name]
+                    if root == "std" && module == "thread" && name == "JoinHandle")
+                || matches!(segments.as_slice(), [root, module, channel, name]
+                    if root == "std" && module == "sync" && channel == "mpsc" && matches!(name.as_str(), "Sender" | "SyncSender" | "Receiver"))
         })
     }
 
@@ -1059,13 +1583,6 @@ fn array_type(ty: &Type) -> &syn::TypeArray {
     };
     array
 }
-
-/// The one type outside this workspace whose name ends in `Error` and that does implement `Default`.
-///
-/// `core::fmt::Error` is a unit struct standing for "formatting failed", and it derives everything.
-/// Every other error type in `std` that was checked does not implement `Default`, so it is cheaper
-/// to name the exception than to enumerate the rule.
-pub(super) const DEFAULTABLE_ERROR: &str = "fmt";
 
 pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
     let mut segments = path.segments.iter().peekable();
@@ -1128,40 +1645,24 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
     Some(segments)
 }
 
-/// Returns whether a type is an error type from outside this workspace, which will have no `Default`.
+/// Exact external error APIs whose `Default` obligations are unavailable.
 ///
-/// Error types are the largest single source of mutants that cannot compile: `Err(Default::default())`
-/// wants an error value, and `std::io::Error`, `anyhow::Error`, `serde_json::Error` and their kind
-/// have no `Default` and are not going to acquire one. Withholding the mutant there costs no signal,
-/// because there was never a mutant to lose.
-///
-/// The rule is deliberately confined to types from *other* crates. A workspace error type may well
-/// be an enum with a `#[default]` variant, and the collector cannot see the definition to find out,
-/// so `crate::`, `self::`, `super::` and any name this file does not import stay optimistic.
+/// An arbitrary dependency type ending in `Error` is not negative evidence.
 pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Some(resolved) = resolved_type_path(ty, imports) else {
         return false;
     };
 
-    let Some(last) = resolved.last() else {
-        return false;
-    };
-
-    if !last.ends_with("Error") {
-        return false;
-    }
-
-    let prefix = &resolved[..resolved.len().saturating_sub(1)];
-
-    let (Some(root), Some(qualifier)) = (prefix.first(), prefix.last()) else {
-        return false;
-    };
-
-    if matches!(root.as_str(), "crate" | "self" | "super") {
-        return false;
-    }
-
-    qualifier != DEFAULTABLE_ERROR
+    matches!(
+        resolved.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        ["std", "io", "Error"]
+            | ["std" | "core", "num", "ParseIntError" | "ParseFloatError" | "TryFromIntError"]
+            | ["std" | "core", "str", "Utf8Error"]
+            | ["std" | "alloc", "string", "FromUtf8Error" | "FromUtf16Error"]
+            | ["std", "env", "VarError" | "JoinPathsError"]
+            | ["std" | "core", "net", "AddrParseError"]
+            | ["anyhow" | "serde_json" | "syn", "Error"]
+    )
 }
 
 /// Returns whether a signature's `Result` fixes its error type to one with no `Default`.
@@ -1303,6 +1804,10 @@ mod tests {
             } else {
                 HashMap::default()
             };
+            let mut aliases = aliases.clone();
+            if !imported {
+                let _shadow = aliases.insert("Alias".into(), None);
+            }
             let types = Types {
                 aliases: Some(&aliases),
                 ..facts(&defaults, &imports)
@@ -1911,7 +2416,7 @@ mod tests {
         ] {
             assert!(!is_foreign_error(&syn::parse_str(text).unwrap(), &imports), "{text}");
         }
-        assert!(is_foreign_error(&parse_quote!(foreign::nested::Error), &imports));
+        assert!(!is_foreign_error(&parse_quote!(foreign::nested::Error), &imports));
         assert!(!is_foreign_error(&parse_quote!(core::fmt::Error), &imports));
         let defaults = Defaults::default();
         let types = facts(&defaults, &imports);
@@ -1920,7 +2425,7 @@ mod tests {
             &parse_quote!(-> Wrapper<bool, foreign::Error>),
             &types
         ));
-        assert!(returns_undefaultable_error(&parse_quote!(-> Result<bool, foreign::Error>), &types));
+        assert!(!returns_undefaultable_error(&parse_quote!(-> Result<bool, foreign::Error>), &types));
     }
 
     #[test]
@@ -2753,7 +3258,6 @@ mod tests {
 
     #[test]
     fn a_same_crate_qualified_import_borrows_package_default_evidence() {
-        let defaults = defaults("struct Artifact;");
         let abstracts = Vec::new();
         let defaulted = Vec::new();
         let aliases = HashMap::default();
@@ -2761,17 +3265,44 @@ mod tests {
             "Artifact".to_owned(),
             Some(vec!["crate".to_owned(), "catalog".to_owned(), "Artifact".to_owned()]),
         )]);
-        let types = Types {
-            abstracts: &abstracts,
-            defaulted: &defaulted,
-            imports: &imports,
-            defaults: &defaults,
-            aliases: Some(&aliases),
-            self_type: None,
-            self_associated: None,
-        };
+        for (source, merged, lacks, proven) in [
+            ("mod catalog { pub struct Artifact; }", false, true, false),
+            (
+                "#[derive(Default)] struct Artifact; mod catalog { pub struct Artifact; }",
+                false,
+                true,
+                false,
+            ),
+            (
+                "struct Artifact; mod catalog { #[derive(Default)] pub struct Artifact; }",
+                false,
+                false,
+                true,
+            ),
+            ("struct Artifact;", false, false, false),
+            ("struct Artifact;", true, true, false),
+        ] {
+            let mut index = defaults(source);
+            if merged {
+                index.absorb(defaults("struct Other;"));
+            }
+            let types = Types {
+                abstracts: &abstracts,
+                defaulted: &defaulted,
+                imports: &imports,
+                defaults: &index,
+                aliases: Some(&aliases),
+                self_type: None,
+                self_associated: None,
+            };
 
-        assert!(types.lacks_default(&parse_quote!(Artifact)));
+            assert_eq!(types.lacks_default(&parse_quote!(Artifact)), lacks, "{source}, merged={merged}");
+            assert_eq!(
+                types.has_proven_default(&parse_quote!(Artifact)),
+                proven,
+                "{source}, merged={merged}"
+            );
+        }
     }
 
     #[test]
@@ -3054,6 +3585,79 @@ mod tests {
             elem: Box::new(parse_quote!(bool)),
         });
         assert_eq!(substitute_type(&grouped, &substitutions), expected);
+    }
+
+    #[test]
+    fn substitution_checks_projected_size_and_does_not_resubstitute_replacements() {
+        let substitutions = HashMap::from_iter([("T".to_owned(), parse_quote!((u8, u8)))]);
+        let input = parse_quote!(Vec<T>);
+        assert_eq!(type_size(&input, None, 4), Some(4));
+        assert_eq!(type_size(&input, Some(&substitutions), 7), Some(7));
+        assert_eq!(type_size(&input, Some(&substitutions), 6), None);
+
+        let mut budget = 11;
+        assert_eq!(
+            substitute_type_with_budget(&input, &substitutions, &mut budget),
+            parse_quote!(Vec<(u8, u8)>)
+        );
+        assert_eq!(budget, 0);
+        assert_eq!(substitute_type_with_budget(&input, &substitutions, &mut 10), parse_quote!(_));
+        let substitutions = HashMap::from_iter([("T".to_owned(), parse_quote!((T, T)))]);
+        assert_eq!(substitute_type(&parse_quote!(T), &substitutions), parse_quote!((T, T)));
+    }
+
+    #[test]
+    fn type_budget_checks_width_depth_and_constant_expressions_before_cloning() {
+        let mut ty: Type = parse_quote!(());
+        let Type::Tuple(tuple) = &mut ty else { unreachable!() };
+        tuple.elems = (0..TYPE_EXPANSION_LIMIT / 2 - 1).map(|_| -> Type { parse_quote!(_) }).collect();
+        assert_eq!(type_size(&ty, None, TYPE_EXPANSION_LIMIT), Some(TYPE_EXPANSION_LIMIT / 2));
+        assert_eq!(substitute_type(&ty, &HashMap::default()), ty);
+        let Type::Tuple(tuple) = &mut ty else { unreachable!() };
+        tuple.elems.push(parse_quote!(_));
+        assert_eq!(substitute_type(&ty, &HashMap::default()), parse_quote!(_));
+
+        let mut nested: Type = parse_quote!(_);
+        for _ in 0..64 {
+            nested = Type::Paren(syn::TypeParen {
+                attrs: Vec::new(),
+                paren_token: syn::token::Paren::default(),
+                elem: Box::new(nested),
+            });
+        }
+        assert_eq!(substitute_type(&nested, &HashMap::default()), parse_quote!(_));
+        let array: Type = parse_quote!([u8; 1 + 2]);
+        assert!(type_size(&array, None, 5).is_none());
+        assert_eq!(type_size(&array, None, 6), Some(6));
+    }
+
+    #[test]
+    fn acyclic_generic_alias_growth_becomes_unknown_within_the_shared_budget() {
+        let file = syn::parse_file(include_str!("fixtures/expanding_aliases.rs")).unwrap();
+        let aliases = file
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Type(alias) => Some((
+                    alias.ident.to_string(),
+                    Some(Alias {
+                        parameters: alias.generics.type_params().map(|parameter| parameter.ident.to_string()).collect(),
+                        target: *alias.ty,
+                    }),
+                )),
+                _ => None,
+            })
+            .collect();
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let mut types = facts(&defaults, &imports);
+        types.aliases = Some(&aliases);
+        assert_eq!(types.instantiate_alias(&parse_quote!(Generic0<bool>)), Some(parse_quote!(_)));
+        assert_eq!(types.source_type(&parse_quote!(Generic0<bool>)), parse_quote!(_));
+        assert_eq!(types.canonical_type(&parse_quote!(Generic0<bool>)), parse_quote!(_));
+        let branching = types.source_type(&parse_quote!(Branch0<bool>));
+        assert!(type_size(&branching, None, TYPE_EXPANSION_LIMIT).is_some());
+        assert!(!types.has_default(&branching));
     }
 
     #[test]

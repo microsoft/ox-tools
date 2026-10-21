@@ -1,0 +1,63 @@
+{
+  "packages": [
+    {
+      "name": "alpha", "version": "0.1.0", "id": "path+file:///fixture/alpha#0.1.0",
+      "source": null, "dependencies": [], "features": {},
+      "targets": [
+        {"name": "alpha", "kind": ["lib"], "crate_types": ["lib"], "src_path": "C:/fixture/alpha/src/lib.rs", "edition": "2024", "test": true, "doc": true, "doctest": true},
+        {"name": "cli", "kind": ["bin"], "crate_types": ["bin"], "src_path": "C:/fixture/alpha/src/main.rs", "edition": "2024", "test": true, "doc": true, "doctest": false}
+      ],
+      "manifest_path": "C:/fixture/alpha/Cargo.toml", "metadata": null,
+      "authors": [], "categories": [], "keywords": [], "edition": "2024"
+    },
+    {
+      "name": "beta", "version": "1.2.3", "id": "path+file:///fixture/beta#1.2.3",
+      "source": null, "dependencies": [], "features": {},
+      "targets": [
+        {"name": "beta", "kind": ["lib"], "crate_types": ["lib"], "src_path": "C:/fixture/beta/src/lib.rs", "edition": "2024", "test": true, "doc": true, "doctest": true}
+      ],
+      "manifest_path": "C:/fixture/beta/Cargo.toml", "metadata": null,
+      "authors": [], "categories": [], "keywords": [], "edition": "2024"
+    },
+    {
+      "name": "registry-leaf", "version": "2.3.4", "id": "registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4",
+      "source": "registry+https://github.com/rust-lang/crates.io-index", "dependencies": [], "features": {},
+      "targets": [
+        {"name": "registry_leaf", "kind": ["lib"], "crate_types": ["lib"], "src_path": "C:/registry/leaf/src/lib.rs", "edition": "2024", "test": true, "doc": true, "doctest": true}
+      ],
+      "manifest_path": "C:/registry/leaf/Cargo.toml", "metadata": null,
+      "authors": [], "categories": [], "keywords": [], "edition": "2024"
+    }
+  ],
+  "workspace_members": ["path+file:///fixture/alpha#0.1.0", "path+file:///fixture/beta#1.2.3"],
+  "workspace_default_members": ["path+file:///fixture/alpha#0.1.0"],
+  "workspace_root": "C:/fixture",
+  "target_directory": "C:/fixture/target",
+  "resolve": {
+    "root": null,
+    "nodes": [
+      {
+        "id": "path+file:///fixture/alpha#0.1.0", "features": [],
+        "dependencies": ["path+file:///fixture/beta#1.2.3", "registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4"],
+        "deps": [
+          {"name": "renamed_beta", "pkg": "path+file:///fixture/beta#1.2.3", "dep_kinds": [{"kind": "build", "target": null}, {"kind": null, "target": null}]},
+          {"name": "build_only", "pkg": "registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4", "dep_kinds": [{"kind": "build", "target": null}]},
+          {"name": "dev_leaf", "pkg": "registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4", "dep_kinds": [{"kind": "dev", "target": null}]}
+        ]
+      },
+      {
+        "id": "path+file:///fixture/beta#1.2.3", "features": ["fast", "std"],
+        "dependencies": ["registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4"],
+        "deps": [
+          {"name": "leaf", "pkg": "registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4", "dep_kinds": [{"kind": null, "target": null}]}
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#registry-leaf@2.3.4", "features": ["alloc"],
+        "dependencies": [], "deps": []
+      }
+    ]
+  },
+  "metadata": null,
+  "version": 1
+}

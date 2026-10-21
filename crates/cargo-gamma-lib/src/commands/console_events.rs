@@ -60,6 +60,12 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
     }
 
     fn begin(&mut self, active: &str, completed: &str, detail: &str) {
+        let detail = if active == "Excluding" {
+            self.progress.reset_unviable();
+            "unviable mutants (0 found)"
+        } else {
+            detail
+        };
         if self.dashboard.is_active() {
             self.dashboard.status(self.host, active, detail);
             return;
@@ -110,12 +116,19 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
     }
 
     fn convergence_progress(&mut self, unviable: usize) {
+        let unviable = self.progress.confirmed_unviable(unviable);
         let detail = format!("unviable mutants ({unviable} found)");
         if self.dashboard.is_active() {
             self.dashboard.status(self.host, "Excluding", &detail);
             return;
         }
         self.progress.update_phase(self.host, &detail);
+    }
+
+    fn convergence_activity(&mut self, _round: u32, unviable: usize, _proof: usize) {
+        // Both displays report monotonic confirmed exclusions, never check rounds, proof subset
+        // sizes, or interaction-only exclusions that do not establish individual unviability.
+        self.convergence_progress(unviable);
     }
 
     fn build_output(&mut self, line: &str) {
@@ -221,6 +234,12 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
 
     fn mutant_started(&mut self) {
         self.dashboard.mutant_started();
+        self.sync_testing_status();
+        self.dashboard.tick(self.host);
+    }
+
+    fn mutant_activity(&mut self, active: bool) {
+        self.dashboard.mutant_activity(active);
         self.sync_testing_status();
         self.dashboard.tick(self.host);
     }
@@ -356,9 +375,9 @@ mod tests {
         let rendered = String::from_utf8_lossy(&events.host.err);
         assert!(rendered.contains("    Planning 0/1 mutants planned"), "{rendered}");
 
-        events.begin("Census", "Censused", "selecting useful tests");
+        events.begin("Testing", "Tested", "executing mutants");
         events.phase_progress(2, 10, "tests");
-        events.end(", selected 4 tests");
+        events.end(", 4 killed");
         events.complete("reachability index ready");
 
         assert_eq!(
@@ -662,6 +681,7 @@ mod tests {
         };
 
         events.begin("Excluding", "Excluded", "unviable mutants");
+        assert!(events.host.err().contains("Excluding unviable mutants (0 found)"));
         events.convergence_progress(10);
         events.complete("10 unviable mutants, leaving 20 viable mutants");
 
@@ -680,6 +700,151 @@ mod tests {
         assert!(!rendered.contains("schema checks"), "{rendered}");
         assert!(!rendered.contains("round"), "{rendered}");
         assert!(!rendered.contains("Cargo reused"), "{rendered}");
+    }
+
+    #[test]
+    fn excluding_retains_confirmed_counts_through_proofs_in_both_displays() {
+        for dashboard in [false, true] {
+            let mut host = Sink::default().terminal(160);
+            let mut events = ConsoleEvents {
+                host: &mut host,
+                progress: Progress::new(true, Styler::new(false), Some(160)),
+                dashboard: Dashboard::new(dashboard, Some(160), Styler::new(false)),
+                styler: Styler::new(false),
+                show_build: false,
+                verdict_log: VerdictLog::default(),
+            };
+            if dashboard {
+                events.sweep_planning(&empty_plan(), 1, 1);
+            }
+            events.begin("Excluding", "Excluded", "unviable mutants");
+            if dashboard {
+                assert_eq!(events.dashboard.testing_status_for_test(), "Excluding unviable mutants (0 found)");
+            }
+            for (reported, retained) in [(3, 3), (1, 3), (10, 10), (0, 10)] {
+                events.convergence_progress(reported);
+                events.isolation_evidence(123, 456, &[], 1, 2, &[]);
+                events.build_progress("checking 99 active mutants");
+                events.build_finished();
+                let expected = format!("Excluding unviable mutants ({retained} found)");
+                if dashboard {
+                    assert_eq!(events.dashboard.testing_status_for_test(), expected);
+                } else {
+                    assert!(events.host.err().ends_with(&expected), "{}", events.host.err());
+                }
+            }
+            assert!(!events.host.err().contains("123 found"));
+            assert!(!events.host.err().contains("456 found"));
+            events.begin("Excluding", "Excluded", "unviable mutants");
+            if dashboard {
+                assert_eq!(events.dashboard.testing_status_for_test(), "Excluding unviable mutants (0 found)");
+            } else {
+                assert!(events.host.err().ends_with("Excluding unviable mutants (0 found)"));
+            }
+        }
+    }
+
+    #[test]
+    fn excluding_shows_only_confirmed_counts_during_check_activity_in_both_displays() {
+        for dashboard in [false, true] {
+            let mut host = Sink::default().terminal(160);
+            let mut events = ConsoleEvents {
+                host: &mut host,
+                progress: Progress::new(true, Styler::new(false), Some(160)),
+                dashboard: Dashboard::new(dashboard, Some(160), Styler::new(false)),
+                styler: Styler::new(false),
+                show_build: false,
+                verdict_log: VerdictLog::default(),
+            };
+            if dashboard {
+                events.sweep_planning(&empty_plan(), 1, 1);
+            }
+            events.begin("Excluding", "Excluded", "unviable mutants");
+            for (confirmed, retained, round, proof) in [(0, 0, 2, 7), (3, 3, 3, 0), (10, 10, 4, 2), (0, 10, 5, 0)] {
+                if confirmed > 0 {
+                    events.convergence_progress(confirmed);
+                }
+                events.convergence_activity(round, confirmed, proof);
+                events.build_finished();
+                let expected = format!("Excluding unviable mutants ({retained} found)");
+                if dashboard {
+                    assert_eq!(events.dashboard.testing_status_for_test(), expected);
+                } else {
+                    assert!(events.host.err().ends_with(&expected), "{}", events.host.err());
+                }
+            }
+            assert!(!events.host.err().contains("105 found"));
+            assert!(!events.host.err().contains("13 found"));
+            for hidden in ["provisional", "confirmed", "; check", "proof"] {
+                assert!(!events.host.err().contains(hidden), "{}", events.host.err());
+            }
+        }
+    }
+
+    #[test]
+    fn file_only_sweep_telemetry_never_changes_either_console_display() {
+        use core::time::Duration;
+
+        let mut session = crate::exec::Session {
+            baseline: Duration::ZERO,
+            baseline_wall: Duration::ZERO,
+            tests: None,
+            quiet: Duration::ZERO,
+            stall: None,
+            build: Duration::ZERO,
+            peak: None,
+            metered: false,
+            unbounded: None,
+            withdrawn: 0,
+            census: Vec::new(),
+            rounds: 0,
+            rounds_taken: Vec::new(),
+            binaries: Vec::new(),
+            scratch: Utf8PathBuf::from("unused"),
+            filtered: 0,
+            widened: false,
+            ordering: crate::exec::OrderingHints::default(),
+            phases: crate::exec::Phases::default(),
+        };
+        let render = |dashboard, session: &crate::exec::Session| {
+            let mut host = Sink::default().terminal(160);
+            let mut events = ConsoleEvents {
+                host: &mut host,
+                progress: Progress::new(true, Styler::new(false), Some(160)),
+                dashboard: Dashboard::new(dashboard, Some(160), Styler::new(false)),
+                styler: Styler::new(false),
+                show_build: false,
+                verdict_log: VerdictLog::default(),
+            };
+            let plan = empty_plan();
+            events.sweep_planning(&plan, 1, 1);
+            events.measured(&plan, session);
+            events.sweep_planned(&[], 1);
+            let status = events.dashboard.testing_status_for_test().to_owned();
+            let progress = events.progress.render();
+            (host.err(), host.out, status, progress)
+        };
+        for dashboard in [false, true] {
+            session.phases.sweep = None;
+            let before = render(dashboard, &session);
+            session.phases.sweep = Some(crate::exec::SweepCost {
+                accounting: Some(crate::exec::SweepAccounting {
+                    complete: true,
+                    initial_population: Some(43_164),
+                    initial_exact_hints: Some(34_603),
+                    initial_killer_confirmed: Some(245),
+                    exact: crate::exec::AttemptCost {
+                        launches: 999,
+                        execution_ms: 123_456,
+                        ..crate::exec::AttemptCost::default()
+                    },
+                    duplicate_launches_avoided: 777,
+                    ..crate::exec::SweepAccounting::default()
+                }),
+                ..crate::exec::SweepCost::default()
+            });
+            assert_eq!(render(dashboard, &session), before);
+        }
     }
 
     /// A warning about what a run is about to cost is worth nothing if it is only shown when
