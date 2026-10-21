@@ -1064,6 +1064,22 @@ mod tests {
                 ),
             ],
         );
+        let rustc = env::var_os("RUSTC").map_or_else(
+            || {
+                let output = Command::new("rustc")
+                    .args(["--print", "sysroot"])
+                    .output()
+                    .expect("the active compiler reports its sysroot");
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                let sysroot = String::from_utf8(output.stdout).expect("the compiler sysroot is UTF-8");
+                Utf8PathBuf::from(sysroot.trim())
+                    .join("bin")
+                    .join(format!("rustc{}", env::consts::EXE_SUFFIX))
+                    .into_std_path_buf()
+                    .into_os_string()
+            },
+            |configured| configured,
+        );
         let mut child = Command::new(env::current_exe().expect("the test executable has a native path"));
         child
             .args([
@@ -1075,7 +1091,7 @@ mod tests {
             .env("RUSTFLAGS", "")
             .env_remove("CARGO_ENCODED_RUSTFLAGS")
             .env_remove("CARGO_BUILD_TARGET")
-            .env_remove("RUSTC")
+            .env("RUSTC", rustc)
             .env("CARGO_HOME", root.join("private-cargo-home"));
         let output = crate::testing::within(crate::testing::WATCHDOG, "isolated profile and host queries", move || {
             child.output().expect("the isolated test process starts")

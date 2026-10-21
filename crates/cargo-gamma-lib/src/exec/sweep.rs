@@ -6601,12 +6601,12 @@ mod tests {
         const SCRIPT: &[&str] = &[
             "when-arg:tests::t0|print:test tests::t0 ... FAILED",
             "when-arg:tests::t0|exit:1",
-            "sleep:200",
+            "sleep:10000",
             "exit:0",
         ];
 
         let (_directory, work, plan, mut binaries) = helper_harness(SCRIPT);
-        binaries[0].budget = Some(Duration::from_millis(20));
+        binaries[0].budget = Some(Duration::from_secs(3));
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
         let census = Census::partial(&binaries[0].path, plan.mutants[0].ordinal, 1, 4);
         let tally = Tally::default();

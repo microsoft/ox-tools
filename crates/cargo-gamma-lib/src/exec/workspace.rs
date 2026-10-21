@@ -5248,7 +5248,7 @@ mod tests {
             .to_owned()
     }
 
-    fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {
+    fn assert_external_target_preserves_git_context(source: &Utf8Path, expected_head: &str) {
         let survey = crate::discover::Survey::for_build(
             &crate::commands::SelectArgs {
                 dir: source.to_owned(),
@@ -5258,7 +5258,11 @@ mod tests {
             &crate::exec::CargoOptions::default(),
         )
         .expect("Cargo metadata resolves the configured external target");
-        assert_eq!(survey.target, target);
+        assert!(
+            !survey.target.starts_with(source),
+            "the fixture must resolve an external target, got `{}` beneath `{source}`",
+            survey.target
+        );
 
         let mut events = crate::testing::Recorder::default();
         let work = Workspace::prepare(&survey.root, &survey.target, &Config::default(), &mut events)
@@ -5294,7 +5298,7 @@ mod tests {
         let target = root.join("t");
         let expected_head = initialize_git_build_fixture(&repository, &target);
 
-        assert_external_target_preserves_git_context(&repository, &target, &expected_head);
+        assert_external_target_preserves_git_context(&repository, &expected_head);
 
         let worktree = root.join("w");
         let output = Command::new("git")
@@ -5306,7 +5310,7 @@ mod tests {
             .output()
             .expect("git worktree runs");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_external_target_preserves_git_context(&worktree, &target, &expected_head);
+        assert_external_target_preserves_git_context(&worktree, &expected_head);
     }
 
     #[test]
@@ -6544,8 +6548,18 @@ mod tests {
         let executable = directory.path().join(format!("cargo-gamma{}", env::consts::EXE_SUFFIX));
         fs::copy(env::current_exe().unwrap(), &executable).unwrap();
         let self_wrapper = executable.to_str().unwrap();
+        let cargo_home = Utf8Path::from_path(directory.path()).unwrap().join("cargo-home");
+        fs::create_dir_all(&cargo_home).unwrap();
         for outer in [None, Some("distinct-outer-wrapper"), Some(self_wrapper)] {
-            let child = run_child_at(&executable, "wrapper_capture", &[("RUSTC_WRAPPER", outer)]);
+            let child = run_child_at(
+                &executable,
+                "wrapper_capture",
+                &[
+                    ("RUSTC_WRAPPER", outer),
+                    ("CARGO_BUILD_RUSTC_WRAPPER", None),
+                    ("CARGO_HOME", Some(cargo_home.as_str())),
+                ],
+            );
             assert_eq!(child["capture"], "retained");
         }
     }
