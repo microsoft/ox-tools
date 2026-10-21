@@ -416,7 +416,7 @@ jobs:
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
-    # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
+    # runs on every leg except Windows ARM (omitted here for brevity).
     needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false

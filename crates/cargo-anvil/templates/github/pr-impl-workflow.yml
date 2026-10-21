@@ -187,8 +187,8 @@ jobs:
     # Tests + coverage: llvm-cov / doc-test / examples.
     # 4-leg matrix -- compile and runtime behaviour can differ across
     # OS and arch for cfg-gated code, so we exercise tests on every leg.
-    # Coverage uploads from the canonical x86_64 Linux leg only to
-    # avoid Codecov double-counting.
+    # Coverage uploads from every leg except Windows ARM so Codecov sees
+    # platform-gated code while avoiding that target's unusable LLVM profiles.
     needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false

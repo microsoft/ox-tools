@@ -303,11 +303,11 @@ impl Survey {
 
         let features = features::from_extra(&args.features, &cargo.extra);
         let metadata = load_metadata(&args.dir, &features)?;
-        Self::from_metadata(args, shard, cargo, &features, &metadata, cache_inputs)
+        Self::for_build_with_metadata(args, shard, cargo, &features, &metadata, cache_inputs)
     }
 
     #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
-    fn from_metadata(
+    fn for_build_with_metadata(
         args: &SelectArgs,
         shard: Option<(u32, u32)>,
         cargo: &CargoOptions,
@@ -4308,7 +4308,7 @@ mod tests {
             ..SelectArgs::default()
         };
 
-        let survey = Survey::from_metadata(&args, None, &CargoOptions::default(), &FeatureArgs::default(), &metadata, false)
+        let survey = Survey::for_build_with_metadata(&args, None, &CargoOptions::default(), &FeatureArgs::default(), &metadata, false)
             .expect("the injected metadata must survey");
 
         assert_eq!(survey.target, target);

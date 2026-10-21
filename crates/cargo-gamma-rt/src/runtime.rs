@@ -2043,7 +2043,7 @@ fn selected() -> u32 {
     let value = ACTIVE.load(Ordering::Acquire);
 
     #[cfg(all(any(unix, windows), not(miri)))]
-    reject_uninstalled(value);
+    terminate_if_uninstalled(value);
 
     value
 }
@@ -2055,7 +2055,7 @@ fn selected() -> u32 {
 #[cfg(all(any(unix, windows), not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[inline]
-fn reject_uninstalled(value: u32) {
+fn terminate_if_uninstalled(value: u32) {
     if value == UNINSTALLED {
         uninstalled_guard();
     }
