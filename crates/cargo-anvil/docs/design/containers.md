@@ -106,6 +106,13 @@ try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONT
 | `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.4). |
 | `GITHUB_TOKEN` | Forwarded by name only with a leading `anvil-container --github-token` flag. Must be explicitly supplied in the host environment (§5.3). |
 
+The repository's `scripts/test-anvil-dogfood.ps1` follows the same opt-in contract.
+Pass `-GitHubToken` with a supplied host `GITHUB_TOKEN` to authenticate its containerized
+checks, including `anvil-aprz` and the requested tier. Missing or blank tokens fail before
+the suite starts. Without the switch, container commands remain unauthenticated even
+when the host has a token. The script never reads host GitHub CLI credentials or places
+the token value in command arguments.
+
 `NO_REBUILD` is evaluated independently of `NO_CACHE`, so the two compose: `anvil-container-status` sets `NO_REBUILD`
 and `NO_RESOLVE` together and answers from local state alone. When `NO_REBUILD` stops a build the reference is still
 printed, since a caller that asked not to build is usually asking which image is missing.
