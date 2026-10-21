@@ -217,7 +217,7 @@ pub(crate) async fn read_response_body<T>(read: impl Future<Output = fetch::Resu
 async fn read_response_body_with_clock<T>(read: impl Future<Output = fetch::Result<T>>, clock: &Clock) -> fetch::Result<T> {
     read.timeout(clock, DEFAULT_REQUEST_TIMEOUT)
         .await
-        .map_err(|_| fetch::HttpError::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP response body timed out")))?
+        .map_err(|_timeout| fetch::HttpError::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP response body timed out")))?
 }
 
 /// Execute an async download operation with automatic retry and timeout.
@@ -433,7 +433,7 @@ mod tests {
         let mut read = std::pin::pin!(read);
 
         assert!(futures_util::poll!(&mut read).is_pending());
-        control.advance(DEFAULT_REQUEST_TIMEOUT - Duration::from_secs(1));
+        control.advance(DEFAULT_REQUEST_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap());
         assert!(futures_util::poll!(&mut read).is_pending());
         control.advance(Duration::from_secs(1));
         let std::task::Poll::Ready(result) = futures_util::poll!(&mut read) else {
