@@ -260,9 +260,10 @@ mod tests {
     #[test]
     fn missing_target_requirement_lists_packages() {
         let err = MissingTargetPerPackageError::new("alpha@1.0.0, beta@2.0.0".to_owned());
-        let rendered = err.to_string();
-        assert!(rendered.contains("--require-target-per-package"));
-        assert!(rendered.contains("alpha@1.0.0, beta@2.0.0"));
+        assert_eq!(
+            err.to_string(),
+            "`--require-target-per-package` found selected packages without a matching target: alpha@1.0.0, beta@2.0.0"
+        );
     }
 
     #[test]
