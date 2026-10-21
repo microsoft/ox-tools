@@ -182,7 +182,7 @@ impl Provider {
             if status == fetch::StatusCode::NOT_FOUND {
                 return Ok(Ok(None));
             }
-            let body = match response.into_body().into_text().await {
+            let body = match crate::facts::resilient_http::read_response_body(response.into_body().into_text()).await {
                 Ok(body) => body,
                 Err(_) => UNREADABLE_BODY_PLACEHOLDER.to_owned(),
             };

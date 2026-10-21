@@ -526,7 +526,7 @@ impl Provider {
         let url = Self::repo_url(client, owner, repo, "");
 
         let (resp, rate_limit) = unwrap_or_return!(client.api_call(&url).await);
-        match resp.into_body().into_json().await {
+        match crate::facts::resilient_http::read_response_body(resp.into_body().into_json()).await {
             Ok(repo_info) => HostingApiResult::Success(repo_info, rate_limit),
             Err(e) => HostingApiResult::Failed(e.into(), rate_limit),
         }
@@ -563,7 +563,7 @@ impl Provider {
                 .and_then(|h| h.to_str().ok())
                 .is_some_and(|link_str| link_str.contains(r#"rel="next""#));
 
-            let issues: Vec<Issue> = match resp.into_body().into_json().await {
+            let issues: Vec<Issue> = match crate::facts::resilient_http::read_response_body(resp.into_body().into_json()).await {
                 Ok(i) => i,
                 Err(e) => return HostingApiResult::Failed(e.into(), latest_rate_limit),
             };

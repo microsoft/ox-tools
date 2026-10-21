@@ -174,7 +174,7 @@ impl Provider {
         }
 
         // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
-        let text = contextualize_response_text(response.into_body().into_text().await)?;
+        let text = contextualize_response_text(crate::facts::resilient_http::read_response_body(response.into_body().into_text()).await)?;
 
         log::debug!(target: LOG_TARGET, "Codecov SVG length: {} bytes", text.len());
 

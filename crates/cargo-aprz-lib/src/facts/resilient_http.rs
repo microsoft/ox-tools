@@ -209,6 +209,17 @@ pub async fn resilient_get_authorized(client: &HttpClient, url: &str, authorizat
     get_following_redirects(client, Url::parse(url)?, authorization).await
 }
 
+/// Bound a small response body's read independently of request retries.
+pub(crate) async fn read_response_body<T>(read: impl Future<Output = fetch::Result<T>>) -> fetch::Result<T> {
+    read_response_body_with_clock(read, &Clock::new_tokio()).await
+}
+
+async fn read_response_body_with_clock<T>(read: impl Future<Output = fetch::Result<T>>, clock: &Clock) -> fetch::Result<T> {
+    read.timeout(clock, DEFAULT_REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| fetch::HttpError::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP response body timed out")))?
+}
+
 /// Execute an async download operation with automatic retry and timeout.
 ///
 /// Wraps an entire download (connect + stream) so that mid-stream failures
@@ -400,6 +411,58 @@ mod tests {
         let cloned = client.clone();
 
         assert!(core::ptr::eq(client.get(), cloned.get()));
+    }
+
+    #[tokio::test]
+    async fn stalled_response_body_expires_without_repeating_the_request() {
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let handler = fetch::fake::FakeHandler::from_fn({
+            let attempts = Arc::clone(&attempts);
+            move |_| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                fetch::HttpResponseBuilder::new_fake()
+                    .stream(futures_util::stream::pending())
+                    .build()
+            }
+        });
+        let client = configure_request_resilience(HttpClient::builder_fake(handler, &clock)).build();
+        let response = resilient_get(&client, "https://example.test/stalled-body").await.unwrap();
+        let read = read_response_body_with_clock(response.into_body().into_text(), &clock);
+        let mut read = std::pin::pin!(read);
+
+        assert!(futures_util::poll!(&mut read).is_pending());
+        control.advance(DEFAULT_REQUEST_TIMEOUT - Duration::from_secs(1));
+        assert!(futures_util::poll!(&mut read).is_pending());
+        control.advance(Duration::from_secs(1));
+        let std::task::Poll::Ready(result) = futures_util::poll!(&mut read) else {
+            panic!("a stalled response body must fail at its deadline");
+        };
+        let error = result.expect_err("the response body never completes");
+        assert!(format!("{error:#}").contains("response body timed out"), "{error:#}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn response_body_reads_preserve_success_and_transport_errors() {
+        let clock = tick::ClockControl::new().to_clock();
+        let response = fetch::HttpResponseBuilder::new_fake().text("body").build().unwrap();
+        let text = read_response_body_with_clock(response.into_body().into_text(), &clock)
+            .await
+            .unwrap();
+        assert_eq!(text, "body");
+
+        let response = fetch::HttpResponseBuilder::new_fake()
+            .stream(futures_util::stream::once(async {
+                Err(fetch::HttpError::from(std::io::Error::other("body disconnected")))
+            }))
+            .build()
+            .unwrap();
+        let error = read_response_body_with_clock(response.into_body().into_text(), &clock)
+            .await
+            .expect_err("body transport failures must be propagated");
+        assert!(format!("{error:#}").contains("body disconnected"), "{error:#}");
     }
 
     /// A `Retry-After: 0` header keeps the retry delay at zero so tests stay fast.

@@ -45,6 +45,10 @@ and unsuccessful HTTP responses that exhaust request resilience are returned
 without restarting documentation or crates.io dump downloads.
 Request timeouts apply to each attempt at each redirect hop. Responses remain streamed for large database and documentation
 downloads.
+Small response bodies (coverage badges, hosting API JSON, and documentation error
+details) have a separate one-minute read deadline after headers arrive. Body
+timeouts do not restart request retries. Large downloads retain their longer
+transfer-specific deadlines.
 
 GET requests follow at most ten HTTP(S) redirects, including relative locations.
 Authorization is sensitive and is permanently removed when a redirect changes
