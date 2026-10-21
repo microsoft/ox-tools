@@ -52,8 +52,10 @@ pub struct CrateOverallData {
     ///
     /// **Source**: Multi-table join:
     /// 1. `crate_owners.csv` from the `crate_owners` table (`crate_id` to owner mapping with user/team discriminant)
-    /// 2. `users.csv` from the `users` table, `gh_login` and `name` fields (for user owners)
-    /// 3. `teams.csv` from the `teams` table, `login` and `name` fields (for team owners)
+    /// 2. `users.csv` from the `users` table, `id` and `name` fields (for user owners)
+    /// 3. `oauth_github.csv`, joined by `user_id`, supplies current GitHub logins;
+    ///    older dumps fall back to `users.gh_login`
+    /// 4. `teams.csv` from the `teams` table, `login` and `name` fields (for team owners)
     pub owners: Vec<Owner>,
 
     /// Monthly download statistics aggregated across all versions of this crate,

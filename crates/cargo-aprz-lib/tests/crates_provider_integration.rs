@@ -61,6 +61,160 @@ fn found(results: &HashMap<String, ProviderResult<CratesData>>, name: &str) -> C
     }
 }
 
+/// Sample dump using the October 2026 user and OAuth schemas.
+fn current_owner_files(now: DateTime<Utc>) -> Vec<(String, String)> {
+    let mut files = Dump::sample(now).csv_files();
+    let users = files
+        .iter_mut()
+        .find(|(name, _)| name == "users.csv")
+        .expect("sample contains users");
+    concat!(
+        "created_at,gh_id,id,name,username\n",
+        "2026-01-01 00:00:00+00,101,1,Alice Example,not-a-github-login\n",
+        "2026-01-01 00:00:00+00,202,2,,another-crates-io-username\n",
+    )
+    .clone_into(&mut users.1);
+    files.push((
+        "oauth_github.csv".to_owned(),
+        "account_id,avatar,login,user_id\n101,,alice-renamed,1\n202,,bob,2\n".to_owned(),
+    ));
+    files
+}
+
+#[tokio::test]
+async fn joins_current_github_logins_without_the_legacy_column() {
+    let now = Utc::now();
+    let server = dump_server(support::dump::tar_gz(&current_owner_files(now)), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None), crate_ref("itoa", None)]).await;
+    let serde = found(&results, "serde");
+    let itoa = found(&results, "itoa");
+    let owners: Vec<_> = serde
+        .overall_data
+        .owners
+        .iter()
+        .chain(&itoa.overall_data.owners)
+        .map(|owner| (owner.login.as_str(), owner.name.as_deref()))
+        .collect();
+
+    assert_eq!(
+        owners,
+        [
+            ("alice-renamed", Some("Alice Example")),
+            ("github:fake-org:maintainers", Some("Fake Org Maintainers")),
+            ("bob", None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prefers_current_logins_over_stale_legacy_logins() {
+    let now = Utc::now();
+    let mut files = Dump::sample(now).csv_files();
+    files.push(("oauth_github.csv".to_owned(), "user_id,login\n1,alice-renamed\n2,bob\n".to_owned()));
+    let server = dump_server(support::dump::tar_gz(&files), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None)]).await;
+
+    assert_eq!(found(&results, "serde").overall_data.owners[0].login, "alice-renamed");
+}
+
+#[tokio::test]
+async fn joins_oauth_logins_regardless_of_archive_order() {
+    let now = Utc::now();
+    let mut files = current_owner_files(now);
+    files.reverse();
+    let server = dump_server(support::dump::tar_gz(&files), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None)]).await;
+
+    assert_eq!(found(&results, "serde").overall_data.owners[0].login, "alice-renamed");
+}
+
+#[tokio::test]
+async fn reuses_cached_current_owner_identities() {
+    let now = Utc::now();
+    let server = dump_server(support::dump::tar_gz(&current_owner_files(now)), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    drop(make_provider(cache.path(), &server, now).await);
+    let provider = make_provider(cache.path(), &server, now + Duration::days(1)).await;
+    let results = query(&provider, &[crate_ref("serde", None)]).await;
+
+    assert_eq!(found(&results, "serde").overall_data.owners[0].login, "alice-renamed");
+}
+
+#[tokio::test]
+async fn refreshes_legacy_caches_without_an_oauth_table() {
+    let now = Utc::now();
+    let server = dump_server(support::dump::tar_gz(&current_owner_files(now)), Some(2)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    drop(make_provider(cache.path(), &server, now).await);
+    std::fs::remove_file(cache.path().join("oauth_github.table")).expect("removing the new table simulates an old cache");
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None)]).await;
+
+    assert_eq!(found(&results, "serde").overall_data.owners[0].login, "alice-renamed");
+}
+
+#[tokio::test]
+async fn preserves_empty_login_behavior_when_no_identity_is_available() {
+    let now = Utc::now();
+    let mut files = current_owner_files(now);
+    let oauth = files
+        .iter_mut()
+        .find(|(name, _)| name == "oauth_github.csv")
+        .expect("fixture contains OAuth");
+    oauth.1 = "user_id,login\n2,bob\n".to_owned();
+    let server = dump_server(support::dump::tar_gz(&files), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None), crate_ref("itoa", None)]).await;
+    let serde = found(&results, "serde");
+    let itoa = found(&results, "itoa");
+
+    assert_eq!(
+        (
+            serde.overall_data.owners[0].login.as_str(),
+            itoa.overall_data.owners[0].login.as_str()
+        ),
+        ("", "bob")
+    );
+}
+
+#[tokio::test]
+async fn preserves_empty_logins_in_oauth_rows() {
+    let now = Utc::now();
+    let mut files = current_owner_files(now);
+    let oauth = files
+        .iter_mut()
+        .find(|(name, _)| name == "oauth_github.csv")
+        .expect("fixture contains OAuth");
+    oauth.1 = "user_id,login\n1,\n2,bob\n".to_owned();
+    let server = dump_server(support::dump::tar_gz(&files), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None)]).await;
+
+    assert_eq!(found(&results, "serde").overall_data.owners[0].login, "");
+}
+
+#[tokio::test]
+async fn accepts_an_empty_oauth_table_with_valid_headers_in_legacy_dumps() {
+    let now = Utc::now();
+    let mut files = Dump::sample(now).csv_files();
+    files.push(("oauth_github.csv".to_owned(), "user_id,login\n".to_owned()));
+    let server = dump_server(support::dump::tar_gz(&files), Some(1)).await;
+    let cache = tempfile::tempdir().expect("creating a temp dir");
+    let provider = make_provider(cache.path(), &server, now).await;
+    let results = query(&provider, &[crate_ref("serde", None)]).await;
+
+    assert_eq!(found(&results, "serde").overall_data.owners[0].login, "alice");
+}
+
 #[tokio::test]
 async fn suggestions_are_ranked_after_a_later_slot_is_replaced() {
     let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
