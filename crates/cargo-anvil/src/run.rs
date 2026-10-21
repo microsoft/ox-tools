@@ -2037,6 +2037,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     fn json_array_invalid_retirement_resolves_repeated_separators() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join("a")).unwrap();
