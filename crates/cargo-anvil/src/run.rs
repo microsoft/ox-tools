@@ -291,53 +291,83 @@ fn build_plan_with_hosts(
 
     plan_removals(repo_root, manifest, &mut plan, hosts, &composed)?;
 
-    // Validate every write in application order, not only the final projection.
-    // An interrupted apply must not leave a temporarily invalid array host.
-    for item in plan.items() {
-        if let Target::Region { host, .. } = &item.target
-            && let Some(after) = &item.spliced_host
-        {
-            let host = (hosts.resolve)(repo_root, host)?;
-            if let Some(array_host) = array_hosts.get(&host) {
-                let before = original_hosts.get(&host).expect("array hosts were captured before planning");
-                let adopted = (array_host.format == ArrayFormat::Toml)
-                    .then(|| {
-                        item.rendered.as_deref().and_then(|body| {
-                            match crate::region::adopt_unmanaged_toml_tables(before, body, CommentSyntax::Hash) {
-                                crate::region::TomlAdoption::Adopted { text, .. } => Some(text),
-                                _ => None,
-                            }
-                        })
-                    })
-                    .flatten();
-                // Table adoption and region insertion are separate edits. Checking
-                // their combined envelope would reject an untouched array between them.
-                if let Some(adopted) = &adopted {
-                    crate::emit::toml_array_region::validate_neighbor_splice(before, adopted, &array_host.paths)
-                        .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
-                }
-                match array_host.format {
-                    ArrayFormat::Toml => crate::emit::toml_array_region::validate_neighbor_splice(
-                        adopted.as_deref().unwrap_or(before),
-                        after,
-                        &array_host.paths,
-                    )
-                    .map_err(|refusal| array_plan_refusal(&host, &refusal))?,
-                    ArrayFormat::Json => {
-                        crate::emit::json_array_region::validate_neighbor_splice(before, after, &array_host.paths)
-                            .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
-                        for spec in &array_host.json_specs {
-                            crate::emit::json_array_region::validate_required_entries(after, spec)
-                                .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
-                        }
-                    }
-                }
-                original_hosts.insert(host, after.clone());
-            }
-        }
-    }
+    validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
 
     Ok(plan)
+}
+
+fn validate_array_plan(
+    repo_root: &Path,
+    plan: &Plan,
+    hosts: &mut HostTextCache,
+    array_hosts: &ArrayHosts,
+    original_hosts: &mut HashMap<String, String>,
+) -> Result<(), AppError> {
+    let mut active_json_specs: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for item in plan.items() {
+        let Target::Region { host, id } = &item.target else {
+            continue;
+        };
+        let host = (hosts.resolve)(repo_root, host)?;
+        let Some(array_host) = array_hosts.get(&host) else {
+            continue;
+        };
+        let current_json_spec = (array_host.format == ArrayFormat::Json)
+            .then(|| array_host.json_specs.iter().find(|spec| spec.region.id.as_str() == id))
+            .flatten();
+        let Some(after) = &item.spliced_host else {
+            if current_json_spec.is_some() {
+                active_json_specs.entry(host).or_default().insert(id.clone());
+            }
+            continue;
+        };
+        let before = original_hosts.get(&host).expect("array hosts were captured before planning");
+        let adopted = (array_host.format == ArrayFormat::Toml)
+            .then(|| {
+                item.rendered.as_deref().and_then(|body| {
+                    match crate::region::adopt_unmanaged_toml_tables(before, body, CommentSyntax::Hash) {
+                        crate::region::TomlAdoption::Adopted { text, .. } => Some(text),
+                        _ => None,
+                    }
+                })
+            })
+            .flatten();
+        if let Some(adopted) = &adopted {
+            crate::emit::toml_array_region::validate_neighbor_splice(before, adopted, &array_host.paths)
+                .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
+        }
+        match array_host.format {
+            ArrayFormat::Toml => {
+                crate::emit::toml_array_region::validate_neighbor_splice(adopted.as_deref().unwrap_or(before), after, &array_host.paths)
+                    .map_err(|refusal| array_plan_refusal(&host, &refusal))?;
+            }
+            ArrayFormat::Json => {
+                crate::emit::json_array_region::validate_neighbor_splice(before, after, &array_host.paths)
+                    .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                if current_json_spec.is_some() {
+                    active_json_specs.entry(host.clone()).or_default().insert(id.clone());
+                }
+                if let Some(active) = active_json_specs.get(&host) {
+                    for spec in array_host.json_specs.iter().filter(|spec| active.contains(spec.region.id.as_str())) {
+                        crate::emit::json_array_region::validate_required_entries(after, spec)
+                            .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                    }
+                }
+            }
+        }
+        original_hosts.insert(host, after.clone());
+    }
+    for (host, array_host) in array_hosts {
+        if array_host.format != ArrayFormat::Json {
+            continue;
+        }
+        let final_text = hosts.get_or_read(repo_root, host)?.unwrap_or_default();
+        for spec in &array_host.json_specs {
+            crate::emit::json_array_region::validate_required_entries(&final_text, spec)
+                .map_err(|refusal| json_array_plan_refusal(host, &refusal))?;
+        }
+    }
+    Ok(())
 }
 
 #[expect(
@@ -2110,6 +2140,106 @@ mod tests {
             assert!(error.contains("required JSON array entry \"managed\""), "{error}");
             assert!(error.contains("No plan was produced; no files were changed"), "{error}");
         }
+    }
+
+    #[test]
+    fn json_array_updates_activate_requirements_in_application_order() {
+        let array = |id: &'static str, path: &'static str, value: &str| crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("CloudBuild.json".to_owned()),
+                id: RegionId::new(id),
+                body: format!("\"{value}\",\n"),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec![path.to_owned()],
+        };
+        let source = concat!(
+            "{\n",
+            "  \"a\": [\n",
+            "  // >>> anvil-managed: a\n",
+            "  \"old-a\",\n",
+            "  // <<< anvil-managed: a\n",
+            "  ],\n",
+            "  \"b\": [\n",
+            "  // >>> anvil-managed: b\n",
+            "  \"old-b\",\n",
+            "  // <<< anvil-managed: b\n",
+            "  ]\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("CloudBuild.json", "a", checksum_str("  \"old-a\",\n"));
+        manifest.set_region("CloudBuild.json", "b", checksum_str("  \"old-b\",\n"));
+        for reverse in [false, true] {
+            let mut builder = Catalog::builder(test_cli());
+            let specs = [array("a", "a", "new-a"), array("b", "b", "new-b")];
+            for spec in if reverse {
+                specs.into_iter().rev().collect::<Vec<_>>()
+            } else {
+                specs.into_iter().collect::<Vec<_>>()
+            } {
+                builder = builder.with_json_array_region(spec);
+            }
+            let plan = json_array_plan(source, &manifest, &builder.build().unwrap()).unwrap();
+            let output = plan
+                .items()
+                .iter()
+                .filter_map(|item| item.spliced_host.as_deref())
+                .next_back()
+                .unwrap();
+            assert_eq!(output.matches("\"new-a\"").count(), 1);
+            assert_eq!(output.matches("\"new-b\"").count(), 1);
+            assert!(!output.contains("\"old-a\""));
+            assert!(!output.contains("\"old-b\""));
+        }
+    }
+
+    #[test]
+    fn ordinary_region_may_update_before_independent_json_array_requirement() {
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": false,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  \"entries\": [\n",
+            "  // >>> anvil-managed: entries\n",
+            "  \"old\",\n",
+            "  // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("CloudBuild.json", "settings", checksum_str("  \"setting\": false,\n"));
+        manifest.set_region("CloudBuild.json", "entries", checksum_str("  \"old\",\n"));
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("CloudBuild.json".to_owned()),
+                id: RegionId::new("settings"),
+                body: "\"setting\": true,\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .with_json_array_region(crate::JsonArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("CloudBuild.json".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"new\",\n".to_owned(),
+                    syntax: CommentSyntax::SlashSlash,
+                },
+                path: vec!["entries".to_owned()],
+            })
+            .build()
+            .unwrap();
+
+        let plan = json_array_plan(source, &manifest, &catalog).unwrap();
+        let output = plan
+            .items()
+            .iter()
+            .filter_map(|item| item.spliced_host.as_deref())
+            .next_back()
+            .unwrap();
+        assert!(output.contains("\"setting\": true"));
+        assert_eq!(output.matches("\"new\"").count(), 1);
+        assert!(!output.contains("\"old\""));
     }
 
     #[test]
