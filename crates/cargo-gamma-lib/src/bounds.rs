@@ -239,4 +239,10 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn survivor_zero_and_negative_sizes_keep_the_positive_number_diagnostic() {
+        for text in ["0", "0MiB", "-0.5", "-0.5KiB"] {
+            assert_eq!(size(text).unwrap_err(), format!("`{text}` must be a number greater than zero"));
+        }
+    }
 }

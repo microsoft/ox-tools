@@ -320,6 +320,88 @@ mod tests {
     }
 
     #[test]
+    fn survivor_attributes_on_every_item_kind_retain_their_own_source_scope() {
+        for source in [
+            "#[marker] const C: i32 = 1;",
+            "#[marker] enum E { A }",
+            "#[marker] extern crate core;",
+            "#[marker] fn f() {}",
+            "#[marker] unsafe extern \"C\" {}",
+            "#[marker] impl S {}",
+            "#[marker] invoke!();",
+            "#[marker] mod m {}",
+            "#[marker] static S: i32 = 1;",
+            "#[marker] struct S;",
+            "#[marker] trait T {}",
+            "#[marker] trait T = Send;",
+            "#[marker] type T = i32;",
+            "#[marker] union U { a: i32 }",
+            "#[marker] use core::fmt;",
+        ] {
+            let parsed = file(source);
+            let scopes = Scopes::of(&parsed);
+            let mut found = scopes
+                .attributes
+                .iter()
+                .filter(|(attribute, _)| attribute.path().is_ident("marker"));
+            let scope = found.next().unwrap_or_else(|| panic!("expected a marker in {source}"));
+            assert!(found.next().is_none(), "{source}");
+            assert_eq!(parsed.slice(&scope.1), source);
+        }
+    }
+
+    #[test]
+    fn survivor_member_attributes_and_nested_items_are_not_lost_by_the_visitor() {
+        for source in [
+            "impl S { #[marker] const C: i32 = 1; }",
+            "impl S { #[marker] fn f() {} }",
+            "impl S { #[marker] invoke!(); }",
+            "impl S { #[marker] type T = i32; }",
+            "trait T { #[marker] const C: i32; }",
+            "trait T { #[marker] fn f(); }",
+            "trait T { #[marker] invoke!(); }",
+            "trait T { #[marker] type A; }",
+            "unsafe extern \"C\" { #[marker] fn f(); }",
+            "unsafe extern \"C\" { #[marker] invoke!(); }",
+            "unsafe extern \"C\" { #[marker] static S: i32; }",
+            "unsafe extern \"C\" { #[marker] type T; }",
+            "impl S { fn f() { #[marker] const C: i32 = 1; } }",
+            "trait T { fn f() { #[marker] const C: i32 = 1; } }",
+        ] {
+            let parsed = file(source);
+            let scopes = Scopes::of(&parsed);
+            let mut found = scopes
+                .attributes
+                .iter()
+                .filter(|(attribute, _)| attribute.path().is_ident("marker"));
+            let scope = found.next().unwrap_or_else(|| panic!("expected a marker in {source}"));
+            assert!(found.next().is_none(), "{source}");
+            let tail = source.split_once("#[marker]").unwrap().1.trim_start().strip_suffix(" }").unwrap();
+            let expected = if source.contains("fn f() { #[marker]") {
+                "const C: i32 = 1;"
+            } else {
+                tail
+            };
+            assert_eq!(parsed.slice(&scope.1), format!("#[marker] {expected}"));
+        }
+    }
+
+    #[test]
+    fn survivor_following_offset_boundaries_never_reach_into_a_later_item() {
+        let scopes = Scopes::from_spans(vec![30..90, 10..15, 10..40, 20..25]);
+        for (offset, expected) in [
+            (0, Some(10..40)),
+            (10, Some(10..40)),
+            (11, Some(20..25)),
+            (20, Some(20..25)),
+            (21, Some(30..90)),
+            (31, None),
+        ] {
+            assert_eq!(scopes.following(offset), expected, "{offset}");
+        }
+    }
+
+    #[test]
     fn a_comment_directive_suppresses_the_following_statement() {
         let source = "fn f(a: i32, b: i32) {\n    // #[gamma::skip(arith)]\n    let x = a + b;\n    let y = a - b;\n}";
         let (count, total) = suppressed(source, "arith");

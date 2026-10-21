@@ -559,6 +559,45 @@ mod tests {
     use crate::testing::advise_fixture::{binary, find, mutant, timing};
 
     #[test]
+    fn survivor_run_analysis_keeps_named_profiles_and_filters_timeout_cpu() {
+        let mutants = [
+            mutant("a.rs", "arith.add_to_sub", Outcome::Timeout, 100),
+            mutant("a.rs", "arith.add_to_sub", Outcome::Survived, 900),
+        ];
+        for (profile, expected) in [
+            (None, true),
+            (Some("test"), true),
+            (Some("dev"), true),
+            (Some("release"), false),
+            (Some("gamma"), false),
+        ] {
+            let findings = analyze_run(&mutants, &timing(1, 1, 100), profile, &[]);
+            assert_eq!(find(&findings, "unoptimized-execution").is_some(), expected, "{profile:?}");
+            if let Some(finding) = find(&findings, "unoptimized-execution") {
+                let name = profile.unwrap_or("Cargo's default test profile");
+                assert_eq!(finding.headline, format!("98% of the run was mutant execution under {name}"));
+            }
+            let timeout = find(&findings, "timeouts").unwrap();
+            assert!(timeout.detail.iter().any(|line| line.contains("100ms")), "{timeout:?}");
+            assert!(!timeout.detail.iter().any(|line| line.contains("1.0s")), "{timeout:?}");
+        }
+    }
+
+    #[test]
+    fn analysis_reports_subsecond_fixed_cost_and_omits_zero_baseline_targets() {
+        let mut subsecond = timing(0, 0, 1);
+        subsecond.wall = Duration::from_millis(500);
+        subsecond.build = Duration::from_millis(400);
+        let finding = fixed_cost(&subsecond).expect("a subsecond run can still spend most of its time building");
+        assert_eq!(finding.headline, "80% of the run was the build and baseline, not mutation testing");
+
+        let binaries = [binary("core", "measured", 12, Some(2)), binary("core", "unmeasured", 0, None)];
+        let findings = analyze_run(&[], &timing(1, 12, 100), Some("release"), &binaries);
+        let finding = find(&findings, "slow-baseline").expect("the measured target exceeds the slow-baseline threshold");
+        assert_eq!(&finding.detail[2..], ["test target `core::measured`: 12.0s baseline, 2 tests"]);
+    }
+
+    #[test]
     fn a_healthy_run_produces_no_findings() {
         let mutants = vec![
             mutant("a.rs", "relational.lt_to_le", Outcome::Killed, 100),

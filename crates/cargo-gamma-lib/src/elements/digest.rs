@@ -165,3 +165,20 @@ pub(super) fn settled_verdict(status: &str, reason: Option<&str>) -> Option<Outc
         _other => None,
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests {
+    use super::*;
+
+    #[test]
+    fn survivor_compile_errors_are_settled_but_unknown_outcomes_are_not() {
+        for reason in [None, Some("compiler rejected the mutant")] {
+            assert_eq!(settled_verdict("CompileError", reason), Some(Outcome::CompileError));
+            assert_eq!(settled_verdict("Killed", reason), Some(Outcome::Killed));
+        }
+        for status in ["Pending", "NotRun", "xyzzy", ""] {
+            assert_eq!(settled_verdict(status, None), None);
+        }
+    }
+}

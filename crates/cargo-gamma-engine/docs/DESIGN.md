@@ -32,6 +32,10 @@ configuration and therefore audits the whole file.
   campaign verdicts.
 - Stable identities are content-derived so reports and incremental knowledge
   remain meaningful as unrelated source changes.
+- Expression mutation families do not descend into patterns, including literal
+  and range patterns in `let ... else` declarations. Evaluated initializers,
+  diverging `else` expressions, and later statements remain eligible for mutation.
+  Dedicated match-arm and match-guard rewrites are handled separately.
 - Mutation discovery uses source-visible type evidence and never identifier
   spelling to screen candidates. Unsigned, textual, and temporal evidence
   propagates through parameters, annotated locals, fields, casts, assignments,
@@ -47,6 +51,10 @@ configuration and therefore audits the whole file.
   decrement; focused non-default selection can still request those optimistic
   sites. Proven text/time addition is not changed to any incompatible arithmetic
   operator; signed and unresolved arithmetic remains in the population.
+- A match pattern is not evaluated, so its literals are not mutated. The `if`
+  guard attached to a match arm is evaluated and receives ordinary expression
+  mutations, including relational substitutions, alongside whole-guard
+  `match_guard` mutations.
 - A mutation that invents `Default::default()` for a known payload requires
   positive evidence. Primitive and supported standard types, package-local
   derives or impls whose concrete generic arguments satisfy their bounds,

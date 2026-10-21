@@ -19,6 +19,7 @@ use crate::facts::cache::{Cache, CacheResult};
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::path_utils::sanitize_path_component;
 use crate::facts::request_tracker::{RequestTracker, TrackedTopic};
+use crate::facts::resilient_http::LazyHttpClient;
 use crate::facts::throttler::Throttler;
 
 pub(super) const LOG_TARGET: &str = "      docs";
@@ -33,7 +34,7 @@ const UNREADABLE_BODY_PLACEHOLDER: &str = "<unable to read body>";
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: Arc<reqwest::Client>,
+    client: LazyHttpClient,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -43,13 +44,10 @@ impl Provider {
     /// Create a new docs provider
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent("cargo-aprz")
-            .build()
-            .expect("unable to create HTTP client");
+        let client = LazyHttpClient::default();
 
         Self {
-            client: Arc::new(client),
+            client,
             cache,
             base_url: base_url.unwrap_or(DOCS_BASE_URL).to_string(),
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
@@ -104,12 +102,13 @@ impl Provider {
         let provider = self.clone();
         let spec = crate_spec.clone();
 
-        // resilient_download retries on Err, passes through Ok(None) for 404.
+        // Only body-transfer errors restart a download; request resilience is already exhausted.
         let result = crate::facts::resilient_http::resilient_download(DOWNLOAD_OPERATION, spec, None, move |spec| {
             let provider = provider.clone();
             async move { provider.download_zst_core(&spec).await }
         })
-        .await;
+        .await
+        .and_then(core::convert::identity);
 
         let temp_file = match result {
             Ok(Some(path)) => path,
@@ -161,31 +160,34 @@ impl Provider {
     }
 
     /// Download logic for a single attempt.
-    /// Returns `Ok(None)` for 404 (not retryable), `Ok(Some(path))` on success.
-    async fn download_zst_core(&self, crate_spec: &CrateSpec) -> Result<Option<PathBuf>> {
+    /// The outer error retries the body transfer; the inner result is final.
+    async fn download_zst_core(&self, crate_spec: &CrateSpec) -> Result<Result<Option<PathBuf>>> {
         self.download_zst_to(crate_spec, temp_zst_path(crate_spec.name(), &crate_spec.version().to_string()))
             .await
     }
 
-    async fn download_zst_to(&self, crate_spec: &CrateSpec, temp_file: PathBuf) -> Result<Option<PathBuf>> {
+    async fn download_zst_to(&self, crate_spec: &CrateSpec, temp_file: PathBuf) -> Result<Result<Option<PathBuf>>> {
         let crate_name = crate_spec.name();
         let version = crate_spec.version().to_string();
 
         let url = format!("{}/crate/{crate_name}/{version}/json", self.base_url);
 
-        let response = crate::facts::resilient_http::resilient_get(&self.client, &url).await?;
+        let response = match crate::facts::resilient_http::resilient_get(self.client.get(), &url).await {
+            Ok(response) => response,
+            Err(error) => return Ok(Err(error)),
+        };
 
         let status = response.status();
         if !status.is_success() {
-            if status == reqwest::StatusCode::NOT_FOUND {
-                return Ok(None);
+            if status == fetch::StatusCode::NOT_FOUND {
+                return Ok(Ok(None));
             }
-            let body = match response.text().await {
+            let body = match crate::facts::resilient_http::read_response_body(response.into_body().into_text()).await {
                 Ok(body) => body,
                 Err(_) => UNREADABLE_BODY_PLACEHOLDER.to_owned(),
             };
             log::debug!(target: LOG_TARGET, "Response body (first 500 chars): {}", body.chars().take(500).collect::<String>());
-            return Err(app_err!("could not download docs for {crate_spec}: HTTP {status}"));
+            return Ok(Err(app_err!("could not download docs for {crate_spec}: HTTP {status}")));
         }
 
         let mut file = tokio::fs::File::create(&temp_file)
@@ -193,10 +195,10 @@ impl Provider {
             .into_app_err_with(|| format!("creating temp file '{}'", temp_file.display()))?;
 
         // #[gamma::skip(try.propagate_to_unwrap, reason = "streaming an HTTP response into a file is an external I/O adapter boundary")]
-        let total_bytes = write_response_body(response.bytes_stream(), &mut file, &temp_file).await?;
+        let total_bytes = write_response_body(crate::facts::resilient_http::response_stream(response), &mut file, &temp_file).await?;
 
         log::debug!(target: LOG_TARGET, "Downloaded {total_bytes} bytes for {crate_spec} to temp file '{}'", temp_file.display());
-        Ok(Some(temp_file))
+        Ok(Ok(Some(temp_file)))
     }
 
     fn calculate_docs_metrics(zst_path: impl AsRef<Path>, crate_spec: &CrateSpec) -> Result<DocsData> {
@@ -212,13 +214,31 @@ impl Provider {
     }
 
     async fn calculate_docs_metrics_and_remove(zst_path: impl AsRef<Path>, crate_spec: &CrateSpec) -> Result<DocsData> {
+        Self::calculate_docs_metrics_and_remove_with(
+            zst_path,
+            crate_spec,
+            |worker_path, worker_spec| Self::calculate_docs_metrics(worker_path, &worker_spec),
+            |path| async move { tokio::fs::remove_file(path).await },
+        )
+        .await
+    }
+
+    async fn calculate_docs_metrics_and_remove_with<RemoveFuture>(
+        zst_path: impl AsRef<Path>,
+        crate_spec: &CrateSpec,
+        worker: impl FnOnce(PathBuf, CrateSpec) -> Result<DocsData> + Send + 'static,
+        remove: impl FnOnce(PathBuf) -> RemoveFuture,
+    ) -> Result<DocsData>
+    where
+        RemoveFuture: Future<Output = std::io::Result<()>>,
+    {
         let path = zst_path.as_ref().to_path_buf();
         let worker_path = path.clone();
         let worker_spec = crate_spec.clone();
-        let result = tokio::task::spawn_blocking(move || Self::calculate_docs_metrics(worker_path, &worker_spec))
+        let result = tokio::task::spawn_blocking(move || worker(worker_path, worker_spec))
             .await
             .map_err(|cause| app_err!("documentation metric worker failed for {crate_spec}: {cause}"))?;
-        tokio::fs::remove_file(&path)
+        remove(path.clone())
             .await
             .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", path.display()));
         result
@@ -318,6 +338,34 @@ mod tests {
 
     fn test_crate_spec(name: &str, version: &str) -> CrateSpec {
         CrateSpec::from_arcs(Arc::from(name), Arc::new(Version::parse(version).unwrap()))
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "runs a blocking worker")]
+    async fn documentation_worker_panics_return_the_crate_context_without_claiming_cleanup() {
+        let path = Path::new("docs.zst");
+        let spec = test_crate_spec("worker-fault", "2.3.4");
+        let error = Provider::calculate_docs_metrics_and_remove_with(
+            path,
+            &spec,
+            |worker_path, worker_spec| {
+                assert_eq!(worker_path, Path::new("docs.zst"));
+                assert_eq!(worker_spec.to_string(), "worker-fault@2.3.4");
+                panic!("injected documentation worker failure");
+            },
+            |_| -> std::future::Ready<std::io::Result<()>> {
+                panic!("cleanup must not run after the worker join error");
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("documentation metric worker failed for worker-fault@2.3.4"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("injected documentation worker failure"), "{error}");
     }
 
     #[tokio::test]
@@ -537,6 +585,7 @@ mod tests {
                 .download_zst_core(&test_crate_spec("anyhow", "1.0.100"))
                 .await
                 .unwrap()
+                .unwrap()
                 .is_none()
         );
 
@@ -550,9 +599,67 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some("http://[::1"));
 
-        let error = provider.download_zst_core(&test_crate_spec("anyhow", "1.0.100")).await.unwrap_err();
+        let error = provider
+            .download_zst_core(&test_crate_spec("anyhow", "1.0.100"))
+            .await
+            .unwrap()
+            .unwrap_err();
 
         assert!(!error.to_string().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_request_failures_do_not_multiply_native_retries() {
+        for status in [
+            None,
+            Some(fetch::StatusCode::BAD_REQUEST),
+            Some(fetch::StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let calls = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+            let recorded = Arc::clone(&calls);
+            let handler = fetch::fake::FakeHandler::from_fn(move |_| {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                match status {
+                    Some(status) => fetch::HttpResponseBuilder::new_fake().status(status).build(),
+                    None => Err(fetch::HttpError::from(io::Error::other("scripted connection failure"))),
+                }
+            });
+            let control = tick::ClockControl::new();
+            let clock = control.to_clock();
+            let client =
+                crate::facts::resilient_http::configure_request_resilience(fetch::HttpClient::builder_fake(handler, &clock)).build();
+            let temp = tempfile::tempdir().unwrap();
+            let mut provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), None);
+            provider.client = LazyHttpClient::from_client(client);
+
+            let spec = test_crate_spec("anyhow", "1.0.100");
+            let mut request = std::pin::pin!(provider.fetch_docs_for_crate_core(&spec));
+            let mut result = None;
+            for _ in 0..32 {
+                if let core::task::Poll::Ready(value) = futures_util::poll!(&mut request) {
+                    result = Some(value);
+                    break;
+                }
+                control.advance(core::time::Duration::from_secs(1));
+            }
+            let result = result.expect("request resilience finishes within four attempts");
+
+            let ProviderResult::Error(error) = result else {
+                panic!("request failure must remain an error: {result:?}");
+            };
+            if let Some(status) = status {
+                assert!(
+                    format!("{error:#}").contains(&format!("could not download docs for anyhow@1.0.100: HTTP {status}")),
+                    "{error:#}"
+                );
+            } else {
+                assert!(format!("{error:#}").contains("scripted connection failure"), "{error:#}");
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if status == Some(fetch::StatusCode::BAD_REQUEST) { 1 } else { 4 }
+            );
+        }
     }
 
     #[tokio::test]

@@ -61,10 +61,112 @@ impl TestEnvironment {
             })
             .collect()
     }
+}
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    #[test]
+    fn the_cargo_environment_uses_both_home_conventions_with_scripted_tool_failures() {
+        for windows in [false, true] {
+            let environment = TestEnvironment::from_cargo_with(r#"{"packages":[]}"#, "", &[], || {
+                common_environment(
+                    Utf8Path::new("workspace"),
+                    OsStr::new("fallback"),
+                    windows,
+                    |name| match name {
+                        "HOME" => Some("unix-home".into()),
+                        "USERPROFILE" => Some("windows-home".into()),
+                        "CARGO" => Some("explicit-cargo".into()),
+                        "CARGO_HOME" | "RUSTUP_HOME" | "RUSTUP_TOOLCHAIN" | "RUSTUP_TOOLCHAIN_SOURCE" | "RUST_RECURSION_COUNT" | "PATH" => {
+                            None
+                        }
+                        _ => panic!("unexpected environment lookup: {name}"),
+                    },
+                    |program, arguments, root| {
+                        assert_eq!(root, Utf8Path::new("workspace"));
+                        assert!(matches!(
+                            (program, arguments),
+                            ("rustup", ["show", "active-toolchain"] | ["which", "cargo"]) | ("rustc", ["--print", "sysroot"])
+                        ));
+                        None
+                    },
+                    || panic!("explicit Cargo needs no current directory"),
+                    |_| panic!("explicit Cargo needs no file lookup"),
+                )
+            })
+            .expect("empty valid metadata still captures the common Cargo environment");
+            let home = if windows { "windows-home" } else { "unix-home" };
+            assert_eq!(
+                environment.common.get(OsStr::new("CARGO_HOME")),
+                Some(&PathBuf::from(home).join(".cargo").into_os_string()),
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_paths_include_out_dirs_and_all_binary_executables_but_no_other_variables() {
+        let mut environment = TestEnvironment::fake("subject", "OUT_DIR", "generated-output");
+        let package = environment.packages.get_mut("subject").unwrap();
+        package.variables.insert("UNRELATED".into(), "not-an-artifact".into());
+        package.binary_executables.insert("CARGO_BIN_EXE_first".into(), "first.exe".into());
+        package
+            .binary_executables
+            .insert("CARGO_BIN_EXE_second".into(), "second.exe".into());
+        let mut paths = environment.testing_paths().unwrap();
+        paths.sort();
+        assert_eq!(paths, ["first.exe", "generated-output", "second.exe"].map(Utf8PathBuf::from));
+    }
+
+    #[test]
+    fn common_environment_retains_the_complete_scripted_rustup_protocol() {
+        let environment = common_environment(
+            Utf8Path::new("workspace"),
+            OsStr::new("fallback"),
+            cfg!(windows),
+            |name| match name {
+                "CARGO_HOME" => Some("chosen-cargo-home".into()),
+                "RUSTUP_HOME" => Some("chosen-rustup-home".into()),
+                "RUSTUP_TOOLCHAIN_SOURCE" => Some("chosen-source".into()),
+                "RUST_RECURSION_COUNT" => Some("7".into()),
+                _ => None,
+            },
+            |program, arguments, root| {
+                assert_eq!(root, Utf8Path::new("workspace"));
+                match (program, arguments) {
+                    ("rustup", ["show", "active-toolchain"]) => Some("chosen-toolchain (default)".into()),
+                    ("rustup", ["which", "cargo"]) => Some("chosen-cargo".into()),
+                    ("rustc", ["--print", "sysroot"]) => Some("chosen-sysroot".into()),
+                    other => panic!("unexpected tool query: {other:?}"),
+                }
+            },
+            || panic!("rustup provided Cargo"),
+            |_| panic!("rustup provided Cargo"),
+        );
+        let mut expected = BTreeMap::from([
+            ("CARGO".into(), "chosen-cargo".into()),
+            ("CARGO_HOME".into(), "chosen-cargo-home".into()),
+            ("RUSTUP_HOME".into(), "chosen-rustup-home".into()),
+            ("RUSTUP_TOOLCHAIN".into(), "chosen-toolchain".into()),
+            ("RUSTUP_TOOLCHAIN_SOURCE".into(), "chosen-source".into()),
+            ("RUST_RECURSION_COUNT".into(), "7".into()),
+        ]);
+        if cfg!(windows) {
+            let _ = expected.insert(
+                "LD_LIBRARY_PATH".into(),
+                PathBuf::from("chosen-sysroot").join("lib").into_os_string(),
+            );
+        }
+        assert_eq!(environment, expected);
+    }
+}
+
+impl TestEnvironment {
     #[cfg(test)]
-    pub(super) fn fake(package: &str, name: &str, value: &str) -> Self {
-        let variables = [(OsString::from(name), OsString::from(value))].into();
+    pub(super) fn fake(package: &str, name: &str, value: impl Into<OsString>) -> Self {
+        let variables = [(OsString::from(name), value.into())].into();
         let packages = core::iter::once((
             package.to_owned(),
             PackageEnvironment {
@@ -781,6 +883,26 @@ mod tests {
         assert_eq!(found[OsStr::new("RUST_RECURSION_COUNT")], OsStr::new("1"));
         assert_eq!(found[OsStr::new("RUSTUP_HOME")], OsStr::new("rustup-home"));
         assert_eq!(found[OsStr::new("CARGO")], OsStr::new("rustup-cargo"));
+    }
+
+    #[test]
+    fn common_environment_resolves_cargo_from_path_without_a_rustup_or_cargo_override() {
+        let directory = PathBuf::from("scripted-toolchain");
+        let search_path = env::join_paths([&directory]).unwrap();
+        for windows in [false, true] {
+            let executable = directory.join(if windows { "cargo.exe" } else { "cargo" });
+            let found = common_environment(
+                Utf8Path::new("workspace"),
+                OsStr::new("cargo"),
+                windows,
+                |name| (name == "PATH").then(|| search_path.clone()),
+                |_, _, _| None,
+                || None,
+                |candidate| candidate == executable,
+            );
+            assert_eq!(found[OsStr::new("CARGO")], executable.as_os_str());
+            assert_eq!(found.len(), 1);
+        }
     }
 
     #[test]

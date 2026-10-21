@@ -151,7 +151,14 @@ pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: V
 }
 
 pub(crate) fn crate_dir(name: &str, source: &str) -> (tempfile::TempDir, Utf8PathBuf) {
-    let dir = crate::testing::workdir(name);
+    crate_dir_in(crate::testing::workdir(name), source)
+}
+
+pub(crate) fn private_crate_dir(name: &str, source: &str) -> (tempfile::TempDir, Utf8PathBuf) {
+    crate_dir_in(crate::testing::private_system_tempdir(name), source)
+}
+
+fn crate_dir_in(dir: tempfile::TempDir, source: &str) -> (tempfile::TempDir, Utf8PathBuf) {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
 
     crate::testing::write_project(

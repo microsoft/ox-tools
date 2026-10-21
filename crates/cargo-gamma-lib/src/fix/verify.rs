@@ -49,6 +49,39 @@ mod tests {
     use crate::fixtures::mutant_at as mutant;
     use crate::model::{Channel, Outcome, Suppression};
 
+    #[test]
+    fn survivor_collateral_excludes_preexisting_and_intended_ids_but_keeps_new_unintended_ids() {
+        let entry = |id: &str, suppressed| {
+            let mut mutant = mutant(id, "src/lib.rs", 1, "arith.add_to_sub", Outcome::Killed);
+            if suppressed {
+                mutant.suppression = Some(Suppression {
+                    channel: Channel::Comment,
+                    reason: None,
+                    tag: None,
+                    line: Some(1),
+                });
+            }
+            mutant
+        };
+        let before = [
+            entry("retained", true),
+            entry("released", true),
+            entry("intended", false),
+            entry("collateral", false),
+        ];
+        let after = [
+            entry("retained", true),
+            entry("released", false),
+            entry("intended", true),
+            entry("collateral", true),
+        ];
+        let result = verify(&before, &after, &core::iter::once("intended".to_owned()).collect());
+        assert!(result.missing.is_empty());
+        assert_eq!(result.collateral, ["collateral"]);
+        assert_eq!(result.released, ["released"]);
+        assert!(!result.is_clean());
+    }
+
     /// A directive that no longer suppresses what it did is the whole hazard of removal, and the
     /// verification has to be able to say so.
     #[test]

@@ -876,7 +876,7 @@ mod tests {
 
     assert_eq!(second, EXIT_OK, "{second_output}");
     assert!(second_output.contains("0 survived,"), "{second_output}");
-    assert!(second_output.contains("generalized 2/2"), "{second_output}");
+    assert!(second_output.contains("inferred tests 2/2"), "{second_output}");
     assert!(second_output.contains("2 probes"), "{second_output}");
 }
 

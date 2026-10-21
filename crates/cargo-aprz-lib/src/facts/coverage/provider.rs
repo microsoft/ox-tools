@@ -15,6 +15,7 @@ use crate::facts::crate_spec::{self, CrateSpec};
 use crate::facts::path_utils::sanitize_path_component;
 use crate::facts::repo_spec::RepoSpec;
 use crate::facts::request_tracker::{RequestTracker, TrackedTopic};
+use crate::facts::resilient_http::LazyHttpClient;
 use crate::facts::throttler::Throttler;
 
 const LOG_TARGET: &str = "  coverage";
@@ -27,7 +28,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct Provider {
-    client: Arc<reqwest::Client>,
+    client: LazyHttpClient,
     cache: Cache,
     base_url: String,
     throttler: Arc<Throttler>,
@@ -36,13 +37,10 @@ pub struct Provider {
 impl Provider {
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent("cargo-aprz")
-            .build()
-            .expect("unable to create HTTP client");
+        let client = LazyHttpClient::default();
 
         Self {
-            client: Arc::new(client),
+            client,
             cache,
             base_url: base_url.unwrap_or(CODECOV_BASE_URL).to_string(),
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
@@ -163,7 +161,7 @@ impl Provider {
         let codecov_url = format!("{}/{service}/{owner}/{repo}/branch/{branch}/graph/badge.svg", self.base_url);
         log::debug!(target: LOG_TARGET, "Trying branch '{branch}' for repository '{repo_spec}'");
 
-        let response = crate::facts::resilient_http::resilient_get(&self.client, &codecov_url)
+        let response = crate::facts::resilient_http::resilient_get(self.client.get(), &codecov_url)
             .await
             .into_app_err_with(|| format!("sending HTTP request to {codecov_url}"))?;
 
@@ -175,8 +173,8 @@ impl Provider {
             return Err(ohno::app_err!("unexpected HTTP status {status} from {codecov_url}"));
         }
 
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "reqwest body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
-        let text = contextualize_response_text(response.text().await)?;
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
+        let text = contextualize_response_text(crate::facts::resilient_http::read_response_body(response.into_body().into_text()).await)?;
 
         log::debug!(target: LOG_TARGET, "Codecov SVG length: {} bytes", text.len());
 

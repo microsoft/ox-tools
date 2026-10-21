@@ -119,6 +119,10 @@ mod tests {
     use crate::catalog::{Catalog, HostSelector};
 
     /// Catalog authors must compose valid TOML without array-of-table ownership.
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain the full generated-catalog composition scan; focused TOML parser tests preserve Miri coverage"
+    )]
     #[test]
     fn toml_regions_compose_for_every_workspace_shape() {
         fn no_arrays(table: &toml_edit::Table) -> bool {

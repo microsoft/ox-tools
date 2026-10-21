@@ -88,6 +88,14 @@ pub fn run<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<OsStr
 /// Split out of [`run`] only so that the catch has a single call to wrap, which keeps the `?`-less
 /// early returns below readable.
 fn dispatched<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> i32 {
+    dispatched_with(host, args, dispatch)
+}
+
+fn dispatched_with<H: Host>(
+    host: &mut H,
+    args: impl IntoIterator<Item = impl Into<OsString> + Clone>,
+    execute: impl FnOnce(&mut H, Cli, Styler) -> crate::Result<i32>,
+) -> i32 {
     let normalized = normalize(args);
 
     let cli = match Cli::try_parse_from(normalized) {
@@ -111,7 +119,7 @@ fn dispatched<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<Os
 
     let styler = Styler::new(cli.color.resolve(host.is_terminal()));
 
-    let code = match dispatch(host, cli, styler) {
+    let code = match execute(host, cli, styler) {
         Ok(code) => code,
 
         Err(cause) => {
@@ -506,6 +514,67 @@ mod tests {
         fn terminal_width(&self) -> Option<u16> {
             None
         }
+    }
+
+    #[test]
+    fn survivor_dispatch_propagates_run_unsuppress_configuration_and_unsuppress_shard_errors() {
+        let fixtures = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let invalid = fixtures.join("dispatch-invalid.txt");
+        for command in ["run", "unsuppress"] {
+            let cli = Cli::try_parse_from(normalize([
+                "cargo-gamma",
+                command,
+                "--dir",
+                fixtures.as_str(),
+                "--config",
+                invalid.as_str(),
+            ]))
+            .expect("the command line itself is valid");
+            let error = dispatch(&mut crate::testing::Sink::default(), cli, Styler::new(false))
+                .expect_err("malformed configuration must return before discovery or execution");
+            assert!(error.is_usage());
+            assert_eq!(error.message(), format!("{invalid}: unclosed array, expected `]`"));
+        }
+        let valid = fixtures.join("dispatch-valid.txt");
+        let cli = Cli::try_parse_from(normalize([
+            "cargo-gamma",
+            "unsuppress",
+            "--dir",
+            fixtures.as_str(),
+            "--config",
+            valid.as_str(),
+            "--shard-count",
+            "2",
+        ]))
+        .expect("a partial shard is validated after configuration folding");
+        let error = dispatch(&mut crate::testing::Sink::default(), cli, Styler::new(false))
+            .expect_err("a shard count without an index is an ordinary usage error");
+        assert!(error.is_usage());
+        assert_eq!(
+            error.to_string(),
+            "a shard count of 2 was set without a shard index; a shard is both, so pass `--shard-index` or set `index` in the `[shard]` table"
+        );
+    }
+
+    #[test]
+    fn survivor_dispatch_errors_keep_the_error_prefix_and_drained_notes_keep_requested_warning_color() {
+        let mut host = crate::testing::Sink::default();
+        assert_eq!(
+            dispatched_with(&mut host, ["cargo-gamma", "--color", "never", "clean"], |_, cli, _| {
+                assert!(matches!(cli.command, Command::Clean(_)));
+                Err(crate::error::error!("scripted dispatch failure"))
+            }),
+            EXIT_CANNOT_PROCEED
+        );
+        assert_eq!(host.err(), "error: scripted dispatch failure\n");
+        let notes = crate::notes::Run::new();
+        let _scope = crate::notes::enter(Some(&notes));
+        crate::notes::note("leftover report");
+        let mut host = crate::testing::Sink::default().terminal(80);
+        say_notes(&mut host, Styler::new(true));
+        assert!(host.err().contains("\x1b["), "{}", host.err());
+        assert_eq!(host.err(), format!("{} leftover report\n", Styler::new(true).warning()));
+        assert!(crate::notes::drain().is_empty(), "notes are emitted exactly once");
     }
 
     /// A crate small enough to enumerate mutants in, with whatever configuration the test needs.
@@ -1004,5 +1073,43 @@ mod tests {
             normalize(["cargo-gamma", "gamma", "--progress=never", "--mutators", "relational"]),
             vec!["cargo-gamma", "run", "--progress=never", "--mutators", "relational"]
         );
+    }
+}
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod normalization_regressions {
+    use super::*;
+    #[test]
+    fn survivor_global_equals_options_and_every_explicit_list_mode_keep_their_argument_positions() {
+        for mode in ["mutants", "files", "mutators", "presets"] {
+            for prefix in [
+                vec!["cargo-gamma"],
+                vec!["cargo-gamma", "--color=never"],
+                vec!["cargo-gamma", "--color", "never"],
+            ] {
+                let mut input = prefix;
+                input.extend(["list", mode]);
+                let expected = input.iter().map(OsString::from).collect::<Vec<_>>();
+                assert_eq!(normalize(input), expected);
+            }
+        }
+        for (args, expected) in [
+            (vec!["cargo-gamma"], None),
+            (vec!["cargo-gamma", "--color=never"], None),
+            (vec!["cargo-gamma", "--color=never", "list"], Some(2)),
+            (vec!["cargo-gamma", "--color=always", "--color=never", "list"], Some(3)),
+            (vec!["cargo-gamma", "--colorful=never", "list"], Some(1)),
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert_eq!(subcommand_index(&args), expected);
+        }
+        for (args, expected) in [
+            (vec!["--color=never", "--jobs", "2"], true),
+            (vec!["--color=never", "merge"], false),
+            (vec!["--color=never", "--help"], false),
+            (vec!["--colorxnever", "merge"], true),
+        ] {
+            assert_eq!(implies_run(&args.into_iter().map(OsString::from).collect::<Vec<_>>()), expected);
+        }
     }
 }

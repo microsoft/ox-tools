@@ -463,11 +463,13 @@ impl Progress {
     }
 
     pub fn tick<H: Host>(&mut self, host: &mut H) {
+        self.tick_at(host, Instant::now());
+    }
+
+    fn tick_at<H: Host>(&mut self, host: &mut H, now: Instant) {
         if !self.enabled || !self.dirty {
             return;
         }
-
-        let now = Instant::now();
 
         if self.last_draw.is_some_and(|last| now.duration_since(last) < REDRAW_INTERVAL) {
             return;
@@ -539,11 +541,13 @@ impl Progress {
     /// only untrusted part, the unit, is encoded where it enters — is not encoded a second time
     /// and stripped of the styling its own label carries.
     fn draw_borrowed<H: Host>(&mut self, host: &mut H, line: &str) {
+        self.draw_borrowed_at(host, line, Instant::now());
+    }
+
+    fn draw_borrowed_at<H: Host>(&mut self, host: &mut H, line: &str, now: Instant) {
         if !self.enabled {
             return;
         }
-
-        let now = Instant::now();
 
         if self.last_draw.is_some_and(|last| now.duration_since(last) < REDRAW_INTERVAL) {
             return;
@@ -758,6 +762,184 @@ mod tests {
 
         assert!(rendered.contains("[    "), "{rendered}");
         assert!(!rendered.contains('>'), "{rendered}");
+    }
+
+    #[test]
+    fn survivor_resize_reset_and_caption_boundaries_preserve_exact_counts() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(200));
+        progress.set_total(4);
+        for outcome in [Outcome::Survived, Outcome::Timeout, Outcome::OutOfMemory] {
+            progress.record(outcome);
+        }
+        assert_eq!(
+            progress.render(),
+            "     Testing [=================>       ] 3/4 mutants evaluated (1 survived, 1 timeout, 1 out of memory)"
+        );
+        let full = "     Testing [=================>       ] 3/4 mutants evaluated (1 survived, 1 timeout, 1 out of memory)";
+        progress.resize(Some(u16::try_from(full.len()).unwrap()));
+        assert_eq!(progress.render(), full);
+        let counted = "     Testing [=================>       ] 3/4 mutants evaluated";
+        progress.resize(Some(u16::try_from(counted.len()).unwrap()));
+        assert_eq!(progress.render(), counted);
+        progress.dirty = false;
+        progress.resize(Some(65));
+        assert!(progress.dirty);
+        assert_eq!(progress.render(), "     Testing [=================>       ] 3/4 mutants evaluated");
+        progress.resize(Some(0));
+        assert_eq!(progress.width, 20);
+        assert_eq!(progress.render(), "     Testing [===...");
+        progress.resize(None);
+        assert_eq!(progress.width, 80);
+        progress.set_total(9);
+        assert_eq!(
+            (
+                progress.total,
+                progress.done,
+                progress.survived,
+                progress.timeouts,
+                progress.out_of_memory
+            ),
+            (9, 0, 0, 0, 0)
+        );
+        assert_eq!(progress.render(), "     Testing [                         ] 0/9 mutants evaluated");
+    }
+
+    #[test]
+    fn survivor_phase_completion_matrix_keeps_the_latest_subject_and_closes_the_row() {
+        for borrowed in [false, true] {
+            for extend in [false, true] {
+                let mut progress = Progress::new(true, Styler::new(false), Some(100));
+                let mut host = Sink::default();
+                progress.begin(&mut host, "Building", "Built", "old");
+                progress.update_phase(&mut host, "new\nsubject");
+                assert_eq!(progress.pending.as_ref().map(|entry| entry.2.as_str()), Some(r"new\nsubject"));
+                if borrowed {
+                    progress.last_draw = None;
+                    progress.borrowed(&mut host, "cargo");
+                    assert!(!progress.open);
+                }
+                host.err.clear();
+                progress.close(&mut host, ", done\r", extend);
+                let subject = if extend { r"new\nsubject, done\r" } else { r", done\r" };
+                assert_eq!(host.err(), format!("\r\x1b[2K       Built {subject}\n"));
+                assert!(!progress.open);
+                assert!(progress.pending.is_none());
+                assert!(progress.dirty);
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_borrowed_restore_abandon_and_disabled_updates_have_exact_state() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.begin(&mut host, "Building", "Built", "pkg");
+        progress.borrowed(&mut host, "\x1b[Kcargo");
+        assert_eq!(progress.shown.as_deref(), Some("cargo"));
+        assert!(!progress.open);
+        host.err.clear();
+        progress.restore(&mut host);
+        assert_eq!(host.err(), "\r\x1b[2K    Building pkg");
+        assert!(progress.open);
+        assert!(progress.shown.is_none());
+        assert!(progress.last_draw.is_none());
+        host.err.clear();
+        progress.restore(&mut host);
+        assert!(host.err.is_empty());
+        progress.borrowed(&mut host, "cargo two");
+        host.err.clear();
+        progress.dirty = false;
+        progress.abandon(&mut host);
+        assert_eq!(host.err(), "\r\x1b[2K    Building pkg\n");
+        assert!(progress.pending.is_none());
+        assert!(progress.dirty);
+        let mut disabled = Progress::new(false, Styler::new(false), Some(80));
+        host.err.clear();
+        disabled.begin(&mut host, "Building", "Built", "pkg");
+        disabled.update_phase(&mut host, "other");
+        disabled.restore(&mut host);
+        disabled.borrowed(&mut host, "cargo");
+        disabled.complete(&mut host, "done");
+        assert!(host.err.is_empty());
+        assert!(disabled.pending.is_none());
+        assert!(!disabled.open);
+    }
+
+    #[test]
+    fn survivor_tick_redraws_dirty_rows_at_the_exact_interval_but_never_repeats_an_unchanged_row() {
+        let base = Instant::now();
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.set_total(3);
+        progress.tick_at(&mut host, base);
+        let initial = host.err();
+        assert!(!initial.is_empty());
+        progress.set_total(4);
+        progress.tick_at(
+            &mut host,
+            (base + REDRAW_INTERVAL)
+                .checked_sub(Duration::from_nanos(1))
+                .expect("this instant follows base by a full redraw interval"),
+        );
+        assert_eq!(host.err(), initial, "a dirty row is still throttled just before the boundary");
+        progress.tick_at(&mut host, base + REDRAW_INTERVAL);
+        let changed = host.err();
+        assert!(changed.len() > initial.len(), "the exact boundary is eligible for redraw");
+        assert!(!progress.dirty);
+        progress.tick_at(&mut host, base + REDRAW_INTERVAL + REDRAW_INTERVAL);
+        assert_eq!(host.err(), changed, "time passing does not make an unchanged row dirty");
+        progress.set_total(5);
+        progress.tick_at(&mut host, base + REDRAW_INTERVAL + REDRAW_INTERVAL + Duration::from_nanos(1));
+        assert!(host.err().len() > changed.len());
+    }
+
+    #[test]
+    fn survivor_tick_invalidates_borrowed_row_identity_and_borrowed_rows_respect_the_same_clock_boundary() {
+        let base = Instant::now();
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.draw_borrowed_at(&mut host, "cargo row", base);
+        assert_eq!(progress.shown.as_deref(), Some("cargo row"));
+        let first = host.err();
+        progress.draw_borrowed_at(
+            &mut host,
+            "new cargo row",
+            (base + REDRAW_INTERVAL)
+                .checked_sub(Duration::from_nanos(1))
+                .expect("this instant follows base by a full redraw interval"),
+        );
+        assert_eq!(host.err(), first, "changed borrowed rows are throttled too");
+        progress.set_total(3);
+        progress.tick_at(&mut host, base + REDRAW_INTERVAL);
+        assert!(progress.shown.is_none(), "the old borrowed row is no longer on screen");
+        let ticked = host.err();
+        progress.draw_borrowed_at(&mut host, "cargo row", base + REDRAW_INTERVAL + REDRAW_INTERVAL);
+        assert!(
+            host.err().len() > ticked.len(),
+            "returning to the old cargo row must actually repaint it"
+        );
+        assert_eq!(host.err().matches("cargo row").count(), 2);
+        assert_eq!(visible_width(""), 0);
+        assert_eq!(visible_width("\x1b[31mA界e\u{301}\x1b[0m"), 4);
+    }
+
+    #[test]
+    fn survivor_insisted_output_closes_the_active_phase_before_writing_a_requested_label() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.begin(&mut host, "Building", "Built", "workspace");
+        host.err.clear();
+        progress.insist(&mut host, "compiler", "requested\nline");
+        assert_eq!(host.err(), "\ncompiler requested\\nline\n");
+        assert!(!progress.open);
+        assert_eq!(
+            progress.pending.as_ref(),
+            Some(&("    Building".to_owned(), "       Built".to_owned(), "workspace".to_owned()))
+        );
+        assert!(progress.dirty);
+        progress.complete(&mut host, "done");
+        assert_eq!(host.err(), "\ncompiler requested\\nline\n       Built done\n");
+        assert!(progress.pending.is_none());
     }
 
     #[test]

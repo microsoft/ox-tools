@@ -73,6 +73,10 @@ fn numeric_associated_call(call: &ExprCall) -> bool {
         })
 }
 
+fn saturating_ordinal(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
 /// One reversible change to the block-scoped binding evidence.
 ///
 /// Remembered so a lexical block can undo exactly what it wrote — its own insertions and shadows —
@@ -926,7 +930,7 @@ impl<'a> Collector<'a> {
         // the mutants already generated at this site.
         if returns_result(&sig.output) && self.wants("fn_value.err_with") {
             for (offset, error) in self.errors.iter().enumerate() {
-                let index = u32::try_from(value_count.saturating_add(offset)).unwrap_or(u32::MAX);
+                let index = saturating_ordinal(value_count.saturating_add(offset));
                 let replacement = format_compact!("Err({error})");
 
                 self.emit_shaped_with_confidence("fn_value.err_with", span, replacement, index, Shape::Block, Confidence::Explicit);
@@ -1119,7 +1123,7 @@ impl<'a> Collector<'a> {
                 .expect("field bounds were checked above and parser spans are UTF-8 boundaries");
 
             let replacement = format_compact!("{head}{tail}");
-            let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+            let ordinal = saturating_ordinal(index);
 
             self.emit_shaped("struct_field.omit", node.span(), replacement, ordinal, Shape::Expr);
         }
@@ -1171,7 +1175,7 @@ impl<'a> Collector<'a> {
                 text.get(to.saturating_sub(items.start)..),
             ) {
                 let replacement = format_compact!("{head}{before}{after}{tail}");
-                let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+                let ordinal = saturating_ordinal(index);
 
                 self.emit_at(
                     "collection.omit_element",
@@ -1642,7 +1646,7 @@ impl<'a> Collector<'a> {
                 "parameter.default_shadow",
                 body.span(),
                 replacement,
-                u32::try_from(index).unwrap_or(u32::MAX),
+                saturating_ordinal(index),
                 Shape::Block,
             );
         }
@@ -1721,12 +1725,7 @@ impl<'a> Collector<'a> {
         }
 
         for (index, (mutator, replacement)) in regex_mutations(&pattern).into_iter().enumerate() {
-            self.emit(
-                mutator,
-                literal.span(),
-                format!("{replacement:?}"),
-                u32::try_from(index).unwrap_or(u32::MAX),
-            );
+            self.emit(mutator, literal.span(), format!("{replacement:?}"), saturating_ordinal(index));
         }
     }
 
@@ -3335,7 +3334,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             _ => {}
         }
 
-        visit::visit_pat(self, &node.pat);
+        self.visit_pat(&node.pat);
         if let Pat::Type(typed) = &node.pat
             && let Some(init) = &node.init
         {
@@ -3526,12 +3525,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // tree would present itself as a mutable string literal.
     }
 
-    fn visit_pat(&mut self, _node: &'ast Pat) {
-        // A pattern is matched against, not evaluated, so nothing in one can be guarded: a guard
-        // is an `if` expression and no expression is legal in pattern position. This matters
-        // because `syn` models a literal pattern as an `ExprLit`, so without this every `"skip"
-        // =>` match arm would offer itself as a mutable literal and produce a mutant that cannot
-        // compile.
+    fn visit_pat(&mut self, node: &'ast Pat) {
+        // A pattern is matched against, not evaluated, so its literals cannot be guarded. `syn`
+        // keeps a match arm's executable `if` guard inside Pat::Guard, though, and that expression
+        // must still be visited for nested mutations such as relational comparisons.
+        if let Pat::Guard(guarded) = node {
+            self.visit_expr(&guarded.guard);
+        }
     }
 
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {

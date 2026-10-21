@@ -440,10 +440,7 @@ impl Census {
             .filter_map(|(site, tests)| {
                 // #[gamma::skip(try.propagate_to_unwrap, reason = "test_sets is built from every entries test vector immediately above; sorting and deduplication retain an equal vector")]
                 let test_set = test_sets.iter().position(|known| *known == tests)?;
-                Some(ReachCluster {
-                    site,
-                    test_set: u32::try_from(test_set).ok()?,
-                })
+                reach_cluster(site, test_set)
             })
             .collect();
         hints.test_sets = test_sets;
@@ -528,6 +525,10 @@ pub(super) fn take(
     stall: Stall,
     events: &mut impl Events,
 ) -> Census {
+    #[cfg(test)]
+    if let Some(census) = SCRIPTED_CENSUS.with_borrow_mut(|slot| slot.as_mut().map(|result| result(binaries))) {
+        return census;
+    }
     let mut census = Census::default();
     let binaries: Vec<&TestBinary> = binaries.iter().filter(|binary| targets.contains_key(&binary.path)).collect();
     census.listing_launches = binaries.len();
@@ -562,7 +563,7 @@ pub(super) fn take(
 
             continue;
         };
-        let listing_cost = started.elapsed();
+        let listing_cost = listing_elapsed(started);
         names.sort_unstable();
         let scopes = initial_scopes(&names);
         let launch_cost = listing_cost.max(MIN_SCOUT_WAIT);
@@ -604,6 +605,21 @@ pub(super) fn take(
     ));
 
     census
+}
+
+fn reach_cluster(site: SiteIdentity, index: usize) -> Option<ReachCluster> {
+    Some(ReachCluster {
+        site,
+        test_set: u32::try_from(index).ok()?,
+    })
+}
+
+fn listing_elapsed(started: Instant) -> Duration {
+    #[cfg(test)]
+    if let Some(elapsed) = SCRIPTED_LISTING_ELAPSED.with(std::cell::Cell::get) {
+        return elapsed;
+    }
+    started.elapsed()
 }
 
 /// Whether the estimated census work is smaller than everything it could possibly save.
@@ -800,7 +816,102 @@ fn listed(command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
     listed_with_request(command, budget, MemoryRequest::default())
 }
 
-fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRequest) -> Option<Vec<Box<str>>> {
+#[cfg(test)]
+type ScriptedListing = Box<dyn FnMut(&Command, Duration, MemoryRequest) -> Option<Vec<Box<str>>>>;
+
+#[cfg(test)]
+thread_local! {
+    static SCRIPTED_LISTING: std::cell::RefCell<Option<ScriptedListing>> = const { std::cell::RefCell::new(None) };
+    static SCRIPTED_LISTING_ELAPSED: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static SCRIPTED_SAMPLE: std::cell::RefCell<Option<ScriptedSample>> = const { std::cell::RefCell::new(None) };
+    static SCRIPTED_CENSUS: std::cell::RefCell<Option<ScriptedCensus>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+type ScriptedSample = Box<dyn FnMut(&Workspace, &TestBinary, Attempt<'_>) -> (Verdict, Vec<u8>, Duration)>;
+
+#[cfg(test)]
+type ScriptedCensus = Box<dyn FnMut(&[TestBinary]) -> Census>;
+
+/// Supplies final census evidence for orchestration tests, bypassing admission and native sampling.
+/// Scoped to the calling thread and reset on return or unwind.
+#[cfg(test)]
+pub(super) fn with_census_result<T>(result: impl FnMut(&[TestBinary]) -> Census + 'static, body: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SCRIPTED_CENSUS.with_borrow_mut(|slot| {
+                let _ = slot.take();
+            });
+        }
+    }
+    SCRIPTED_CENSUS.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "census result scopes cannot nest");
+        *slot = Some(Box::new(result));
+    });
+    let _reset = Reset;
+    body()
+}
+
+/// Replaces native sample storage/execution/read with a verdict, census bytes and sample duration;
+/// the real decoder still validates supplied evidence. `elapsed` fixes listing cost only.
+/// Both overrides apply on the calling thread and reset on return or unwind.
+#[cfg(test)]
+fn with_sample_observer<T>(
+    observer: impl FnMut(&Workspace, &TestBinary, Attempt<'_>) -> (Verdict, Vec<u8>, Duration) + 'static,
+    elapsed: Duration,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SCRIPTED_SAMPLE.with_borrow_mut(|slot| {
+                let _ = slot.take();
+            });
+            SCRIPTED_LISTING_ELAPSED.set(None);
+        }
+    }
+    SCRIPTED_SAMPLE.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "a test cannot install overlapping census observers");
+        *slot = Some(Box::new(observer));
+    });
+    SCRIPTED_LISTING_ELAPSED.set(Some(elapsed));
+    let _reset = Reset;
+    body()
+}
+
+/// Replaces the completed listing, bypassing launch preparation, supervision, decoding and parsing.
+/// The override is current-thread-only, cannot nest, and is cleared on scope exit, including unwind.
+#[cfg(test)]
+pub(super) fn with_listing_runner<T>(
+    runner: impl FnMut(&Command, Duration, MemoryRequest) -> Option<Vec<Box<str>>> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SCRIPTED_LISTING.with_borrow_mut(|runner| {
+                let _ = runner.take();
+            });
+        }
+    }
+    SCRIPTED_LISTING.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "a thread cannot install two listing runners simultaneously");
+        *slot = Some(Box::new(runner));
+    });
+    let _reset = Reset;
+    body()
+}
+
+fn listed_with_request(command: Command, budget: Duration, request: MemoryRequest) -> Option<Vec<Box<str>>> {
+    #[cfg(test)]
+    if let Some(listing) = SCRIPTED_LISTING.with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(&command, budget, request))) {
+        return listing;
+    }
+    listed_native(command, Some(budget), request)
+}
+
+fn listed_native(mut command: Command, budget: Option<Duration>, request: MemoryRequest) -> Option<Vec<Box<str>>> {
     enum ListingStatus {
         Observed(std::process::ExitStatus),
         Missing,
@@ -859,17 +970,19 @@ fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRe
     });
     drop(sender);
 
-    let deadline = Instant::now() + budget;
+    let deadline = budget.map(|budget| Instant::now() + budget);
 
     let status = loop {
         match subtree.observe() {
             Ok(Some(status)) => break ListingStatus::Observed(status),
 
             // #[gamma::skip(match_guard.always_false, reason = "disabling the deadline arm leaves the zero-duration polling loop non-terminating after the budget expires")]
-            Ok(None) if Instant::now() >= deadline => break ListingStatus::Missing,
+            Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => break ListingStatus::Missing,
 
             // #[gamma::skip(iter.min_to_max, reason = "using the remaining budget instead of the polling interval changes only wake-up latency; the same child status and deadline decide the result")]
-            Ok(None) => thread::sleep(LIST_POLL.min(deadline.saturating_duration_since(Instant::now()))),
+            Ok(None) => thread::sleep(deadline.map_or(LIST_POLL, |deadline| {
+                LIST_POLL.min(deadline.saturating_duration_since(Instant::now()))
+            })),
 
             // The handle is gone, so the one question that would settle this cannot be asked again.
             Err(_unaskable) => break ListingStatus::Missing,
@@ -898,13 +1011,20 @@ fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRe
     // this final drain too: abandoning its blocked reader loses only a census optimization, while
     // joining it would turn one escaped process into an unbounded run.
     let (text, whole) = reading
-        .and_then(|()| receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok())
+        .and_then(|()| match deadline {
+            Some(deadline) => receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok(),
+            None => receiver.recv().ok(),
+        })
         .unwrap_or_default();
 
     let ListingStatus::Observed(status) = status else {
         return None;
     };
-    if !whole || !status.success() {
+    decode_listing(text, whole, status.success())
+}
+
+fn decode_listing(text: Vec<u8>, whole: bool, succeeded: bool) -> Option<Vec<Box<str>>> {
+    if !whole || !succeeded {
         return None;
     }
 
@@ -1155,6 +1275,500 @@ fn subdivision_repays(
     sampling.saturating_mul(2) < remaining
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use std::io::Write as _;
+
+    use super::super::loader::Launch;
+    use super::*;
+
+    fn policy_workspace() -> Workspace {
+        let root = Utf8PathBuf::from(if cfg!(windows) { "C:/census-policy" } else { "/census-policy" });
+        Workspace::adopt(root.clone(), root.join("target"))
+    }
+
+    #[derive(Default)]
+    struct Lifecycle {
+        begins: Vec<(String, String, String)>,
+        progress: Vec<(usize, usize, String)>,
+        ends: Vec<String>,
+    }
+
+    impl Events for Lifecycle {
+        fn phase(&mut self, _verb: &str, _detail: &str) {}
+        fn mutant(&mut self, _mutant: &Mutant) {}
+        fn begin(&mut self, active: &str, done: &str, detail: &str) {
+            self.begins.push((active.into(), done.into(), detail.into()));
+        }
+        fn phase_progress(&mut self, completed: usize, total: usize, unit: &str) {
+            self.progress.push((completed, total, unit.into()));
+        }
+        fn end(&mut self, detail: &str) {
+            self.ends.push(detail.into());
+        }
+    }
+
+    #[test]
+    fn actual_take_sorts_and_filters_listings_preserves_every_stall_argument_and_uses_the_exact_nonmetered_sample_budget() {
+        for budget in [None, Some(Duration::from_nanos(9)), Some(Duration::from_micros(1))] {
+            let work = policy_workspace();
+            let selected = TestBinary {
+                baseline: Duration::from_nanos(100),
+                budget,
+                ..crate::testing::test_binary("selected")
+            };
+            let excluded = crate::testing::test_binary("excluded");
+            let targets = HashMap::from_iter([(selected.path.clone(), HashSet::from_iter([7]))]);
+            let sampled = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let trace = std::rc::Rc::clone(&sampled);
+            let stall = Stall {
+                budget: Some(Duration::from_nanos(17)),
+            };
+            let mut events = Lifecycle::default();
+            let expected_path = selected.path.clone();
+            let result = with_listing_runner(
+                move |command, _, _| {
+                    assert_eq!(command.get_program(), expected_path.as_std_path().as_os_str());
+                    Some(vec!["root::z::case".into(), "root::a::case".into()])
+                },
+                || {
+                    with_sample_observer(
+                        move |_, _, attempt| {
+                            assert_eq!(attempt.active, None);
+                            assert_eq!(attempt.stall, stall);
+                            assert!(!attempt.request.meter);
+                            assert_eq!(attempt.request.limit, None);
+                            assert_eq!(attempt.timeout, budget.map(|budget| Duration::from_nanos(400).max(budget)));
+                            let Only::These(names) = attempt.only else {
+                                panic!("the measured sample must retain its exact names")
+                            };
+                            trace
+                                .borrow_mut()
+                                .push(names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>());
+                            let bytes = [7, SEAL].into_iter().flat_map(u32::to_ne_bytes).collect::<Vec<_>>();
+                            (Verdict::Passed, bytes, Duration::from_nanos(1))
+                        },
+                        Duration::ZERO,
+                        || {
+                            take(
+                                &work,
+                                &[selected, excluded],
+                                &targets,
+                                Duration::from_mins(1),
+                                3,
+                                stall,
+                                &mut events,
+                            )
+                        },
+                    )
+                },
+            );
+            assert_eq!(
+                sampled.borrow().as_slice(),
+                [vec!["root::a::case".to_owned()], vec!["root::z::case".to_owned()]]
+            );
+            assert_eq!(result.listing_launches, 1);
+            assert_eq!(result.listed_binaries, 1);
+            assert_eq!(result.estimated_cost, MIN_SCOUT_WAIT * 2);
+            assert_eq!(result.walked, 2);
+            assert_eq!(result.len(), 1);
+            assert_eq!(events.begins, [("Optimizing".into(), "Optimized".into(), "1 test binary".into())]);
+            assert_eq!(events.progress, [(0, 1, "test binary".into()), (1, 1, "test binary".into())]);
+            assert_eq!(events.ends, [", 1 of 1 binary mapped, over 2 samples".to_owned()]);
+        }
+    }
+
+    #[test]
+    fn an_already_expired_actual_walk_never_reaches_the_native_sampler_or_spends_one_launch() {
+        let work = policy_workspace();
+        let binary = crate::testing::test_binary("expired");
+        let targets = HashMap::from_iter([(binary.path.clone(), HashSet::from_iter([7]))]);
+        let completed = std::cell::Cell::new(0);
+        let (mapped, launched) = with_sample_observer(
+            |_, _, _| panic!("an expired actual walk cannot enter sampling"),
+            Duration::ZERO,
+            || {
+                walk(
+                    &work,
+                    vec![(&binary, vec!["case".into()], MIN_SCOUT_WAIT)],
+                    &targets,
+                    Some(Instant::now()),
+                    3,
+                    Stall {
+                        budget: Some(Duration::from_nanos(17)),
+                    },
+                    || completed.set(completed.get() + 1),
+                )
+            },
+        );
+        assert!(mapped.is_empty());
+        assert_eq!(launched, 0);
+        assert_eq!(completed.get(), 1);
+    }
+
+    #[test]
+    fn sampled_scope_times_preserve_the_first_remainder_and_singleton_divisor_and_complete_empty_reach_is_not_dropped() {
+        for reached in [false, true] {
+            let work = policy_workspace();
+            let binary = crate::testing::test_binary("shares");
+            let targets = HashMap::from_iter([(binary.path.clone(), HashSet::from_iter([7]))]);
+            let names = ["root::a::first", "root::a::second", "root::a::third", "root::z::last"]
+                .map(Box::from)
+                .to_vec();
+            let (mapped, launched) = plan_walk(
+                &work,
+                vec![(&binary, names, MIN_SCOUT_WAIT)],
+                &targets,
+                Stall::NONE,
+                |_, _, _, _, _| Some((if reached { vec![7] } else { vec![] }, Duration::from_nanos(5))),
+                || false,
+                || {},
+            );
+            assert_eq!(launched, 2);
+            assert_eq!(mapped.len(), 1);
+            assert!(mapped[0].1.complete);
+            assert_eq!(mapped[0].1.times, [3, 1, 1, 5].map(Duration::from_nanos));
+            assert_eq!(mapped[0].1.reached.is_empty(), !reached);
+        }
+    }
+
+    #[test]
+    fn an_incomplete_empty_first_binary_does_not_abandon_a_later_requested_binary() {
+        let work = policy_workspace();
+        let first = crate::testing::test_binary("incomplete");
+        let second = crate::testing::test_binary("later");
+        let targets = HashMap::from_iter([first.path.clone(), second.path.clone()].map(|path| (path, HashSet::from_iter([7]))));
+        let completed = std::cell::Cell::new(0);
+        let (mapped, launched) = plan_walk(
+            &work,
+            vec![
+                (&first, vec!["first".into()], MIN_SCOUT_WAIT),
+                (&second, vec!["second".into()], MIN_SCOUT_WAIT),
+            ],
+            &targets,
+            Stall::NONE,
+            |_, binary, _, _, _| (binary.path == second.path).then_some((vec![7], Duration::from_nanos(11))),
+            || false,
+            || completed.set(completed.get() + 1),
+        );
+        assert_eq!(completed.get(), 2);
+        assert_eq!(launched, 2);
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].0, second.path);
+        assert_eq!(mapped[0].1.times, [Duration::from_nanos(11)]);
+        assert!(mapped[0].1.complete);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn reach_cluster_conversion_refuses_the_first_unrepresentable_index_without_allocating_test_sets() {
+        let site = SiteIdentity::from_mutant(&crate::fixtures::mutant());
+        let last = usize::try_from(u32::MAX).unwrap();
+        assert_eq!(
+            reach_cluster(site.clone(), last),
+            Some(ReachCluster {
+                site: site.clone(),
+                test_set: u32::MAX
+            })
+        );
+        assert_eq!(reach_cluster(site, last + 1), None);
+        let elapsed = Duration::from_nanos(2 * u64::from(u32::MAX));
+        for count in [last, last + 1] {
+            assert_eq!(sample_time_shares(elapsed, count), (Duration::from_nanos(2), Duration::ZERO));
+        }
+    }
+
+    #[test]
+    fn subdivision_adapter_keeps_exact_child_name_and_reach_counts_at_the_profit_boundary() {
+        let children = [Scope { tests: vec![0] }, Scope { tests: vec![1] }];
+        let scope = Scope { tests: vec![0, 1] };
+        let names = ["first", "second", "third", "fourth"].map(Box::from);
+        let wanted = HashSet::from_iter([1, 2, 3]);
+        for (nanos, expected) in [(39, false), (40, false), (41, false), (42, true), (43, true)] {
+            assert_eq!(
+                should_subdivide(
+                    &children,
+                    &scope,
+                    &names,
+                    &[1, 2],
+                    &wanted,
+                    Duration::from_nanos(10),
+                    Duration::from_nanos(nanos)
+                ),
+                expected,
+                "baseline={nanos}ns must compare forty ns of sampling against twice the floor-rounded half-baseline"
+            );
+        }
+    }
+
+    #[test]
+    fn listing_commands_apply_the_selected_loader_and_package_environment_without_launching() {
+        let mut work = policy_workspace();
+        let binary = crate::testing::test_binary("not-executed");
+        work.set_launch(Launch {
+            loader: Some("selected-loader".into()),
+            stack: "7654321".into(),
+        });
+        work.set_test_environment(&binary.package_id, "PACKAGE_VALUE", "selected-package");
+        let command = listing_command(&work, &binary, true, false);
+        let variables = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+        for (name, expected) in [(LOADER_VAR, "selected-loader"), ("PACKAGE_VALUE", "selected-package")] {
+            assert_eq!(
+                variables.get(std::ffi::OsStr::new(name)).copied().flatten(),
+                Some(std::ffi::OsStr::new(expected))
+            );
+        }
+        assert!(!variables.contains_key(std::ffi::OsStr::new("RUST_MIN_STACK")));
+        assert_eq!(command.get_current_dir(), Some(work.root.as_std_path()));
+    }
+
+    struct RefusedRead;
+
+    impl io::Read for RefusedRead {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("bounded read refused after its valid prefix"))
+        }
+    }
+
+    #[test]
+    fn a_bounded_census_read_propagates_a_late_reader_failure_instead_of_panicking_or_trusting_its_prefix() {
+        let reader = io::Cursor::new([1, 2, 3]).chain(RefusedRead);
+        let failure = read_bounded_from(reader).expect_err("a successfully read prefix is not a complete census");
+        let CensusReadError::Io(cause) = failure else {
+            panic!("a reader transport failure is not an oversized census")
+        };
+        assert_eq!(cause.kind(), io::ErrorKind::Other);
+        assert_eq!(cause.to_string(), "bounded read refused after its valid prefix");
+    }
+
+    #[test]
+    fn census_size_validation_reports_the_first_and_second_excess_lengths_without_allocating_records() {
+        for length in [MAX_CENSUS_BYTES - 1, MAX_CENSUS_BYTES, MAX_CENSUS_BYTES + 1, MAX_CENSUS_BYTES + 2] {
+            let result = validate_census_size(usize::try_from(length).unwrap());
+            if length <= MAX_CENSUS_BYTES {
+                result.expect("both in-bound lengths fit the bounded census protocol");
+            } else {
+                let failure = result.expect_err("every byte beyond the cap must be refused with its actual observed length");
+                let CensusReadError::Oversized { actual, maximum } = failure else {
+                    panic!("a known oversized length must not become a reader transport error")
+                };
+                assert_eq!(actual, length);
+                assert_eq!(maximum, MAX_CENSUS_BYTES);
+            }
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn census_cost_clamps_oversized_counts_without_allocating_test_populations() {
+        let oversized = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+        assert_eq!(
+            add_listing_cost(Duration::from_nanos(7), Duration::from_nanos(3), oversized),
+            Duration::from_nanos(7 + 3 * u64::from(u32::MAX))
+        );
+        let boundary = Duration::from_nanos(2 * u64::from(u32::MAX) - 1);
+        assert!(!subdivision_repays(oversized, Duration::from_nanos(1), boundary, 1, 1, 1));
+        assert!(subdivision_repays(
+            oversized,
+            Duration::from_nanos(1),
+            boundary + Duration::from_nanos(2),
+            1,
+            1,
+            1
+        ));
+    }
+
+    #[test]
+    fn listing_decoding_requires_whole_successful_utf8_output() {
+        for (bytes, whole, succeeded, expected) in [
+            (
+                b"suite::selected: test\n".as_slice(),
+                true,
+                true,
+                Some(vec!["suite::selected".into()]),
+            ),
+            (b"suite::selected: test\n", false, true, None),
+            (b"suite::selected: test\n", true, false, None),
+            (b"\xff", true, true, None),
+            (b"", true, true, Some(Vec::new())),
+        ] {
+            assert_eq!(decode_listing(bytes.to_vec(), whole, succeeded), expected);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    #[cfg_attr(miri, ignore = "native listing acceptance launches a contained subprocess")]
+    fn malformed_utf8_listing_is_not_an_empty_success() {
+        const CHILD: &str = "GAMMA_EXEC_INVALID_UTF8_LISTING_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(&[0xff]).unwrap();
+            stdout.flush().unwrap();
+            std::process::exit(0);
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        let _ = command
+            .args([
+                "--exact",
+                "exec::census::final_survivor_tests::malformed_utf8_listing_is_not_an_empty_success",
+                "--nocapture",
+            ])
+            .env(CHILD, "1");
+        assert_eq!(listed_native(command, None, MemoryRequest::default()), None);
+    }
+
+    #[test]
+    #[cfg(feature = "system-tests")]
+    #[cfg_attr(miri, ignore = "native listing acceptance launches a contained subprocess")]
+    fn failed_listing_processes_and_uncontainable_launches_never_publish_empty_censuses() {
+        for exit in [0, 1] {
+            let script = if exit == 0 { "exit:0" } else { "exit:1" };
+            let (_directory, work) = crate::testing::helper_workspace("listing-terminal", &["print:suite::selected: test", script]);
+            let binary = crate::testing::helper();
+            let command = listing_command(&work, &binary, true, false);
+            let names = listed_native(command, None, MemoryRequest::default());
+            assert_eq!(names, (exit == 0).then(|| vec!["suite::selected".into()]));
+        }
+        let (_directory, work) = crate::testing::helper_workspace("listing-containment", &["print:suite::selected: test", "exit:0"]);
+        let command = listing_command(&work, &crate::testing::helper(), true, false);
+        let _refused = process_faults::arm(ProcessFault::Prepare);
+        assert_eq!(listed_native(command, None, MemoryRequest::default()), None);
+    }
+
+    #[test]
+    fn listing_adapters_distinguish_missing_empty_selected_and_ignored_marker_records() {
+        for mode in 0..4 {
+            for empty in [false, true] {
+                let mut work = policy_workspace();
+                work.set_test_args(vec!["suite".into(), "--skip".into(), "excluded".into(), "--format=json".into()]);
+                let binary = crate::testing::test_binary("listing-subject");
+                let listed = with_listing_runner(
+                    move |command, budget, request| {
+                        assert_eq!(command.get_program(), "listing-subject");
+                        assert_eq!(budget, LIST_BUDGET);
+                        assert_eq!(request.meter, mode >= 2);
+                        assert_eq!(request.limit, (mode >= 2).then_some(37));
+                        let expected = if mode == 3 {
+                            vec!["--list", "--format=terse", "--ignored"]
+                        } else {
+                            vec!["--list", "--format=terse", "--skip", "excluded", "suite"]
+                        };
+                        assert_eq!(
+                            command.get_args().collect::<Vec<_>>(),
+                            expected.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
+                        );
+                        Some(if empty {
+                            Vec::new()
+                        } else {
+                            vec!["suite::selected".into(), "__cargo_gamma_resource_696f_binary".into()]
+                        })
+                    },
+                    || match mode {
+                        0 => list(&work, &binary),
+                        1 => list_selected_nonempty(&work, &binary),
+                        2 => list_selected_allow_empty(
+                            &work,
+                            &binary,
+                            MemoryRequest {
+                                meter: true,
+                                limit: Some(37),
+                            },
+                        ),
+                        3 => list_resource_markers(
+                            &work,
+                            &binary,
+                            MemoryRequest {
+                                meter: true,
+                                limit: Some(37),
+                            },
+                        ),
+                        _ => unreachable!("the loop contains only four listing adapters"),
+                    },
+                );
+                let expected: Option<Vec<Box<str>>> = if empty && mode < 2 {
+                    None
+                } else if empty {
+                    Some(Vec::new())
+                } else if mode == 1 {
+                    Some(vec!["suite::selected".into(), "__cargo_gamma_resource_696f_binary".into()])
+                } else if mode == 3 {
+                    Some(vec!["__cargo_gamma_resource_696f_binary".into()])
+                } else {
+                    Some(vec!["suite::selected".into()])
+                };
+                assert_eq!(listed, expected, "mode={mode} empty={empty}");
+                let absent = with_listing_runner(
+                    |_, _, _| None,
+                    || match mode {
+                        0 => list(&work, &binary),
+                        1 => list_selected_nonempty(&work, &binary),
+                        2 => list_selected_allow_empty(&work, &binary, MemoryRequest::default()),
+                        3 => list_resource_markers(&work, &binary, MemoryRequest::default()),
+                        _ => unreachable!("the loop contains only four listing adapters"),
+                    },
+                );
+                assert_eq!(absent, None, "failed listing must not become an empty success");
+            }
+        }
+    }
+
+    #[test]
+    fn subdivision_break_even_matrix_is_strict_and_requires_reached_tests() {
+        for launches in 0..=3 {
+            for scope_tests in 0..=4 {
+                for total_tests in 0..=4 {
+                    for reached_sites in 0..=3 {
+                        for baseline_ns in [0, 1, 7, 8, 9, 16] {
+                            let expected = total_tests != 0
+                                && reached_sites != 0
+                                && launches * 2 * 2 < (baseline_ns * scope_tests / total_tests.max(1)) * reached_sites;
+                            assert_eq!(
+                                subdivision_repays(
+                                    launches,
+                                    Duration::from_nanos(2),
+                                    Duration::from_nanos(baseline_ns as u64),
+                                    scope_tests,
+                                    total_tests,
+                                    reached_sites,
+                                ),
+                                expected,
+                                "launches={launches} scope={scope_tests}/{total_tests} sites={reached_sites} baseline={baseline_ns}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hierarchical_and_contiguous_subdivision_preserve_exact_indices() {
+        let names: Vec<Box<str>> = ["root::a::one", "root::a::two", "root::b::three", "root::c::four"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let indices = |scopes: Vec<Scope>| scopes.into_iter().map(|scope| scope.tests).collect::<Vec<_>>();
+        assert_eq!(indices(initial_scopes(&names)), [vec![0, 1], vec![2], vec![3]]);
+        assert_eq!(
+            indices(subdivision(&Scope { tests: vec![0, 1, 2, 3] }, &names).unwrap()),
+            [vec![0, 1], vec![2], vec![3]]
+        );
+        assert!(subdivision(&Scope { tests: vec![1] }, &names).is_none());
+        assert_eq!(
+            indices(subdivision(&Scope { tests: vec![0, 1] }, &names).unwrap()),
+            [vec![0], vec![1]]
+        );
+        assert_eq!(indices(contiguous_children(&Scope { tests: vec![1, 3] }, true)), [vec![1], vec![3]]);
+        let five = Scope {
+            tests: vec![0, 1, 2, 3, 4],
+        };
+        assert_eq!(indices(contiguous_children(&five, true)), [vec![0, 1, 2], vec![3, 4]]);
+        assert_eq!(indices(contiguous_children(&five, false)), [vec![0, 1, 2], vec![3, 4]]);
+    }
+}
+
 fn scale_duration(duration: Duration, numerator: usize, denominator: usize) -> Duration {
     // #[gamma::skip(expr.decrement, reason = "usize converts exactly to u128 on every supported target, so this fallback cannot be observed")]
     let denominator = u128::try_from(denominator).unwrap_or(u128::MAX).max(1);
@@ -1177,6 +1791,30 @@ fn walk_with<S, E>(
     stall: Stall,
     sampler: S,
     expired: E,
+    completed: impl FnMut(),
+) -> (Vec<(Utf8PathBuf, Reach)>, usize)
+where
+    S: Fn(&Workspace, &TestBinary, &[&str], &Utf8Path, Stall) -> Option<(Vec<u32>, Duration)>,
+    E: Fn() -> bool,
+{
+    #[cfg(test)]
+    let scripted = SCRIPTED_SAMPLE.with_borrow(Option::is_some);
+    #[cfg(not(test))]
+    let scripted = false;
+    if !scripted && fs::create_dir_all(work.base().join("census").as_std_path()).is_err() {
+        return (Vec::new(), 0);
+    }
+
+    plan_walk(work, listed, targets, stall, sampler, expired, completed)
+}
+
+fn plan_walk<S, E>(
+    work: &Workspace,
+    listed: Vec<(&TestBinary, Vec<Box<str>>, Duration)>,
+    targets: &HashMap<Utf8PathBuf, HashSet<u32>>,
+    stall: Stall,
+    sampler: S,
+    expired: E,
     mut completed: impl FnMut(),
 ) -> (Vec<(Utf8PathBuf, Reach)>, usize)
 where
@@ -1184,11 +1822,6 @@ where
     E: Fn() -> bool,
 {
     let directory = work.base().join("census");
-
-    if fs::create_dir_all(directory.as_std_path()).is_err() {
-        return (Vec::new(), 0);
-    }
-
     let mut mapped = Vec::with_capacity(listed.len());
     let mut launches = 0_usize;
 
@@ -1225,9 +1858,7 @@ where
         let mut times = vec![Duration::ZERO; names.len()];
 
         for observed in evidence {
-            let divisor = u32::try_from(observed.scope.tests.len()).unwrap_or(u32::MAX).max(1);
-            let per_test = observed.elapsed / divisor;
-            let remainder = observed.elapsed.saturating_sub(per_test * divisor);
+            let (per_test, remainder) = sample_time_shares(observed.elapsed, observed.scope.tests.len());
             for (position, index) in observed.scope.tests.iter().enumerate() {
                 if let Ok(index) = usize::try_from(*index)
                     && let Some(time) = times.get_mut(index)
@@ -1274,15 +1905,17 @@ where
     (mapped, launches)
 }
 
+fn sample_time_shares(elapsed: Duration, tests: usize) -> (Duration, Duration) {
+    let divisor = u32::try_from(tests).unwrap_or(u32::MAX).max(1);
+    let per_test = elapsed / divisor;
+    (per_test, elapsed.saturating_sub(per_test * divisor))
+}
+
 /// Runs one test scope in census mode and returns the site ordinals it reached.
 ///
 /// `None` means the sample cannot be trusted, which is the whole binary's problem rather than this
 /// test's: see [`walk`].
 fn sample(work: &Workspace, binary: &TestBinary, names: &[&str], path: &Utf8Path, stall: Stall) -> Option<(Vec<u32>, Duration)> {
-    // Appended to by the runtime, so a leftover from the previous test on this worker would be read
-    // as part of this one.
-    let _removed = fs::remove_file(path.as_std_path());
-
     let attempt = Attempt {
         // No mutant. A census must see the program the author wrote, or the sites it records are
         // the ones some mutant steered it towards.
@@ -1296,6 +1929,18 @@ fn sample(work: &Workspace, binary: &TestBinary, names: &[&str], path: &Utf8Path
         census: Some(path),
     };
 
+    #[cfg(test)]
+    if let Some((verdict, bytes, elapsed)) =
+        SCRIPTED_SAMPLE.with_borrow_mut(|slot| slot.as_mut().map(|observer| observer(work, binary, attempt)))
+    {
+        return match verdict {
+            Verdict::Passed => decode(&read_bounded_from(io::Cursor::new(bytes)).ok()?).map(|sites| (sites, elapsed)),
+            _spoiled => None,
+        };
+    }
+
+    // The runtime appends, so remove any evidence left by the previous sample on this worker.
+    let _removed = fs::remove_file(path.as_std_path());
     let _resources = work.acquire_resources(binary, Only::These(names));
     let started = Instant::now();
 
@@ -1378,20 +2023,30 @@ impl From<io::Error> for CensusReadError {
 /// lengths while consuming little physical storage, and files can change after inspection.
 fn read_bounded(path: &Utf8Path) -> Result<BoundedCensus, CensusReadError> {
     let file = fs::File::open(path.as_std_path())?;
+    read_bounded_from(file)
+}
+
+fn read_bounded_from(reader: impl io::Read) -> Result<BoundedCensus, CensusReadError> {
     let mut bytes = Vec::new();
 
     // Probe beyond the accepted boundary so an exact-length file can be distinguished from a
     // truncated read of an oversized one.
-    let _read = file.take(MAX_CENSUS_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
+    let _read = reader.take(MAX_CENSUS_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
 
-    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_CENSUS_BYTES) {
+    validate_census_size(bytes.len())?;
+
+    Ok(BoundedCensus(bytes))
+}
+
+fn validate_census_size(length: usize) -> Result<(), CensusReadError> {
+    if u64::try_from(length).is_ok_and(|len| len > MAX_CENSUS_BYTES) {
         return Err(CensusReadError::Oversized {
-            actual: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            actual: u64::try_from(length).unwrap_or(u64::MAX),
             maximum: MAX_CENSUS_BYTES,
         });
     }
 
-    Ok(BoundedCensus(bytes))
+    Ok(())
 }
 
 /// Turns the runtime's records into site ordinals, or `None` if the file is not a whole census.

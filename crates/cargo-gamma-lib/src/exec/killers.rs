@@ -53,10 +53,14 @@ impl Killers {
     /// written by another version without anyone having to care.
     pub(super) fn load(base: &Utf8Path, root: &Utf8Path) -> Self {
         let promoted = Hints::load(root);
-        let mut entries = promoted.probes();
-        let mut generalized = promoted.generalized();
         let record = RunRecord::load(base);
         let incomplete = RunRecord::load_incomplete(base);
+        Self::from_records(&promoted, &record, &incomplete)
+    }
+
+    fn from_records(promoted: &Hints, record: &RunRecord, incomplete: &RunRecord) -> Self {
+        let mut entries = promoted.probes();
+        let mut generalized = promoted.generalized();
 
         // The record last, so this machine's own last answer wins over the committed one wherever
         // both name a mutant: a probe is checked either way, but the fresher guess is likelier to
@@ -242,6 +246,83 @@ mod tests {
 
         assert_eq!(read.len(), 1);
         assert_eq!(read.hint("abc"), Some(&killer("tests::round_trip")));
+    }
+
+    fn completed_record() -> RunRecord {
+        let population = [mutant("fedcba987654")];
+        let mut learned = Killers::default();
+        learned.record("fedcba987654".into(), killer("tests::completed"));
+        learned.replace_generalized(GeneralizedHints {
+            binaries: vec![FileBinaryHints {
+                file: "src/completed.rs".into(),
+                candidates: vec![RankedHint {
+                    candidate: BinaryHint {
+                        package: "alpha".into(),
+                        target: "lib".into(),
+                    },
+                    seeds: 2,
+                    hits: 3,
+                    misses: 1,
+                    measured_ms: 37,
+                    samples: 2,
+                    order: 11,
+                }],
+            }],
+            ..GeneralizedHints::empty_supported()
+        });
+        let mut record = RunRecord::default();
+        learned.stage(&mut record, &population);
+        record
+    }
+
+    #[test]
+    fn completed_records_round_trip_without_incomplete_fallback() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let base = root.join("cache");
+        std::fs::create_dir(&base).unwrap();
+        let record = completed_record();
+        record.store_completed(&base).unwrap();
+        assert_eq!(
+            RunRecord::load(&base).probes().get("fedcba987654"),
+            Some(&killer("tests::completed"))
+        );
+        assert!(RunRecord::load_incomplete(&base).probes().is_empty());
+        let loaded = Killers::load(&base, root);
+        assert_completed_knowledge(&loaded);
+    }
+
+    #[test]
+    fn completed_records_supply_exact_probes_and_generalized_file_knowledge() {
+        let record = completed_record();
+        let loaded = Killers::from_records(&Hints::default(), &record, &RunRecord::default());
+        assert_completed_knowledge(&loaded);
+    }
+
+    fn assert_completed_knowledge(loaded: &Killers) {
+        assert_eq!(loaded.hint("fedcba987654"), Some(&killer("tests::completed")), "{loaded:?}");
+        let hints = loaded.generalized().supported().unwrap();
+        assert_eq!(hints.binaries.len(), 1);
+        assert_eq!(hints.binaries[0].file, Utf8Path::new("src/completed.rs"));
+        let candidate = &hints.binaries[0].candidates[0];
+        assert_eq!(
+            (
+                candidate.seeds,
+                candidate.hits,
+                candidate.misses,
+                candidate.measured_ms,
+                candidate.samples,
+                candidate.order
+            ),
+            (2, 3, 1, 37, 2, 11)
+        );
+        assert_eq!(
+            candidate.candidate,
+            BinaryHint {
+                package: "alpha".into(),
+                target: "lib".into()
+            }
+        );
     }
 
     #[test]

@@ -142,6 +142,7 @@ fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
     match syntax {
         crate::region::CommentSyntax::Hash => "hash",
         crate::region::CommentSyntax::SlashSlash => "slashslash",
+        crate::region::CommentSyntax::Xml => "xml",
     }
 }
 
@@ -305,6 +306,23 @@ impl CatalogBuilder {
             let toml_host = self.toml_array_paths.iter().any(|(host, _, _)| host == &region.host);
             (toml_host && region.syntax != crate::region::CommentSyntax::Hash)
                 .then(|| format!("region '{}' has comment syntax incompatible with its TOML array host", region.id))
+        }));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let invalid = region.id.as_str().contains("--")
+                || region.id.as_str().contains('\r')
+                || region.id.as_str().contains('\n')
+                || region
+                    .id
+                    .as_str()
+                    .chars()
+                    .any(|character| !matches!(character, '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'));
+            (region.syntax == crate::region::CommentSyntax::Xml && invalid).then(|| {
+                format!(
+                    "region '{}' cannot use XML comments because its id contains '--', CR, LF, or a character XML 1.0 forbids",
+                    region.id
+                )
+            })
         }));
         if !errors.is_empty() {
             bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, errors.join("\n  - "));
@@ -686,6 +704,49 @@ mod tests {
         assert!(region_repr.contains("path:Cargo.toml"));
         assert!(!region_repr.contains("single_crate_cargo_toml"));
         assert!(region_repr.contains("slashslash"));
+    }
+
+    #[test]
+    fn canonical_repr_tags_xml_region_syntax() {
+        let region = Artifact::region(RegionSpec {
+            host: HostSelector::Path("dirs.proj".to_owned()),
+            id: RegionId::new("anvil-cloudbuild-projects"),
+            body: "<Project Include=\"src/demo\" />\n".to_owned(),
+            syntax: CommentSyntax::Xml,
+        });
+
+        assert_eq!(
+            canonical_repr(&region),
+            format!("region{SEP}path:dirs.proj{SEP}anvil-cloudbuild-projects{SEP}xml{SEP}<Project Include=\"src/demo\" />\n")
+        );
+    }
+
+    #[test]
+    fn build_rejects_xml_region_ids_that_cannot_be_comment_content() {
+        for id in [
+            "build--projects",
+            "build\nprojects",
+            "build\rprojects",
+            "build\u{0}projects",
+            "build\u{1}projects",
+        ] {
+            let error = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("dirs.proj".to_owned()),
+                    id: RegionId::new(id),
+                    body: "<Project Include=\"src/demo\" />\n".to_owned(),
+                    syntax: CommentSyntax::Xml,
+                }))
+                .build()
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid catalog for 'anvil':\n  - region '{id}' cannot use XML comments because its id contains '--', CR, LF, or a character XML 1.0 forbids"
+                )
+            );
+        }
     }
 
     #[test]

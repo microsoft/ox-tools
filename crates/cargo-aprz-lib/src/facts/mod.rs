@@ -39,6 +39,7 @@ pub mod docs;
 pub mod endpoints;
 pub mod hosting;
 mod path_utils;
+pub(crate) mod process;
 mod progress;
 mod provider_result;
 mod repo_spec;
@@ -56,7 +57,7 @@ pub use crate_ref::CrateRef;
 pub use crate_spec::CrateSpec;
 pub use crates::CratesData;
 #[cfg(feature = "internals")]
-pub use endpoints::DEFAULT_ADVISORY_URL;
+pub use endpoints::DEFAULT_ADVISORY_ARCHIVE_URL;
 pub use endpoints::Endpoints;
 pub use hosting::BugLabelMatcher;
 pub use progress::Progress;

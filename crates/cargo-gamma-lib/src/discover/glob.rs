@@ -207,6 +207,38 @@ mod tests {
     }
 
     #[test]
+    fn survivor_glob_scratch_reuse_cannot_carry_matches_between_paths_or_tokens() {
+        let mut scratch = Scratch::default();
+        for _ in 0..2 {
+            for (pattern, text, expected) in [
+                ("**", "a/b/c", true),
+                ("**", "", true),
+                ("**a", "", false),
+                ("*", "", true),
+                ("?", "", false),
+                ("a", "a", true),
+                ("a", "ab", false),
+                ("a", "b", false),
+                ("ab", "b", false),
+                ("ab", "ab", true),
+                ("**/a", "a", true),
+                ("**/a", "", false),
+                ("**/a", "x/y/a", true),
+                ("a*", "a/b", false),
+                ("*a", "aa", true),
+                ("", "", true),
+                ("", "a", false),
+            ] {
+                assert_eq!(
+                    glob_match(&tokenize(pattern), text, &mut scratch),
+                    expected,
+                    "{pattern:?} / {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn question_marks_and_recursive_prefixes_obey_path_boundaries() {
         for (pattern, path, expected) in [
             ("src/?b.rs", "src/ab.rs", true),

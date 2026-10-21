@@ -21,6 +21,8 @@ use crate::{HashMap, HashSet, Result};
 mod blame;
 mod complaints;
 mod invoke;
+#[cfg(test)]
+pub(super) use invoke::with_compiler;
 mod isolation;
 pub(super) mod messages;
 mod splices;
@@ -99,6 +101,134 @@ fn pending_packages(plan: &Plan) -> Vec<String> {
     packages.sort();
     packages.dedup();
     packages
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod final_survivor_tests {
+    use super::*;
+
+    fn plan() -> Plan {
+        Plan {
+            root: "root".into(),
+            files: Vec::new(),
+            mutants: Vec::new(),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            digests: HashMap::default(),
+            skipped: Vec::new(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        }
+    }
+
+    #[test]
+    fn package_resolution_prefers_a_manifest_then_decodes_both_package_id_formats() {
+        let mut plan = plan();
+        plan.specs = HashMap::from_iter([
+            ("first".into(), ("members/first".into(), "1.0.0".into())),
+            ("second".into(), ("members/second".into(), "2.0.0".into())),
+        ]);
+        let root = Utf8Path::new("C:\\Workspace");
+        assert_eq!(
+            package_of_message(Some("c:/workspace/members/second/CARGO.TOML"), Some("fallback 3.0.0"), &plan, root),
+            Some("second".into())
+        );
+        for (identity, expected) in [
+            ("registry+https://host/index#new-name@1.2.3", Some("new-name")),
+            ("path+file:///root#outer#inner@9", Some("inner")),
+            ("path+file:///root#unversioned", Some("unversioned")),
+            ("old-name 1.2.3 (registry+https://host)", Some("old-name")),
+            ("  spaced 1.2.3", Some("spaced")),
+            (" \t", None),
+        ] {
+            assert_eq!(
+                package_of_message(Some("unrelated/Cargo.toml"), Some(identity), &plan, root),
+                expected.map(str::to_owned)
+            );
+        }
+        assert_eq!(package_of_message(None, None, &plan, root), None);
+    }
+
+    #[test]
+    fn pending_packages_excludes_nonpending_and_zero_ordinals_then_sorts_and_deduplicates() {
+        let mut plan = plan();
+        let template = crate::fixtures::mutant();
+        plan.mutants = [
+            ("z", 1, Outcome::Pending),
+            ("a", 2, Outcome::Pending),
+            ("z", 3, Outcome::Pending),
+            ("zero", 0, Outcome::Pending),
+            ("settled", 4, Outcome::Survived),
+        ]
+        .into_iter()
+        .map(|(package, ordinal, outcome)| Mutant {
+            package: package.into(),
+            ordinal,
+            outcome,
+            ..template.clone()
+        })
+        .collect();
+        assert_eq!(pending_packages(&plan), ["a", "z"]);
+        plan.mutants.clear();
+        assert!(pending_packages(&plan).is_empty());
+    }
+
+    #[test]
+    fn package_membership_is_existential_and_abandonment_has_sorted_unique_ordinals() {
+        let mut plan = plan();
+        plan.mutants = [(9, "z"), (3, "a"), (7, "z"), (0, "z")]
+            .into_iter()
+            .map(|(ordinal, package)| Mutant {
+                ordinal,
+                package: package.into(),
+                outcome: Outcome::Pending,
+                ..crate::fixtures::mutant()
+            })
+            .collect();
+        let packages = ["unrelated".to_owned(), "z".to_owned()];
+        for mutant in &plan.mutants {
+            assert_eq!(
+                isolation_candidate(mutant, &HashSet::default(), Some(&packages)),
+                mutant.ordinal != 0 && &*mutant.package == "z"
+            );
+        }
+        let mut converger = Converger::default();
+        let abandoned = converger.abandon(&mut plan, Some(&packages), &error!("compiler stopped"));
+        assert_eq!(abandoned.ordinals, [7, 9]);
+        assert_eq!(converger.withdrawn, HashSet::from_iter([7, 9]));
+        assert_eq!(converger.abandoned, HashSet::from_iter([7, 9]));
+        assert_eq!(
+            plan.mutants.iter().map(|mutant| mutant.outcome).collect::<Vec<_>>(),
+            [Outcome::NotBuilt, Outcome::Pending, Outcome::NotBuilt, Outcome::Pending]
+        );
+        let round = build_round(Duration::from_millis(17), &plan, [9, 3, 7, 9]);
+        assert_eq!(round.elapsed, Duration::from_millis(17));
+        assert_eq!(round.withdrew, 3);
+        assert_eq!(
+            round
+                .packages
+                .iter()
+                .map(|package| (&*package.package, package.mutants))
+                .collect::<Vec<_>>(),
+            [("a", 1), ("z", 2)]
+        );
+    }
+
+    #[test]
+    fn narrowed_verdict_rollback_restores_the_prior_compiled_artifact_set() {
+        let original = HashSet::from_iter([Utf8PathBuf::from("src/original.rs")]);
+        let mut converger = Converger {
+            compiled: Some(original.clone()),
+            ..Converger::default()
+        };
+        let saved = converger.verdict_state();
+        converger.compiled = Some(HashSet::from_iter(["src/narrowed.rs".into()]));
+        converger.restore_verdict_state(saved);
+        assert_eq!(converger.compiled, Some(original));
+    }
 }
 
 /// A test-only stand-in for one proof build: a verdict on the complete active schema.

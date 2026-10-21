@@ -2044,6 +2044,30 @@ mod tests {
     }
 
     #[test]
+    fn block_arguments_do_not_add_a_postfix_call_link() {
+        for expression in ["if call().field.field.field {}", "if call().field.field.field { body }"] {
+            assert!(!exceeds_nesting_limit(&stream(expression), 1), "{expression}");
+        }
+        assert!(exceeds_nesting_limit(&stream("if call().field.field.field() {}"), 1));
+    }
+
+    #[test]
+    fn new_operands_restart_with_the_whole_chain_budget() {
+        for expression in ["return value.a.b.c.d", "break value.a.b.c.d"] {
+            assert!(!exceeds_nesting_limit(&stream(expression), 1), "{expression}");
+        }
+        assert!(exceeds_nesting_limit(&stream("return value.a.b.c.d.e"), 1));
+    }
+
+    #[test]
+    fn punctuation_without_a_receiver_does_not_spend_a_postfix_link() {
+        for expression in ["value.a.b.c = .other", "value.a.b.c + ?other"] {
+            assert!(!exceeds_nesting_limit(&stream(expression), 1), "{expression}");
+        }
+        assert!(exceeds_nesting_limit(&stream("value.a.b.c.d.other"), 1));
+    }
+
+    #[test]
     fn separators_restart_the_expression_chain_budget() {
         let chain_limit = NESTING_LIMIT * CHAIN_FACTOR;
 

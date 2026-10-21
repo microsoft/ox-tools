@@ -370,6 +370,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_and_single_character_literals_stop_before_adjacent_real_comments() {
+        for literal in ["\"\"", "'a'", "'é'", "'\\''", "'\\n'"] {
+            let text = format!("xx{literal}// real");
+            assert_eq!(literal_end(&text, 2), Some(2 + literal.len()), "{literal}");
+            let comments = scan_comments(&text, &line_starts(&text));
+            assert_eq!(comments.len(), 1, "{literal}");
+            assert_eq!(&text[comments[0].span.clone()], "// real");
+            assert_eq!(&text[comments[0].body.clone()], "real");
+            assert_eq!(comments[0].line, 1);
+            assert!(comments[0].trailing);
+        }
+        let text = "fn f<'a>() {} // real";
+        assert_eq!(literal_end(text, 5), None);
+        assert_eq!(scan_comments(text, &line_starts(text)).len(), 1);
+    }
+
+    #[test]
     fn scanner_endpoints_and_comment_records_match_exact_source_slices() {
         for (text, expected) in [
             ("x / y * z", vec![]),

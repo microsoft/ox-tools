@@ -77,15 +77,20 @@ this simple process:
 
 2. Create a branch off of main.
 
-3. Run `./scripts/release-crate.ps1 <crate_name> [new_version]` to bump a crate's version and update the crate's
+3. Run `.\scripts\release-crate.ps1 <crate_name> -Version <new_version>` to set a crate's version and update the crate's
    `CHANGELOG.md` file.
+   Omit `-Version` for a minor bump, or use `-Bump` with `major`, `minor`, or `patch`.
+   To refresh notes for the current, untagged version, pass that same version to `-Version`.
    Run the script many times if you want to release several crates in the same PR.
    Generated notes prefer a PR-linked release entry over a duplicate unlinked
    preparation entry for the same crate and version.
 
    To reconstruct a missing changelog section for an existing tagged release without changing
-   the crate version, run `./scripts/release-crate.ps1 <crate_name> -BackfillVersion <version>`.
-   The script derives the commit range from that release tag and its preceding version tag.
+   the crate version, run `.\scripts\release-crate.ps1 <crate_name> -BackfillVersion <version>`.
+   The script derives the commit range from that release tag and its preceding semantic-version tag.
+   For the first semantic-version tag, it includes the crate's complete history through that tag;
+   no preceding tag is required. Run these commands from the repository root.
+   Validate the backfill workflow with `pwsh -NoProfile -File .\scripts\test-release-crate.ps1`.
 
 4. Create a PR like normal to push changes out.
 

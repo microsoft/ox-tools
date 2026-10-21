@@ -3169,6 +3169,27 @@ fn a_match_guard_is_mutated_the_way_a_branch_condition_is() {
 }
 
 #[test]
+fn a_comparison_inside_a_match_guard_receives_relational_mutants() {
+    let source = "fn f(v: i32) -> i32 { match v { n if n > 0 => n, _ => 0 } }";
+    let found = candidates(source, "relational");
+
+    assert_eq!(
+        found
+            .iter()
+            .map(|candidate| (candidate.mutator, candidate.replacement.as_str()))
+            .collect::<Vec<_>>(),
+        [("relational.gt_to_ge", "(n) >= (0)"), ("relational.gt_to_lt", "(n) < (0)"),]
+    );
+}
+
+#[test]
+fn a_pattern_literal_before_a_match_guard_is_not_mutated() {
+    let source = "fn f(v: i32, enabled: bool) -> i32 { match v { 1 if enabled => v, _ => v } }";
+
+    assert!(candidates(source, "literal").is_empty());
+}
+
+#[test]
 fn an_unguarded_arm_offers_no_guard_mutants() {
     let source = "fn f(v: i32) -> i32 { match v { 1 => 1, _ => 0 } }";
 

@@ -522,6 +522,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_build_test_predicates_use_declared_cfg_not_hypothetical_unit_target() {
+        let predicate: Meta = syn::parse_quote!(test);
+        let ordinary = CfgSet::parse("unix");
+        assert_eq!(ordinary.decide(&predicate, true), Verdict::No);
+        assert_eq!(ordinary.decide(&predicate, false), Verdict::No);
+        let testing = ordinary.with_test();
+        assert_eq!(testing.decide(&predicate, true), Verdict::Yes);
+        assert_eq!(testing.decide(&predicate, false), Verdict::No);
+        assert_eq!(testing.decide(&syn::parse_quote!(unix), false), Verdict::Yes);
+    }
+
+    #[test]
     fn malformed_cfg_attrs_and_printed_pairs_are_not_invented() {
         let set = CfgSet::parse("=\"value\"\nvalid=\"\"\nnonsense=\n");
         assert_eq!(set.pairs.len(), 1);

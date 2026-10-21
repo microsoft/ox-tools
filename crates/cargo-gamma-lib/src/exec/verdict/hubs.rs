@@ -36,6 +36,14 @@ use loom::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(loom)]
 use loom::sync::{Condvar, Mutex};
 
+#[cfg(all(test, not(loom)))]
+type WaitObserver = Box<dyn FnMut(&Pulse, u64, Duration)>;
+
+#[cfg(all(test, not(loom)))]
+thread_local! {
+    static WAIT_OBSERVER: std::cell::RefCell<Option<WaitObserver>> = const { std::cell::RefCell::new(None) };
+}
+
 /// A wakeup shared between the reader threads and the thread waiting on the child.
 ///
 /// Sleeping a fixed five milliseconds between polls would cost a binary that finished instantly a
@@ -58,6 +66,26 @@ pub(super) struct Pulse {
 }
 
 impl Pulse {
+    /// Observes waits before the generation lock and normal wait logic, without replacing either.
+    /// Callbacks may signal this pulse because its mutex is not yet held; observing one does not
+    /// imply a condition-variable sleep. The current-thread scope cannot nest and resets on drop.
+    #[cfg(all(test, not(loom)))]
+    pub(super) fn with_wait_observer<T>(observer: impl FnMut(&Self, u64, Duration) + 'static, body: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WAIT_OBSERVER.with_borrow_mut(|observer| *observer = None);
+            }
+        }
+
+        WAIT_OBSERVER.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "wait observers must not be nested on one thread");
+            *slot = Some(Box::new(observer));
+        });
+        let _reset = Reset;
+        body()
+    }
+
     /// The current generation, to be passed to a later [`Pulse::wait`].
     // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
     pub(super) fn seen(&self) -> u64 {
@@ -84,6 +112,13 @@ impl Pulse {
     /// Sleeps until the generation moves past `seen`, or `upto` elapses, whichever is sooner.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     pub(super) fn wait(&self, seen: u64, upto: Duration) {
+        #[cfg(all(test, not(loom)))]
+        WAIT_OBSERVER.with_borrow_mut(|observer| {
+            if let Some(observer) = observer.as_mut() {
+                observer(self, seen, upto);
+            }
+        });
+
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
         let generation = self.generation.lock().unwrap();
 

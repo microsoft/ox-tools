@@ -107,3 +107,60 @@ impl Incoming {
         &self.schema_version
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests {
+    use super::*;
+
+    #[test]
+    fn survivor_incoming_schema_accessors_preserve_the_version_and_the_validators_closed_major_set() {
+        for version in ["1", "1.0", "1.99.123", "2", "2.0.0", "3", "2.01", "2.0.0.0", ""] {
+            let document = serde_json::json!({
+                "schemaVersion": version,
+                "thresholds": { "high": 100, "low": 0 },
+                "files": {}
+            });
+            let incoming: Incoming = serde_json::from_value(document.clone()).unwrap();
+            assert_eq!(incoming.schema_version(), version);
+            let supported = matches!(version, "1" | "1.0" | "1.99.123" | "2" | "2.0.0");
+            assert_eq!(incoming.has_supported_schema_version(), supported);
+            assert_eq!(crate::elements::validate_schema(&document).is_ok(), supported);
+        }
+    }
+
+    #[test]
+    fn survivor_schema_valid_large_positions_expose_only_the_native_usize_deserialization_boundary() {
+        let mut document = serde_json::json!({
+            "schemaVersion": "2",
+            "thresholds": { "high": 100, "low": 0 },
+            "files": {
+                "src/lib.rs": {
+                    "source": "",
+                    "language": "rust",
+                    "mutants": [{
+                        "id": "deadbeefcafe",
+                        "mutatorName": "external",
+                        "status": "Survived",
+                        "location": {
+                            "start": { "line": u64::MAX, "column": 1 },
+                            "end": { "line": u64::MAX, "column": 1 }
+                        }
+                    }]
+                }
+            }
+        });
+        crate::elements::validate_schema(&document).unwrap();
+        #[cfg(target_pointer_width = "64")]
+        {
+            let incoming: Incoming = serde_json::from_value(document.clone()).unwrap();
+            assert_eq!(incoming.files["src/lib.rs"].mutants[0].location.start.line, usize::MAX);
+        }
+        #[cfg(target_pointer_width = "32")]
+        serde_json::from_value::<Incoming>(document.clone()).expect_err("a schema-valid u64 position can exceed native usize");
+        document["files"]["src/lib.rs"]["mutants"][0]["location"]["start"]["line"] = serde_json::json!(1);
+        document["files"]["src/lib.rs"]["mutants"][0]["location"]["end"]["line"] = serde_json::json!(1);
+        let document: Incoming = serde_json::from_value(document).unwrap();
+        assert_eq!(document.files["src/lib.rs"].mutants[0].location.start.line, 1);
+    }
+}

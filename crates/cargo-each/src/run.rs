@@ -494,24 +494,44 @@ fn run_streamed_group_with(
     timeout: Option<Duration>,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
+    run_streamed_group_control_with(
+        invocation,
+        timeout,
+        spawn,
+        |process| process.inner().try_wait(),
+        terminate_group,
+        || {
+            let started = Instant::now();
+            move || started.elapsed()
+        },
+        thread::sleep,
+    )
+}
+
+fn run_streamed_group_control_with<T, E>(
+    invocation: &Invocation,
+    timeout: Option<Duration>,
+    spawn: impl FnOnce(Command) -> Result<T, String>,
+    observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    terminate: impl FnOnce(T) -> io::Result<()>,
+    start_elapsed: impl FnOnce() -> E,
+    sleep: impl FnMut(Duration),
+) -> InvocationResult
+where
+    E: FnMut() -> Duration,
+{
     let (program, command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return InvocationResult::Infrastructure(message),
     };
-    let tree = match spawn(command) {
-        Ok(tree) => tree,
+    let process = match spawn(command) {
+        Ok(process) => process,
         Err(error) => {
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
-    wait_for_process(
-        tree,
-        timeout,
-        |process| process.inner().try_wait(),
-        terminate_group,
-        CHILD_LEADER_OBSERVATION,
-    )
-    .result
+    let elapsed = start_elapsed();
+    wait_for_process_with(process, timeout, observe, terminate, CHILD_LEADER_OBSERVATION, elapsed, sleep).result
 }
 
 fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedOutcome {
@@ -1021,8 +1041,8 @@ mod tests {
         effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
         parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_cargo_with, run_streamed,
-        run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with,
-        terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker,
+        run_streamed_group_control_with, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker,
+        spawn_worker_with, terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker,
         wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
@@ -1837,11 +1857,36 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns process groups")]
-    fn real_group_execution_observes_completion_and_timeout() {
-        let success = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(5));
-        assert!(matches!(success, InvocationResult::Exited(status) if status.success()));
+    fn streamed_group_runner_observes_success_before_its_deadline_in_process() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let spawned = Cell::new(false);
+        let process = FakeProcess {
+            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
+            termination: None,
+        };
 
+        let result = run_streamed_group_control_with(
+            &invocation(&["controlled-program"]),
+            Some(Duration::from_millis(25)),
+            |_| {
+                spawned.set(true);
+                Ok(process)
+            },
+            FakeProcess::observe,
+            FakeProcess::terminate,
+            || {
+                assert!(spawned.get(), "the timeout clock starts after spawning");
+                || elapsed.get()
+            },
+            |pause| elapsed.set(elapsed.get() + pause),
+        );
+
+        assert!(matches!(result, InvocationResult::Exited(status) if status.success()));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns process groups")]
+    fn real_group_termination_stops_group_and_direct_child() {
         let group = spawn_group(sleeping_test_command()).expect("spawn sleeping process group");
         let started = Instant::now();
         terminate_group(group).expect("process-group termination succeeds");
