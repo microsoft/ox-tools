@@ -2166,6 +2166,55 @@ mod tests {
         )
     }
 
+    #[test]
+    fn json_array_missing_host_skips_preflight_repair_and_scaffolds() {
+        let catalog = Catalog::builder(test_cli())
+            .with_json_array_region(crate::JsonArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("config.json".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"managed\",\n".to_owned(),
+                    syntax: CommentSyntax::SlashSlash,
+                },
+                path: vec!["entries".to_owned()],
+            })
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+
+        assert_eq!(plan.items().len(), 1);
+        assert!(hosts.cached("config.json").unwrap().contains("\"managed\","));
+    }
+
+    #[test]
+    fn non_json_scanner_provenance_is_ignored() {
+        let mut manifest = Manifest::default();
+        manifest.json_scanner_hosts.insert("settings.txt".to_owned());
+
+        let scanner_hosts = json_scanner_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &manifest,
+            &memory_hosts(),
+            &ArrayHosts::new(),
+        )
+        .unwrap();
+
+        assert!(scanner_hosts.is_empty());
+    }
+
     fn memory_hosts() -> HostTextCache {
         HostTextCache {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),

@@ -1679,6 +1679,57 @@ mod tests {
     }
 
     #[test]
+    fn recorded_placement_covers_absent_wrong_shaped_moved_and_split_regions() {
+        let path = vec!["entries".to_owned()];
+        validate_recorded_placement("{\"entries\":[]}", "entries", &path).unwrap();
+
+        let no_root = concat!("// >>> anvil-managed: entries\n", "// <<< anvil-managed: entries\n");
+        assert_eq!(
+            validate_recorded_placement(no_root, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::ArrayShape
+        );
+
+        let wrong_shape = concat!(
+            "{\n",
+            "  \"entries\": {},\n",
+            "  // >>> anvil-managed: entries\n",
+            "  // <<< anvil-managed: entries\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(wrong_shape, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::ArrayShape
+        );
+
+        let moved = concat!(
+            "{\n",
+            "  \"entries\": [],\n",
+            "  // >>> anvil-managed: entries\n",
+            "  // <<< anvil-managed: entries\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(moved, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::MisplacedArrayMarkers
+        );
+
+        let split = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "    {\"key\": true\n",
+            "    // <<< anvil-managed: entries\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(split, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::MisplacedArrayMarkers
+        );
+    }
+
+    #[test]
     fn separator_scanner_ignores_strings_and_both_comment_forms() {
         let gap = "\"text,still\" /* , */ // ,\n ,";
         assert_eq!(separator_comma(gap), gap.rfind(','));
@@ -1695,6 +1746,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(comments, ["// actual comment"]);
+        HostScanner::Json
+            .find("'unterminated", "id", CommentSyntax::SlashSlash)
+            .unwrap_err();
     }
 
     #[test]

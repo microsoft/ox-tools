@@ -484,6 +484,10 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
     if root_is_empty {
         return Ok(None);
     }
+    xml_root_bounds(root_opening_end, root_close)
+}
+
+fn xml_root_bounds(root_opening_end: Option<usize>, root_close: Option<(usize, Option<usize>)>) -> Result<Option<XmlRootBounds>, String> {
     match (root_opening_end, root_close) {
         (Some(opening_end), Some((closing_start, closing_line_start))) => Ok(Some(XmlRootBounds {
             opening_end,
@@ -3082,6 +3086,10 @@ mod tests {
         assert_eq!(
             xml_document_root("<root>\n").unwrap_err(),
             "the XML host has no closing element for `root`"
+        );
+        assert_eq!(
+            xml_root_bounds(Some(1), None).unwrap_err(),
+            "the XML host has an incomplete document element"
         );
     }
 
