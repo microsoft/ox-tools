@@ -6,7 +6,7 @@
 //! Orchestrates: workspace discovery, manifest load, backend resolution,
 //! emitter invocation, plan accumulation, and final apply/summarize.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 
@@ -312,9 +312,7 @@ fn validate_array_plan(
         let Some(array_host) = array_hosts.get(&host) else {
             continue;
         };
-        let current_json_spec = (array_host.format == ArrayFormat::Json)
-            .then(|| array_host.json_specs.iter().find(|spec| spec.region.id.as_str() == id))
-            .flatten();
+        let current_json_spec = array_host.json_specs.get(id);
         let Some(after) = &item.spliced_host else {
             if current_json_spec.is_some() {
                 active_json_specs.entry(host).or_default().insert(id.clone());
@@ -348,7 +346,11 @@ fn validate_array_plan(
                     active_json_specs.entry(host.clone()).or_default().insert(id.clone());
                 }
                 if let Some(active) = active_json_specs.get(&host) {
-                    for spec in array_host.json_specs.iter().filter(|spec| active.contains(spec.region.id.as_str())) {
+                    for spec in array_host
+                        .json_specs
+                        .values()
+                        .filter(|spec| active.contains(spec.region.id.as_str()))
+                    {
                         crate::emit::json_array_region::validate_required_entries(after, spec)
                             .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
                     }
@@ -358,11 +360,8 @@ fn validate_array_plan(
         original_hosts.insert(host, after.clone());
     }
     for (host, array_host) in array_hosts {
-        if array_host.format != ArrayFormat::Json {
-            continue;
-        }
         let final_text = hosts.get_or_read(repo_root, host)?.unwrap_or_default();
-        for spec in &array_host.json_specs {
+        for spec in array_host.json_specs.values() {
             crate::emit::json_array_region::validate_required_entries(&final_text, spec)
                 .map_err(|refusal| json_array_plan_refusal(host, &refusal))?;
         }
@@ -456,7 +455,7 @@ impl ArrayFormat {
 struct ArrayHost {
     format: ArrayFormat,
     paths: Vec<Vec<String>>,
-    json_specs: Vec<crate::JsonArrayRegionSpec>,
+    json_specs: BTreeMap<String, crate::JsonArrayRegionSpec>,
 }
 
 /// Resolved repository paths mapped to their live-and-historical array state.
@@ -482,15 +481,18 @@ fn array_host_inputs(
                         let entry = paths.entry(host).or_insert_with(|| ArrayHost {
                             format,
                             paths: Vec::new(),
-                            json_specs: Vec::new(),
+                            json_specs: BTreeMap::new(),
                         });
                         debug_assert_eq!(entry.format, format, "validated array specs for one host always share a format");
                         entry.paths.push(path.to_vec());
                         if format == ArrayFormat::Json {
-                            entry.json_specs.push(crate::JsonArrayRegionSpec {
-                                region: spec.clone(),
-                                path: path.to_vec(),
-                            });
+                            entry.json_specs.insert(
+                                spec.id.as_str().to_owned(),
+                                crate::JsonArrayRegionSpec {
+                                    region: spec.clone(),
+                                    path: path.to_vec(),
+                                },
+                            );
                         }
                     }
                 }
@@ -539,7 +541,7 @@ fn array_host_inputs(
                     .or_insert_with(|| ArrayHost {
                         format,
                         paths: Vec::new(),
-                        json_specs: Vec::new(),
+                        json_specs: BTreeMap::new(),
                     })
                     .paths
                     .extend(existing);
