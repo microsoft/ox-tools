@@ -16,6 +16,35 @@ wildcards = "deny"
 allow-wildcard-paths = true
 # <<< anvil-managed: anvil-deny-bans
 
+# Upstream dependencies require incompatible release lines. Keep these bounds
+# narrow so new release lines still warn; cargo-deny reports stale skips.
+skip = [
+    { crate = "allocator-api2", version = "0.2", reason = "hashbrown/rallocator require 0.2; plurality requires 0.4" },
+    { crate = "getrandom", version = "0.3", reason = "Bolero/tempfile require 0.3; jobserver requires 0.4" },
+    { crate = "r-efi", version = "5", reason = "getrandom 0.3 requires 5; getrandom 0.4 requires 6" },
+    { crate = "hashbrown", version = "0.14", reason = "rowan requires 0.14; indexmap requires 0.17" },
+    { crate = "hashbrown", version = "0.15", reason = "chumsky/petgraph require 0.15; indexmap requires 0.17" },
+    { crate = "nix", version = "0.27", reason = "command-group requires 0.27; sysctl requires 0.31" },
+    { crate = "nix", version = "0.30", reason = "mmap-rs requires 0.30; sysctl requires 0.31" },
+    { crate = "rustc-hash", version = "1", reason = "rowan requires 1.x; the workspace and ra_ap_syntax require 2.x" },
+    { crate = "rustdoc-types", version = ">=0.50, <0.57", reason = "APRZ intentionally supports rustdoc JSON schemas 50 through 57" },
+    { crate = "syn", version = "2", reason = "upstream derive macros require syn 2; gamma requires syn 3" },
+    { crate = "thiserror", version = "1", reason = "sysctl requires thiserror 1; other dependencies require 2" },
+    { crate = "thiserror-impl", version = "1", reason = "derive macros for sysctl's thiserror 1 dependency" },
+    { crate = "windows", version = "0.48", reason = "mmap-rs requires 0.48; the workspace requires 0.62" },
+    { crate = "windows-sys", version = "0.60", reason = "shared_child requires 0.60; other dependencies require 0.61" },
+    { crate = "windows-targets", version = "0.48", reason = "windows 0.48 import libraries; windows-sys 0.60 requires 0.53" },
+    { crate = "windows_aarch64_gnullvm", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "windows_aarch64_msvc", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "windows_i686_gnu", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "windows_i686_msvc", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "windows_x86_64_gnu", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "windows_x86_64_gnullvm", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "windows_x86_64_msvc", version = "0.48", reason = "import library required by windows-targets 0.48" },
+    { crate = "winnow", version = "0.5", reason = "Bolero's proc-macro-crate requires 0.5; toml requires 1.x" },
+    { crate = "winnow", version = "0.7", reason = "ra_ap_parser requires 0.7; toml requires 1.x" },
+]
+
 # >>> anvil-managed: anvil-deny-sources
 [sources]
 unknown-registry = "deny"
@@ -30,9 +59,6 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
-    "MPL-2.0",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
 ]

@@ -36,9 +36,6 @@ allow = [<CRLF>
     "Apache-2.0 WITH LLVM-exception",<CRLF>
     "BSD-2-Clause",<CRLF>
     "BSD-3-Clause",<CRLF>
-    "ISC",<CRLF>
-    "MPL-2.0",<CRLF>
-    "Unicode-DFS-2016",<CRLF>
     "Unicode-3.0",<CRLF>
     "Zlib",<CRLF>
 ]<CRLF>

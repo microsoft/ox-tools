@@ -332,6 +332,13 @@ publish a full-coverage snapshot for the current state of `main`.
 | `aprz`   | `cargo aprz check`                                                  | oxidizer |
 | `clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 
+The generated license allow list contains MIT, Apache-2.0 (including the LLVM
+exception), BSD-2-Clause, BSD-3-Clause, Unicode-3.0, and Zlib. ISC, MPL-2.0, and
+Unicode-DFS-2016 are not default allowances. Repositories that need another
+license can add a crate-scoped `licenses.exceptions` entry outside the managed
+region. Keep repository-specific duplicate-version exceptions in `bans.skip`
+outside its managed region, with a version bound and a reason.
+
 These checks share a property: their outcome can change without a commit to this repo.
 `deny`/`audit`/`aprz` consult external databases (RustSec advisory DB, license registries,
 Azure risk indices). `clippy` reflects whatever lint set ships with the currently-installed
