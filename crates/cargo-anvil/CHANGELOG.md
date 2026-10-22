@@ -22,10 +22,12 @@
 
 - ✔️ Tasks
 
+  - clean up cargo-deny warnings without narrowing license policy ([#287](https://github.com/microsoft/ox-tools/pull/287))
   - cargo-anvil: prepare 0.15.1 release
 
 - 🧩 Miscellaneous
 
+  - Merge main after #287 and regenerate Anvil
   - Merge main into pin alignment
 
 ## [0.15.0] - 2026-10-13
