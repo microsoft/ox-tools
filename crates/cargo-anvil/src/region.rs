@@ -72,8 +72,18 @@ impl HostScanner {
     pub(crate) fn find<'a>(self, text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
         match self {
             Self::Toml => find_toml_region(text, id, syntax),
-            Self::Json => find_region_in_lines(text, id, syntax, json_comment_lines(text)),
+            Self::Json => {
+                validate_json_comment_scan(text)?;
+                find_region_in_lines(text, id, syntax, json_comment_lines(text))
+            }
             Self::Lines => find_region(text, id, syntax),
+        }
+    }
+
+    pub(crate) fn validate_marker_scan(self, text: &str) -> Result<(), AppError> {
+        match self {
+            Self::Json => validate_json_comment_scan(text),
+            Self::Toml | Self::Lines => Ok(()),
         }
     }
 
@@ -88,7 +98,10 @@ impl HostScanner {
     pub(crate) fn remove(self, text: &str, id: &str, syntax: CommentSyntax) -> Result<String, AppError> {
         match self {
             Self::Toml => remove_toml_region(text, id, syntax),
-            Self::Json => crate::emit::json_array_region::remove_json_region(text, id, syntax),
+            Self::Json => {
+                validate_json_comment_scan(text)?;
+                crate::emit::json_array_region::remove_json_region(text, id, syntax)
+            }
             Self::Lines => remove_region(text, id, syntax),
         }
     }
@@ -541,6 +554,52 @@ pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
             Some(full_line_comment.then_some(line))
         })
         .flatten()
+}
+
+fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
+    let bytes = text.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut block_comment = false;
+    let mut line_comment = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if line_comment {
+            if matches!(byte, b'\r' | b'\n') {
+                line_comment = false;
+            }
+        } else if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+        } else if block_comment {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment = false;
+                index += 1;
+            }
+        } else if matches!(byte, b'"' | b'\'') {
+            quote = Some(byte);
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            line_comment = true;
+            index += 1;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            block_comment = true;
+            index += 1;
+        }
+        index += 1;
+    }
+    if block_comment {
+        bail!("JSON-like host contains an unterminated block comment; close it before managing regions");
+    }
+    if quote.is_some() {
+        bail!("JSON-like host contains an unterminated quoted string; close it before managing regions");
+    }
+    Ok(())
 }
 
 pub(crate) fn find_region_in_lines<'a>(

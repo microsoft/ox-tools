@@ -276,6 +276,15 @@ fn build_plan_with_hosts(
             } else {
                 HostScanner::for_path(&host)
             };
+            if scanner == HostScanner::Json
+                && let Some(text) = hosts.get_or_read(repo_root, &host)?
+                && let Err(error) = scanner.validate_marker_scan(&text)
+            {
+                let reason = error.to_string();
+                refuse_region(&mut plan, host.clone(), &key.id, &reason, RefusalRemedy::MalformedMarkers);
+                composed.states.insert(host, ComposedHostState::Unsafe(reason));
+                continue;
+            }
             let Some(syntax) = retirement_syntax_or_refuse(repo_root, &mut plan, hosts, &host, &key.id, recorded_checksum, scanner)? else {
                 continue;
             };
@@ -912,6 +921,12 @@ fn push_region_at_with_scanner(
 ) -> Result<(), AppError> {
     let host = (hosts.resolve)(repo_root, host)?;
     let current = hosts.get_or_read(repo_root, &host)?;
+    if let Some(text) = current.as_deref()
+        && let Err(error) = scanner.validate_marker_scan(text)
+    {
+        refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::MalformedMarkers);
+        return Ok(());
+    }
     if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref(), scanner) {
         return Ok(());
     }
@@ -2729,6 +2744,60 @@ mod tests {
                 assert!(plan.refusals()[0].contains("must use slash-slash comment markers"));
                 assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
             }
+        }
+    }
+
+    #[test]
+    fn scanner_only_host_refuses_unterminated_block_comment_for_update_and_retirement() {
+        let settings = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": false,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings))
+            .build()
+            .unwrap();
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let source = concat!(
+            "{\n",
+            "  /* unterminated repository comment\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
+        for target_catalog in [&catalog, &empty] {
+            let mut hosts = memory_hosts();
+            hosts.set("config.json", source.to_owned());
+            hosts.newlines.insert("config.json".to_owned(), "\n");
+
+            let plan = build_plan_with_hosts(
+                Path::new("in-memory-json-region-tests"),
+                &Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+                &manifest,
+                &[],
+                target_catalog,
+                &mut hosts,
+            )
+            .unwrap();
+            let projected = plan.projected_manifest(&manifest);
+
+            assert_eq!(plan.refusals().len(), 1);
+            assert!(plan.refusals()[0].contains("unterminated block comment"), "{:?}", plan.refusals());
+            assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
+            assert_eq!(
+                projected.region_checksum("config.json", "settings"),
+                manifest.region_checksum("config.json", "settings")
+            );
+            assert!(projected.json_scanner_hosts.contains("config.json"));
         }
     }
 
