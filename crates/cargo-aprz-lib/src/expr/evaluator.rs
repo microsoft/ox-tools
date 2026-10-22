@@ -555,7 +555,9 @@ mod tests {
                 format!("size(crate.description) == {size}"),
                 format!("crate.description.size() == {size}"),
             ] {
-                assert!(eval_expr(&expression, &metrics).unwrap(), "{expression} for {description:?}");
+                let result = eval_expr(&expression, &metrics)
+                    .unwrap_or_else(|error| panic!("could not evaluate {expression} for {description:?}: {error}"));
+                assert!(result, "{expression} for {description:?}");
             }
         }
     }

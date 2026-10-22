@@ -13,8 +13,9 @@ U+00E9 and the supplementary-plane character U+1F980 each have size 1. In contra
 `e` followed by the combining acute accent U+0301 has size 2, even when displayed
 as one character.
 
-For lists, `size()` counts elements. The built-in policy's
-`size(crate.owners) >= 2` check is therefore unaffected by string-size semantics.
+For list metrics, `size(crate.owners)` and `crate.owners.size()` count elements.
+The built-in policy's `size(crate.owners) >= 2` check is therefore unaffected by
+string-size semantics.
 
 ## Native provider acceptance
 
