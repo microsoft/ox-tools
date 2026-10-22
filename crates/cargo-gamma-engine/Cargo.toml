@@ -23,6 +23,13 @@ all-features = true
 # This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
 disable = true
 
+# This dependency constrains blake3's transitive version without being used directly.
+[package.metadata.cargo-udeps.ignore]
+normal = ["constant_time_eq"]
+
+[package.metadata.unused-deps]
+allowed = ["constant_time_eq"]
+
 [package.metadata.coverage-gate]
 # Ratchet this from the lowest production-only line result across supported CI platforms; retain
 # the existing precision rather than rounding upward and creating a platform-sensitive failure.
@@ -32,6 +39,7 @@ min-lines-percent = 99.39603
 blake3 = { workspace = true, features = ["std"] }
 camino = { workspace = true }
 compact_str = { workspace = true, features = ["serde", "std"] }
+constant_time_eq = { workspace = true }
 proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
 quote = { workspace = true }
 regex-syntax = { workspace = true, features = ["std", "unicode"] }

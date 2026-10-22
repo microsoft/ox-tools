@@ -43,6 +43,7 @@ allow = [<CRLF>
     "Zlib",<CRLF>
 ]<CRLF>
 confidence-threshold = 0.93<CRLF>
+unused-allowed-license = "allow"<CRLF>
 # <<< anvil-managed: anvil-deny-licenses<CRLF>
 <CRLF>
 # >>> anvil-managed: anvil-deny-bans<CRLF>

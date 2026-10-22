@@ -171,7 +171,7 @@ fn metric_key(name: &str, suffix: &str) -> Arc<String> {
     METRIC_KEYS.get(name).map_or_else(|| Arc::new(suffix.to_string()), Arc::clone)
 }
 
-fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: DateTime<Local>) -> Context<'static> {
+fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: DateTime<Local>) -> Context<'static, 'static> {
     use core::borrow::Borrow;
 
     let mut context = Context::default();
