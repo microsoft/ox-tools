@@ -66,7 +66,7 @@ flowchart LR
     impact_act[".github/actions/<br/>anvil-impact"]:::action
     setup_act[".github/actions/<br/>anvil-setup"]:::action
     run_group_act[".github/actions/<br/>anvil-run-group"]:::action
-    codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
+    codecov_act["codecov/codecov-action@v7.1.1"]:::external
     impact_just["just anvil-impact"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
@@ -132,7 +132,7 @@ flowchart LR
     publish_job["publish-failure<br/>upsert incident issue"]:::job
     setup_act[".github/actions/<br/>anvil-setup"]:::action
     run_group_act[".github/actions/<br/>anvil-run-group"]:::action
-    codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
+    codecov_act["codecov/codecov-action@v7.1.1"]:::external
     github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
@@ -990,7 +990,7 @@ than inconsistent.
 
 Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
 by tag. In the generated workflows that is, at the time of writing,
-`codecov/codecov-action@v7.0.0`, `marocchino/sticky-pull-request-comment@v3.0.5` and
+`codecov/codecov-action@v7.1.1`, `marocchino/sticky-pull-request-comment@v3.0.5` and
 `cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
 the same rule to the actions they use, so the list a reader sees there may be longer.
 An immutable release locks its Git tag to one commit: the tag cannot be moved, and
@@ -1011,7 +1011,7 @@ the publisher. When bumping a tag-pinned action, confirm the new release still r
 it:
 
 ```console
-$ gh api repos/codecov/codecov-action/releases/tags/v7.0.0 --jq .immutable
+$ gh api repos/codecov/codecov-action/releases/tags/v7.1.1 --jq .immutable
 true
 ```
 
@@ -1041,7 +1041,7 @@ The upload step:
 ```yaml
 - name: Upload coverage to Codecov
   if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
-  uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
+  uses: codecov/codecov-action@v7.1.1 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
     files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
     flags: ${{ matrix.os }}
