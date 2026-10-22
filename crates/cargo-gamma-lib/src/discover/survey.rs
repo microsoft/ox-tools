@@ -312,10 +312,46 @@ impl Survey {
         } else {
             ExternalPathInputs::default()
         };
-        Self::for_build_with_metadata(args, shard, cargo, &features, &metadata, external_inputs, cache_inputs)
+        Self::for_build_with_metadata(
+            args,
+            shard,
+            cargo,
+            &features,
+            &metadata,
+            external_inputs,
+            cache_inputs,
+            configuration,
+        )
     }
 
-    #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
+    #[cfg(test)]
+    pub(crate) fn for_build_with_metadata_reader(
+        args: &SelectArgs,
+        shard: Option<(u32, u32)>,
+        cargo: &CargoOptions,
+        read_metadata: impl FnOnce(&MetadataCommand) -> std::result::Result<Metadata, cargo_metadata::Error>,
+    ) -> Result<Self> {
+        cargo.validate()?;
+
+        let features = features::from_extra(&args.features, &cargo.extra);
+        let metadata = load_survey_metadata_using(&args.dir, &features, false, read_metadata)?;
+        Self::for_build_with_metadata(
+            args,
+            shard,
+            cargo,
+            &features,
+            &metadata,
+            ExternalPathInputs::default(),
+            false,
+            configuration,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "workspace selection is one ordered metadata pass with explicit test seams"
+    )]
     fn for_build_with_metadata(
         args: &SelectArgs,
         shard: Option<(u32, u32)>,
@@ -324,6 +360,7 @@ impl Survey {
         metadata: &Metadata,
         external_inputs: ExternalPathInputs,
         cache_inputs: bool,
+        resolve_configuration: impl FnOnce(&Utf8Path, &CargoOptions, &HashMap<String, Vec<String>>) -> Cfgs,
     ) -> Result<Self> {
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
         let target = Utf8PathBuf::from(metadata.target_directory.as_str());
@@ -476,7 +513,7 @@ impl Survey {
         files.sort_by(|left, right| left.path.cmp(&right.path));
         normalize_file_lists(&mut declaration_files, &mut exclusion_files);
 
-        let cfgs = configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(metadata, &selected));
+        let cfgs = resolve_configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(metadata, &selected));
         validate_trait_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
 
         // The diff names files; only the workspace can say which files those are. Resolving it
@@ -4515,6 +4552,7 @@ mod tests {
             &metadata,
             ExternalPathInputs::default(),
             false,
+            |_root, _cargo, _enabled| Cfgs::default(),
         )
         .expect("the injected metadata must survey");
 

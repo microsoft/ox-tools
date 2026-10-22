@@ -5437,21 +5437,21 @@ mod tests {
             .to_owned()
     }
 
-    fn assert_external_target_preserves_git_context(source: &Utf8Path, expected_head: &str) {
-        let survey = crate::discover::Survey::for_build(
+    fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {
+        let survey = crate::discover::Survey::for_build_with_metadata_reader(
             &crate::commands::SelectArgs {
                 dir: source.to_owned(),
                 ..crate::commands::SelectArgs::default()
             },
             None,
             &crate::exec::CargoOptions::default(),
+            |command| {
+                let mut command = command.clone();
+                command.env_remove("CARGO_TARGET_DIR").exec()
+            },
         )
         .expect("Cargo metadata resolves the configured external target");
-        assert!(
-            !survey.target.starts_with(source),
-            "the fixture must resolve an external target, got `{}` beneath `{source}`",
-            survey.target
-        );
+        assert_eq!(survey.target, target);
 
         let mut events = crate::testing::Recorder::default();
         let work = Workspace::prepare(&survey.root, &survey.target, &Config::default(), &mut events)
@@ -5487,7 +5487,7 @@ mod tests {
         let target = root.join("t");
         let expected_head = initialize_git_build_fixture(&repository, &target);
 
-        assert_external_target_preserves_git_context(&repository, &expected_head);
+        assert_external_target_preserves_git_context(&repository, &target, &expected_head);
 
         let worktree = root.join("w");
         let output = Command::new("git")
@@ -5499,7 +5499,7 @@ mod tests {
             .output()
             .expect("git worktree runs");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_external_target_preserves_git_context(&worktree, &expected_head);
+        assert_external_target_preserves_git_context(&worktree, &target, &expected_head);
     }
 
     #[test]
