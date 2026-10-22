@@ -149,7 +149,7 @@ fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'
 /// Validate the template independently of repository state.
 pub(crate) fn validate_spec(spec: &JsonArrayRegionSpec) -> Result<(), ManagedRegionRefusal> {
     match &spec.region.host {
-        crate::HostSelector::Path(host) if host.to_ascii_lowercase().ends_with(".json") => {}
+        crate::HostSelector::Path(host) if is_json_host(host) => {}
         crate::HostSelector::Path(_) => {
             return Err(refusal("JSON array hosts must have a .json suffix", RefusalRemedy::ArrayShape));
         }
@@ -168,6 +168,10 @@ pub(crate) fn validate_spec(spec: &JsonArrayRegionSpec) -> Result<(), ManagedReg
     }
     body_strings(&spec.region.body)?;
     Ok(())
+}
+
+pub(crate) fn is_json_host(host: &str) -> bool {
+    host.to_ascii_lowercase().ends_with(".json")
 }
 
 fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {

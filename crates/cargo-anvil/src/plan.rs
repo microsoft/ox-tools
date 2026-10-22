@@ -309,6 +309,19 @@ impl Plan {
         self.json_scanner_regions.insert(RegionKey { host, id });
     }
 
+    pub(crate) fn region_has_checksum_update(&self, host: &str, id: &str) -> bool {
+        self.items.iter().any(|item| {
+            item.rendered_checksum.is_some()
+                && matches!(
+                    &item.target,
+                    Target::Region {
+                        host: item_host,
+                        id: item_id
+                    } if item_host == host && item_id == id
+                )
+        })
+    }
+
     /// Record whether applying this plan would change `.anvil.lock`.
     pub(crate) fn set_manifest_update_required(&mut self, required: bool) {
         self.manifest_update_required = required;

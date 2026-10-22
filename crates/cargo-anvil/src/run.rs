@@ -596,7 +596,7 @@ fn add_historical_array_inputs(
         let extension = Path::new(&key.host).extension().and_then(std::ffi::OsStr::to_str);
         let format = if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("toml")) {
             Some(ArrayFormat::Toml)
-        } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        } else if crate::emit::json_array_region::is_json_host(&key.host)
             && (manifest.json_array_paths.contains_key(key) || manifest.json_scanner_regions.contains(key))
         {
             Some(ArrayFormat::Json)
@@ -1747,6 +1747,25 @@ fn plan_removals_with_array_hosts(
             continue;
         }
         if live_regions.contains(&(resolved_host.clone(), key.id.clone())) {
+            if !plan.region_has_checksum_update(&resolved_host, &key.id) {
+                let mut retained = PlanItem::insync(
+                    Target::Region {
+                        host: resolved_host.clone(),
+                        id: key.id.clone(),
+                    },
+                    last.clone(),
+                );
+                if let Some(path) = previous.json_array_paths.get(key) {
+                    retained = retained.with_json_array_path(path.clone());
+                } else if previous.json_scanner_regions.contains(key)
+                    || array_hosts
+                        .get(&resolved_host)
+                        .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
+                {
+                    retained = retained.with_json_scanner();
+                }
+                plan.push(retained);
+            }
             plan.push(PlanItem::orphaned_kept(Target::Region {
                 host: key.host.clone(),
                 id: key.id.clone(),
@@ -2080,6 +2099,17 @@ mod tests {
         }
     }
 
+    fn case_renamed_json_hosts() -> HostTextCache {
+        HostTextCache {
+            resolve: |root, path| {
+                crate::io::resolve_case_insensitive_with(root, path, |_, name| {
+                    Ok(name.eq_ignore_ascii_case("config.json").then(|| "Config.json".to_owned()))
+                })
+            },
+            ..HostTextCache::default()
+        }
+    }
+
     fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache) {
         let HostSelector::Path(host) = &spec.host else {
             panic!("the managed-region test helper requires HostSelector::Path");
@@ -2226,6 +2256,46 @@ mod tests {
 
         let error = json_array_plan(source, &manifest, &empty).unwrap_err().to_string();
         assert!(error.starts_with("Refused JSON array host CloudBuild.json:"), "{error}");
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn json_array_dotfile_retirement_runs_structural_preflight() {
+        let source = concat!(
+            "{\"entries\":[\n",
+            "// >>> anvil-managed: entries\n",
+            "\"managed\",\n",
+            "// <<< anvil-managed: entries\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region(".json", "entries", checksum_str("\"managed\",\n"));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: ".json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".json", source.to_owned());
+        hosts.newlines.insert(".json".to_owned(), crate::region::text_newline(source));
+
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &empty,
+            &mut hosts,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.starts_with("Refused JSON array host .json:"), "{error}");
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
     }
 
@@ -2658,9 +2728,9 @@ mod tests {
             },
             vec!["entries".to_owned()],
         );
-        let mut hosts = memory_hosts();
-        hosts.set("config.json", source.to_owned());
-        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+        let mut hosts = case_renamed_json_hosts();
+        hosts.set("Config.json", source.to_owned());
+        hosts.newlines.insert("Config.json".to_owned(), crate::region::text_newline(source));
 
         let retirement = build_plan_with_hosts(
             Path::new("in-memory-json-region-tests"),
@@ -2674,20 +2744,25 @@ mod tests {
             &mut hosts,
         )
         .unwrap();
-        let retired = hosts.cached("config.json").unwrap();
+        let retired = hosts.cached("Config.json").unwrap();
         let projected = retirement.projected_manifest(&manifest);
         let settings_key = crate::manifest::RegionKey {
-            host: "config.json".to_owned(),
+            host: "Config.json".to_owned(),
             id: "settings".to_owned(),
         };
         assert!(projected.json_array_paths.is_empty());
         assert!(projected.json_scanner_regions.contains(&settings_key));
+        let recorded_settings = checksum_str("  \"setting\": original,\n");
+        assert_eq!(
+            projected.region_checksum("Config.json", "settings"),
+            Some(recorded_settings.as_str())
+        );
         assert_eq!(retirement.refusals().len(), 1);
         assert!(retired.contains(example));
         let newline = crate::region::text_newline(&retired);
-        let mut hosts = memory_hosts();
-        hosts.set("config.json", retired);
-        hosts.newlines.insert("config.json".to_owned(), newline);
+        let mut hosts = case_renamed_json_hosts();
+        hosts.set("Config.json", retired);
+        hosts.newlines.insert("Config.json".to_owned(), newline);
 
         let rerun = build_plan_with_hosts(
             Path::new("in-memory-json-region-tests"),
@@ -2701,7 +2776,7 @@ mod tests {
             &mut hosts,
         )
         .unwrap();
-        let output = hosts.cached("config.json").unwrap();
+        let output = hosts.cached("Config.json").unwrap();
 
         assert_eq!(rerun.refusals().len(), 1);
         assert!(output.contains(example));
