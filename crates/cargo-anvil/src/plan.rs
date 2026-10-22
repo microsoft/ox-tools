@@ -80,6 +80,8 @@ pub struct PlanItem {
     /// Structural JSON array selector whose provenance must be retained in
     /// the manifest. `None` for every other plan item.
     pub(crate) json_array_path: Option<Vec<String>>,
+    /// Whether this region must retain JSONC-aware marker scanning.
+    pub(crate) json_scanner: bool,
 }
 
 impl PlanItem {
@@ -96,6 +98,7 @@ impl PlanItem {
             spliced_host: Some(spliced_host),
             rendered_checksum: None,
             json_array_path: None,
+            json_scanner: false,
         }
     }
     /// Construct a plan item for an in-sync, skipped, or leave-alone
@@ -110,6 +113,7 @@ impl PlanItem {
             spliced_host: None,
             rendered_checksum: None,
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -131,6 +135,7 @@ impl PlanItem {
             spliced_host: None,
             rendered_checksum: Some(template_checksum),
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -144,6 +149,7 @@ impl PlanItem {
             spliced_host: None,
             rendered_checksum: Some(checksum),
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -164,6 +170,7 @@ impl PlanItem {
             spliced_host: None,
             rendered_checksum: Some(template_checksum),
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -180,6 +187,7 @@ impl PlanItem {
             spliced_host: Some(spliced_host),
             rendered_checksum: Some(body_checksum),
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -195,6 +203,7 @@ impl PlanItem {
             spliced_host: None,
             rendered_checksum: None,
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -213,6 +222,7 @@ impl PlanItem {
             spliced_host: Some(spliced_host),
             rendered_checksum: None,
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -229,12 +239,20 @@ impl PlanItem {
             spliced_host: None,
             rendered_checksum: None,
             json_array_path: None,
+            json_scanner: false,
         }
     }
 
     #[must_use]
     pub(crate) fn with_json_array_path(mut self, path: Vec<String>) -> Self {
         self.json_array_path = Some(path);
+        self.json_scanner = true;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_json_scanner(mut self) -> Self {
+        self.json_scanner = true;
         self
     }
 }
@@ -484,9 +502,18 @@ impl Plan {
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
             json_array_paths: previous_manifest.json_array_paths.clone(),
+            json_scanner_regions: previous_manifest.json_scanner_regions.clone(),
         };
 
         for item in &self.items {
+            if item.json_scanner
+                && let Target::Region { host, id } = &item.target
+            {
+                next.json_scanner_regions.insert(RegionKey {
+                    host: host.clone(),
+                    id: id.clone(),
+                });
+            }
             match item.decision {
                 Decision::Write | Decision::Propose | Decision::InSync => {
                     if let Some(checksum) = &item.rendered_checksum {
@@ -518,6 +545,7 @@ impl Plan {
                         };
                         next.regions.remove(&key);
                         next.json_array_paths.remove(&key);
+                        next.json_scanner_regions.remove(&key);
                     }
                 },
                 Decision::LeaveAlone => {}
@@ -662,6 +690,7 @@ mod tests {
             spliced_host: None,
             rendered_checksum: None,
             json_array_path: None,
+            json_scanner: false,
         });
 
         drop(plan.apply_files(tmp.path()));

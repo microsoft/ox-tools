@@ -74,8 +74,11 @@ participate in the catalog checksum, but are not persisted or part of the
 region's identity. Structural JSON regions additionally record an optional
 `json_array_path` on their existing region entry. This additive provenance
 selects JSON-aware retirement after the catalog declaration disappears.
-Historical and ordinary JSON region records without that field retain the
-line-oriented retirement contract.
+Ordinary regions that coexist with a structural JSON array record
+`json_scanner = true`; the flag remains on each surviving ordinary region if
+the final array region retires, so later runs keep ignoring marker-shaped text
+inside block comments. Historical and standalone ordinary JSON region records
+without either field retain the line-oriented retirement contract.
 Rejecting zero-entry templates does not change empty on-disk body regeneration
 or retirement. After declaration removal, TOML placement is inferred from the
 current structure; JSON placement is checked against the recorded selector.

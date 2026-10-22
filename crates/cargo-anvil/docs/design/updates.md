@@ -37,6 +37,10 @@ Regions introduced through the structural JSON-array API also record an optional
 distinguishes strict JSON-array retirement from ordinary slash-comment regions
 whose host may use a more permissive JSON-like dialect. Locks without the field
 remain valid and keep the ordinary line-oriented retirement behavior.
+Ordinary regions that coexist with a structural JSON array also record
+`json_scanner = true`. That marker survives retirement of the final array region
+for as long as the ordinary region remains managed, preventing later runs from
+reinterpreting repository block-comment examples as ownership sentinels.
 The lock is read at startup and refreshed after applying the plan; `--dry-run`
 does not write it. Missing tracking means an item has not previously been rendered.
 The schema version controls format compatibility; a newer schema is refused.

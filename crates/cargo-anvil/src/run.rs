@@ -270,6 +270,7 @@ fn build_plan_with_hosts(
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
             let scanner = if manifest.json_array_paths.contains_key(key)
+                || manifest.json_scanner_regions.contains(key)
                 || array_hosts
                     .get(&host)
                     .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
@@ -585,7 +586,9 @@ fn add_historical_array_inputs(
         let extension = Path::new(&key.host).extension().and_then(std::ffi::OsStr::to_str);
         let format = if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("toml")) {
             Some(ArrayFormat::Toml)
-        } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("json")) && manifest.json_array_paths.contains_key(key) {
+        } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            && (manifest.json_array_paths.contains_key(key) || manifest.json_scanner_regions.contains(key))
+        {
             Some(ArrayFormat::Json)
         } else {
             None
@@ -603,6 +606,12 @@ fn add_historical_array_inputs(
                     })
                     .paths
                     .push(path.clone());
+            } else if manifest.json_scanner_regions.contains(key) {
+                paths.entry(host).or_insert_with(|| ArrayHost {
+                    format,
+                    paths: Vec::new(),
+                    json_specs: BTreeMap::new(),
+                });
             }
         }
     }
@@ -810,7 +819,8 @@ fn push_region_at(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "threads explicit host scanning through ordinary-region planning"
+    clippy::too_many_lines,
+    reason = "threads explicit host scanning through the complete ordinary-region planning transaction"
 )]
 fn push_region_at_with_scanner(
     repo_root: &Path,
@@ -910,6 +920,11 @@ fn push_region_at_with_scanner(
             refuse_region(plan, host, id, &reason, refusal.remedy);
             return Ok(());
         }
+    };
+    let item = if scanner == HostScanner::Json {
+        item.with_json_scanner()
+    } else {
+        item
     };
     let retiring = current
         .as_deref()
@@ -1729,6 +1744,7 @@ fn plan_removals_with_array_hosts(
             continue;
         }
         let scanner = if previous.json_array_paths.contains_key(key)
+            || previous.json_scanner_regions.contains(key)
             || array_hosts
                 .get(&resolved_host)
                 .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
@@ -2510,6 +2526,100 @@ mod tests {
         assert_eq!(output.matches("// >>> anvil-managed: settings").count(), 1);
         assert_eq!(output.matches("// <<< anvil-managed: settings").count(), 1);
         assert!(!output.contains("\"setting\": true,\n"));
+    }
+
+    #[test]
+    fn ordinary_region_keeps_json_scanner_after_final_array_retirement() {
+        let settings = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": true,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "    \"managed\",\n",
+            "    // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        );
+        let example = concat!(
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.set_region("config.json", "entries", checksum_str("    \"managed\",\n"));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+
+        let retirement = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let retired = hosts.cached("config.json").unwrap();
+        let projected = retirement.projected_manifest(&manifest);
+        let settings_key = crate::manifest::RegionKey {
+            host: "config.json".to_owned(),
+            id: "settings".to_owned(),
+        };
+        assert!(projected.json_array_paths.is_empty());
+        assert!(projected.json_scanner_regions.contains(&settings_key));
+        assert!(retired.contains(example));
+        let newline = crate::region::text_newline(&retired);
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", retired);
+        hosts.newlines.insert("config.json".to_owned(), newline);
+
+        let rerun = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &projected,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+
+        assert_eq!(rerun.dry_run_exit_code(), 0);
+        assert!(output.contains(example));
     }
 
     #[test]

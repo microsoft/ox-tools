@@ -14,7 +14,7 @@
 //! running; older schemas are migrated automatically (no older schemas
 //! exist today).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err, bail};
@@ -54,6 +54,10 @@ pub struct Manifest {
     /// JSON array selector recorded for regions created through the structural
     /// JSON array API. Ordinary slash-comment regions have no entry here.
     pub json_array_paths: BTreeMap<RegionKey, Vec<String>>,
+
+    /// Ordinary regions that must retain JSONC-aware marker scanning because
+    /// they share or previously shared a structural JSON array host.
+    pub json_scanner_regions: BTreeSet<RegionKey>,
 }
 
 /// Composite key identifying one managed region.
@@ -208,6 +212,7 @@ impl Manifest {
 
         let mut regions = BTreeMap::new();
         let mut json_array_paths = BTreeMap::new();
+        let mut json_scanner_regions = BTreeSet::new();
         if let Some(arr) = doc.get("region").and_then(Item::as_array_of_tables) {
             for table in arr {
                 let host = table
@@ -250,6 +255,14 @@ impl Manifest {
                     }
                     json_array_paths.insert(key.clone(), path);
                 }
+                if let Some(scanner) = table.get("json_scanner") {
+                    let scanner = scanner
+                        .as_bool()
+                        .ok_or_else(|| app_err!("[[region]] entry '{}'/'{}' has a non-boolean `json_scanner`", key.host, key.id))?;
+                    if scanner {
+                        json_scanner_regions.insert(key.clone());
+                    }
+                }
                 ensure_contained(&key.host, "[[region]] host")?;
             }
         }
@@ -261,6 +274,7 @@ impl Manifest {
             files,
             regions,
             json_array_paths,
+            json_scanner_regions,
         })
     }
 
@@ -304,6 +318,9 @@ impl Manifest {
                     array.push(component.as_str());
                 }
                 table.insert("json_array_path", Item::Value(array.into()));
+            }
+            if self.json_scanner_regions.contains(key) {
+                table.insert("json_scanner", value(true));
             }
             region_tables.push(table);
         }
@@ -465,6 +482,10 @@ mod tests {
             },
             vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
         );
+        m.json_scanner_regions.insert(RegionKey {
+            host: "CloudBuild.json".to_owned(),
+            id: "anvil-source-root".to_owned(),
+        });
         m.set_region("CloudBuild.json", "anvil-source-root", "sha256:eeee");
         m
     }
@@ -617,6 +638,10 @@ mod tests {
             (
                 "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"root\", 1]\n",
                 "[[region]] entry 'config.json'/'entries' has a non-string `json_array_path` component",
+            ),
+            (
+                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_scanner = \"yes\"\n",
+                "[[region]] entry 'config.json'/'entries' has a non-boolean `json_scanner`",
             ),
         ] {
             let err = Manifest::parse(text).unwrap_err();
