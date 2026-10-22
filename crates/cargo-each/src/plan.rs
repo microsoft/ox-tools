@@ -170,15 +170,18 @@ impl Plan {
             Mode::PerTarget => members
                 .iter()
                 .flat_map(|member| {
+                    let mut cargo_spec = None;
                     member
                         .targets
                         .iter()
                         .filter(|target| target_matches(target, target_kinds, target_required_features))
-                        .map(|target| {
+                        .map(move |target| {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
                                 spec: member.spec(),
-                                cargo_spec: if uses_cargo_spec { member.cargo_spec() } else { String::new() },
+                                cargo_spec: cargo_spec
+                                    .get_or_insert_with(|| if uses_cargo_spec { member.cargo_spec() } else { String::new() })
+                                    .clone(),
                                 version: member.version.clone(),
                                 manifest: member.manifest_path.display().to_string(),
                                 target: target.name.clone(),
@@ -483,6 +486,57 @@ mod tests {
         assert_eq!(plan.invocations.len(), 1);
         assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha::loom"));
         assert_eq!(plan.invocations[0].argv, ["cargo", "test", "-p", "alpha", "--test", "loom"]);
+    }
+
+    #[test]
+    fn per_target_reuses_member_selectors_without_resolving_unmatched_members() {
+        let mut a = member("alpha");
+        a.targets = ["first", "second"]
+            .into_iter()
+            .map(|name| MemberTarget {
+                name: name.to_owned(),
+                kinds: BTreeSet::from([TargetKind::Example]),
+                required_features: BTreeSet::new(),
+            })
+            .collect();
+        let mut b = a.clone();
+        b.name = "beta".to_owned();
+        b.manifest_path = member("beta").manifest_path;
+        let mut unmatched = member("unmatched");
+        // This sentinel cannot become a file URL and must remain unresolved.
+        unmatched.manifest_path = PathBuf::from("unmatched").join("Cargo.toml");
+        unmatched.targets.push(MemberTarget {
+            name: "library".to_owned(),
+            kinds: BTreeSet::from([TargetKind::Lib]),
+            required_features: BTreeSet::new(),
+        });
+
+        let plan = Plan::build(
+            &[&unmatched, &a, &b],
+            &cmd(&["cargo", "run", "-p", "{cargo-spec}", "--example", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &BTreeSet::from([TargetKind::Example]),
+                target_required_features: &BTreeSet::new(),
+                workspace_rust_version: None,
+            },
+        )
+        .expect("unmatched members do not need a source URL");
+
+        let root = if cfg!(windows) { "file:///C:/ws" } else { "file:///ws" };
+        let expected = ["alpha", "beta"]
+            .into_iter()
+            .flat_map(|name| {
+                ["first", "second"].map(|target| Invocation {
+                    label: Some(format!("{name}::{target}")),
+                    argv: cmd(&["cargo", "run", "-p", &format!("{root}/{name}#{name}@1.2.3"), "--example", target]),
+                    work_dir: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(plan.invocations, expected);
     }
 
     #[test]

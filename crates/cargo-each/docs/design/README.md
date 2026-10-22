@@ -55,7 +55,7 @@ per object.
    `--package-file`, so callers do not need shell array expansion. cargo-each
    stays agnostic about who produced the file and what the selection means.
 3. **Four execution modes.** *per-package* (run the command once per member,
-   substituting `{name}`/`{spec}`/`{version}`/`{manifest}`) covers per-manifest
+   substituting `{name}`/`{spec}`/`{cargo-spec}`/`{version}`/`{manifest}`) covers per-manifest
    tools; *once* (run the command a single time when the set is non-empty)
    covers workspace-wide tools and single-invocation cargo commands, with a
    `{packages}` placeholder that expands to the cargo selection flags; and
@@ -297,6 +297,7 @@ Substituted inside each `ARG` of the command template:
 |-------|-----------|------|
 | `{name}` | bare package name (`cargo-anvil`) | per-package |
 | `{spec}` | `name@version` | per-package |
+| `{cargo-spec}` | source-qualified `file:///...#name@version` for the member's absolute manifest directory, with URL encoding | per-package |
 | `{version}` | package version | per-package |
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
@@ -471,7 +472,7 @@ cargo each --package-file target/anvil/impact/affected.packages --filter lib -- 
 
 ```just
 cargo each --package-file target/anvil/impact/affected.packages --filter dep:loom -- \
-    cargo +{{ rust_nightly }} test --package {name} ...
+    cargo +{{ rust_nightly }} test --package {cargo-spec} ...
 ```
 
 **per-target examples** (run each selected example with a timeout):
@@ -479,7 +480,7 @@ cargo each --package-file target/anvil/impact/affected.packages --filter dep:loo
 ```just
 cargo each --package-file target/anvil/impact/affected.packages \
     --each-target example --timeout 30s -- \
-    cargo run --package {spec} --example {target}
+    cargo run --package {cargo-spec} --example {target}
 ```
 
 Recipes whose only per-tier logic is the skip/splat preamble become one
