@@ -269,7 +269,11 @@ fn build_plan_with_hosts(
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let scanner = if manifest.json_array_paths.contains_key(key) {
+            let scanner = if manifest.json_array_paths.contains_key(key)
+                || array_hosts
+                    .get(&host)
+                    .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
+            {
                 HostScanner::Json
             } else {
                 HostScanner::for_path(&host)
@@ -296,7 +300,7 @@ fn build_plan_with_hosts(
         )?;
     }
 
-    plan_removals(repo_root, manifest, &mut plan, hosts, &composed)?;
+    plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &array_hosts)?;
 
     validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
 
@@ -1615,12 +1619,14 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
 /// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
-fn plan_removals(
+#[expect(clippy::too_many_lines, reason = "keeps file and region retirement decisions in one ordered pass")]
+fn plan_removals_with_array_hosts(
     repo_root: &Path,
     previous: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
     composed: &ComposedHosts,
+    array_hosts: &ArrayHosts,
 ) -> Result<(), AppError> {
     let live_files = live_files(plan);
     let live_regions: BTreeSet<(String, String)> = plan
@@ -1722,7 +1728,11 @@ fn plan_removals(
             }));
             continue;
         }
-        let scanner = if previous.json_array_paths.contains_key(key) {
+        let scanner = if previous.json_array_paths.contains_key(key)
+            || array_hosts
+                .get(&resolved_host)
+                .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
+        {
             HostScanner::Json
         } else {
             HostScanner::for_path(&resolved_host)
@@ -1795,6 +1805,17 @@ fn plan_removals(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+fn plan_removals(
+    repo_root: &Path,
+    previous: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &ComposedHosts,
+) -> Result<(), AppError> {
+    plan_removals_with_array_hosts(repo_root, previous, plan, hosts, composed, &ArrayHosts::new())
 }
 
 /// Infer the marker syntax of a retired region from current host evidence.
@@ -2419,6 +2440,76 @@ mod tests {
 
         assert!(error.contains("outside its recorded JSON array"), "{error}");
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_region_retirement_in_structural_json_host_preserves_block_comment_examples() {
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli()).with_json_array_region(array).build().unwrap();
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "    \"managed\",\n",
+            "    // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        );
+        let example = concat!(
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.set_region("config.json", "entries", checksum_str("    \"managed\",\n"));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+
+        let _plan = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+
+        assert!(output.contains(example));
+        assert_eq!(output.matches("// >>> anvil-managed: settings").count(), 1);
+        assert_eq!(output.matches("// <<< anvil-managed: settings").count(), 1);
+        assert!(!output.contains("\"setting\": true,\n"));
     }
 
     #[test]
