@@ -91,7 +91,6 @@ fn generate_with_serializer<W: Write>(
                     Risk::High => &high_risk_format,
                 };
                 #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
-                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "the prior header write validates this column; row 1 is valid and appraisal status contains only bounded numeric values and fixed labels, so the string write cannot return a bounds or length error")]
                 propagate_xlsx(worksheet.write_string_with_format(row, (col_idx + 1) as u16, value, format))?;
             }
         }

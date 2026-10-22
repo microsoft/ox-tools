@@ -429,7 +429,7 @@ impl Hints {
             .collect()
     }
 
-    /// The mutants to offer the compiler first, in the artifact's own order.
+    /// Historical compiler-failure identities, in the artifact's own order.
     #[must_use]
     pub fn ordering(&self) -> Vec<&str> {
         self.mutants

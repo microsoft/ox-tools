@@ -650,6 +650,7 @@ dependencies = [
  "cargo-gamma-rt",
  "cargo-gamma-unsafe",
  "cargo_metadata",
+ "chrono",
  "clap",
  "clap_complete",
  "compact_str",
@@ -694,6 +695,7 @@ dependencies = [
 name = "cargo-gamma-unsafe"
 version = "0.3.0"
 dependencies = [
+ "cargo-gamma-rt",
  "libc",
  "loom",
  "tempfile",

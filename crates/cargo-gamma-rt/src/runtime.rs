@@ -45,24 +45,21 @@ pub const NONE: u32 = 0;
 /// ```
 pub const ACTIVE_VAR: &str = "GAMMA_ACTIVE";
 
-/// The environment variable that puts a process into census mode.
+/// The environment variable naming the active-mutant reach observation file.
 ///
-/// Its value is the path of the file where the process writes the ordinals it reached. Setting it
-/// selects unmutated behavior when no mutant is active — a census runs the code the author wrote —
-/// and turns every guard into a probe that records the site it stands at. Alongside a positive
-/// [`ACTIVE_VAR`], the same path records only whether that active site was reached while preserving
-/// mutated behavior; this is how an ordinary sweep harvests reachability without another process.
+/// Alongside a positive [`ACTIVE_VAR`], this records whether that active guard was reached without
+/// changing mutant selection. With no active mutant, guards record nothing.
 ///
 /// The path is fetched and opened through the platform's native encoding — `getenv` and `fopen` on
 /// Unix, the wide Win32 and CRT entry points on Windows — so a scratch tree whose path lies outside
 /// the active ANSI code page is opened like any other. A path that cannot be opened at all costs
-/// only speed: the reader treats an absent census as a spoiled sample rather than as a run that
+/// only speed: the reader treats an absent observation as a spoiled sample rather than as a run that
 /// reached nothing, so no mutant is convicted or acquitted on the strength of it.
 ///
 /// ```rust
-/// assert_eq!(gamma_rt::CENSUS_VAR, "GAMMA_CENSUS");
+/// assert_eq!(gamma_rt::REACH_VAR, "GAMMA_REACH");
 /// ```
-pub const CENSUS_VAR: &str = "GAMMA_CENSUS";
+pub const REACH_VAR: &str = "GAMMA_REACH";
 
 /// The variable's name as the C interfaces below want it: NUL-terminated, and a compile-time
 /// constant so that asking for it costs nothing.
@@ -71,19 +68,19 @@ pub const CENSUS_VAR: &str = "GAMMA_CENSUS";
 #[cfg(any(unix, windows))]
 const ACTIVE_VAR_C: &[u8] = b"GAMMA_ACTIVE\0";
 
-/// [`CENSUS_VAR`] in the same form, for the same reason.
+/// [`REACH_VAR`] in the same form, for the same reason.
 #[cfg(any(unix, windows))]
-const CENSUS_VAR_C: &[u8] = b"GAMMA_CENSUS\0";
+const REACH_VAR_C: &[u8] = b"GAMMA_REACH\0";
 
-/// [`CENSUS_VAR`] as UTF-16, which is the form the wide Win32 and CRT entry points want.
+/// [`REACH_VAR`] as UTF-16, which is the form the wide Win32 and CRT entry points want.
 ///
-/// The census *path* has to be fetched and opened through the wide interfaces: a scratch tree
+/// The observation *path* has to be fetched and opened through the wide interfaces: a scratch tree
 /// under a user profile whose name lies outside the active ANSI code page either loses characters
-/// on the way through the narrow ones or cannot be opened at all, and the census then silently
+/// on the way through the narrow ones or cannot be opened at all, and the observation then silently
 /// never works on that host. Widening the variable's own name is the price of asking for it that
 /// way, and it costs nothing at run time — it is a constant.
 #[cfg(windows)]
-const CENSUS_VAR_W: [u16; CENSUS_VAR_C.len()] = widen(CENSUS_VAR_C);
+const REACH_VAR_W: [u16; REACH_VAR_C.len()] = widen(REACH_VAR_C);
 
 /// Widens an ASCII byte string, terminator included, to UTF-16 at compile time.
 ///
@@ -107,63 +104,30 @@ const fn widen<const N: usize>(ascii: &[u8]) -> [u16; N] {
     wide
 }
 
-/// The pseudo-ordinal that means "record every site reached, and activate nothing".
-///
-/// Census mode rides on the same startup-captured selection as mutant selection so that the guard
-/// keeps its single load. `parse` refuses this value because a mode is not something
-/// `GAMMA_ACTIVE` may ask for.
-const CENSUS: u32 = u32::MAX - 1;
-
-/// How many sites a census can record.
-///
-/// This is the shared coordinator/runtime protocol maximum. A population past it is not silently
-/// half-recorded: a site over the edge records [`OVERFLOW`], which tells the coordinator to discard
-/// the whole census rather than mistake an unrecorded site for an unreached one.
-pub const MAX_CENSUS_SITES: usize = 1 << 20;
-
-/// The number of site bits retained by the runtime's private bitmap.
-///
-/// One bit per site makes the zeroed table occupy 128 KiB of address space, with pages committed
-/// only when a census reaches the corresponding sites.
+/// Whether the one active mutant's guard was reached.
 #[cfg(any(unix, windows))]
-const SITES: usize = MAX_CENSUS_SITES;
+static REACHED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(any(unix, windows))]
-const WORD_BITS: usize = 32;
-
-/// The sites reached by this process, serialized to the census file only when it exits.
-#[cfg(any(unix, windows))]
-static REACHED: [AtomicU32; SITES / WORD_BITS] = [const { AtomicU32::new(0) }; SITES / WORD_BITS];
-
-/// Whether a reached site was too large to fit in [`REACHED`].
-#[cfg(any(unix, windows))]
-static OVERFLOWED: AtomicBool = AtomicBool::new(false);
-
-/// The marker record meaning "this census is incomplete, do not trust it".
+/// The marker record meaning "this observation is incomplete, do not trust it".
 ///
 /// `u32::MAX` is not an ordinal — `parse` refuses it — so it cannot collide with a real record.
 pub const OVERFLOW: u32 = u32::MAX;
 
-/// The marker record written last, at a clean exit, meaning the census is whole.
+/// The marker record written last, at a clean exit, meaning the observation is whole.
 ///
 /// The runtime writes this record last, at process exit, so a reader that finds it intact
-/// knows the whole buffered bitmap was serialized first. Its absence — a truncated write, a crash
+/// knows the reach flag was serialized first. Its absence — a truncated write, a crash
 /// before exit, or a failed open — stops the reader mistaking a missing record for an unreached
 /// site: an unsealed file is discarded whole rather than believed in part.
 ///
-/// `u32::MAX - 2` is not an ordinal — `parse` refuses it alongside the overflow marker and
-/// `CENSUS`, so the environment cannot name it — and it is neither [`OVERFLOW`] nor a site id:
-/// `note` diverts every id at or above `SITES` to the [`OVERFLOW`] path, so no larger id ever
-/// reaches the file. That bound is what actually keeps the encoding unambiguous, and widening
-/// `SITES` past `u32::MAX - 2` would break it. It is also not `CENSUS`, which never reaches the
-/// file. The reader in `cargo-gamma-lib` imports this marker from the runtime so the protocol has
-/// one source of truth.
+/// `parse` refuses this value and all larger values, so it cannot collide with an active ordinal.
+/// The reader shares this marker to keep the protocol's definition in one place.
 pub const SEAL: u32 = u32::MAX - 2;
 
-/// The longest census path this will retain, in native code units.
+/// The longest observation path this will retain, in native code units.
 ///
 /// It is long enough for ordinary Unix and Win32 paths, and bounded because startup copies the
-/// path into static storage without an allocator. A path beyond this bound leaves the census
+/// path into static storage without an allocator. A path beyond this bound leaves the observation
 /// unsealed, which prevents the coordinator from trusting a partial result.
 #[cfg(any(unix, windows))]
 const PATH_LIMIT: usize = 4096;
@@ -182,7 +146,7 @@ const READ_LIMIT: usize = 32;
 /// hosted, non-Miri target between process start and this crate's own constructor running, so a
 /// guard reached in that window is not mistaken for a legitimate unmutated run: see [`selected`].
 ///
-/// Refused by [`parse`] alongside [`OVERFLOW`], [`CENSUS`], and [`SEAL`], so the environment cannot
+/// Refused by [`parse`] alongside the wire markers, so the environment cannot
 /// name it either.
 #[cfg(any(unix, windows))]
 const UNINSTALLED: u32 = u32::MAX - 3;
@@ -192,7 +156,7 @@ const UNINSTALLED: u32 = u32::MAX - 3;
 /// On a hosted, non-Miri target this starts at [`UNINSTALLED`]: the only other
 /// constructor-ordering signal available is [`NONE`], which is indistinguishable from a legitimate
 /// request for unmutated behavior and would let a guard reached before `install` silently
-/// misreport a mutant or census run as a baseline one. [`selected`] turns an observation of
+/// misreport a mutant or observation run as a baseline one. [`selected`] turns an observation of
 /// [`UNINSTALLED`] into immediate, non-unwinding process termination instead. A target with neither
 /// `unix` nor `windows`, or a Miri execution of either, never links `install` at all, so it starts
 /// at, and stays at, the actually-correct [`NONE`] fallback described at the crate root.
@@ -204,47 +168,47 @@ static ACTIVE: AtomicU32 = AtomicU32::new(UNINSTALLED);
 #[cfg(any(not(any(unix, windows)), miri))]
 static ACTIVE: AtomicU32 = AtomicU32::new(NONE);
 
-/// The captured census path's length, excluding its terminator.
+/// The captured observation path's length, excluding its terminator.
 ///
 /// A zero length means no usable path was captured. The path and the NUL terminator that follows
 /// it are both written before this is published with `Release`, and [`open`] acquires it before
 /// reading the corresponding static buffer — so a non-zero length is also the promise that a
 /// terminator sits at that offset.
 #[cfg(any(unix, windows))]
-static CENSUS_PATH_LENGTH: AtomicUsize = AtomicUsize::new(0);
+static REACH_PATH_LENGTH: AtomicUsize = AtomicUsize::new(0);
 
-/// Native census-path storage captured during process startup.
+/// Native observation-path storage captured during process startup.
 ///
 /// The constructor is the only writer, and it publishes completed bytes through
-/// [`CENSUS_PATH_LENGTH`] before any later reader can observe them. `UnsafeCell` is needed only to
+/// [`REACH_PATH_LENGTH`] before any later reader can observe them. `UnsafeCell` is needed only to
 /// initialize no-allocator static storage; its contained bytes are never mutated after publication.
 #[cfg(unix)]
-struct CensusPath {
+struct ReachPath {
     bytes: UnsafeCell<[u8; PATH_LIMIT]>,
 }
 
 #[cfg(unix)]
 // SAFETY: the constructor is the sole writer and publishes the completed buffer before readers
 // access it; no code mutates it thereafter.
-unsafe impl Sync for CensusPath {}
+unsafe impl Sync for ReachPath {}
 
 #[cfg(unix)]
-static CENSUS_PATH: CensusPath = CensusPath {
+static REACH_PATH: ReachPath = ReachPath {
     bytes: UnsafeCell::new([0; PATH_LIMIT]),
 };
 
-/// Windows' UTF-16 variant of [`CensusPath`].
+/// Windows' UTF-16 variant of [`ReachPath`].
 #[cfg(windows)]
-struct CensusPath {
+struct ReachPath {
     bytes: UnsafeCell<[u16; PATH_LIMIT]>,
 }
 
 #[cfg(windows)]
 // SAFETY: as for the Unix variant above.
-unsafe impl Sync for CensusPath {}
+unsafe impl Sync for ReachPath {}
 
 #[cfg(windows)]
-static CENSUS_PATH: CensusPath = CensusPath {
+static REACH_PATH: ReachPath = ReachPath {
     bytes: UnsafeCell::new([0; PATH_LIMIT]),
 };
 
@@ -255,7 +219,7 @@ static CENSUS_PATH: CensusPath = CensusPath {
 #[cfg(all(test, any(unix, windows)))]
 static STARTUP_ENVIRONMENT_READS: AtomicUsize = AtomicUsize::new(0);
 
-/// Captures selection and the optional census path while the process is still starting.
+/// Captures selection and the optional observation path while the process is still starting.
 ///
 /// This is called only by the loader/CRT constructor below. Linux reads the immutable environment
 /// image captured by `exec`, so an earlier native constructor may start threads without racing this
@@ -263,7 +227,7 @@ static STARTUP_ENVIRONMENT_READS: AtomicUsize = AtomicUsize::new(0);
 /// afterwards.
 #[cfg(any(unix, windows))]
 fn capture_selection() -> u32 {
-    selection_or_environment_error(selection_from(capture_census_path(), capture_active))
+    selection_or_environment_error(selection_from(capture_reach_path(), capture_active))
 }
 
 /// Converts an unrecoverable startup-environment failure into the runtime's fatal protocol.
@@ -279,33 +243,12 @@ fn selection_or_environment_error(selection: Result<u32, ()>) -> u32 {
     }
 }
 
-/// Turns what startup learned about `GAMMA_CENSUS` into a selection, or into a startup failure.
-///
-/// A census path with no active ordinal selects census mode. A path alongside a positive active
-/// ordinal instead records that one active site's reach while leaving the mutant selected.
-///
-/// A census request this process could not read is **not** absence, and must not fall through to
-/// active selection: the process would then execute a mutant, write no census file, and report a
-/// baseline failure the coordinator would read as a fact about that mutant. It is reported as a
-/// startup failure instead, which [`capture_selection`] turns into the environment-error protocol.
-///
-/// Taking the census answer and the active read as parameters — rather than performing them — is
-/// what lets a test drive every combination, including native API failures that cannot be produced
-/// on demand.
+/// Preserves mutant selection unless the observation environment could not be read.
 #[cfg(any(unix, windows))]
-fn selection_from(census: CensusRequest, active: impl FnOnce() -> Result<u32, ()>) -> Result<u32, ()> {
-    match census {
-        CensusRequest::Absent => active(),
-        CensusRequest::Path(_) | CensusRequest::Unusable => {
-            let selected = active()?;
-
-            // A path alongside an active mutant records whether that mutant's guard was reached
-            // without changing the code the process executes. With no active mutant, the same
-            // path retains its original census meaning and records every guard under baseline
-            // behavior.
-            Ok(if selected == NONE { CENSUS } else { selected })
-        }
-        CensusRequest::Error => Err(()),
+fn selection_from(observation: ReachRequest, active: impl FnOnce() -> Result<u32, ()>) -> Result<u32, ()> {
+    match observation {
+        ReachRequest::Absent | ReachRequest::Path(_) | ReachRequest::Unusable => active(),
+        ReachRequest::Error => Err(()),
     }
 }
 
@@ -327,42 +270,42 @@ enum EnvironmentValue {
     Error,
 }
 
-/// What startup learned about `GAMMA_CENSUS`, which is not the same question as what it holds.
+/// What startup learned about `GAMMA_REACH`, which is not the same question as what it holds.
 ///
 /// Absence and failure require opposite decisions: absence permits active-mutant selection, while
 /// failure must stop startup before a run can produce evidence under the wrong mode.
 #[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CensusRequest {
-    /// `GAMMA_CENSUS` was unset, or set to nothing: this process is not taking a census.
+enum ReachRequest {
+    /// `GAMMA_REACH` was unset, or set to nothing: no observation was requested.
     Absent,
 
-    /// Census mode, with a NUL-terminated path of this non-zero length retained in [`CENSUS_PATH`].
+    /// A NUL-terminated path of this non-zero length retained in [`REACH_PATH`].
     Path(NonZeroUsize),
 
-    /// Census mode, with a path too long for [`PATH_LIMIT`] to retain and therefore never opened.
+    /// A path too long for [`PATH_LIMIT`] to retain and therefore never opened.
     Unusable,
 
     /// The startup environment could not be read, so nothing is known about this variable.
     Error,
 }
 
-/// Windows environment-read failures before a census path has been published.
+/// Windows environment-read failures before an observation path has been published.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CensusPathError {
+enum ReachPathError {
     Absent,
     Unusable,
     Environment,
 }
 
 #[cfg(any(windows, test))]
-impl From<CensusPathError> for CensusRequest {
-    fn from(error: CensusPathError) -> Self {
+impl From<ReachPathError> for ReachRequest {
+    fn from(error: ReachPathError) -> Self {
         match error {
-            CensusPathError::Absent => Self::Absent,
-            CensusPathError::Unusable => Self::Unusable,
-            CensusPathError::Environment => Self::Error,
+            ReachPathError::Absent => Self::Absent,
+            ReachPathError::Unusable => Self::Unusable,
+            ReachPathError::Environment => Self::Error,
         }
     }
 }
@@ -508,25 +451,25 @@ fn active_from_environment_read(outcome: EnvironmentReadOutcome, buffer: &[u8]) 
     }
 }
 
-/// Captures a non-empty `GAMMA_CENSUS` path and reports what the environment said about it.
+/// Captures a non-empty `GAMMA_REACH` path and reports what the environment said about it.
 ///
-/// A requested path that does not fit static storage still selects census mode; it simply cannot
+/// A requested path that does not fit static storage leaves selection unchanged; it simply cannot
 /// be opened, and therefore remains unsealed and is rejected by the reader.
 #[cfg(unix)]
-fn capture_census_path() -> CensusRequest {
+fn capture_reach_path() -> ReachRequest {
     // SAFETY: only this constructor writes the `UnsafeCell`, before the release publication below.
-    let path = unsafe { &mut *CENSUS_PATH.bytes.get() };
-    let value = copy_environment(CENSUS_VAR_C, path);
-    let request = terminate_census_path(path, value);
+    let path = unsafe { &mut *REACH_PATH.bytes.get() };
+    let value = copy_environment(REACH_VAR_C, path);
+    let request = terminate_reach_path(path, value);
 
-    if let CensusRequest::Path(length) = request {
-        CENSUS_PATH_LENGTH.store(length.get(), Ordering::Release);
+    if let ReachRequest::Path(length) = request {
+        REACH_PATH_LENGTH.store(length.get(), Ordering::Release);
     }
 
     request
 }
 
-/// Terminates a captured census path in place, and says what was captured.
+/// Terminates a captured observation path in place, and says what was captured.
 ///
 /// The terminator is written here rather than assumed, and that is the whole point of this
 /// function. Linux copies value bytes out of `/proc/self/environ` and stops at the value's own
@@ -536,36 +479,36 @@ fn capture_census_path() -> CensusRequest {
 /// explicitly, on the one path that publishes a length for it to trust.
 ///
 /// A value that fills the buffer exactly has nowhere to put a terminator, so it is reported as
-/// [`CensusRequest::Unusable`] and no length is published; nothing is written past the buffer, and
-/// [`open`] refuses to open a census with no published length.
+/// [`ReachRequest::Unusable`] and no length is published; nothing is written past the buffer, and
+/// [`open`] refuses to open an observation with no published length.
 ///
 /// Taking the environment answer as a parameter — rather than performing the read — is what lets a
 /// test drive the `PATH_LIMIT - 1` boundary against a buffer it pre-filled with non-zero bytes,
 /// which is the case a zeroed static would otherwise hide.
 #[cfg(unix)]
-fn terminate_census_path(path: &mut [u8; PATH_LIMIT], value: EnvironmentValue) -> CensusRequest {
+fn terminate_reach_path(path: &mut [u8; PATH_LIMIT], value: EnvironmentValue) -> ReachRequest {
     match value {
-        EnvironmentValue::Absent | EnvironmentValue::Found(0) => CensusRequest::Absent,
-        EnvironmentValue::Error => CensusRequest::Error,
+        EnvironmentValue::Absent | EnvironmentValue::Found(0) => ReachRequest::Absent,
+        EnvironmentValue::Error => ReachRequest::Error,
         EnvironmentValue::Found(length) => match path.get_mut(length) {
             Some(terminator) => {
                 *terminator = 0;
 
-                CensusRequest::Path(
+                ReachRequest::Path(
                     NonZeroUsize::new(length).expect("the zero-length environment value was handled before path termination"),
                 )
             }
 
             // The value filled the buffer, so it was truncated and there is no room to terminate
-            // what remains. Census mode still holds; the path does not.
-            None => CensusRequest::Unusable,
+            // what remains. Mutant selection remains independent of path usability.
+            None => ReachRequest::Unusable,
         },
     }
 }
 
-/// Windows' equivalent of [`capture_census_path`].
+/// Windows' equivalent of [`capture_reach_path`].
 #[cfg(windows)]
-fn capture_census_path() -> CensusRequest {
+fn capture_reach_path() -> ReachRequest {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
 
@@ -574,10 +517,10 @@ fn capture_census_path() -> CensusRequest {
     // SAFETY: clearing the calling thread's last-error value has no precondition.
     unsafe { SetLastError(ERROR_SUCCESS) };
 
-    // SAFETY: `CENSUS_VAR_W` is NUL-terminated and `buffer` is writable for the supplied length.
+    // SAFETY: `REACH_VAR_W` is NUL-terminated and `buffer` is writable for the supplied length.
     let written = unsafe {
         GetEnvironmentVariableW(
-            CENSUS_VAR_W.as_ptr(),
+            REACH_VAR_W.as_ptr(),
             buffer.as_mut_ptr(),
             u32::try_from(buffer.len()).unwrap_or(u32::MAX),
         )
@@ -589,7 +532,7 @@ fn capture_census_path() -> CensusRequest {
         ERROR_SUCCESS
     };
 
-    let length = match census_path_length(environment_read_outcome(written, last_error, buffer.len())) {
+    let length = match reach_path_length(environment_read_outcome(written, last_error, buffer.len())) {
         Ok(length) => length,
         Err(error) => return error.into(),
     };
@@ -598,20 +541,20 @@ fn capture_census_path() -> CensusRequest {
         // SAFETY: only this constructor writes the `UnsafeCell`, and `length` bytes plus the
         // API's terminator all fit in both arrays.
         unsafe {
-            core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length.get() + 1);
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), REACH_PATH.bytes.get().cast(), length.get() + 1);
         }
-        CENSUS_PATH_LENGTH.store(length.get(), Ordering::Release);
+        REACH_PATH_LENGTH.store(length.get(), Ordering::Release);
 
-        CensusRequest::Path(length)
+        ReachRequest::Path(length)
     }
 }
 
 #[cfg(any(windows, test))]
-const fn census_path_length(outcome: EnvironmentReadOutcome) -> Result<NonZeroUsize, CensusPathError> {
+const fn reach_path_length(outcome: EnvironmentReadOutcome) -> Result<NonZeroUsize, ReachPathError> {
     match outcome {
-        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => Err(CensusPathError::Absent),
-        EnvironmentReadOutcome::Error => Err(CensusPathError::Environment),
-        EnvironmentReadOutcome::TooLongToStore => Err(CensusPathError::Unusable),
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => Err(ReachPathError::Absent),
+        EnvironmentReadOutcome::Error => Err(ReachPathError::Environment),
+        EnvironmentReadOutcome::TooLongToStore => Err(ReachPathError::Unusable),
         EnvironmentReadOutcome::Found(length) => Ok(length),
     }
 }
@@ -623,9 +566,9 @@ const fn census_path_length(outcome: EnvironmentReadOutcome) -> Result<NonZeroUs
 /// — selects unmutated behavior, which is the answer that cannot turn a mutated program into a
 /// passing one.
 ///
-/// The reserved words of the encoding — [`UNINSTALLED`], the census file's [`SEAL`], [`CENSUS`],
+/// The reserved words of the encoding — [`UNINSTALLED`], the observation file's [`SEAL`],
 /// and the overflow marker — are refused as one contiguous range: a population would
-/// have to hold four billion mutants to reach them, and a startup sentinel, a mode, or a file
+/// have to hold four billion mutants to reach them, and a startup sentinel or a file
 /// marker is not something `GAMMA_ACTIVE` may ask for.
 #[cfg(any(unix, windows))]
 fn parse(bytes: &[u8]) -> u32 {
@@ -1173,11 +1116,11 @@ unsafe extern "system" {
     /// set through the Win32 side of the process.
     ///
     /// Narrow is enough for [`ACTIVE_VAR`], whose value is a decimal ordinal and therefore ASCII by
-    /// construction, so no code page can change what it says. [`CENSUS_VAR`] names a path and goes
+    /// construction, so no code page can change what it says. [`REACH_VAR`] names a path and goes
     /// through [`GetEnvironmentVariableW`] instead.
     fn GetEnvironmentVariableA(name: *const u8, buffer: *mut u8, size: u32) -> u32;
 
-    /// The wide form of the same call, used for [`CENSUS_VAR`] because its value is a filesystem
+    /// The wide form of the same call, used for [`REACH_VAR`] because its value is a filesystem
     /// path. Windows stores the environment as UTF-16; the narrow call converts to the active ANSI
     /// code page on the way out, which drops any character the code page cannot represent — an
     /// ordinary occurrence for a user profile directory with a non-Latin name.
@@ -1258,18 +1201,18 @@ impl WindowsOverlapped {
 unsafe extern "C" {
     /// The C library's `fopen`, whose signature is fixed by the C standard. Used rather than
     /// `std::fs::File` because this crate is `no_std`, and rather than the platforms' own
-    /// `open`/`CreateFileA` because the C library buffers the batches serialized at process exit.
+    /// `open`/`CreateFileA` because the C library buffers the records written at process exit.
     ///
-    /// The exit handler writes the reached-site bitmap in batches, appends a seal, and flushes the
+    /// The exit handler writes the active ordinal if reached, appends a seal, and flushes the
     /// stream. A reader that finds the seal intact at the end knows every record before it arrived
-    /// too. A process that aborts skips the handler and leaves no sealed census to trust.
+    /// too. A process that aborts skips the handler and leaves no sealed observation to trust.
     #[cfg(unix)]
     fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
 
     /// The Microsoft CRT's wide `fopen`, identical to it in everything said above and taking its
     /// path and mode as UTF-16. Windows uses this rather than the narrow `fopen`, which interprets
     /// its path in the active ANSI code page: a scratch tree whose path holds a character that code
-    /// page cannot represent would fail to open, `sink` would latch the failure, and the census
+    /// page cannot represent would fail to open, `sink` would latch the failure, and the observation
     /// would silently never work on that host — the run merely slower, forever, with the reason
     /// invisible.
     #[cfg(windows)]
@@ -1289,92 +1232,43 @@ unsafe extern "C" {
     /// what leaves an unsealed file for the reader to reject.
     fn atexit(handler: extern "C" fn()) -> c_int;
 
-    #[cfg(test)]
-    fn tmpfile() -> *mut c_void;
-
-    #[cfg(test)]
-    fn fclose(stream: *mut c_void) -> c_int;
 }
 
-/// Records that the site with ordinal `id` was reached, if it has not been recorded already.
+/// Records that the active guard was reached, if it has not been recorded already.
 ///
-/// The bitmap is what keeps this affordable. A site inside a loop is reached millions of times but
-/// occupies one bit, and no file is opened or written until the process exits. Every hit after the
-/// first takes a cheap relaxed precheck of the bit (or [`OVERFLOWED`]) it would set and returns
-/// immediately if it is already set, skipping the lease/compare-exchange/decrement protocol below
-/// entirely.
-///
-/// # Why the precheck cannot lose a site under concurrent sealing
-///
-/// [`REACHED`] bits and [`OVERFLOWED`] are set-only for a census's whole lifetime — nothing ever
-/// clears them — so a relaxed load that observes one already set is observing a fact that stays
-/// true forever after, regardless of what ordering did or did not make visible to this thread yet.
-/// The precheck can therefore only ever take a shortcut that is *correct to take*: it never
-/// fabricates a "set" it did not really witness. The reverse case is symmetric and does not need
-/// the precheck to be right at all: if the relevant bit is not yet visible to this thread — whether
-/// truly unset or set by a write this thread has not observed — falling through to the full
-/// lease/fetch-or/release protocol below is exactly what already happens on every call today, so
-/// no case exists where the precheck causes a site to go unrecorded that would otherwise have been.
-// Cost: this deliberately makes no empirical throughput promise. The structural trade-off is
-// sufficient here: census-only first and unique hits pay one relaxed load, while repeated hits
-// avoid the recorder lease and compare-exchange protocol entirely.
-// Cold: reached on a site's first hit during a census or an active-mutant reach sample. The
-// inlined guard performs the cheap bitmap precheck so repeated hot-loop hits do not pay an
-// out-of-line call; keeping the recorder protocol here avoids bloating every instrumented site.
+/// The flag is set-only. A relaxed precheck can skip work only after observing a hit that is
+/// already recorded; a stale false value merely repeats the recording protocol.
 #[cold]
 #[inline(never)]
 #[cfg(any(unix, windows))]
-fn note(id: u32) {
-    let index = usize::try_from(id).expect("every supported target represents every mutation-site ordinal");
-
-    if index >= SITES {
-        if OVERFLOWED.load(Ordering::Relaxed) {
-            return;
-        }
-    } else {
-        let bit = 1_u32 << (index % WORD_BITS);
-
-        if REACHED[index / WORD_BITS].load(Ordering::Relaxed) & bit != 0 {
-            return;
-        }
+fn note() {
+    if already_noted() {
+        return;
     }
 
-    // The lease starts before the bitmap claim. A seal must therefore wait from the instant this
+    // The lease starts before setting the flag. A seal must therefore wait from the instant this
     // guard makes a site reachable rather than scan past an update that has not landed yet.
     if begin_recording() {
         #[cfg(test)]
         pause_after_lease();
 
-        if index >= SITES {
-            OVERFLOWED.store(true, Ordering::Relaxed);
-        } else {
-            let bit = 1_u32 << (index % WORD_BITS);
-
-            let _previous = REACHED[index / WORD_BITS].fetch_or(bit, Ordering::Relaxed);
-        }
+        REACHED.store(true, Ordering::Relaxed);
         end_recording();
     }
 }
 
 #[inline]
 #[cfg(any(unix, windows))]
-fn already_noted(id: u32) -> bool {
-    let index = usize::try_from(id).expect("every supported target represents every mutation-site ordinal");
-
-    if index >= SITES {
-        OVERFLOWED.load(Ordering::Relaxed)
-    } else {
-        let bit = 1_u32 << (index % WORD_BITS);
-        REACHED[index / WORD_BITS].load(Ordering::Relaxed) & bit != 0
-    }
+fn already_noted() -> bool {
+    REACHED.load(Ordering::Relaxed)
 }
 
-/// The high bit closes census recording; the remaining bits count bitmap updates in progress.
+/// The high bit closes observation recording; the remaining bits count flag updates in progress.
 ///
 /// `seal` claims the closed state only from zero recorders. A guard increments the count before
-/// touching the bitmap and decrements it with `Release` afterwards. An acquiring successful seal
-/// claim therefore observes every bitmap update it waited for. Once claimed, no new recorder can
-/// enter while the bitmap is being serialized.
+/// setting the flag and decrements it with `Release` afterwards. An acquiring successful seal
+/// claim therefore observes every flag update it waited for. Once claimed, no new recorder can
+/// enter while the observation is being serialized.
 #[cfg(any(unix, windows))]
 struct RecorderState {
     value: RecorderAtomicUsize,
@@ -1487,11 +1381,11 @@ impl RecorderState {
 }
 
 #[cfg(all(any(unix, windows), not(all(loom, feature = "loom"))))]
-static CENSUS_RECORDERS: RecorderState = RecorderState::new();
+static REACH_RECORDERS: RecorderState = RecorderState::new();
 
 #[cfg(all(any(unix, windows), loom, feature = "loom"))]
 loom::lazy_static! {
-    static ref CENSUS_RECORDERS: RecorderState = RecorderState::new();
+    static ref REACH_RECORDERS: RecorderState = RecorderState::new();
 }
 
 #[cfg(any(unix, windows))]
@@ -1503,19 +1397,19 @@ const RECORDER_MASK: usize = !SEALING;
 /// Enters the recording side of the recording/seal protocol.
 #[cfg(any(unix, windows))]
 fn begin_recording() -> bool {
-    CENSUS_RECORDERS.begin_recording()
+    REACH_RECORDERS.begin_recording()
 }
 
-/// Leaves the recording side after its bitmap update is complete.
+/// Leaves the recording side after its flag update is complete.
 #[cfg(any(unix, windows))]
 fn end_recording() {
-    CENSUS_RECORDERS.end_recording();
+    REACH_RECORDERS.end_recording();
 }
 
-/// Closes the protocol once no bitmap update is in progress.
+/// Closes the protocol once no flag update is in progress.
 #[cfg(any(unix, windows))]
 fn begin_seal() -> bool {
-    CENSUS_RECORDERS.begin_seal()
+    REACH_RECORDERS.begin_seal()
 }
 
 /// Test-only controlled write seam for the exit-write regression.
@@ -1543,7 +1437,7 @@ static TEST_SEAL_WAITING: AtomicBool = AtomicBool::new(false);
 static TEST_SEAL_CLAIMED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(test, any(unix, windows)))]
 static TEST_RECORDER_SATURATION_SPUN: AtomicBool = AtomicBool::new(false);
-/// Pauses a test writer after it has a lease but before it claims its bitmap bit.
+/// Pauses a test writer after it has a lease but before it sets the reach flag.
 #[cfg(all(test, any(unix, windows)))]
 fn pause_after_lease() {
     if TEST_NOTE_STATE
@@ -1590,58 +1484,13 @@ fn write_record(record: u32, stream: *mut c_void) -> bool {
     write_bytes(&bytes, stream) == bytes.len()
 }
 
-/// Number of census bytes accumulated before one `fwrite`.
-#[cfg(any(unix, windows))]
-const OUTPUT_BUFFER: usize = 4096;
-
-#[cfg(any(unix, windows))]
-const _: () = assert!(OUTPUT_BUFFER.is_multiple_of(core::mem::size_of::<u32>()));
-
-/// Adds one record to an exit-time output batch, flushing a full batch first.
-#[cfg(any(unix, windows))]
-fn buffer_record(record: u32, buffer: &mut [u8; OUTPUT_BUFFER], used: &mut usize, stream: *mut c_void) -> bool {
-    if *used == buffer.len() {
-        if write_bytes(buffer, stream) != buffer.len() {
-            return false;
-        }
-
-        *used = 0;
-    }
-
-    let bytes = record.to_le_bytes();
-    buffer[*used..*used + bytes.len()].copy_from_slice(&bytes);
-    *used += bytes.len();
-
-    true
-}
-
-/// Serializes every reached site from the bitmap in ascending ordinal order.
+/// Writes the active ordinal only if its guard was reached before sealing.
 #[cfg(any(unix, windows))]
 fn write_reached(stream: *mut c_void) -> bool {
-    let mut buffer = [0_u8; OUTPUT_BUFFER];
-    let mut used = 0_usize;
-
-    for (word_at, word) in REACHED.iter().enumerate() {
-        let mut bits = word.load(Ordering::Relaxed);
-
-        while bits != 0 {
-            let bit_at = usize::try_from(bits.trailing_zeros()).unwrap_or(0);
-            let site = word_at * WORD_BITS + bit_at;
-            let record = u32::try_from(site).expect("the census bitmap is far smaller than the mutation-site ordinal space");
-
-            if !buffer_record(record, &mut buffer, &mut used, stream) {
-                return false;
-            }
-
-            bits &= bits - 1;
-        }
-    }
-
-    (!OVERFLOWED.load(Ordering::Relaxed) || buffer_record(OVERFLOW, &mut buffer, &mut used, stream))
-        && (used == 0 || write_bytes(&buffer[..used], stream) == used)
+    !already_noted() || write_record(active(), stream)
 }
 
-/// Returns the census stream, opening it once, or null if it could not be opened.
+/// Returns the observation stream, opening it once, or null if it could not be opened.
 ///
 /// Opening is serialized rather than left to race the way [`active`]'s read does, because two
 /// winners would leave two independently buffered streams on one file and their buffers could
@@ -1699,10 +1548,10 @@ fn sink() -> *mut c_void {
     }
 }
 
-/// Opens the census file named by [`CENSUS_VAR`] for appending, returning null on any failure.
+/// Opens the observation file named by [`REACH_VAR`] for appending, returning null on any failure.
 ///
 /// Appending rather than truncating, so that a path reused by mistake is caught by cargo-gamma as
-/// a census with impossible contents rather than quietly losing the earlier one.
+/// an observation with impossible contents rather than quietly losing the earlier one.
 ///
 /// Excluded from coverage because the path is captured before the test harness and the returned C
 /// stream is process-global. A normally exiting subprocess that preserves coverage counters would
@@ -1729,33 +1578,33 @@ fn open() -> *mut c_void {
 
     #[cfg(unix)]
     {
-        if CENSUS_PATH_LENGTH.load(Ordering::Acquire) == 0 {
+        if REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
             return core::ptr::null_mut();
         }
 
         // SAFETY: startup copied the path and explicitly wrote its NUL terminator into this static
-        // — see `terminate_census_path` — before publishing the non-zero length acquired above.
+        // — see `terminate_reach_path` — before publishing the non-zero length acquired above.
         // The buffer is immutable after publication; `MODE` is NUL-terminated too.
-        unsafe { fopen(CENSUS_PATH.bytes.get().cast(), MODE.as_ptr().cast()) }
+        unsafe { fopen(REACH_PATH.bytes.get().cast(), MODE.as_ptr().cast()) }
     }
 
     #[cfg(windows)]
     {
-        if CENSUS_PATH_LENGTH.load(Ordering::Acquire) == 0 {
+        if REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
             return core::ptr::null_mut();
         }
 
         // SAFETY: startup copied a NUL-terminated UTF-16 path into this static before publishing
         // its non-zero length. It is immutable after publication; `MODE` is NUL-terminated too.
-        return unsafe { _wfopen(CENSUS_PATH.bytes.get().cast(), MODE.as_ptr()) };
+        return unsafe { _wfopen(REACH_PATH.bytes.get().cast(), MODE.as_ptr()) };
     }
 }
 
-/// Writes the reached-site bitmap and the seal that vouches it is whole, at a normal process exit.
+/// Writes the active ordinal if reached, followed by a seal, at a normal process exit.
 ///
-/// Registered with `atexit` by [`install`] whenever a census was requested, so it runs even for a
+/// Registered with `atexit` by [`install`] whenever an observation was requested, so it runs even for a
 /// test that reached no site and therefore opened no file of its own: the lone seal it writes is
-/// what lets the reader treat an *absent* file as a failed run rather than an honest empty census.
+/// what lets the reader treat an *absent* file as a failed run rather than an honest empty observation.
 ///
 /// It withholds the seal if the stream cannot be opened or any buffered record cannot be written.
 /// Any failure leaves an unsealed file, which the reader already rejects.
@@ -1766,7 +1615,7 @@ fn open() -> *mut c_void {
 #[cfg(any(unix, windows))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 extern "C" fn seal() {
-    // Claiming the protocol waits for every bitmap update that already started and prevents any
+    // Claiming the protocol waits for every flag update that already started and prevents any
     // later update from starting.
     if !begin_seal() {
         return;
@@ -1774,7 +1623,7 @@ extern "C" fn seal() {
 
     let stream = sink();
 
-    // No file to seal. The reader reads an absent census as a failed run, which is the right
+    // No file to seal. The reader reads an absent observation as a failed run, which is the right
     // verdict for a process whose open never succeeded.
     if stream.is_null() {
         return;
@@ -1799,28 +1648,23 @@ extern "C" fn seal() {
 /// Returns the selection that is safe to publish after exit-handler registration.
 #[cfg(any(unix, windows))]
 fn selection_after_registration(selection: u32, recording: bool, mut register: impl FnMut(extern "C" fn()) -> c_int) -> u32 {
-    if !recording || register(seal) == 0 {
-        selection
-    } else if selection == CENSUS {
-        // A census that cannot receive its integrity seal must not run as though its negative
-        // evidence could later be trusted.
-        NONE
-    } else {
-        // Reach harvesting is only an optimization. Failing to install its exit hook must not
-        // switch off the mutant the caller asked this process to execute.
-        selection
+    if recording {
+        // A failed registration leaves no sealed observation, but must not switch off the mutant.
+        let _status = register(seal);
     }
+
+    selection
 }
 
-/// Registers [`seal`] to run at exit, but only for a process actually taking a census.
+/// Registers [`seal`] to run at exit only when an observation path was captured.
 ///
-/// Placed in the platform's constructor table so selection and the census path are captured before
+/// Placed in the platform's constructor table so selection and the observation path are captured before
 /// `main`. It also lets the seal cover a test that touches no instrumented site: there is no first
 /// guard to hang registration off.
 #[cfg(any(unix, windows))]
 extern "C" fn install() {
     let selection = capture_selection();
-    let recording = CENSUS_PATH_LENGTH.load(Ordering::Acquire) != 0;
+    let recording = REACH_PATH_LENGTH.load(Ordering::Acquire) != 0;
     let protected = selection_after_registration(selection, recording, |handler| {
         // SAFETY: `seal` has the `extern "C" fn()` signature `atexit` requires, and registration
         // has no other precondition.
@@ -1861,6 +1705,9 @@ const ENVIRONMENT_HELPER_VAR: &str = "GAMMA_RT_ENVIRONMENT_HELPER";
 #[cfg(all(test, any(unix, windows), not(miri)))]
 const ENVIRONMENT_HELPER_VAR_C: &[u8] = b"GAMMA_RT_ENVIRONMENT_HELPER\0";
 
+#[cfg(all(test, unix, not(miri)))]
+const GETENV_HELPER_VAR_C: &[u8] = b"GAMMA_RT_GETENV_CHILD\0";
+
 /// The replacement value used after the helper has captured ordinal 7.
 #[cfg(all(test, any(unix, windows), not(miri)))]
 const ENVIRONMENT_HELPER_REPLACEMENT_C: &[u8] = b"99\0";
@@ -1875,12 +1722,12 @@ const ENVIRONMENT_ERROR_HELPER_VAR_C: &[u8] = b"GAMMA_RT_ENVIRONMENT_ERROR_HELPE
 /// before entering the test harness. The parent-process assertion covers the observable result.
 #[cfg(all(test, any(unix, windows), not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn environment_helper_requested() -> bool {
+fn environment_helper_requested(name: &[u8]) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: the name is NUL-terminated. This runs during single-threaded process startup,
         // before the helper performs any environment mutation.
-        let value = unsafe { getenv(ENVIRONMENT_HELPER_VAR_C.as_ptr().cast()) };
+        let value = unsafe { getenv(name.as_ptr().cast()) };
 
         if value.is_null() {
             return false;
@@ -1908,13 +1755,7 @@ fn environment_helper_requested() -> bool {
         // SAFETY: clearing last error has no precondition.
         unsafe { SetLastError(ERROR_SUCCESS) };
         // SAFETY: the name is NUL-terminated and `value` is writable for the supplied length.
-        let written = unsafe {
-            GetEnvironmentVariableA(
-                ENVIRONMENT_HELPER_VAR_C.as_ptr(),
-                value.as_mut_ptr(),
-                u32::try_from(value.len()).unwrap_or(u32::MAX),
-            )
-        };
+        let written = unsafe { GetEnvironmentVariableA(name.as_ptr(), value.as_mut_ptr(), u32::try_from(value.len()).unwrap_or(u32::MAX)) };
 
         written == 1 && value[0] == b'1'
     }
@@ -1931,7 +1772,14 @@ fn environment_helper_requested() -> bool {
 #[cfg(all(test, any(unix, windows), not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 extern "C" fn run_environment_helper() {
-    if !environment_helper_requested() {
+    #[cfg(unix)]
+    if environment_helper_requested(GETENV_HELPER_VAR_C) {
+        let succeeded = getenv_helper_succeeds();
+        // SAFETY: this constructor must exit before libtest creates any threads.
+        unsafe { exit_immediately(if succeeded { 73 } else { 74 }) };
+    }
+
+    if !environment_helper_requested(ENVIRONMENT_HELPER_VAR_C) {
         return;
     }
 
@@ -1957,14 +1805,44 @@ extern "C" fn run_environment_helper() {
     #[cfg(unix)]
     // SAFETY: the helper must not enter the libtest harness after mutating the process environment.
     unsafe {
-        exit_immediately(i32::from(!succeeded));
+        exit_immediately(if succeeded { 72 } else { 74 });
     }
 
     #[cfg(windows)]
     // SAFETY: the helper must not enter the libtest harness after mutating the process environment.
     unsafe {
-        ExitProcess(u32::from(!succeeded));
+        ExitProcess(if succeeded { 72 } else { 74 });
     }
+}
+
+#[cfg(all(test, unix, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn getenv_helper_succeeds() -> bool {
+    let name = b"GAMMA_RT_COR1_TEST_VARIABLE\0";
+    // SAFETY: the constructor has not entered main or started Rust threads; the name is terminated.
+    if unsafe { unsetenv(name.as_ptr().cast()) } != 0 {
+        return false;
+    }
+    let mut destination = [0_u8; 32];
+    if copy_environment_via_getenv(name, &mut destination) != EnvironmentValue::Absent {
+        return false;
+    }
+    for value in [b"1".as_slice(), b"22", b"333", b"4444"] {
+        let mut buffer = [0_u8; 8];
+        buffer[..value.len()].copy_from_slice(value);
+        // SAFETY: both strings are terminated and all native environment access is single-threaded.
+        if unsafe { setenv(name.as_ptr().cast(), buffer.as_ptr().cast(), 1) } != 0 {
+            return false;
+        }
+        let mut destination = [0_u8; 32];
+        let EnvironmentValue::Found(length) = copy_environment_via_getenv(name, &mut destination) else {
+            return false;
+        };
+        if destination.get(..length) != Some(value) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Installs the pre-main environment helper in Unix test binaries.
@@ -2023,23 +1901,17 @@ static RUN_ENVIRONMENT_HELPER: extern "C" fn() = run_environment_helper;
 #[inline]
 #[must_use]
 pub fn active() -> u32 {
-    let selected = selected();
-
-    // Census mode is not a mutant, and callers outside the guard ask this question to find out
-    // whether they are running mutated code. They are not, so they are told so.
-    if selected == CENSUS { NONE } else { selected }
+    selected()
 }
 
-/// Returns the raw startup-captured selection, which is an ordinal, [`NONE`], or [`CENSUS`].
+/// Returns the startup-captured ordinal or [`NONE`].
 ///
-/// Split from [`active`] because the guard needs to distinguish census mode and every other caller
-/// needs not to. Never returns `UNINSTALLED`: observing it means some other native constructor
+/// Never returns `UNINSTALLED`: observing it means some other native constructor
 /// ran instrumented code before this crate's own, so `uninstalled_guard` terminates the process
 /// instead of letting the caller mistake it for a legitimate [`NONE`].
 #[inline]
 fn selected() -> u32 {
-    // The constructor's `Release` store publishes the copied census path before a guard observing
-    // census mode can use it.
+    // The constructor's `Release` store publishes the copied observation path before guards use it.
     let value = ACTIVE.load(Ordering::Acquire);
 
     #[cfg(all(any(unix, windows), not(miri)))]
@@ -2089,11 +1961,6 @@ fn uninstalled_guard() -> ! {
 /// which is what makes the whole schema approach affordable: an inactive guard costs a predictable
 /// branch that the CPU learns immediately.
 ///
-/// Census mode rides on the same load rather than on a second one, which is why it is a reserved
-/// value of the cached ordinal rather than a flag of its own. An ordinary run therefore pays one
-/// extra comparison against a constant, on a branch that is never taken and so is predicted
-/// perfectly after the first guard.
-///
 /// The name is one character because it appears at every mutation site of every rewritten file,
 /// where it is read far less often than it is written.
 ///
@@ -2113,20 +1980,9 @@ fn uninstalled_guard() -> ! {
 pub fn a(id: u32) -> bool {
     let active = selected();
 
-    // A census wants the code the author wrote, so the answer is always `false` and the site is
-    // recorded on the way past. The record is what tells cargo-gamma which tests can possibly
-    // reach this mutant: a test that never runs the guard in an unmutated process cannot run it in
-    // a mutated one either, because the mutant changes nothing before its own site executes.
     #[cfg(any(unix, windows))]
-    if active == CENSUS {
-        note(id);
-
-        return false;
-    }
-
-    #[cfg(any(unix, windows))]
-    if active == id && CENSUS_PATH_LENGTH.load(Ordering::Relaxed) != 0 && !already_noted(id) {
-        note(id);
+    if id != NONE && active == id && REACH_PATH_LENGTH.load(Ordering::Relaxed) != 0 && !already_noted() {
+        note();
     }
 
     id != NONE && active == id
@@ -2164,7 +2020,7 @@ mod tests {
     use super::*;
 
     #[cfg(not(miri))]
-    static CENSUS_NONE_TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    static REACH_NONE_TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
     /// Counts every allocation the calling thread makes, so a test can prove a region made none.
     struct Counting;
@@ -2328,7 +2184,7 @@ mod tests {
     #[test]
     fn guards_never_read_the_environment_after_startup() {
         // The counting seam covers every platform environment query in this runtime. The
-        // constructor must have made at least the census query before this test starts, and all
+        // constructor must have made at least the observation query before this test starts, and all
         // guard entry points must leave its count unchanged even while user threads could mutate
         // the environment.
         let startup_reads = STARTUP_ENVIRONMENT_READS.load(Ordering::Acquire);
@@ -2355,6 +2211,18 @@ mod tests {
             }),
             0
         );
+    }
+
+    #[test]
+    fn allocation_measurements_detect_both_allocation_and_reallocation() {
+        let counted = allocations(|| {
+            let mut bytes = Vec::with_capacity(1);
+            bytes.push(1_u8);
+            let _pointer = core::hint::black_box(bytes.as_ptr());
+            bytes.reserve_exact(1);
+            let _bytes = core::hint::black_box(bytes);
+        });
+        assert_eq!(counted, 2, "zero-allocation oracles require a functioning alloc/realloc counter");
     }
 
     #[test]
@@ -2385,8 +2253,8 @@ mod tests {
         assert_eq!(parse(b"4294967296"), NONE);
         assert_eq!(parse(b"99999999999999999999"), NONE);
         assert_eq!(parse(b"4294967295"), NONE, "the sentinel is not an ordinal");
-        assert_eq!(parse(b"4294967294"), NONE, "nor is the census mode");
-        assert_eq!(parse(b"4294967293"), NONE, "nor is the census file's seal");
+        assert_eq!(parse(b"4294967294"), NONE, "values above the seal cannot name a mutant");
+        assert_eq!(parse(b"4294967293"), NONE, "nor is the observation file's seal");
         assert_eq!(parse(b"4294967292"), NONE, "nor is the pre-install sentinel");
     }
 
@@ -2482,8 +2350,8 @@ mod tests {
         path[..4].copy_from_slice(b"/tmp");
 
         assert_eq!(
-            terminate_census_path(&mut path, EnvironmentValue::Found(4)),
-            CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero"))
+            terminate_reach_path(&mut path, EnvironmentValue::Found(4)),
+            ReachRequest::Path(NonZeroUsize::new(4).expect("four is non-zero"))
         );
         assert_eq!(path[4], 0, "the capture must write the terminator `fopen` stops at");
         assert_eq!(path[5], 0xFF, "and must write nothing beyond it");
@@ -2504,8 +2372,8 @@ mod tests {
         path[..length].fill(b'p');
 
         assert_eq!(
-            terminate_census_path(&mut path, EnvironmentValue::Found(length)),
-            CensusRequest::Path(NonZeroUsize::new(length).expect("PATH_LIMIT minus one is non-zero"))
+            terminate_reach_path(&mut path, EnvironmentValue::Found(length)),
+            ReachRequest::Path(NonZeroUsize::new(length).expect("PATH_LIMIT minus one is non-zero"))
         );
         assert_eq!(path[length], 0, "the longest retainable path is left unterminated");
         assert!(path[..length].iter().all(|byte| *byte == b'p'), "the path itself was disturbed");
@@ -2514,12 +2382,12 @@ mod tests {
     /// A value that fills the buffer has nowhere to put a terminator, so no path is published.
     #[cfg(unix)]
     #[test]
-    fn a_path_that_exactly_fills_the_limit_is_census_mode_without_a_usable_path() {
+    fn a_path_that_exactly_fills_the_limit_is_observation_mode_without_a_usable_path() {
         let mut path = [b'p'; PATH_LIMIT];
 
         assert_eq!(
-            terminate_census_path(&mut path, EnvironmentValue::Found(PATH_LIMIT)),
-            CensusRequest::Unusable
+            terminate_reach_path(&mut path, EnvironmentValue::Found(PATH_LIMIT)),
+            ReachRequest::Unusable
         );
         assert!(
             path.iter().all(|byte| *byte == b'p'),
@@ -2529,34 +2397,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_empty_or_unset_census_variable_is_absence_rather_than_census_mode() {
+    fn an_empty_or_unset_observation_variable_is_absence_rather_than_observation_mode() {
         let mut path = [0_u8; PATH_LIMIT];
 
-        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Absent), CensusRequest::Absent);
-        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Found(0)), CensusRequest::Absent);
+        assert_eq!(terminate_reach_path(&mut path, EnvironmentValue::Absent), ReachRequest::Absent);
+        assert_eq!(terminate_reach_path(&mut path, EnvironmentValue::Found(0)), ReachRequest::Absent);
     }
 
     #[cfg(unix)]
     #[test]
-    fn an_unreadable_environment_is_not_reported_as_an_absent_census_variable() {
+    fn an_unreadable_environment_is_not_reported_as_an_absent_observation_variable() {
         let mut path = [0_u8; PATH_LIMIT];
 
-        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Error), CensusRequest::Error);
+        assert_eq!(terminate_reach_path(&mut path, EnvironmentValue::Error), ReachRequest::Error);
     }
 
-    /// A census request this process could not read never selects an active mutant.
+    /// An observation request this process could not read never selects an active mutant.
     ///
     /// The failure this pins: falling through to `GAMMA_ACTIVE` would run the mutant, write no
-    /// census file, and hand the coordinator a baseline failure it would read as a verdict about
+    /// observation file, and hand the coordinator a baseline failure it would read as a verdict about
     /// that mutant. The caller turns this `Err` into the environment-error protocol instead.
     #[cfg(any(unix, windows))]
     #[test]
-    fn a_census_environment_failure_is_a_startup_failure_rather_than_a_mutant_selection() {
+    fn an_observation_environment_failure_is_a_startup_failure_rather_than_a_mutant_selection() {
         let consulted = Cell::new(0_usize);
-        let answer = selection_from(CensusRequest::Error, || unexpected_active_environment_read(&consulted));
+        let answer = selection_from(ReachRequest::Error, || unexpected_active_environment_read(&consulted));
 
         assert_eq!(answer, Err(()));
-        assert_eq!(consulted.get(), 0, "a failed census read went on to select an active mutant");
+        assert_eq!(consulted.get(), 0, "a failed observation read went on to select an active mutant");
     }
 
     #[expect(
@@ -2591,42 +2459,50 @@ mod tests {
 
     #[cfg(any(windows, test))]
     #[test]
-    fn native_environment_outcomes_map_to_census_requests_without_an_api_call() {
-        assert_eq!(census_path_length(EnvironmentReadOutcome::Absent), Err(CensusPathError::Absent));
-        assert_eq!(census_path_length(EnvironmentReadOutcome::Empty), Err(CensusPathError::Absent));
-        assert_eq!(census_path_length(EnvironmentReadOutcome::Error), Err(CensusPathError::Environment));
+    fn native_environment_outcomes_map_to_observation_requests_without_an_api_call() {
+        assert_eq!(reach_path_length(EnvironmentReadOutcome::Absent), Err(ReachPathError::Absent));
+        assert_eq!(reach_path_length(EnvironmentReadOutcome::Empty), Err(ReachPathError::Absent));
+        assert_eq!(reach_path_length(EnvironmentReadOutcome::Error), Err(ReachPathError::Environment));
         assert_eq!(
-            census_path_length(EnvironmentReadOutcome::TooLongToStore),
-            Err(CensusPathError::Unusable)
+            reach_path_length(EnvironmentReadOutcome::TooLongToStore),
+            Err(ReachPathError::Unusable)
         );
         assert_eq!(
-            census_path_length(EnvironmentReadOutcome::Found(NonZeroUsize::new(1).expect("one is non-zero"))),
+            reach_path_length(EnvironmentReadOutcome::Found(NonZeroUsize::new(1).expect("one is non-zero"))),
             Ok(NonZeroUsize::new(1).expect("one is non-zero"))
         );
-        assert_eq!(CensusRequest::from(CensusPathError::Absent), CensusRequest::Absent);
-        assert_eq!(CensusRequest::from(CensusPathError::Unusable), CensusRequest::Unusable);
-        assert_eq!(CensusRequest::from(CensusPathError::Environment), CensusRequest::Error);
     }
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn an_absent_census_variable_falls_through_to_the_active_ordinal() {
-        assert_eq!(selection_from(CensusRequest::Absent, || Ok(7)), Ok(7));
+    fn an_absent_observation_variable_falls_through_to_the_active_ordinal() {
+        assert_eq!(selection_from(ReachRequest::Absent, || Ok(7)), Ok(7));
+    }
+
+    #[test]
+    fn observation_path_errors_preserve_their_startup_request_meaning() {
+        for (error, expected) in [
+            (ReachPathError::Absent, ReachRequest::Absent),
+            (ReachPathError::Unusable, ReachRequest::Unusable),
+            (ReachPathError::Environment, ReachRequest::Error),
+        ] {
+            assert_eq!(ReachRequest::from(error), expected);
+        }
     }
 
     #[cfg(any(unix, windows))]
     #[test]
     fn an_active_environment_failure_is_still_a_startup_failure() {
-        assert_eq!(selection_from(CensusRequest::Absent, || Err(())), Err(()));
+        assert_eq!(selection_from(ReachRequest::Absent, || Err(())), Err(()));
     }
 
-    /// A census path records the active site when a mutant is selected.
+    /// An observation path records the active site when a mutant is selected.
     #[cfg(any(unix, windows))]
     #[test]
-    fn a_census_request_preserves_an_active_mutant() {
+    fn an_observation_request_preserves_an_active_mutant() {
         for request in [
-            CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")),
-            CensusRequest::Unusable,
+            ReachRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")),
+            ReachRequest::Unusable,
         ] {
             let consulted = Cell::new(0_usize);
             let answer = selection_from(request, || {
@@ -2642,10 +2518,10 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn a_census_request_without_an_active_mutant_still_selects_census_mode() {
+    fn an_observation_request_without_an_active_mutant_preserves_the_baseline() {
         assert_eq!(
-            selection_from(CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")), || Ok(NONE)),
-            Ok(CENSUS)
+            selection_from(ReachRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")), || Ok(NONE)),
+            Ok(NONE)
         );
     }
 
@@ -2821,7 +2697,7 @@ mod tests {
     ///
     /// Reporting the transient interruption as a failure would make the caller emit the
     /// environment-error marker and terminate, so a run under an ordinary job-control or timer
-    /// signal would end instead of taking its census.
+    /// signal would end instead of taking its observation.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_interrupted_read_is_retried_rather_than_reported_as_a_failure() {
@@ -2994,7 +2870,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn opening_without_a_census_path_returns_no_stream() {
+    fn opening_without_an_observation_path_returns_no_stream() {
         assert!(open().is_null());
     }
 
@@ -3003,20 +2879,20 @@ mod tests {
         // Two spellings of one name is two chances to change only one of them.
         assert_eq!(ACTIVE_VAR.as_bytes(), &ACTIVE_VAR_C[..ACTIVE_VAR_C.len() - 1]);
         assert_eq!(ACTIVE_VAR_C.last(), Some(&0));
-        assert_eq!(CENSUS_VAR.as_bytes(), &CENSUS_VAR_C[..CENSUS_VAR_C.len() - 1]);
-        assert_eq!(CENSUS_VAR_C.last(), Some(&0));
+        assert_eq!(REACH_VAR.as_bytes(), &REACH_VAR_C[..REACH_VAR_C.len() - 1]);
+        assert_eq!(REACH_VAR_C.last(), Some(&0));
     }
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn a_failed_exit_registration_refuses_census_mode() {
+    fn a_failed_exit_registration_preserves_the_baseline() {
         let registrations = Cell::new(0);
-        let selected = selection_after_registration(CENSUS, true, |_handler| {
+        let selected = selection_after_registration(NONE, true, |_handler| {
             registrations.set(registrations.get() + 1);
             -1
         });
 
-        assert_eq!(selected, NONE, "an unsealable census must not be published as active");
+        assert_eq!(selected, NONE);
         assert_eq!(registrations.get(), 1);
     }
 
@@ -3047,7 +2923,14 @@ mod tests {
                     });
                 }
 
-                let _sealer = scope.spawn(|| assert!(state.begin_seal()));
+                let _sealer = scope.spawn(|| {
+                    assert!(state.begin_seal());
+                    assert_eq!(
+                        completed.load(Ordering::Acquire),
+                        admitted.load(Ordering::Acquire),
+                        "sealing completed before an admitted writer finished"
+                    );
+                });
             });
 
             assert_eq!(completed.load(Ordering::Relaxed), admitted.load(Ordering::Relaxed));
@@ -3127,52 +3010,6 @@ mod tests {
         assert_eq!(state.try_begin_seal(), Some(true));
     }
 
-    #[cfg(any(unix, windows))]
-    #[cfg_attr(miri, ignore = "uses a C temporary stream; miri isolation forbids tmpfile")]
-    #[test]
-    fn a_full_output_batch_flushes_or_reports_a_short_write() {
-        // SAFETY: `tmpfile` creates a private writable C stream with no caller preconditions.
-        let stream = unsafe { tmpfile() };
-        if stream.is_null() {
-            // The host may deny temporary-file creation. That says nothing about buffering, so
-            // leave this platform-dependent setup unavailable rather than reporting a false
-            // product failure.
-            return;
-        }
-
-        let mut buffer = [0_u8; OUTPUT_BUFFER];
-        let mut used = buffer.len();
-
-        assert!(buffer_record(7, &mut buffer, &mut used, stream));
-        assert_eq!(used, core::mem::size_of::<u32>());
-
-        used = buffer.len();
-        TEST_WRITE_STATE.store(BLOCK_AND_SHORT, Ordering::Release);
-        let stream_address = stream.expose_provenance();
-        std::thread::scope(|scope| {
-            let writer = scope.spawn(|| {
-                let stream = core::ptr::with_exposed_provenance_mut(stream_address);
-                buffer_record(9, &mut buffer, &mut used, stream)
-            });
-
-            while TEST_WRITE_STATE.load(Ordering::Acquire) != WRITE_ENTERED {
-                if writer.is_finished() {
-                    let result = writer
-                        .join()
-                        .expect("the writer failure must propagate instead of leaving the test spinning");
-                    core::panic!("the writer returned {result} before entering the short-write seam");
-                }
-                core::hint::spin_loop();
-            }
-            TEST_WRITE_STATE.store(RELEASE_SHORT_WRITE, Ordering::Release);
-
-            assert!(!writer.join().expect("the forced short writer must not panic"));
-        });
-
-        // SAFETY: `stream` is the still-open handle returned by `tmpfile` above.
-        assert_eq!(unsafe { fclose(stream) }, 0);
-    }
-
     #[cfg(not(miri))]
     mod process_tests {
         use std::env;
@@ -3218,12 +3055,18 @@ mod tests {
                         "--nocapture",
                     ])
                     .env(ACTIVE_VAR, value)
+                    .env_remove(REACH_VAR)
                     .output()
                     .expect("the child runs");
 
                 let text = String::from_utf8_lossy(&output.stdout).into_owned();
 
-                assert!(text.contains(expected), "`{value}` produced {text}");
+                assert!(
+                    output.status.success(),
+                    "the selection helper failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(text.split_whitespace().any(|token| token == expected), "`{value}` produced {text}");
             }
         }
 
@@ -3242,14 +3085,15 @@ mod tests {
             let executable = env::current_exe().expect("the test binary knows its own path");
 
             let output = Command::new(&executable)
+                .args(["--exact", "environment-pre-main-helper"])
                 .env(ENVIRONMENT_HELPER_VAR, "1")
                 .env(ACTIVE_VAR, "7")
-                .env_remove(CENSUS_VAR)
+                .env_remove(REACH_VAR)
                 .output()
                 .expect("the pre-main environment helper runs");
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            assert!(output.status.success(), "pre-main environment helper failed: {stderr}");
+            assert_eq!(output.status.code(), Some(72), "pre-main environment helper failed: {stderr}");
         }
 
         #[test]
@@ -3389,65 +3233,23 @@ mod tests {
         #[test]
         #[cfg(all(unix, not(miri)))]
         fn copy_environment_via_getenv_reads_stable_values_in_an_isolated_process() {
-            // Environment mutation is process-global, so even a sequential set-and-read belongs in
-            // a child where no sibling test can read the environment at the same time.
+            // A filtered libtest child still has harness threads. The constructor performs this
+            // check before main and reports a distinct status, so a missing helper cannot pass.
             let executable = env::current_exe().expect("the test binary knows its own path");
 
             let output = Command::new(&executable)
-                .env(GETENV_CHILD, "1")
-                .args([
-                    "--exact",
-                    "runtime::tests::process_tests::the_child_reads_stable_values_via_getenv",
-                    "--nocapture",
-                ])
+                .env("GAMMA_RT_GETENV_CHILD", "1")
+                .env_remove(REACH_VAR)
+                .args(["--exact", "getenv-pre-main-helper"])
                 .output()
                 .expect("the child runs");
 
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        }
-
-        /// Marks a re-run of this test binary as the isolated half of the `getenv` test.
-        #[cfg(all(unix, not(miri)))]
-        const GETENV_CHILD: &str = "GAMMA_RT_GETENV_CHILD";
-
-        #[test]
-        #[cfg(all(unix, not(miri)))]
-        fn the_child_reads_stable_values_via_getenv() {
-            if env::var_os(GETENV_CHILD).is_none() {
-                return;
-            }
-
-            let name = b"GAMMA_RT_COR1_TEST_VARIABLE\0";
-            let values: [&[u8]; 4] = [b"1", b"22", b"333", b"4444"];
-
-            // SAFETY: `name` is a NUL-terminated C string and this isolated process has no
-            // concurrent environment access.
-            unsafe { unsetenv(name.as_ptr().cast()) };
-
-            let mut destination = [0_u8; 32];
-            assert_eq!(copy_environment_via_getenv(name, &mut destination), EnvironmentValue::Absent);
-
-            for value in values {
-                let mut buffer = [0_u8; 8];
-                buffer[..value.len()].copy_from_slice(value);
-
-                // SAFETY: `name` and `buffer` are NUL-terminated C strings, and this isolated
-                // process has no concurrent environment access.
-                let status = unsafe { setenv(name.as_ptr().cast(), buffer.as_ptr().cast(), 1) };
-                assert_eq!(status, 0, "setenv rejected a valid name and value");
-
-                let mut destination = [0_u8; 32];
-                let EnvironmentValue::Found(length) = copy_environment_via_getenv(name, &mut destination) else {
-                    core::panic!("getenv did not return the stable value");
-                };
-
-                assert_eq!(&destination[..length], value);
-            }
+            assert_eq!(output.status.code(), Some(73), "{}", String::from_utf8_lossy(&output.stderr));
         }
 
         #[test]
         #[cfg(any(unix, windows))]
-        fn the_reserved_ordinal_is_inactive_in_baseline_census_and_mutant_processes() {
+        fn the_reserved_ordinal_is_inactive_in_baseline_observation_and_mutant_processes() {
             let executable = env::current_exe().expect("the test binary knows its own path");
 
             let baseline = Command::new(&executable)
@@ -3457,7 +3259,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env_remove(ACTIVE_VAR)
-                .env_remove(CENSUS_VAR)
+                .env_remove(REACH_VAR)
                 .output()
                 .expect("the baseline child runs");
             assert!(baseline.status.success(), "{}", String::from_utf8_lossy(&baseline.stderr));
@@ -3472,7 +3274,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(ACTIVE_VAR, "7")
-                .env_remove(CENSUS_VAR)
+                .env_remove(REACH_VAR)
                 .output()
                 .expect("the mutant child runs");
             assert!(mutant.status.success(), "{}", String::from_utf8_lossy(&mutant.stderr));
@@ -3480,10 +3282,10 @@ mod tests {
 
             assert!(mutant.contains("active=7 none=false seven=true"), "{mutant}");
 
-            let sequence = CENSUS_NONE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let sequence = REACH_NONE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = env::current_dir()
                 .expect("the test process has a working directory")
-                .join(format!(".gamma-census-none-{}-{sequence}.bin", process::id()));
+                .join(format!(".gamma-observation-none-{}-{sequence}.bin", process::id()));
             let _removed = fs::remove_file(&path);
 
             let observed = Command::new(&executable)
@@ -3493,7 +3295,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(ACTIVE_VAR, "7")
-                .env(CENSUS_VAR, &path)
+                .env(REACH_VAR, &path)
                 .output()
                 .expect("the observed mutant child runs");
             assert!(observed.status.success(), "{}", String::from_utf8_lossy(&observed.stderr));
@@ -3511,16 +3313,16 @@ mod tests {
             println!("active={} none={} seven={}", active(), a(NONE), a(7));
         }
 
-        /// Runs a census child and returns its raw output after removing the project-local test file.
+        /// Runs an observation child and removes its project-local output file.
         #[cfg(any(unix, windows))]
-        fn census_bytes_of(test: &str) -> Vec<u8> {
-            static CENSUS_TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+        fn reach_bytes_of(test: &str, ordinal: u32) -> Vec<u8> {
+            static REACH_TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
             let executable = env::current_exe().expect("the test binary knows its own path");
-            let sequence = CENSUS_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let sequence = REACH_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = env::current_dir()
                 .expect("the test process has a working directory")
-                .join(format!(".gamma-census-{}-{sequence}.bin", process::id()));
+                .join(format!(".gamma-observation-{}-{sequence}.bin", process::id()));
 
             // Opened for appending, so a leftover from an earlier run would be read as part of this
             // one. Removing it first is what makes the assertion below about the whole file sound.
@@ -3528,71 +3330,79 @@ mod tests {
 
             let output = Command::new(&executable)
                 .args(["--exact", test, "--nocapture"])
-                .env(CENSUS_VAR, &path)
+                .env(ACTIVE_VAR, ordinal.to_string())
+                .env(REACH_VAR, &path)
                 .output()
                 .expect("the child runs");
 
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(test),
+                "the exact filter did not execute `{test}`"
+            );
 
-            // Nothing flushes the census before the child exits, so this read has to happen after the
+            // Nothing flushes the observation before the child exits, so this read has to happen after the
             // wait that `output` performed.
-            let bytes = fs::read(&path).expect("the child wrote a census");
+            let bytes = fs::read(&path).expect("the child wrote an observation");
             let _ = fs::remove_file(&path);
 
             bytes
         }
 
-        /// Runs one of the census children below and returns the sealed records it wrote, in order.
+        /// Runs one of the observation children below and returns the sealed records it wrote, in order.
         #[cfg(any(unix, windows))]
-        fn census_of(test: &str) -> Vec<u32> {
-            let bytes = census_bytes_of(test);
+        fn reach_of(test: &str, ordinal: u32) -> Vec<u32> {
+            let bytes = reach_bytes_of(test, ordinal);
 
-            assert_eq!(bytes.len() % 4, 0, "a census is whole four-byte records");
+            assert_eq!(bytes.len() % 4, 0, "an observation is whole four-byte records");
 
             let mut records: Vec<u32> = bytes
                 .chunks_exact(4)
                 .map(|record| u32::from_le_bytes(record.try_into().expect("a chunk of four is four bytes")))
                 .collect();
 
-            // Every clean census ends with the seal that vouches it is whole. The reader requires it,
+            // Every clean observation ends with the seal that vouches it is whole. The reader requires it,
             // and so does every assertion below, which is about the records written *before* it.
-            assert_eq!(records.pop(), Some(SEAL), "a clean census is sealed");
+            assert_eq!(records.pop(), Some(SEAL), "a clean observation is sealed");
 
             records
         }
 
         #[test]
         #[cfg(any(unix, windows))]
-        fn a_census_records_each_site_it_reached_exactly_once() {
-            assert_eq!(census_of("runtime::tests::process_tests::the_child_walks_a_few_sites"), vec![3, 9]);
-        }
-
-        #[test]
-        #[cfg(any(unix, windows))]
-        fn a_census_does_not_touch_its_file_until_process_exit() {
-            assert_eq!(census_of("runtime::tests::process_tests::the_child_buffers_its_sites"), vec![17]);
-        }
-
-        #[test]
-        #[cfg(any(unix, windows))]
-        fn a_census_serializes_more_than_one_output_batch_in_order() {
-            let expected: Vec<u32> = (0..1100).collect();
-
+        fn an_observation_records_only_the_active_site_and_only_once() {
+            assert_eq!(reach_of("runtime::tests::process_tests::the_child_walks_a_few_sites", 3), vec![3]);
+            assert_eq!(reach_of("runtime::tests::process_tests::the_child_walks_a_few_sites", 9), vec![9]);
             assert_eq!(
-                census_of("runtime::tests::process_tests::the_child_fills_multiple_output_batches"),
-                expected
+                reach_of("runtime::tests::process_tests::the_child_walks_a_few_sites", 17),
+                Vec::<u32>::new()
             );
         }
 
         #[test]
         #[cfg(any(unix, windows))]
-        fn a_census_that_reached_no_site_is_still_sealed() {
+        fn an_observation_does_not_touch_its_file_until_process_exit() {
+            assert_eq!(reach_of("runtime::tests::process_tests::the_child_buffers_its_sites", 17), vec![17]);
+        }
+
+        #[test]
+        #[cfg(any(unix, windows))]
+        fn baseline_guards_never_record_sites() {
+            assert_eq!(
+                reach_of("runtime::tests::process_tests::the_child_walks_a_few_sites", NONE),
+                Vec::<u32>::new()
+            );
+        }
+
+        #[test]
+        #[cfg(any(unix, windows))]
+        fn an_observation_that_reached_no_site_is_still_sealed() {
             // A test can legitimately reach no instrumented site — that convicts no mutant, which is an
-            // answer, not a failure. The seal is written even then, so an *empty* census is a lone seal
-            // and an *absent* one is unambiguously a run that failed. `census_of` pops the seal, so
+            // answer, not a failure. The seal is written even then, so an *empty* observation is a lone seal
+            // and an *absent* one is unambiguously a run that failed. `reach_of` pops the seal, so
             // what a zero-reach child leaves behind is nothing at all.
             assert_eq!(
-                census_of("runtime::tests::process_tests::the_child_touches_no_sites"),
+                reach_of("runtime::tests::process_tests::the_child_touches_no_sites", 17),
                 Vec::<u32>::new()
             );
         }
@@ -3601,15 +3411,15 @@ mod tests {
         #[cfg(any(unix, windows))]
         fn a_site_claimed_while_sealing_waits_is_written_before_the_seal() {
             assert_eq!(
-                census_of("runtime::tests::process_tests::the_child_holds_a_lease_before_claiming_a_site"),
+                reach_of("runtime::tests::process_tests::the_child_holds_a_lease_before_claiming_a_site", 79),
                 vec![79]
             );
         }
 
         #[test]
         #[cfg(any(unix, windows))]
-        fn a_short_exit_write_leaves_the_census_unsealed() {
-            let bytes = census_bytes_of("runtime::tests::process_tests::the_child_forces_a_short_exit_write");
+        fn a_short_exit_write_leaves_the_observation_unsealed() {
+            let bytes = reach_bytes_of("runtime::tests::process_tests::the_child_forces_a_short_exit_write", 79);
 
             assert_eq!(bytes.len() % 4, 0, "the test seam never writes a partial record");
             assert!(
@@ -3623,18 +3433,13 @@ mod tests {
 
         #[test]
         fn the_child_touches_no_sites() {
-            // Reaches no guard, so records nothing. Only meaningful when launched by the test above,
-            // which checks the census still exists and is still sealed; harmless on its own.
-            assert_eq!(active(), NONE);
-            assert!(!any());
+            // Reaches no guard; the parent checks that an empty observation is still sealed.
         }
 
         #[test]
         #[cfg(any(unix, windows))]
         fn the_child_holds_a_lease_before_claiming_a_site() {
-            // This child is launched by the parent test with census mode selected. Running it directly
-            // under the ordinary test harness exercises no census path and must remain harmless.
-            if selected() != CENSUS {
+            if active() != 79 || REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
                 return;
             }
 
@@ -3644,7 +3449,7 @@ mod tests {
 
             thread::scope(|scope| {
                 let writer = scope.spawn(|| {
-                    assert!(!a(79));
+                    assert!(a(79));
                 });
 
                 while TEST_NOTE_STATE.load(Ordering::Acquire) != LEASE_HELD {
@@ -3673,15 +3478,11 @@ mod tests {
         #[test]
         #[cfg(any(unix, windows))]
         fn the_child_forces_a_short_exit_write() {
-            // This test is also discovered in the parent process. Only the child launched above has
-            // census mode selected during startup, so only it can drive the runtime's exit-time write.
-            if selected() != CENSUS {
+            if active() != 79 || REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
                 return;
             }
 
-            for site in 0..=1024 {
-                assert!(!a(site));
-            }
+            assert!(a(79));
 
             TEST_WRITE_STATE.store(BLOCK_AND_SHORT, Ordering::Release);
             thread::scope(|scope| {
@@ -3707,56 +3508,50 @@ mod tests {
 
         #[test]
         fn the_child_walks_a_few_sites() {
-            // Every guard answers `false` under a census, exactly as it does with no mutant selected,
-            // so the child runs the code its author wrote and the sites it reaches are the real ones.
-            assert!(!a(3));
-            assert!(!a(3));
-            assert!(!a(9));
-            assert!(!a(3));
-
-            // A census is not a mutant, and nothing outside the guard should be able to tell it from
-            // an ordinary unmutated run.
-            assert_eq!(active(), NONE);
-            assert!(!any());
+            assert!(!a(NONE));
+            assert_eq!(a(3), active() == 3);
+            assert_eq!(a(3), active() == 3);
+            assert_eq!(a(9), active() == 9);
+            assert_eq!(a(3), active() == 3);
         }
 
         #[test]
         #[cfg(any(unix, windows))]
         fn the_child_buffers_its_sites() {
-            if selected() != CENSUS {
+            if active() != 17 || REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
                 return;
             }
 
-            assert!(!a(17));
+            assert!(a(17));
 
-            let path = env::var_os(CENSUS_VAR).expect("the parent supplied a census path");
+            let path = env::var_os(REACH_VAR).expect("the parent supplied an observation path");
 
             assert!(
                 !Path::new(&path).exists(),
-                "recording a site touched the census file before process exit"
+                "recording a site touched the observation file before process exit"
             );
         }
 
         #[test]
         #[cfg(any(unix, windows))]
-        fn the_child_fills_multiple_output_batches() {
-            if selected() != CENSUS {
+        fn the_child_reaches_a_large_active_ordinal() {
+            if REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
                 return;
             }
 
-            for site in 0..1100 {
-                assert!(!a(site));
-            }
+            assert!(a(active()));
+            assert!(a(active()));
         }
 
         #[test]
         #[cfg(any(unix, windows))]
-        fn a_site_past_the_table_marks_the_whole_census_untrustworthy() {
-            // The marker is what stops an unrecordable site being mistaken for an unreached one. The
-            // bitmap is serialized in ordinal order at exit, followed by the overflow state.
+        fn observation_storage_does_not_limit_active_ordinals() {
             assert_eq!(
-                census_of("runtime::tests::process_tests::the_child_walks_past_the_table"),
-                vec![1, 2, OVERFLOW]
+                reach_of(
+                    "runtime::tests::process_tests::the_child_reaches_a_large_active_ordinal",
+                    u32::MAX - 4
+                ),
+                vec![u32::MAX - 4]
             );
         }
 
@@ -3764,7 +3559,7 @@ mod tests {
         #[cfg(any(unix, windows))]
         fn recording_stays_closed_after_an_explicit_seal() {
             assert_eq!(
-                census_of("runtime::tests::process_tests::the_child_records_after_an_explicit_seal"),
+                reach_of("runtime::tests::process_tests::the_child_records_after_an_explicit_seal", 37),
                 Vec::<u32>::new()
             );
         }
@@ -3772,33 +3567,13 @@ mod tests {
         #[test]
         #[cfg(any(unix, windows))]
         fn the_child_records_after_an_explicit_seal() {
-            if selected() != CENSUS {
+            if active() != 37 || REACH_PATH_LENGTH.load(Ordering::Acquire) == 0 {
                 return;
             }
 
             seal();
-            assert!(!a(37));
-            assert!(!already_noted(37));
-        }
-
-        #[test]
-        #[cfg(any(unix, windows))]
-        fn the_child_walks_past_the_table() {
-            let past = u32::try_from(SITES).expect("the table is smaller than the ordinal space");
-
-            assert!(!a(1));
-            assert!(!a(past));
-            if selected() == CENSUS {
-                assert!(already_noted(past));
-            }
-
-            // Recording continues past the overflow; all reached in-range sites remain available when
-            // the bitmap is serialized at exit.
-            assert!(!a(2));
-
-            // Marked once however many sites overflow, because the tool needs the fact and not a
-            // record of every site that produced it.
-            assert!(!a(past + 1));
+            assert!(a(37));
+            assert!(!already_noted());
         }
     }
 }
@@ -3831,8 +3606,16 @@ mod loom_models {
             };
             let sealer = {
                 let state = Arc::clone(&state);
+                let admitted = Arc::clone(&admitted);
+                let recorded = Arc::clone(&recorded);
 
-                loom::thread::spawn(move || state.try_begin_seal())
+                loom::thread::spawn(move || {
+                    let sealed = state.try_begin_seal();
+                    if sealed == Some(true) && admitted.load(Ordering::Relaxed) {
+                        assert!(recorded.load(Ordering::Relaxed), "seal completed over an unfinished writer");
+                    }
+                    sealed
+                })
             };
 
             writer.join().expect("writer thread");

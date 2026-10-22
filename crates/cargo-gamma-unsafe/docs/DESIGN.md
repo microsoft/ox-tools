@@ -23,7 +23,14 @@ crate's dependency graph and must remain dependency-free.
   `killpg` reserves them for special or undefined behavior.
 - Linux cgroups and Windows job objects provide process-tree memory limits.
 - On Linux, terminal interrupts kill both the process group and the cgroup, so
-  descendants that create a new session cannot escape cleanup.
+  descendants that create a new session or process group remain reachable.
+  This covers accidental process-group/session escape, not hostile same-credential
+  migration through writable cgroup interfaces; it is not a security sandbox.
+- Process-group release clears registration and quiesces any sweep holding an
+  extracted identity before the leader may be reaped and its numeric identity reused.
+- Spawn windows and interrupt sweeps share cleanup ownership. Only the final owner
+  may accept fatal responsibility, after all group and cgroup effects finish.
+  A handler never waits for another owner: that owner may be the thread it interrupted.
 - Cgroup registration is owned by the `Cgroup` it watches and discharged by that
   cgroup's own `Drop`, wherever it has been moved to; the release waits for any
   signal-handler sweep still using the kill descriptor before the owning file

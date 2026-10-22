@@ -34,8 +34,11 @@
 //! any of those three would change what the tests prove.
 
 use core::fmt::Write as _;
-use core::num::NonZeroU32;
+use core::num::{NonZeroU8, NonZeroU32};
 use core::ops::Range;
+
+use syn::spanned::Spanned as _;
+use syn::visit::{self, Visit};
 
 use crate::error::Error;
 #[cfg(test)]
@@ -353,7 +356,7 @@ pub fn instrument_with_guards(text: &str, mutants: &[AssignedMutant<'_>]) -> Res
 
     for root in &roots {
         out.push_str(copy(text, cursor..root.span.start));
-        render(text, root, &mut out, &mut spans);
+        render(text, root, &mut out, &mut spans, None);
         cursor = root.span.end;
     }
 
@@ -460,13 +463,21 @@ fn attach<'a>(node: Node<'a>, stack: &mut [Node<'a>], roots: &mut Vec<Node<'a>>)
 }
 
 /// Writes the instrumented form of one node, recording the output each guard covers.
-fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32, (Range<usize>, Range<usize>)>) {
+fn render(
+    text: &str,
+    node: &Node<'_>,
+    out: &mut String,
+    spans: &mut HashMap<u32, (Range<usize>, Range<usize>)>,
+    returns: Option<&Returns>,
+) {
+    let own_returns = iterator_returns(text, node);
+    let returns = own_returns.as_ref().or(returns);
     let start = out.len();
     let mut mutated = Vec::with_capacity(node.mutants.len());
 
     for (ordinal, replacement) in &node.mutants {
         match node.shape {
-            Shape::Expr | Shape::Block | Shape::IterBlock | Shape::IterExpr => {
+            Shape::Expr | Shape::Block | Shape::IterBlock | Shape::IterExpr | Shape::IterWrappedBlock { .. } => {
                 let opening = if matches!(node.shape, Shape::Expr | Shape::IterExpr) {
                     "("
                 } else {
@@ -479,15 +490,20 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
                 // the two arms one type. See `Shape::IterBlock`.
                 if matches!(node.shape, Shape::IterBlock | Shape::IterExpr) {
                     let _ = write!(out, "{EITHER_PATH}::L(");
+                } else if matches!(node.shape, Shape::IterWrappedBlock { .. }) {
+                    out.push('(');
                 }
 
                 let from = out.len();
 
-                out.push_str(replacement);
+                render_replacement(replacement, node, own_returns.as_ref(), returns, out);
                 mutated.push((*ordinal, from..out.len()));
 
                 if matches!(node.shape, Shape::IterBlock | Shape::IterExpr) {
                     out.push(')');
+                } else if let Shape::IterWrappedBlock { depth } = node.shape {
+                    out.push(')');
+                    iterator_maps(out, depth, "L");
                 }
 
                 out.push_str(" } else { ");
@@ -497,6 +513,8 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
                 // the two arms only agree once that is the right-hand side of this one.
                 if matches!(node.shape, Shape::IterBlock | Shape::IterExpr) {
                     let _ = write!(out, "{EITHER_PATH}::R(");
+                } else if matches!(node.shape, Shape::IterWrappedBlock { .. }) {
+                    out.push('(');
                 }
             }
             Shape::Continue | Shape::Break => {
@@ -517,15 +535,21 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
     }
 
     // The innermost thing is the original text with this node's children instrumented in place.
+    if let Some(returns) = &own_returns {
+        let _ = write!(out, "'{}: {{ ", returns.label);
+    }
     let mut cursor = node.span.start;
 
     for child in &node.children {
-        out.push_str(copy(text, cursor..child.span.start));
-        render(text, child, out, spans);
+        write_return_text(text, cursor..child.span.start, out, returns);
+        render(text, child, out, spans, returns);
         cursor = child.span.end;
     }
 
-    out.push_str(copy(text, cursor..node.span.end));
+    write_return_text(text, cursor..node.span.end, out, returns);
+    if own_returns.is_some() {
+        out.push_str(" }");
+    }
 
     // An arm is disabled by a guard trailing its pattern. Several mutants on one arm chain with
     // `&&`, which is correct however many there are, though only one can ever be active at once.
@@ -538,12 +562,20 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
         }
     }
 
+    let wrapped_close;
     let close = match node.shape {
         Shape::Expr => " })",
         Shape::Block => " } }",
         Shape::IterExpr => ") })",
         // The extra `)` closes the `Either::R` this arm was opened with.
         Shape::IterBlock => ") } }",
+        Shape::IterWrappedBlock { depth } => {
+            let mut closing = String::from(")");
+            iterator_maps(&mut closing, depth, "R");
+            closing.push_str(" } }");
+            wrapped_close = closing;
+            &wrapped_close
+        }
         Shape::Continue | Shape::Break | Shape::Stmt => " }",
         // The guard is the whole of the change, and it is already written.
         Shape::Arm => "",
@@ -560,13 +592,175 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
     }
 }
 
+fn iterator_maps(out: &mut String, depth: NonZeroU8, variant: &str) {
+    for _ in 1..depth.get() {
+        out.push_str(".map(|__gamma_value| __gamma_value");
+    }
+    let _ = write!(out, ".map({EITHER_PATH}::{variant})");
+    for _ in 1..depth.get() {
+        out.push(')');
+    }
+}
+
+fn render_replacement(replacement: &str, node: &Node<'_>, own: Option<&Returns>, inherited: Option<&Returns>, out: &mut String) {
+    let returns = if let Some(own) = own {
+        let sites = return_sites(replacement);
+        (!sites.is_empty()).then(|| Returns {
+            label: own.label.clone(),
+            sites,
+        })
+    } else {
+        inherited
+            .filter(|returns| {
+                returns
+                    .sites
+                    .iter()
+                    .any(|site| site.start >= node.span.start && site.end <= node.span.end)
+            })
+            .map(|returns| Returns {
+                label: returns.label.clone(),
+                sites: return_sites(replacement),
+            })
+    };
+    if own.is_some()
+        && let Some(returns) = &returns
+    {
+        let _ = write!(out, "'{}: {{ ", returns.label);
+    }
+    write_return_text(replacement, 0..replacement.len(), out, returns.as_ref());
+    if own.is_some() && returns.is_some() {
+        out.push_str(" }");
+    }
+}
+
+struct Returns {
+    label: String,
+    sites: Vec<Range<usize>>,
+}
+
+fn iterator_returns(text: &str, node: &Node<'_>) -> Option<Returns> {
+    if !matches!(node.shape, Shape::IterBlock | Shape::IterWrappedBlock { .. }) {
+        return None;
+    }
+    let sites = return_sites(copy(text, node.span.clone()));
+    (!sites.is_empty()).then(|| Returns {
+        label: format!("__gamma_return_{}", node.mutants[0].0),
+        sites: sites
+            .into_iter()
+            .map(|site| site.start + node.span.start..site.end + node.span.start)
+            .collect(),
+    })
+}
+
+// Iterator guards map their completed value into Either. Early exits must finish that same
+// mapping, while returns belonging to nested functions, closures, and async blocks stay untouched.
+fn return_sites(source: &str) -> Vec<Range<usize>> {
+    #[derive(Default)]
+    struct Walk(Vec<Range<usize>>);
+    impl<'ast> Visit<'ast> for Walk {
+        fn visit_expr_return(&mut self, i: &'ast syn::ExprReturn) {
+            self.0.push(i.return_token.span().byte_range());
+            visit::visit_expr_return(self, i);
+        }
+        fn visit_expr_closure(&mut self, _i: &'ast syn::ExprClosure) {}
+        fn visit_expr_async(&mut self, _i: &'ast syn::ExprAsync) {}
+        fn visit_item_fn(&mut self, _i: &'ast syn::ItemFn) {}
+        fn visit_impl_item_fn(&mut self, _i: &'ast syn::ImplItemFn) {}
+        fn visit_trait_item_fn(&mut self, _i: &'ast syn::TraitItemFn) {}
+    }
+    let Ok(expression) = syn::parse_str::<syn::Expr>(source) else {
+        return Vec::new();
+    };
+    let mut walk = Walk::default();
+    walk.visit_expr(&expression);
+    walk.0
+}
+
+fn write_return_text(text: &str, range: Range<usize>, out: &mut String, returns: Option<&Returns>) {
+    let mut cursor = range.start;
+    if let Some(returns) = returns {
+        for site in &returns.sites {
+            if site.start >= cursor && site.end <= range.end {
+                out.push_str(copy(text, cursor..site.start));
+                let _ = write!(out, "break '{}", returns.label);
+                cursor = site.end;
+            }
+        }
+    }
+    out.push_str(copy(text, cursor..range.end));
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::num::NonZeroU8;
     use core::ops::Range;
 
     use super::{AssignedMutant, Guard, Ordinal, Position, Shape};
     use crate::{HashMap, Result};
+
+    #[test]
+    fn nested_wrapped_iterator_returns_leave_inner_function_boundaries_intact() {
+        let text = "{ let closure = || { return 9; }; let future = async { return 8; }; fn inner() { return; } struct S; impl S { fn f() { return; } } trait T { fn f() { return; } } if true { return Some(Some(1..3)); } Some(Some(3..5)) }";
+        let outer = mutant(
+            0..text.len(),
+            1,
+            "{ return Some(Some(5..7)); }",
+            Shape::IterWrappedBlock {
+                depth: NonZeroU8::new(2).unwrap(),
+            },
+        );
+        let nested_text = "return Some(Some(1..3))";
+        let start = text.find(nested_text).unwrap();
+        let child = mutant(start..start + nested_text.len(), 2, "return Some(Some(7..9))", Shape::Expr);
+        let output = instrument(text, &[&outer, &child]).unwrap();
+        let _parsed: syn::Expr = syn::parse_str(&output).unwrap();
+        assert_eq!(output.matches("break '__gamma_return_1").count(), 3);
+        assert!(output.contains("|| { return 9; }"));
+        assert!(output.contains("async { return 8; }"));
+        assert!(output.contains("fn inner() { return; }"));
+        assert_eq!(
+            output
+                .matches(".map(|__gamma_value| __gamma_value.map(::gamma_rt::Either::L))")
+                .count(),
+            1
+        );
+        assert_eq!(
+            output
+                .matches(".map(|__gamma_value| __gamma_value.map(::gamma_rt::Either::R))")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn iterator_return_rewriting_handles_return_free_and_invalid_replacements() {
+        let text = "{ return 1..3; }";
+        for replacement in ["{ 3..5 }", "{ return 3..5; }"] {
+            let site = mutant(0..text.len(), 1, replacement, Shape::IterBlock);
+            let output = instrument(text, &[&site]).unwrap();
+            let _parsed: syn::Expr = syn::parse_str(&output).unwrap();
+            assert!(output.contains("::gamma_rt::Either::R('__gamma_return_1: {"));
+            assert_eq!(
+                output.matches("break '__gamma_return_1").count(),
+                usize::from(replacement.contains("return")) + 1
+            );
+        }
+        assert!(super::return_sites("not valid rust !").is_empty());
+        let text = "{ Some(1..3) }";
+        let site = mutant(
+            0..text.len(),
+            1,
+            "{ Some(3..5) }",
+            Shape::IterWrappedBlock {
+                depth: NonZeroU8::new(1).unwrap(),
+            },
+        );
+        let output = instrument(text, &[&site]).unwrap();
+        assert!(!output.contains("__gamma_return"));
+        assert!(output.contains(".map(::gamma_rt::Either::L)"));
+        assert!(output.contains(".map(::gamma_rt::Either::R)"));
+    }
 
     #[test]
     fn position_sweep_matches_independent_unicode_prefix_counts() {

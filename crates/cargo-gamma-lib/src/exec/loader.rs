@@ -103,8 +103,8 @@ mod final_survivor_tests {
 
 /// Applies the dynamic-library search path to one command.
 ///
-/// Every executable Cargo built needs the same path, including the `--list` launches that precede
-/// the census. Leaving listing out works for statically linked tests and fails at process startup
+/// Every executable Cargo built needs the same path, including resource-discovery `--list` launches.
+/// Leaving listing out works for statically linked tests and fails at process startup
 /// for dynamically linked proc-macro tests, before they can print a diagnostic Gamma can read.
 pub(super) fn configure_loader(command: &mut Command, launch: &Launch) {
     if let Some(path) = launch.loader.as_ref() {

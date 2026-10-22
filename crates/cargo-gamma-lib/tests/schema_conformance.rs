@@ -120,6 +120,7 @@ fn sample() -> Report {
             started_at: 1_700_000_000,
             mutant_id_version: Some(cargo_gamma_lib::internals::model::MUTANT_ID_VERSION),
             merged: false,
+            population_complete: false,
             shard: Some(ShardInfo { index: 1, count: 4 }),
             tests: Some(37),
             not_built: Some(2),
@@ -132,6 +133,24 @@ fn sample() -> Report {
 /// Serializes the sample report as a JSON value.
 fn emitted() -> Value {
     serde_json::from_str(&to_json(&sample()).expect("serializes")).expect("emits valid JSON")
+}
+
+#[test]
+fn population_coverage_is_an_explicit_boolean_with_conservative_legacy_reads() {
+    for complete in [false, true] {
+        let mut report = sample();
+        report.config.as_mut().unwrap().population_complete = complete;
+        let report: Value = serde_json::from_str(&to_json(&report).unwrap()).unwrap();
+        assert_eq!(report["config"]["populationComplete"], complete);
+        let report: Report = serde_json::from_value(report).unwrap();
+        assert_eq!(report.config.unwrap().population_complete, complete);
+    }
+    let mut legacy = emitted();
+    legacy["config"].as_object_mut().unwrap().remove("populationComplete");
+    let decoded: Report = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(!decoded.config.unwrap().population_complete);
+    legacy["config"]["populationComplete"] = "true".into();
+    serde_json::from_value::<Report>(legacy).expect_err("populationComplete must be a boolean, not a string");
 }
 
 #[test]

@@ -13,14 +13,13 @@ use cargo_gamma_process::MemoryRequest;
 
 use super::baseline::{Baseline, measure_baseline};
 use super::build::{Abandoned, Build, Converger};
-use super::census::{self, Census};
 use super::config::Config;
 use super::events::Events;
 use super::killers::Killers;
 use super::memory;
 use super::memory::MemoryPolicy;
 use super::resources::Resources;
-use super::session::{CensusCost, CensusStatus, PackageSweepCost, Phases, Session, SweepCost};
+use super::session::{PackageSweepCost, Phases, Session, SweepCost};
 use super::stall::Stall;
 use super::sweep::{Sweep, test_all};
 use super::test_binary::{
@@ -32,7 +31,7 @@ use crate::discover::{CompileFailTarget, LibraryTestTarget, Plan, Survey, compil
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::registry::Selection;
-use crate::{HashMap, HashSet, Result};
+use crate::{HashMap, Result};
 
 /// How many groups a "not run, by …" line names before it starts counting the rest.
 const GROUP_LIMIT: usize = 5;
@@ -53,10 +52,6 @@ pub fn run(survey: &Survey, selection: &Selection, config: &Config, events: &mut
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "prepared testing, census and checkpoint publication share the measured campaign state"
-)]
 pub(crate) fn run_with_locks(
     survey: &Survey,
     selection: &Selection,
@@ -110,62 +105,15 @@ pub(crate) fn run_with_locks(
     } else {
         Killers::default()
     };
+    built.session.phases.initial_hints = Some(super::session::InitialHints::capture(&plan, &killers));
 
-    // Built once and threaded through every phase that needs "which binaries can this package's
-    // mutants reach": census economics and the sweep's scheduling and verdict execution. Each used
-    // to answer that question with its own pass over `plan` and `binaries`; a plan's package/binary
-    // shape does not change mid-run, so one shared, ordered index answers both identically and for a
-    // fraction of the work.
+    // The package/binary shape stays fixed throughout the sweep.
     let reach = Reachability::build(&plan, &built.session.binaries, &scope);
-
-    // Taken after the baseline and before the first mutant, because it needs what the baseline
-    // established — how long a binary takes, which is the budget a censused test is held to — and
-    // because everything it decides is about how the sweep runs.
-    let (census_targets, maximum_census_savings) = census_targets(&plan, &reach, &killers);
-    let census_requested = census_is_worthwhile(config.optimize_test_execution, narrowed, &census_targets, maximum_census_savings);
-    let census_started = Instant::now();
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    let mut census = if census_requested {
-        census::take(
-            &built.work,
-            &built.session.binaries,
-            &census_targets,
-            maximum_census_savings,
-            config.jobs,
-            stall,
-            events,
-        )
-    } else {
-        Census::default()
-    };
-    let census_was_admitted = census_admitted(census_requested, &census);
-    built.session.phases.census_status = census_status(config.optimize_test_execution, census_was_admitted, &census, census_targets.len());
-
-    // Only recorded when a census actually ran: an absent census is not a census that took no time,
-    // and the whole question is whether the default selection paid for itself.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    built.session.phases.census = census_cost(
-        census_was_admitted,
-        census_started.elapsed(),
-        maximum_census_savings,
-        &census,
-        &census_targets,
-    );
-
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if incremental {
-        let mut generalized = killers.generalized().clone();
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-        if persist_census_learning(census_was_admitted, &census, &plan, &built.session.binaries, &mut generalized) {
-            install_census_learning(&mut killers, generalized);
-        }
-    }
 
     if let Some(record) = record {
         let state = super::testing_state::TestingState::start(
             &plan,
             &built,
-            census,
             killers,
             super::testing_state::TestingSettings {
                 jobs: config.jobs,
@@ -178,10 +126,10 @@ pub(crate) fn run_with_locks(
             record,
             (&stuck, &dropped),
         )?;
-        census = state.census;
         killers = state.killers;
         built.work.arm_testing_journal()?;
     }
+    built.work.retain_initial_hints(built.session.phases.initial_hints.clone());
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     announce_measurement(events, &plan, &built.session);
@@ -192,7 +140,6 @@ pub(crate) fn run_with_locks(
         jobs: config.jobs,
         meter: built.session.metered,
         confirm: config.confirm,
-        census: &census,
     };
 
     let sweep_started = Instant::now();
@@ -213,7 +160,7 @@ pub(crate) fn run_with_locks(
     // `None` when nothing was swept: the phase is recorded as absent rather than as a real phase
     // that happened to cost nothing, which is what [`Phases::sweep`] documents its `Option` to mean.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    built.session.phases.sweep = sweep_cost(spent, sweep_elapsed);
+    built.session.phases.sweep = built.work.with_sweep_diagnostics(sweep_cost(spent, sweep_elapsed));
     built.work.complete_testing()?;
 
     Ok(Measured {
@@ -233,6 +180,7 @@ pub(crate) fn resume_testing(
 ) -> Result<Measured> {
     let scope = state.oracle.scope();
     workspace.retain_sweep_cost(state.session.phases.sweep.clone());
+    workspace.retain_initial_hints(state.session.phases.initial_hints.clone());
     events.sweep_planning(&state.plan, state.session.binaries.len(), state.settings.jobs);
     let reach = Reachability::build(&state.plan, &state.session.binaries, &scope);
     announce_measurement(events, &state.plan, &state.session);
@@ -245,7 +193,6 @@ pub(crate) fn resume_testing(
         jobs: state.settings.jobs,
         meter: state.session.metered,
         confirm: state.settings.confirm,
-        census: &state.census,
     };
     let swept = test_all(
         &workspace,
@@ -263,7 +210,8 @@ pub(crate) fn resume_testing(
             return Err(failure);
         }
     };
-    state.session.phases.sweep = SweepCost::combine(state.session.phases.sweep, sweep_cost(spent, started.elapsed()));
+    state.session.phases.sweep =
+        workspace.with_sweep_diagnostics(SweepCost::combine(state.session.phases.sweep, sweep_cost(spent, started.elapsed())));
     workspace.complete_testing()?;
     Ok(Measured {
         plan: state.plan,
@@ -278,140 +226,12 @@ pub(crate) fn resume_testing(
     })
 }
 
-/// Selected mutation sites each test binary can reach and the most case selection could save.
-///
-/// The duration is a serial upper bound: even a perfect census cannot avoid more than one whole
-/// baseline run for each reachable mutant/binary pair.
-///
-/// A mutant carrying an exact checked killer hint that actually names a binary this mutant can
-/// reach does not itself justify or pay for censusing any binary: [`sweep::mutant_cost`](super::sweep)
-/// already prices it at one binary baseline (the probe), so a census could only ever shave time off
-/// a launch the sweep does not expect to need to run in full. This eligibility test has to mirror
-/// [`sweep::judge_ordered`](super::sweep)'s own hint precedence exactly — a hint naming a package
-/// or target this run no longer builds, or one the test packages were narrowed away from, is
-/// exactly as stale there as it would be here, and `judge_ordered` falls straight through it to the
-/// unhinted binaries. A mutant whose hint cannot be matched to any reachable binary is therefore
-/// treated as unhinted here too, entering the first pass below and justifying census normally,
-/// rather than silently skipping census on the strength of a hint the sweep will never honor.
-///
-/// A hint that *is* eligible is only ever a *guess* until the sweep checks it — the probe can still
-/// miss, at which point the mutant falls back to every binary that reaches it, exactly as if it had
-/// never been hinted. So a validly hinted mutant's ordinal still rides along for free on any
-/// binary an unhinted mutant already justified censusing (a shared site): skipping that would leave
-/// the site absent from the completed census, which [`Census::selection`] and [`Census::work`]
-/// would then read as *proven unreached* rather than merely unmeasured for this mutant — silently
-/// turning a stale-hint fallback into a wrong `Uncovered` verdict. A binary no unhinted mutant ever
-/// justifies censusing gets no census entry for the hinted mutant either, so a stale hint there
-/// conservatively falls back to running that binary whole, never to skipping it as though it were
-/// proven safe.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (HashMap<camino::Utf8PathBuf, HashSet<u32>>, Duration) {
-    let mut targets: HashMap<camino::Utf8PathBuf, HashSet<u32>> = HashMap::default();
-    let mut maximum_savings = Duration::ZERO;
-
-    let pending = || {
-        plan.mutants
-            .iter()
-            .filter(|mutant| mutant.ordinal != 0 && mutant.outcome == Outcome::Pending)
-    };
-
-    // A hint only excuses a mutant from justifying its own census when it names a binary this
-    // mutant can actually reach — the exact eligibility test `judge_ordered` itself applies before
-    // trusting a hint. A stale or unreachable hint (naming a package or target this run dropped, or
-    // one the test packages were narrowed away from) fails this test exactly as it fails there, so
-    // such a mutant is treated as unhinted below rather than silently going uncensused.
-    let eligibly_hinted = |mutant: &crate::model::Mutant| {
-        killers.hint(&mutant.id).is_some_and(|hint| {
-            reach
-                .reachable(mutant)
-                .is_some_and(|reachable| reachable.iter().any(|binary| binary.matches_killer(hint)))
-        })
-    };
-
-    // Unhinted mutants (including those whose hint is stale or unreachable) alone decide which
-    // binaries get censused at all, and are the only ones that pay the baseline into
-    // `maximum_savings` — an eligibly hinted mutant riding along below never grows it.
-    'unhinted: for mutant in pending().filter(|mutant| !eligibly_hinted(mutant)) {
-        let Some(reachable) = reach.reachable(mutant) else {
-            continue 'unhinted;
-        };
-
-        for binary in reachable {
-            let _new = targets.entry(binary.path.clone()).or_default().insert(mutant.ordinal);
-            maximum_savings = maximum_savings.saturating_add(binary.baseline);
-        }
-    }
-
-    // An eligibly hinted mutant only ever adds its ordinal to a binary some unhinted mutant already
-    // put in `targets` — never a binary of its own, since that would make the census pay to select
-    // cases for a probe it expects not to need.
-    'hinted: for mutant in pending().filter(|mutant| eligibly_hinted(mutant)) {
-        let Some(reachable) = reach.reachable(mutant) else {
-            continue 'hinted;
-        };
-
-        for binary in reachable {
-            if let Some(sites) = targets.get_mut(&binary.path) {
-                let _new = sites.insert(mutant.ordinal);
-            }
-        }
-    }
-
-    (targets, maximum_savings)
-}
-
-fn census_is_worthwhile(
-    optimize_test_execution: bool,
-    narrowed: bool,
-    targets: &HashMap<camino::Utf8PathBuf, HashSet<u32>>,
-    maximum_savings: Duration,
-) -> bool {
-    optimize_test_execution && narrowed && !targets.is_empty() && !maximum_savings.is_zero()
-}
-
-fn census_cost(
-    admitted: bool,
-    elapsed: Duration,
-    maximum_savings: Duration,
-    census: &Census,
-    targets: &HashMap<camino::Utf8PathBuf, HashSet<u32>>,
-) -> Option<CensusCost> {
-    admitted.then(|| CensusCost {
-        elapsed,
-        walked: census.walked(),
-        binaries: census.len(),
-        candidate_binaries: targets.len(),
-        candidate_sites: targets.values().map(HashSet::len).sum(),
-        listing_launches: census.listing_launches(),
-        listed_binaries: census.listed_binaries(),
-        estimated_cost: census.estimated_cost(),
-        walk_admitted: census.walk_admitted(),
-        maximum_savings,
-        complete_binaries: census.complete_binaries(),
-        incomplete_binaries: census.incomplete_binaries(),
-    })
-}
-
-fn census_admitted(requested: bool, census: &Census) -> bool {
-    requested && !census.walk_declined()
-}
-
-fn census_status(enabled: bool, admitted: bool, census: &Census, candidates: usize) -> CensusStatus {
-    if !enabled {
-        CensusStatus::Disabled
-    } else if !admitted {
-        CensusStatus::Declined
-    } else if census.is_complete_for(candidates) {
-        CensusStatus::Complete
-    } else {
-        CensusStatus::Incomplete
-    }
-}
-
 pub(super) fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<SweepCost> {
     let spent = spent?;
 
     Some(SweepCost {
+        confirmed_initial_killers: spent.confirmed_initial_killers,
+        accounting: spent.accounting,
         elapsed,
         launches: spent.launches,
         probes: spent.probes,
@@ -425,7 +245,6 @@ pub(super) fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) 
         item_candidates: spent.item_candidates,
         reach_candidates: spent.reach_candidates,
         file_candidates: spent.file_candidates,
-        census_candidates: spent.census_candidates,
         item_probes: spent.item_probes,
         item_hits: spent.item_hits,
         reach_probes: spent.reach_probes,
@@ -435,15 +254,8 @@ pub(super) fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) 
         item_rejected: spent.item_rejected,
         reach_rejected: spent.reach_rejected,
         file_rejected: spent.file_rejected,
-        census_probes: spent.census_probes,
-        census_hits: spent.census_hits,
         whole_selections: spent.whole_selections,
-        case_selections: spent.case_selections,
-        hinted_selections: spent.hinted_selections,
-        hinted_fallbacks: spent.hinted_fallbacks,
         uncovered_selections: spent.uncovered_selections,
-        available_tests: spent.available_tests,
-        selected_tests: spent.selected_tests,
         packages: spent
             .packages
             .into_iter()
@@ -457,29 +269,6 @@ pub(super) fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) 
         launches_saved: spent.saved,
         reach_launches_saved: spent.reach_saved,
     })
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn persist_census_learning(
-    requested: bool,
-    census: &Census,
-    plan: &Plan,
-    binaries: &[TestBinary],
-    generalized: &mut crate::discover::GeneralizedHints,
-    // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-) -> bool {
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if !requested || !census.has_evidence() {
-        return false;
-    }
-
-    census.persist_clusters(&plan.mutants, binaries, generalized);
-    true
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn install_census_learning(killers: &mut Killers, generalized: crate::discover::GeneralizedHints) {
-    Killers::replace_generalized(killers, generalized);
 }
 
 // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -586,10 +375,9 @@ fn session_before_sweep(baseline: Baseline, build: Build, work: &Workspace, cont
         widened: build.widened,
         ordering: build.ordering,
         phases: Phases {
+            initial_hints: None,
             copy: context.copy,
             preflight: context.preflight,
-            census_status: CensusStatus::Disabled,
-            census: None,
             sweep: None,
         },
     }
@@ -668,11 +456,8 @@ fn preflight(
     let intended = survey.packages();
     let intending: crate::HashSet<&str> = intended.iter().map(String::as_str).collect();
     let checking = reaching_packages(&survey.reach, &intending, &scope);
-    converger.library_packages(survey.library_packages.clone());
+    converger.freeze_context(checking.as_deref());
     let cleared = Converger::preflight(work, plan, checking.as_deref(), &intended, config.test_lib, config.build, events)?;
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    record_preflight_discovery(converger, cleared.discovery.clone());
-
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     end_preflight(events);
 
@@ -705,9 +490,6 @@ fn inferred_package_local(config: &Config) -> bool {
 }
 
 // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn record_preflight_discovery(converger: &mut Converger, discovery: String) {
-    converger.target_discovery(discovery);
-}
 
 // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -868,7 +650,7 @@ fn measure_with_locks(
     announce_compile_fail_costs(survey, config, events);
 
     let mut plan = survey.skeleton();
-    let mut converger = Converger::guided(load_ordering_hints(survey, config));
+    let mut converger = Converger::default();
     converger.select_test_lib(config.test_lib);
 
     // The scratch-tree copy, timed on its own: it is a component of the build's total, but a large
@@ -876,6 +658,8 @@ fn measure_with_locks(
     // which.
     let copy_started = Instant::now();
     let mut work = Workspace::prepare_with_locks(&plan.root, &survey.target, config, events, locks)?;
+    let exclusions = crate::discover::CompilerExclusions::load(work.base(), &plan.root)?;
+    exclusions.store(work.base())?;
     let copy = copy_started.elapsed();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -885,6 +669,10 @@ fn measure_with_locks(
     // how wide the workload they measure and judge is.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     calibrate_harness(&work, config.jobs);
+
+    for package in survey.packages() {
+        work.link_runtime(&package, &plan.files)?;
+    }
 
     let preflight_started = Instant::now();
     let Cleared {
@@ -896,7 +684,9 @@ fn measure_with_locks(
     let oracle = Oracle::new(packages, inferred_package_local(config), whole_workspace);
     let scope = oracle.scope();
 
-    let anything_live = instrument_population(survey, selection, &mut plan, &work, events)?;
+    let anything_live = instrument_population(survey, selection, &mut plan, &work, events, Some(&exclusions))?;
+    converger.historical_exclusions = plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::CompileError).count();
+    converger.compiler_exclusions = Some(exclusions);
     let mut stuck = Vec::new();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -923,6 +713,7 @@ fn measure_with_locks(
     // redundant cache-hit Cargo invocation.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     begin_schema_build(events);
+    events.convergence_progress(converger.historical_exclusions);
 
     // Build only packages whose tests can actually be selected: the rest would be compiled,
     // baselined and never consulted. All target packages have already been instrumented, so this
@@ -1001,7 +792,7 @@ fn measure_with_locks(
         return Err(error);
     }
     // Marker enumeration requires that finalized launch environment. Install the resulting policy
-    // before baseline measurement so baseline, census, mutant, and confirmation launches all use
+    // before baseline measurement so baseline, mutant, and confirmation launches all use
     // the same admission rules.
     let resources = match Resources::discover(
         &work,
@@ -1225,39 +1016,6 @@ fn tally(mutants: &[&crate::model::Mutant], key: impl Fn(&crate::model::Mutant) 
     rendered
 }
 
-/// The mutants an earlier run could not compile, offered to the build as an order rather than a fact.
-///
-/// Two sources, unioned: the scratch record left by whatever ran here last, and the artifact the
-/// workspace checks in. Neither is filtered by build context, and that is the point — this is the
-/// tier that survives a context mismatch, because being wrong about the order costs the order and
-/// nothing else. What comes back is a set of mutant ids; [`Converger`] decides what to do with it,
-/// and every mutant named is still built, still judged, and still scored exactly as if it had never
-/// appeared here. See [`crate::exec::OrderingHints`].
-///
-/// Empty when incremental mode is off. `--incremental no` is what a caller reaches for when they suspect the
-/// tool is remembering something it should not, so it turns off remembering — including the tiers
-/// that could not have affected the answer.
-// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-fn load_ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate::model::MutantId> {
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if !config.incremental.is_enabled() {
-        return crate::HashSet::default();
-    }
-
-    let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
-    let record = crate::discover::RunRecord::load(&base);
-    let incomplete = crate::discover::RunRecord::load_incomplete(&base);
-    let checked_in = crate::discover::Hints::load(&survey.root);
-
-    record
-        .ordering()
-        .into_iter()
-        .map(crate::model::MutantId::new)
-        .chain(incomplete.ordering().into_iter().map(crate::model::MutantId::new))
-        .chain(checked_in.ordering().into_iter().map(crate::model::MutantId::new))
-        .collect()
-}
-
 /// Scans and instruments the complete target population before asking Cargo to build it.
 ///
 /// Packages are still scanned in dependency order for deterministic ordinals, but compilation is
@@ -1271,6 +1029,7 @@ fn instrument_population(
     plan: &mut Plan,
     work: &Workspace,
     events: &mut impl Events,
+    exclusions: Option<&crate::discover::CompilerExclusions>,
 ) -> Result<bool> {
     let mut ordinals = u32::default();
     let source_indices = plan.source_indices();
@@ -1281,7 +1040,7 @@ fn instrument_population(
     begin_population(events, packages.len());
     for stage in &crate::discover::stages(&packages, &survey.reach) {
         for package in stage {
-            let scanned = survey.scan(Some(package), selection, &mut ordinals)?;
+            let scanned = survey.scan_excluding(Some(package), selection, &mut ordinals, exclusions)?;
 
             live = live.saturating_add(live_mutants(&scanned.mutants));
             validate_synchronized_sources(work, &scanned.digests)?;
@@ -1289,12 +1048,8 @@ fn instrument_population(
         }
     }
 
-    for package in &packages {
-        work.link_runtime(package, &plan.files)?;
-    }
-
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    finish_population(events, live);
+    finish_population(events, &plan.mutants);
     Ok(live > usize::default())
 }
 
@@ -1308,16 +1063,17 @@ fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
     mutants.iter().filter(|mutant| mutant.ordinal > 0).count()
 }
 
-fn finish_population(events: &mut impl Events, mutants: usize) {
-    let detail = format!(", {}", crate::report::quantity(mutants, "mutant"));
+fn finish_population(events: &mut impl Events, mutants: &[Mutant]) {
+    let population = mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 || mutant.outcome == Outcome::CompileError)
+        .count();
+    let detail = format!(", {}", crate::report::quantity(population, "mutant"));
     events.end(&detail);
 }
 
 fn schema_build_counts(mutants: &[Mutant]) -> (usize, usize, usize) {
-    let unviable = mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::CompileError)
-        .count();
+    let unviable = mutants.iter().filter(|mutant| mutant.outcome == Outcome::CompileError).count();
     let viable = mutants
         .iter()
         .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
@@ -1649,7 +1405,7 @@ mod tests {
     use camino::Utf8Path;
 
     use super::*;
-    use crate::discover::{Killer, ReachCluster, SiteIdentity, TargetFile};
+    use crate::discover::{Killer, TargetFile};
     use crate::exec::memory::{Demand, MemoryControl};
     use crate::exec::verdict::Only;
     use crate::fixtures;
@@ -1910,7 +1666,7 @@ mod tests {
         let executable = crate::testing::helper().path;
         let result = super::super::build::with_compiler(
             move |work, _arguments, _timeout, _events| {
-                if fs::read_to_string(work.root.join("Cargo.toml")).unwrap().contains("gamma_rt") {
+                if fs::read_to_string(work.root.join("src/lib.rs")).unwrap().contains("gamma_rt") {
                     return Err(error!("the controlled schema compiler refused its input"));
                 }
                 Ok(Some(successful_compiler_output(work, &executable, false)))
@@ -2041,72 +1797,6 @@ mod tests {
         }
     }
 
-    fn census_helper_arguments() -> Vec<String> {
-        let records = (1..=8)
-            .chain(core::iter::once(gamma_rt::SEAL))
-            .map(|ordinal| ordinal.to_string())
-            .collect::<Vec<_>>()
-            .join("|");
-        vec![
-            "--gamma-step=when-arg:--list|print:covered: test".to_owned(),
-            "--gamma-step=when-arg:--list|exit:0".to_owned(),
-            format!(
-                "--gamma-step=when-env:{}|write-le:{}|{records}",
-                gamma_rt::CENSUS_VAR,
-                gamma_rt::CENSUS_VAR
-            ),
-            "--gamma-step=print:running 1 test".to_owned(),
-            "--gamma-step=print:test covered ... ok".to_owned(),
-            "--gamma-step=exit:0".to_owned(),
-        ]
-    }
-
-    #[test]
-    fn run_orchestration_preserves_census_admission_phase_costs_and_completed_learning() {
-        let source = (0..8).fold(String::new(), |mut source, index| {
-            writeln!(source, "pub fn subject{index}() -> bool {{ true }}").unwrap();
-            source
-        });
-        for (optimize, whole_binary) in [(false, false), (true, false), (true, true)] {
-            let (_directory, survey, selection, config) = orchestration_fixture(&source);
-            let mut config = Config {
-                optimize_test_execution: optimize,
-                whole_test_binaries: whole_binary,
-                ..config
-            };
-            config.cargo.test_args = census_helper_arguments();
-            let executable = crate::testing::helper().path;
-            let result = super::super::build::with_compiler(
-                move |work, _arguments, _timeout, _events| Ok(Some(successful_compiler_output(work, &executable, true))),
-                || {
-                    census::with_census_result(
-                        |binaries| Census::complete(&binaries[0].path),
-                        || run(&survey, &selection, &config, &mut Recorder::default()),
-                    )
-                },
-            )
-            .unwrap();
-            assert_eq!(result.plan.mutants.len(), 8);
-            assert!(result.plan.mutants.iter().all(|mutant| mutant.outcome != Outcome::Pending));
-            assert!(
-                result.learning.is_some(),
-                "a completed run must return its learning even when the learned map is empty"
-            );
-            let built = result.built.unwrap();
-            assert_eq!(built.session.binaries[0].tests, Some(1));
-            assert!(built.session.phases.sweep.is_some());
-            let expected = if !optimize {
-                CensusStatus::Disabled
-            } else if whole_binary {
-                CensusStatus::Declined
-            } else {
-                CensusStatus::Complete
-            };
-            assert_eq!(built.session.phases.census_status, expected);
-            assert_eq!(built.session.phases.census.is_some(), optimize && !whole_binary);
-        }
-    }
-
     fn prepared_record(survey: &Survey, config: &Config) -> super::super::testing_state::RecordPreparation {
         let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
         super::super::testing_state::RecordPreparation {
@@ -2192,7 +1882,6 @@ mod tests {
         let state = super::super::testing_state::TestingState::start(
             &measured.plan,
             &built,
-            Census::default(),
             killers,
             super::super::testing_state::TestingSettings {
                 jobs: config.jobs,
@@ -2328,7 +2017,6 @@ mod tests {
     fn failed_full_and_resumed_sweeps_publish_partial_learning_and_retain_the_failed_population() {
         for resume in [false, true] {
             let (_directory, survey, selection, mut config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
-            config.optimize_test_execution = false;
             config.cargo.test_args = startup_failure_arguments();
             let scanned = survey.scan(None, &selection, &mut 0).unwrap();
             let mutant = scanned.mutants[0].clone();
@@ -2442,7 +2130,7 @@ mod tests {
         let measured = super::super::build::with_compiler(
             move |work, _arguments, _timeout, _events| {
                 let mut output = successful_compiler_output(work, &executable, false);
-                if fs::read_to_string(work.root.join("Cargo.toml")).unwrap().contains("gamma_rt") {
+                if fs::read_to_string(work.root.join("src/lib.rs")).unwrap().contains("gamma_rt") {
                     output.status = std::process::Command::new(&executable).arg("--gamma-step=exit:1").status().unwrap();
                     output.stderr = b"controlled unattributed compiler refusal".to_vec();
                 }
@@ -2468,13 +2156,14 @@ mod tests {
             let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
             let original = survey.root.join("src/lib.rs");
             let executable = crate::testing::helper().path;
+            if !scan {
+                fs::write(survey.root.join("Cargo.toml"), "not = [valid TOML").unwrap();
+            }
             let result = super::super::build::with_compiler(
                 move |work, _arguments, _timeout, _events| {
                     let output = successful_compiler_output(work, &executable, false);
                     if scan {
                         fs::write(&original, "pub fn subject( {").unwrap();
-                    } else {
-                        fs::write(work.root.join("Cargo.toml"), "not = [valid TOML").unwrap();
                     }
                     Ok(Some(output))
                 },
@@ -2665,7 +2354,9 @@ mod tests {
                     outcome,
                     ..fixture.clone()
                 };
-                let expected = if ordinal == 0 {
+                let expected = if outcome == Outcome::CompileError {
+                    (1, 0, 0)
+                } else if ordinal == 0 {
                     (0, 0, 0)
                 } else {
                     match outcome {
@@ -2683,7 +2374,7 @@ mod tests {
                 population.push(mutant);
             }
         }
-        assert_eq!(schema_build_counts(&population), (2, 2, 2));
+        assert_eq!(schema_build_counts(&population), (3, 2, 2));
         assert_eq!(schema_build_counts(&[]), (0, 0, 0));
     }
 
@@ -2737,38 +2428,7 @@ mod tests {
                 assert_eq!(session.binaries[0].path.as_str(), "subject");
                 assert_eq!(session.phases.copy, Duration::from_secs(11));
                 assert_eq!(session.phases.preflight, Duration::from_secs(12));
-                assert!(session.phases.census.is_none());
                 assert!(session.phases.sweep.is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn census_learning_installs_complete_and_partial_evidence_only_when_requested() {
-        let plan = oracle_plan("core");
-        let mut binary = oracle_binary("core", Some(4));
-        binary.baseline = Duration::from_secs(1);
-        for requested in [false, true] {
-            for complete in [false, true] {
-                let census = if complete {
-                    Census::examined(&binary.path, 1, 1, 4)
-                } else {
-                    Census::partial(&binary.path, 1, 1, 4)
-                };
-                let mut generalized = crate::discover::GeneralizedHints::empty_supported();
-                let changed = persist_census_learning(requested, &census, &plan, core::slice::from_ref(&binary), &mut generalized);
-                assert_eq!(changed, requested);
-                assert_eq!(generalized.reach.is_empty(), !requested);
-                if requested {
-                    assert_eq!(generalized.reach.len(), 1);
-                    assert_eq!(generalized.reach[0].site, SiteIdentity::from_mutant(&plan.mutants[0]));
-                    assert_eq!(generalized.test_sets.len(), 1);
-                    assert_eq!(generalized.test_sets[0].len(), 1);
-                    assert_eq!(generalized.test_sets[0][0].package, "core");
-                    let mut killers = Killers::default();
-                    install_census_learning(&mut killers, generalized.clone());
-                    assert_eq!(killers.generalized(), &generalized);
-                }
             }
         }
     }
@@ -3177,12 +2837,13 @@ mod tests {
 
     #[test]
     fn population_and_build_progress_name_the_complete_work() {
-        let mutants = [stuck_mutant(0, "a", "f"), stuck_mutant(1, "b", "f"), stuck_mutant(2, "c", "f")];
+        let mut mutants = [stuck_mutant(0, "a", "f"), stuck_mutant(1, "b", "f"), stuck_mutant(2, "c", "f")];
+        mutants[0].outcome = Outcome::CompileError;
         assert_eq!(live_mutants(&mutants), 2);
 
         let mut events = Recorder::default();
         begin_population(&mut events, 12);
-        finish_population(&mut events, 3);
+        finish_population(&mut events, &mutants);
         begin_schema_build(&mut events);
         finish_schema_build(&mut events, 1, 2, 0);
         assert_eq!(
@@ -3192,6 +2853,35 @@ mod tests {
                 (String::new(), ", 3 mutants".to_owned()),
                 ("Excluding".to_owned(), "unviable mutants".to_owned()),
                 (String::new(), "1 unviable mutant, leaving 2 viable mutants".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn population_progress_counts_live_and_unviable_mutants_once_but_not_other_inactive_results() {
+        let mut mutants = [
+            stuck_mutant(0, "historical", "f"),
+            stuck_mutant(1, "live", "f"),
+            stuck_mutant(2, "new_failure", "f"),
+            stuck_mutant(0, "ignored", "f"),
+            stuck_mutant(0, "settled", "f"),
+        ];
+        mutants[0].outcome = Outcome::CompileError;
+        mutants[1].outcome = Outcome::Pending;
+        mutants[2].outcome = Outcome::CompileError;
+        mutants[3].outcome = Outcome::Ignored;
+        mutants[4].outcome = Outcome::Killed;
+        let mut events = Recorder::default();
+
+        finish_population(&mut events, &mutants);
+        let (unviable, viable, not_built) = schema_build_counts(&mutants);
+        finish_schema_build(&mut events, unviable, viable, not_built);
+
+        assert_eq!(
+            events.phases,
+            [
+                (String::new(), ", 3 mutants".to_owned()),
+                (String::new(), "2 unviable mutants, leaving 1 viable mutant".to_owned()),
             ]
         );
     }
@@ -3813,136 +3503,7 @@ mod tests {
     }
 
     #[test]
-    fn census_targets_only_selected_pending_sites_and_relevant_binaries() {
-        let mut plan = oracle_plan("core");
-        let mut inactive = plan.mutants[0].clone();
-        inactive.ordinal = 0;
-        plan.mutants.push(inactive);
-        let mut settled = plan.mutants[0].clone();
-        settled.ordinal = 2;
-        settled.outcome = Outcome::Killed;
-        plan.mutants.push(settled);
-
-        let mut core = oracle_binary("core", Some(1));
-        core.path = "/tmp/core".into();
-        core.baseline = Duration::from_secs(2);
-
-        let mut app = oracle_binary("app", Some(1));
-        app.path = "/tmp/app".into();
-        app.baseline = Duration::from_secs(3);
-
-        let mut empty = oracle_binary("app", Some(0));
-        empty.path = "/tmp/empty".into();
-        empty.baseline = Duration::from_secs(100);
-
-        let packages = [String::from("app")];
-        let scope = capped(&packages);
-        let binaries = [core, app, empty];
-        let reach = Reachability::build(&plan, &binaries, &scope);
-        let (targets, savings) = census_targets(&plan, &reach, &Killers::default());
-
-        assert_eq!(targets.len(), 1);
-        let selected: HashSet<u32> = core::iter::once(1).collect();
-        assert_eq!(targets.get(Utf8Path::new("/tmp/app")), Some(&selected));
-        assert_eq!(savings, Duration::from_secs(3));
-    }
-
-    #[test]
-    fn a_mutant_without_reachable_tests_does_not_hide_later_census_targets() {
-        let mut plan = oracle_plan("orphan");
-        let _previous = plan
-            .reach
-            .insert("orphan".to_owned(), core::iter::once("orphan".to_owned()).collect());
-        let mut reachable = plan.mutants[0].clone();
-        reachable.package = "core".to_owned().into();
-        reachable.ordinal = 2;
-        plan.mutants.push(reachable);
-        let mut app = oracle_binary("app", Some(1));
-        app.path = "/tmp/census-app".into();
-        app.baseline = Duration::from_secs(7);
-        let binaries = [app];
-        let packages = ["app".to_owned()];
-        let scope = capped(&packages);
-        let reach = Reachability::build(&plan, &binaries, &scope);
-        let (targets, savings) = census_targets(&plan, &reach, &Killers::default());
-        assert_eq!(
-            targets,
-            HashMap::from_iter([(Utf8PathBuf::from("/tmp/census-app"), core::iter::once(2).collect(),)])
-        );
-        assert_eq!(savings, Duration::from_secs(7));
-    }
-
-    #[test]
-    fn phase_costs_preserve_census_admission_and_sweep_funnel_measurements() {
-        let targets = HashMap::from_iter([(Utf8PathBuf::from("/tmp/app"), HashSet::from_iter([1]))]);
-        for (optimize, narrowed, targets, savings, expected) in [
-            (false, true, targets.clone(), Duration::from_secs(1), false),
-            (true, false, targets.clone(), Duration::from_secs(1), false),
-            (true, true, HashMap::default(), Duration::from_secs(1), false),
-            (true, true, targets.clone(), Duration::ZERO, false),
-            (true, true, targets, Duration::from_secs(1), true),
-        ] {
-            assert_eq!(census_is_worthwhile(optimize, narrowed, &targets, savings), expected);
-        }
-
-        let absent = Census::default();
-        let targets = HashMap::from_iter([
-            (Utf8PathBuf::from("/tmp/app"), HashSet::from_iter([1, 2])),
-            (Utf8PathBuf::from("/tmp/other"), HashSet::from_iter([3])),
-        ]);
-        assert!(census_cost(false, Duration::from_secs(1), Duration::from_secs(9), &absent, &targets).is_none());
-        let cost =
-            census_cost(true, Duration::from_secs(1), Duration::from_secs(9), &absent, &targets).expect("requested census has a phase");
-        assert_eq!(
-            (
-                cost.elapsed,
-                cost.walked,
-                cost.binaries,
-                cost.candidate_binaries,
-                cost.candidate_sites,
-                cost.listing_launches,
-                cost.listed_binaries,
-                cost.estimated_cost,
-                cost.walk_admitted,
-                cost.maximum_savings,
-                cost.complete_binaries,
-                cost.incomplete_binaries,
-            ),
-            (
-                Duration::from_secs(1),
-                0,
-                0,
-                2,
-                3,
-                0,
-                0,
-                Duration::ZERO,
-                false,
-                Duration::from_secs(9),
-                0,
-                0,
-            )
-        );
-
-        assert_eq!(census_status(false, false, &absent, 1), CensusStatus::Disabled);
-        assert_eq!(census_status(true, false, &absent, 1), CensusStatus::Declined);
-        assert_eq!(census_status(true, true, &absent, 1), CensusStatus::Incomplete);
-        let declined = Census::declined();
-        assert!(declined.walk_declined());
-        assert!(!census_admitted(true, &declined));
-        assert!(
-            census_admitted(true, &absent),
-            "failed listings were attempted rather than economically declined"
-        );
-        assert!(!census_admitted(false, &absent));
-        assert!(
-            census_cost(false, Duration::from_secs(1), Duration::from_secs(9), &declined, &targets).is_none(),
-            "an economically declined census has no phase"
-        );
-        assert_eq!(census_status(true, false, &declined, 1), CensusStatus::Declined);
-        let complete = Census::complete(Utf8Path::new("/tmp/app"));
-        assert_eq!(census_status(true, true, &complete, 1), CensusStatus::Complete);
-
+    fn sweep_costs_preserve_funnel_measurements() {
         assert!(sweep_cost(None, Duration::from_secs(1)).is_none());
         let cost = sweep_cost(
             Some(super::super::sweep::Spent {
@@ -3972,233 +3533,6 @@ mod tests {
                 cost.reach_launches_saved,
             ),
             (Duration::from_secs(9), 1, 2, 3, 4, 5, 6, 7, 8)
-        );
-    }
-
-    #[test]
-    fn absent_or_empty_census_preserves_durable_reach_clusters() {
-        let plan = oracle_plan("core");
-        let killer = Killer {
-            package: "tests".to_owned(),
-            target: "tests".to_owned(),
-            test: "tests::kills_it".to_owned(),
-        };
-        let mut generalized = crate::discover::GeneralizedHints::empty_supported();
-        generalized.test_sets.push(vec![killer]);
-        generalized.reach.push(ReachCluster {
-            site: SiteIdentity::from_mutant(&plan.mutants[0]),
-            test_set: 0,
-        });
-        let original = generalized.clone();
-        let census = Census::default();
-
-        assert!(!persist_census_learning(false, &census, &plan, &[], &mut generalized));
-        assert_eq!(generalized, original);
-        assert!(!persist_census_learning(true, &census, &plan, &[], &mut generalized));
-        assert_eq!(generalized, original);
-    }
-
-    /// A hinted mutant sharing a binary with an unhinted one still gets censused there — for free —
-    /// but contributes nothing of its own to the census's economics.
-    ///
-    /// Skipping the hinted mutant's ordinal entirely would leave it out of `targets` for a binary
-    /// the census is going to walk anyway, because the unhinted mutant beside it needs it. A
-    /// completed census that never recorded that site would then make `Census::selection` read it
-    /// as *proven unreached* instead of merely never asked about — turning a stale hint into a wrong
-    /// `Uncovered` verdict rather than the whole-binary run a stale hint should fall back to.
-    #[test]
-    fn a_hinted_mutant_rides_along_on_a_binary_an_unhinted_mutant_already_justifies() {
-        let mut plan = oracle_plan("core");
-        let mut hinted = crate::testing::advise_fixture::mutant("a.rs", "arith.add_to_sub", Outcome::Pending, 1);
-        hinted.package = "core".to_owned().into();
-        hinted.ordinal = 2;
-        plan.mutants.push(hinted);
-
-        let mut killers = Killers::default();
-        killers.record(
-            plan.mutants[1].id.clone(),
-            Killer {
-                package: "core".to_owned(),
-                target: String::new(),
-                test: "tests::hint".to_owned(),
-            },
-        );
-
-        let mut core = oracle_binary("core", Some(1));
-        core.path = "/tmp/core".into();
-        core.baseline = Duration::from_secs(2);
-
-        let binaries = [core];
-        let scope = TestScope {
-            packages: &[],
-            package_local: false,
-            whole_workspace: true,
-        };
-        let reach = Reachability::build(&plan, &binaries, &scope);
-
-        let (targets, savings) = census_targets(&plan, &reach, &killers);
-
-        assert_eq!(targets.len(), 1, "one binary is targeted, shared by both mutants");
-        let expected: HashSet<u32> = [1, 2].into_iter().collect();
-        assert_eq!(
-            targets.get(Utf8Path::new("/tmp/core")),
-            Some(&expected),
-            "the hinted ordinal rides along with the unhinted one"
-        );
-        assert_eq!(
-            savings,
-            Duration::from_secs(2),
-            "only the unhinted mutant pays the binary's baseline into the census's economics"
-        );
-    }
-
-    /// A package whose only pending mutant already carries an exact checked killer hint never
-    /// justifies a census of its own — the probe the sweep already plans to try is cheaper than
-    /// anything a census could narrow it to.
-    #[test]
-    fn a_mutant_with_a_hint_and_no_unhinted_sibling_never_targets_its_own_binary() {
-        let mut plan = oracle_plan("core");
-        plan.mutants[0].ordinal = 1;
-
-        let mut killers = Killers::default();
-        killers.record(
-            plan.mutants[0].id.clone(),
-            Killer {
-                package: "core".to_owned(),
-                target: String::new(),
-                test: "tests::hint".to_owned(),
-            },
-        );
-
-        let mut core = oracle_binary("core", Some(1));
-        core.path = "/tmp/core".into();
-        core.baseline = Duration::from_secs(2);
-
-        let mut other = core.clone();
-        other.path = "/tmp/core-other".into();
-        other.target = "other".to_owned();
-        let binaries = [core, other];
-        let scope = TestScope {
-            packages: &[],
-            package_local: false,
-            whole_workspace: true,
-        };
-        let reach = Reachability::build(&plan, &binaries, &scope);
-
-        let (targets, savings) = census_targets(&plan, &reach, &killers);
-
-        assert!(targets.is_empty(), "a hinted mutant alone must not pay to census its own binary");
-        assert_eq!(savings, Duration::ZERO, "no census was justified, so it has nothing to be worth");
-    }
-
-    /// A hinted mutant whose binary is never independently justified by an unhinted mutant is left
-    /// out of `targets` entirely, not merely un-costed — a stale hint there must fall back to a
-    /// whole-binary run rather than being read as `Uncovered` by an absent-but-listed census entry.
-    #[test]
-    fn a_stale_hints_binary_stays_out_of_targets_when_nothing_else_justifies_it() {
-        let mut plan = oracle_plan("core");
-        plan.mutants[0].ordinal = 1;
-
-        // Given its own explicit reach entry, `extra` no longer falls back to the "reaches
-        // everything" default an absent package gets, which keeps it genuinely isolated from
-        // `core` on both sides — the property this test is about.
-        let _extra_reach = plan
-            .reach
-            .insert("extra".to_owned(), core::iter::once("extra".to_owned()).collect());
-
-        let mut extra = crate::testing::advise_fixture::mutant("b.rs", "arith.add_to_sub", Outcome::Pending, 2);
-        extra.package = "extra".to_owned().into();
-        extra.ordinal = 5;
-        plan.mutants.push(extra);
-
-        let mut killers = Killers::default();
-        killers.record(
-            plan.mutants[1].id.clone(),
-            Killer {
-                package: "extra".to_owned(),
-                target: String::new(),
-                test: "tests::hint".to_owned(),
-            },
-        );
-
-        let mut core = oracle_binary("core", Some(1));
-        core.path = "/tmp/core".into();
-        core.baseline = Duration::from_secs(2);
-
-        let mut extra_binary = oracle_binary("extra", Some(1));
-        extra_binary.path = "/tmp/extra".into();
-        extra_binary.baseline = Duration::from_secs(4);
-
-        let binaries = [core, extra_binary];
-        let scope = TestScope {
-            packages: &[],
-            package_local: false,
-            whole_workspace: true,
-        };
-        let reach = Reachability::build(&plan, &binaries, &scope);
-
-        let (targets, savings) = census_targets(&plan, &reach, &killers);
-
-        assert_eq!(targets.len(), 1, "only the unhinted mutant's own binary is targeted");
-        assert!(
-            targets.contains_key(Utf8Path::new("/tmp/core")),
-            "the unhinted mutant's binary is censused"
-        );
-        assert!(
-            !targets.contains_key(Utf8Path::new("/tmp/extra")),
-            "the hinted mutant's own binary, which nothing else justifies, must stay absent"
-        );
-        assert_eq!(
-            savings,
-            Duration::from_secs(2),
-            "only the unhinted mutant's binary counts toward savings"
-        );
-    }
-
-    /// A hint that no longer names a binary this mutant can reach — one recorded before a target
-    /// was renamed, before the binary moved package, or before the test packages were narrowed away
-    /// from it — is exactly as stale as [`super::sweep::judge_ordered`](super::sweep) would find it:
-    /// it never matches any binary in `reach.reachable(&mutant.package)`, so this pass has to fall
-    /// back to treating the mutant as unhinted rather than silently excusing it from a census.
-    #[test]
-    fn a_hint_naming_no_reachable_binary_is_treated_as_unhinted() {
-        let mut plan = oracle_plan("core");
-        plan.mutants[0].ordinal = 1;
-
-        let mut killers = Killers::default();
-        killers.record(
-            plan.mutants[0].id.clone(),
-            Killer {
-                package: "core".to_owned(),
-                target: "a-target-no-binary-carries".to_owned(),
-                test: "tests::hint".to_owned(),
-            },
-        );
-
-        let mut core = oracle_binary("core", Some(1));
-        core.path = "/tmp/core".into();
-        core.baseline = Duration::from_secs(2);
-
-        let binaries = [core];
-        let scope = TestScope {
-            packages: &[],
-            package_local: false,
-            whole_workspace: true,
-        };
-        let reach = Reachability::build(&plan, &binaries, &scope);
-
-        let (targets, savings) = census_targets(&plan, &reach, &killers);
-
-        let expected: HashSet<u32> = core::iter::once(1).collect();
-        assert_eq!(
-            targets.get(Utf8Path::new("/tmp/core")),
-            Some(&expected),
-            "a hint naming no reachable binary must not exempt the mutant from justifying its own census"
-        );
-        assert_eq!(
-            savings,
-            Duration::from_secs(2),
-            "an ineligible hint pays the baseline into savings exactly like an unhinted mutant"
         );
     }
 

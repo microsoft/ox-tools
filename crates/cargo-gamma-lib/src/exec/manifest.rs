@@ -465,7 +465,7 @@ impl Manifest {
     ///
     /// An existing dependency on the implementation crate is replaced rather than retained. Every
     /// instrumented package must share one runtime instance: two package identities would carry
-    /// independent active-mutant and census state into the same test executable. The replacement
+    /// independent active-mutant and reach state into the same test executable. The replacement
     /// still carries forward any `features` and `default-features` the replaced entry declared,
     /// so a package that opted into a runtime feature keeps that selection.
     ///

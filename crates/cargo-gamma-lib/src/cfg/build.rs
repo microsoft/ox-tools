@@ -13,6 +13,9 @@
 //! So the settings are resolved here, from the same places cargo reads them, and handed to the
 //! probe as command-line flags — because `rustc` itself does not read `RUSTFLAGS`, which is a
 //! Cargo-facing variable, and inheriting it changes nothing at all.
+//!
+//! Compiler cfg and host probes are trusted, unbounded discovery setup. They are not campaign-owned
+//! process trees and do not observe build deadlines or cooperative cancellation.
 
 use std::process::Command;
 use std::{env, fs};

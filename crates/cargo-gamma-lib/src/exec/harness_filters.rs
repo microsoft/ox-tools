@@ -120,8 +120,8 @@ impl<'args> HarnessFilters<'args> {
 
     /// The user's arguments as a listing pass should carry them.
     ///
-    /// A listing has to see exactly the population the user's filters allow, or the census records
-    /// tests that are never going to run. That population is decided by more than the positional
+    /// A listing has to see exactly the population the user's filters allow, or resource discovery
+    /// includes tests that are never going to run. That population is decided by more than the positional
     /// filters — `--include-ignored` and `--exclude-should-panic` move it too — so everything is
     /// carried rather than an allowlist that would silently drop the next such option. The one
     /// exception is `--format`, which would fight with the one the listing asks for.

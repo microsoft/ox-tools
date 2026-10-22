@@ -40,10 +40,12 @@
 //! descendant that calls `setsid` leaves it, and every later signal to the group misses it — so
 //! every Windows launch enters a job and every Linux launch attempts to enter a cgroup leaf whether
 //! or not anything is being measured. An unmetered Linux launch may use best-effort process-group
-//! containment only when the host has no supported cgroup facility. Sealed containment means a
-//! boundary descendants cannot leave: [`containment`] reports when the host cannot provide one
-//! before repository-controlled code executes, and [`ProcessTree::sealed`] reports the resulting
-//! state for one launch.
+//! containment only when the host has no supported cgroup facility. Sealed containment retains
+//! descendants across `setsid`/`setpgid`: [`containment`] reports when the host cannot provide that
+//! boundary before repository-controlled code executes, and [`ProcessTree::sealed`] reports the
+//! resulting state for one launch. Linux cgroups cover accidental process-group/session escape,
+//! not a hostile same-credential sandbox: code with writable cgroup interfaces can deliberately
+//! migrate out of the leaf.
 //!
 //! The boundary is in force from the child's first instruction. On Linux the child moves itself
 //! into the cgroup between fork and exec; on Windows it normally starts suspended, enters the

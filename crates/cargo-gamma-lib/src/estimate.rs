@@ -24,7 +24,7 @@ const NARROW_PROBE_SHARE: f64 = 0.25;
 /// A durable exact hint is checked knowledge and almost always convicts again.
 const EXACT_HIT_SHARE: f64 = 0.95;
 
-/// Inferred tests and incomplete-census selections are useful but deliberately less trusted.
+/// Inferred tests are useful but deliberately less trusted.
 const INFERRED_HIT_SHARE: f64 = 0.65;
 
 /// The execution shape used to predict one mutant's test cost.
@@ -33,16 +33,13 @@ pub(crate) enum WorkKind {
     /// A durable exact killer is expected to decide the mutant with one probe.
     Exact,
 
-    /// Census evidence selected measured individual tests.
-    Selected,
-
     /// A learned candidate is tried before its whole-binary fallback.
     Hinted,
 
     /// Reachable test binaries run without a narrower prediction.
     Whole,
 
-    /// Complete census evidence found no test that reaches the mutant.
+    /// No test binary can reach the mutant's package.
     Uncovered,
 }
 
@@ -64,7 +61,7 @@ impl MutationWork {
             kind,
             settled: match kind {
                 WorkKind::Exact | WorkKind::Hinted => scale_duration(suite, NARROW_PROBE_SHARE),
-                WorkKind::Selected | WorkKind::Whole => scale_duration(suite, KILLED_SHARE),
+                WorkKind::Whole => scale_duration(suite, KILLED_SHARE),
                 WorkKind::Uncovered => Duration::ZERO,
             },
         }
@@ -113,10 +110,6 @@ fn scale_duration(duration: Duration, factor: f64) -> Duration {
     Duration::try_from_secs_f64(duration.as_secs_f64() * factor).unwrap_or(Duration::MAX)
 }
 
-pub(crate) fn inferred_fallback_cost(fallback: Duration) -> Duration {
-    scale_duration(scale_duration(fallback, KILLED_SHARE), 1.0 - INFERRED_HIT_SHARE)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -156,13 +149,10 @@ mod tests {
 
         assert_eq!(MutationWork::new(WorkKind::Exact, suite).scheduling_cost(), Duration::from_secs(2));
         assert_eq!(MutationWork::new(WorkKind::Hinted, suite).scheduling_cost(), Duration::from_secs(2));
-        assert_eq!(
-            MutationWork::new(WorkKind::Selected, suite).scheduling_cost(),
-            Duration::from_secs(4)
-        );
+        assert_eq!(MutationWork::new(WorkKind::Whole, suite).scheduling_cost(), Duration::from_secs(4));
         assert_eq!(MutationWork::new(WorkKind::Uncovered, suite).scheduling_cost(), Duration::ZERO);
         assert_eq!(
-            MutationWork::hinted(WorkKind::Selected, Duration::from_secs(2), suite).scheduling_cost(),
+            MutationWork::hinted(WorkKind::Whole, Duration::from_secs(2), suite).scheduling_cost(),
             Duration::from_secs(6)
         );
     }

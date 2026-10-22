@@ -58,6 +58,9 @@ windows-sys = { workspace = true, features = [
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tempfile = { workspace = true }
 
+[target.'cfg(windows)'.dev-dependencies]
+cargo-gamma-rt = { workspace = true }
+
 [[test]]
 name = "loom"
 required-features = ["loom"]

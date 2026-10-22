@@ -15,7 +15,7 @@ use crate::model::{Mutant, Outcome, Summary};
 /// The same discipline as [`crate::elements`]: a consumer reading a figure whose meaning has
 /// silently changed is worse off than one that refuses to read it. Bump this whenever a field's
 /// meaning changes or a field is removed; adding one does not need it.
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "7";
 
 /// How many rows bounded ranking tables keep, matching the prose dump.
 ///
@@ -119,9 +119,9 @@ pub struct Bundle {
     /// Where the run's time went, phase by phase. Absent when nothing was built, so no phase ran.
     ///
     /// The aggregates above say how much time the run spent; this says where. The copy and the
-    /// preflight are components of `build.elapsedMs`; the census and the sweep are components of
+    /// preflight are components of `build.elapsedMs`; the sweep is a component of
     /// `run.testingMs`. Neither set sums to its aggregate — compiling sits between the copy and the
-    /// baseline, and bookkeeping between the census and the sweep — because the point is to see
+    /// baseline, and bookkeeping before the sweep — because the point is to see
     /// which phase a slow run is slow in, not to reconcile the totals. Every phase that did not run
     /// is absent rather than zero: `null` means it did not happen, `0` would claim it happened
     /// instantly.
@@ -440,10 +440,8 @@ pub struct Withdrawal {
 /// Where the run's time went, phase by phase.
 ///
 /// The copy and the preflight are components of `build.elapsedMs`; the baseline is `build.baselineMs`
-/// restated so the fixed cost reads as a sequence rather than two unrelated numbers; the census and
-/// the sweep are components of `run.testingMs`. The value of the split is that whether the per-test
-/// census pays for itself — its cost against the launches it saves the sweep — can be read off one
-/// run, where before it was folded invisibly inside the build.
+/// restated so the fixed cost reads as a sequence rather than two unrelated numbers. The sweep is
+/// a component of `run.testingMs`; its launch and probe counts show how execution used that time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Phases {
@@ -457,13 +455,6 @@ pub struct Phases {
     /// What the baseline suite cost. The same figure as `build.baselineMs`.
     pub baseline: Phase,
 
-    /// Whether census was disabled, declined, incomplete, or complete.
-    pub census_status: String,
-
-    /// What the per-test census cost and covered. Absent when census was disabled or declined.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub census: Option<CensusPhase>,
-
     /// What the sweep cost and launched. Absent when nothing was swept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sweep: Option<SweepPhase>,
@@ -476,43 +467,20 @@ pub struct Phase {
     pub elapsed_ms: u64,
 }
 
-/// What the per-test census cost and covered.
-///
-/// The census spends one subprocess per test per binary; `walked` is exactly that count, and it is
-/// the figure the census's cost has to be weighed against the sweep's launch count to know whether
-/// the trade was positive.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct CensusPhase {
-    pub elapsed_ms: u64,
-
-    /// How many test executions the census walked, one subprocess apiece.
-    pub walked: usize,
-
-    /// How many test binaries the census examined.
-    pub binaries: usize,
-    pub candidate_binaries: usize,
-    pub candidate_sites: usize,
-    pub listing_launches: usize,
-    pub listed_binaries: usize,
-    pub estimated_cost_ms: u64,
-    pub walk_admitted: bool,
-    pub maximum_savings_ms: u64,
-    pub complete_binaries: usize,
-    pub incomplete_binaries: usize,
-}
-
 /// What the sweep cost and how it spent its launches.
 ///
 /// `launches` is what turns the cost model's `build + Σ(launch + prefix)` from a formula into a
-/// measurement; `probes` is what says whether the killer hints and the census are earning their
+/// measurement; `probes` is what says whether the killer hints are earning their
 /// keep, since a probe is a launch the run only made because a hint pointed at it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SweepPhase {
+    /// File-only, summed binary execution costs; `elapsedMs` remains campaign sweep wall time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<crate::exec::SweepAccounting>,
     pub elapsed_ms: u64,
 
-    /// How many test-binary subprocesses the sweep launched in total.
+    /// Legacy requested binary runs, excluding additional confirmation attempts.
     pub launches: usize,
 
     /// How many of those launches were hint-directed probes.
@@ -531,7 +499,6 @@ pub struct SweepPhase {
     pub item_candidates: usize,
     pub reach_candidates: usize,
     pub file_candidates: usize,
-    pub census_candidates: usize,
     pub item_probes: usize,
     pub item_hits: usize,
     pub reach_probes: usize,
@@ -541,15 +508,8 @@ pub struct SweepPhase {
     pub item_rejected: usize,
     pub reach_rejected: usize,
     pub file_rejected: usize,
-    pub census_probes: usize,
-    pub census_hits: usize,
     pub whole_selections: usize,
-    pub case_selections: usize,
-    pub hinted_selections: usize,
-    pub hinted_fallbacks: usize,
     pub uncovered_selections: usize,
-    pub available_tests: usize,
-    pub selected_tests: usize,
     pub packages: Vec<PackageSweep>,
     pub launches_saved: usize,
     pub reach_launches_saved: usize,
@@ -912,22 +872,8 @@ fn phases_of(session: &Session, redaction: Redaction) -> Phases {
         baseline: Phase {
             elapsed_ms: millis(session.baseline_wall),
         },
-        census_status: session.phases.census_status.as_str().to_owned(),
-        census: session.phases.census.as_ref().map(|census| CensusPhase {
-            elapsed_ms: millis(census.elapsed),
-            walked: census.walked,
-            binaries: census.binaries,
-            candidate_binaries: census.candidate_binaries,
-            candidate_sites: census.candidate_sites,
-            listing_launches: census.listing_launches,
-            listed_binaries: census.listed_binaries,
-            estimated_cost_ms: millis(census.estimated_cost),
-            walk_admitted: census.walk_admitted,
-            maximum_savings_ms: millis(census.maximum_savings),
-            complete_binaries: census.complete_binaries,
-            incomplete_binaries: census.incomplete_binaries,
-        }),
         sweep: session.phases.sweep.as_ref().map(|sweep| SweepPhase {
+            accounting: sweep.accounting.clone(),
             elapsed_ms: millis(sweep.elapsed),
             launches: sweep.launches,
             probes: sweep.probes,
@@ -941,7 +887,6 @@ fn phases_of(session: &Session, redaction: Redaction) -> Phases {
             item_candidates: sweep.item_candidates,
             reach_candidates: sweep.reach_candidates,
             file_candidates: sweep.file_candidates,
-            census_candidates: sweep.census_candidates,
             item_probes: sweep.item_probes,
             item_hits: sweep.item_hits,
             reach_probes: sweep.reach_probes,
@@ -951,15 +896,8 @@ fn phases_of(session: &Session, redaction: Redaction) -> Phases {
             item_rejected: sweep.item_rejected,
             reach_rejected: sweep.reach_rejected,
             file_rejected: sweep.file_rejected,
-            census_probes: sweep.census_probes,
-            census_hits: sweep.census_hits,
             whole_selections: sweep.whole_selections,
-            case_selections: sweep.case_selections,
-            hinted_selections: sweep.hinted_selections,
-            hinted_fallbacks: sweep.hinted_fallbacks,
             uncovered_selections: sweep.uncovered_selections,
-            available_tests: sweep.available_tests,
-            selected_tests: sweep.selected_tests,
             packages: sweep
                 .packages
                 .iter()
@@ -1439,11 +1377,12 @@ mod tests {
     #[test]
     fn a_run_that_built_something_carries_its_phase_timings() {
         let phases = crate::exec::Phases {
+            initial_hints: None,
             copy: Duration::from_millis(12),
             preflight: Duration::from_millis(340),
-            census_status: crate::exec::CensusStatus::Declined,
-            census: None,
             sweep: Some(crate::exec::SweepCost {
+                accounting: None,
+                confirmed_initial_killers: std::collections::BTreeSet::new(),
                 elapsed: Duration::from_secs(42),
                 launches: 47,
                 probes: 12,
@@ -1457,7 +1396,6 @@ mod tests {
                 item_candidates: 9,
                 reach_candidates: 7,
                 file_candidates: 5,
-                census_candidates: 6,
                 item_probes: 4,
                 item_hits: 2,
                 reach_probes: 2,
@@ -1467,15 +1405,8 @@ mod tests {
                 item_rejected: 0,
                 reach_rejected: 0,
                 file_rejected: 0,
-                census_probes: 5,
-                census_hits: 2,
                 whole_selections: 31,
-                case_selections: 10,
-                hinted_selections: 5,
-                hinted_fallbacks: 3,
                 uncovered_selections: 6,
-                available_tests: 1_000,
-                selected_tests: 120,
                 packages: vec![crate::exec::PackageSweepCost {
                     package: "private-package".into(),
                     mutants: 7,
@@ -1493,23 +1424,13 @@ mod tests {
         assert_eq!(phases.copy.elapsed_ms, 12);
         assert_eq!(phases.preflight.elapsed_ms, 340);
         assert_eq!(phases.baseline.elapsed_ms, 500);
-        assert!(phases.census.is_none(), "no census ran, so the census phase is absent");
 
         let sweep = phases.sweep.expect("the sweep ran");
 
         assert_eq!(sweep.elapsed_ms, 42_000);
         assert_eq!(sweep.launches, 47);
         assert_eq!(sweep.probes, 12);
-        assert_eq!(
-            (
-                sweep.whole_selections,
-                sweep.case_selections,
-                sweep.hinted_selections,
-                sweep.hinted_fallbacks
-            ),
-            (31, 10, 5, 3)
-        );
-        assert_eq!((sweep.available_tests, sweep.selected_tests), (1_000, 120));
+        assert_eq!((sweep.whole_selections, sweep.uncovered_selections), (31, 6));
         assert_eq!((sweep.item_candidates, sweep.item_probes, sweep.item_hits), (9, 4, 2));
         assert_eq!((sweep.reach_candidates, sweep.reach_probes, sweep.reach_hits), (7, 2, 1));
         let package = &sweep.packages[0];
@@ -1531,52 +1452,9 @@ mod tests {
         assert!(bundle(&plan(), None, &context()).phases.is_none());
     }
 
-    /// The census is the whole subject here, and its figures must appear exactly when it ran.
-    #[test]
-    fn the_census_phase_is_present_only_when_a_census_ran() {
-        let without = bundle(&plan(), Some(&session_with(crate::exec::Phases::default())), &context());
-
-        assert!(without.phases.expect("phases").census.is_none(), "no census means no census phase");
-
-        let phases = crate::exec::Phases {
-            census: Some(crate::exec::CensusCost {
-                elapsed: Duration::from_secs(8),
-                walked: 1_681,
-                binaries: 30,
-                candidate_binaries: 30,
-                candidate_sites: 420,
-                listing_launches: 30,
-                listed_binaries: 29,
-                estimated_cost: Duration::from_secs(12),
-                walk_admitted: true,
-                maximum_savings: Duration::from_secs(90),
-                complete_binaries: 27,
-                incomplete_binaries: 3,
-            }),
-            ..crate::exec::Phases::default()
-        };
-
-        let census = bundle(&plan(), Some(&session_with(phases)), &context())
-            .phases
-            .expect("phases")
-            .census
-            .expect("a census ran");
-
-        assert_eq!(census.elapsed_ms, 8_000);
-        assert_eq!(census.walked, 1_681);
-        assert_eq!(census.binaries, 30);
-        assert_eq!(census.candidate_sites, 420);
-        assert_eq!(census.listing_launches, 30);
-        assert_eq!(census.listed_binaries, 29);
-        assert_eq!(census.estimated_cost_ms, 12_000);
-        assert!(census.walk_admitted);
-        assert_eq!(census.maximum_savings_ms, 90_000);
-        assert_eq!((census.complete_binaries, census.incomplete_binaries), (27, 3));
-    }
-
     /// The one relationship the bundle guarantees by construction: the baseline restated in the
     /// phase profile is the very figure the build reports, because both read `session.baseline_wall`.
-    /// The copy and preflight are subsets of the build and the census and sweep of the testing
+    /// The copy and preflight are subsets of the build and the sweep of the testing
     /// window, but those are guaranteed by where the clocks sit in a real run, not by this code, so
     /// they are not asserted here.
     #[test]
@@ -1707,10 +1585,9 @@ mod tests {
     #[test]
     fn the_serialized_phases_use_camel_case_and_omit_the_phases_that_did_not_run() {
         let phases = crate::exec::Phases {
+            initial_hints: None,
             copy: Duration::from_millis(1),
             preflight: Duration::from_millis(2),
-            census_status: crate::exec::CensusStatus::Disabled,
-            census: None,
             sweep: Some(crate::exec::SweepCost {
                 elapsed: Duration::from_millis(3),
                 launches: 4,
@@ -1733,9 +1610,90 @@ mod tests {
         assert!(json.contains("\"probes\""), "{json}");
         assert!(json.contains("\"reachLaunchesSaved\": 1"), "{json}");
 
-        // The census did not run, so it must not appear as a key at all.
-        assert!(!json.contains("\"census\""), "an absent census must be omitted, not null: {json}");
-        assert!(!json.contains("\"walked\""), "{json}");
+        let without_sweep = to_json(&bundle(&plan(), Some(&session_with(crate::exec::Phases::default())), &context())).expect("json");
+
+        assert!(!without_sweep.contains("\"sweep\""), "{without_sweep}");
+    }
+
+    #[test]
+    fn telemetry_reports_separate_population_attempts_and_concurrent_costs_without_frozen_identities() {
+        use crate::exec::{AttemptCost, InitialHints, Phases, SweepAccounting, SweepCost};
+
+        let killer = crate::discover::Killer {
+            package: "private-initial-package".into(),
+            target: "private-initial-target".into(),
+            test: "private-initial-killer".into(),
+        };
+        let accounting = SweepAccounting {
+            complete: true,
+            initial_population: Some(43_164),
+            initial_exact_hints: Some(34_603),
+            initial_killer_confirmed: Some(245),
+            exact: AttemptCost {
+                launches: 50,
+                execution_ms: 2_000,
+                inconclusive: 3,
+                ..AttemptCost::default()
+            },
+            inferred: AttemptCost {
+                launches: 20,
+                execution_ms: 1_000,
+                misses: 7,
+                ..AttemptCost::default()
+            },
+            fallback: AttemptCost {
+                launches: 10,
+                execution_ms: 3_000,
+                ..AttemptCost::default()
+            },
+            confirmation: AttemptCost {
+                launches: 5,
+                execution_ms: 500,
+                ..AttemptCost::default()
+            },
+            duplicate_launches_avoided: 12,
+            live_refresh_failures: 2,
+        };
+        let sweep = SweepCost {
+            elapsed: Duration::from_millis(1_500),
+            accounting: Some(accounting.clone()),
+            confirmed_initial_killers: std::iter::once("private-initial-confirmed-mutant".into()).collect(),
+            ..SweepCost::default()
+        };
+        let session = session_with(Phases {
+            initial_hints: Some(InitialHints {
+                population: 43_164,
+                killers: std::iter::once(("private-initial-mutant".into(), killer)).collect(),
+            }),
+            sweep: Some(sweep.clone()),
+            ..Phases::default()
+        });
+        for redaction in [Redaction::Names, Redaction::Hashed, Redaction::Omitted] {
+            let mut context = context();
+            context.redaction = redaction;
+            let document = to_json(&bundle(&plan(), Some(&session), &context)).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&document).unwrap();
+            let reported = &json["phases"]["sweep"];
+            assert_eq!(reported["elapsedMs"], 1_500);
+            assert_eq!(reported["accounting"], serde_json::to_value(&accounting).unwrap());
+            assert_eq!(reported["accounting"]["initialExactHints"], 34_603);
+            assert_eq!(reported["accounting"]["exact"]["launchAttempts"], 50);
+            assert_eq!(reported["accounting"]["confirmation"]["executionMs"], 500);
+            assert!(
+                !document.contains("private-initial-"),
+                "frozen identities belong only in local prepared state"
+            );
+        }
+        let live = sweep.live_json().unwrap();
+        assert!(
+            !live.contains("private-initial-"),
+            "live reports contain no frozen hint or confirmation identities"
+        );
+        let live: serde_json::Value = serde_json::from_str(&live).unwrap();
+        assert_eq!(live["schemaVersion"], 1);
+        assert_eq!(live["sweepWallMs"], 1_500);
+        assert_eq!(live["accounting"]["fallback"]["executionMs"], 3_000);
+        assert_eq!(live["accounting"], serde_json::to_value(accounting).unwrap());
     }
 
     #[test]
@@ -1792,7 +1750,7 @@ mod tests {
 
     #[test]
     fn the_bundle_says_which_schema_it_is() {
-        assert_eq!(bundle(&plan(), None, &context()).schema_version, "5");
+        assert_eq!(bundle(&plan(), None, &context()).schema_version, "7");
     }
 
     #[test]

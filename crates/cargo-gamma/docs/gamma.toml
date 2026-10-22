@@ -171,16 +171,7 @@
 #
 # test-lib = false
 
-# Experimentally measure case-level reachability before testing mutants.
-# Default: false.
-#
-# The command-line equivalent is `--optimize-test-execution`. The census runs only when its
-# economic gate predicts that case selection can repay the additional listing and sampling work.
-#
-# optimize-test-execution = false
-
-# Explicitly suppress case-level selection and run each reachable test binary whole.
-# This conflicts with optimize-test-execution.
+# Run each reachable test binary whole rather than transferring reach observations between mutants.
 #
 # whole-test-binaries = false
 

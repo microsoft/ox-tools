@@ -3,8 +3,7 @@
 
 //! Taking the children along when this process is interrupted.
 //!
-//! Everything here runs, or may run, inside a signal handler, so it is written to the rules
-//! that implies: no allocation, no locks, and no calls that are not async-signal-safe. The
+//! The handler path permits no allocation, locks, or calls that are not async-signal-safe. The
 //! registry is therefore a fixed array of atomics rather than the obvious `Vec` behind a
 //! `Mutex`, which a handler could deadlock against the very thread it interrupted.
 //!
@@ -19,18 +18,21 @@
 //! scans each slot once and may have already passed the slot the registration lands in.
 //!
 //! [`spawning`] closes both. A spawner announces itself before it creates anything and reads the
-//! interrupt state afterwards; a handler announces itself before it scans and reads the spawner
-//! count afterwards. Both sides use sequentially consistent operations, so at least one of them
-//! sees the other — this is Dekker's argument, and it is the whole of the guarantee:
+//! interrupt state afterwards; a handler takes cleanup ownership before publishing the signal
+//! and scanning. Sequentially consistent operations preserve the cancellation handshake:
 //!
 //! * The spawner sees the interrupt. It then either has not created its child yet, and does not,
 //!   or has, and [`Spawning::watch`] kills the new group as it registers it.
-//! * The handler sees the spawner. It kills every group it can see and returns **without** dying,
-//!   leaving the fatal half of the interrupt to whichever spawner is last out of the window.
+//! * A spawner or another sweep still owns cleanup. The handler kills what it can see and returns
+//!   **without** dying, handing fatal responsibility to the final cleanup owner.
 //!
 //! There is no interleaving in which the spawner believes the run is calm and the handler believes
 //! nothing is being spawned, so no thread ever re-raises a terminal signal while an unwatched child
 //! exists.
+//!
+//! No handler waits for another owner: it may have interrupted that owner on the same thread.
+//! Ordinary lifecycle release, however, waits for sweeps holding extracted identities before
+//! permitting reap or descriptor close. Clearing a slot does not revoke an already-extracted kill.
 //!
 //! The cost is that an interrupt arriving mid-spawn is delivered when that spawn finishes rather
 //! than at once, and the alternative is the leak above. The width is whatever a caller holds the
@@ -85,6 +87,13 @@ const EMPTY: i32 = 0;
 /// Zero is not a signal number, so it cannot be confused with one that has.
 const CALM: i32 = 0;
 
+/// Marks a registry that is stopping its watched processes.
+///
+/// Published in the same atomic word as the owner count, so final-close cannot mistake a later
+/// interrupt's signal for one whose cleanup it just finished.
+const STOPPING: usize = 1 << (usize::BITS - 1);
+const OWNER_MASK: usize = STOPPING - 1;
+
 /// The groups an interrupt takes with it, and the protocol that keeps a child from slipping past.
 ///
 /// Separated from the process-wide [`REGISTRY`] it is normally reached through, and given the kill
@@ -102,15 +111,18 @@ struct Registry {
     /// representable.
     cgroups: [AtomicI32; SLOTS],
 
-    /// Sweeps currently using descriptors, so release cannot close one under a handler.
+    /// Sweeps currently using extracted identities or descriptors.
     handling: AtomicUsize,
 
-    /// How many children exist, or are about to, without their group being watched yet.
-    spawning: AtomicUsize,
+    /// Spawn/sweep owner count in the low bits, with a sticky `STOPPING` flag in the high bit.
+    ///
+    /// The final owner takes responsibility without waiting: a handler may have interrupted
+    /// another owner on this very thread, so waiting here would deadlock.
+    owners: AtomicUsize,
 
     /// The signal a handler has begun acting on, or [`CALM`].
     ///
-    /// Written once and never cleared: a run that has begun dying of a signal does not stop.
+    /// Set on interruption and never cleared: a run that has begun dying of a signal does not stop.
     interrupted: AtomicI32,
 }
 
@@ -122,7 +134,7 @@ impl Registry {
             groups: [const { AtomicI32::new(EMPTY) }; SLOTS],
             cgroups: [const { AtomicI32::new(EMPTY) }; SLOTS],
             handling: AtomicUsize::new(0),
-            spawning: AtomicUsize::new(0),
+            owners: AtomicUsize::new(0),
             interrupted: AtomicI32::new(CALM),
         }
     }
@@ -134,17 +146,17 @@ impl Registry {
             groups: core::array::from_fn(|_| AtomicI32::new(EMPTY)),
             cgroups: core::array::from_fn(|_| AtomicI32::new(EMPTY)),
             handling: AtomicUsize::new(0),
-            spawning: AtomicUsize::new(0),
+            owners: AtomicUsize::new(0),
             interrupted: AtomicI32::new(CALM),
         }
     }
 
-    /// Announces a spawn about to create a process group that is not registered yet.
+    /// Acquires cleanup ownership before creating an unwatched group or publishing an interrupt.
     ///
     /// Sequentially consistent, and paired with the [`Registry::signal`] the caller performs next:
     /// together they are one half of the handshake described at the top of this module.
     fn open(&self) {
-        let _previous = self.spawning.fetch_add(1, Ordering::SeqCst);
+        let _previous = self.owners.fetch_add(1, Ordering::SeqCst);
         // Loom treats atomic SeqCst accesses as AcqRel; its supported SC fence makes this
         // store-fence-load handshake match production's real SeqCst ordering.
         #[cfg(loom)]
@@ -158,29 +170,26 @@ impl Registry {
 
     /// Closes a spawn window, and says what the caller must now die of.
     ///
-    /// `Some` means a handler found this window open, killed what it could see and left the fatal
-    /// half of the interrupt here. The last window out performs it, having first swept the groups
-    /// registered since that handler ran; an earlier one must not, because a window still open is
-    /// a child that may still be unwatched.
-    #[cfg(any(all(test, not(miri)), loom))]
+    /// An interrupted window sweeps again before handing back cleanup ownership. `Some` means
+    /// this was the final owner, with neither an unwatched spawn nor an unfinished sweep remaining.
+    #[cfg(any(test, loom))]
     fn close<K: Fn(i32)>(&self, kill: &K) -> Option<i32> {
         self.close_with(kill, &|_descriptor| {})
     }
 
     fn close_with<K: Fn(i32), C: Fn(i32)>(&self, kill: &K, kill_cgroup: &C) -> Option<i32> {
-        let last = self.spawning.fetch_sub(1, Ordering::SeqCst) == 1;
-        // Pairs the window-closing store with the signal load in Loom's SC fence order.
-        #[cfg(loom)]
-        fence(Ordering::SeqCst);
-        let signal = self.signal();
-
-        if !last || signal == CALM {
-            return None;
+        if self.signal() != CALM {
+            self.sweep_with(kill, kill_cgroup);
         }
 
-        self.sweep_with(kill, kill_cgroup);
+        self.finish()
+    }
 
-        Some(signal)
+    /// Hands fatal responsibility to the last cleanup owner, never blocking a signal handler.
+    fn finish(&self) -> Option<i32> {
+        let previous = self.owners.fetch_sub(1, Ordering::SeqCst);
+        let last = previous & OWNER_MASK == 1;
+        (last && previous & STOPPING != 0).then(|| self.signal())
     }
 
     /// Starts watching a freshly created group, returning the slot it took.
@@ -191,7 +200,7 @@ impl Registry {
     /// the sweep in [`Registry::close`] reaches it a second time — a group whose only member has
     /// just been killed and not yet reaped still pins its id, so the repeat cannot land elsewhere.
     fn claim<K: Fn(i32)>(&self, group: i32, kill: &K) -> Option<usize> {
-        if group <= EMPTY {
+        if group <= 1 {
             return None;
         }
 
@@ -213,9 +222,30 @@ impl Registry {
     /// it kills, and a run that deferred its death goes on spawning: the slot a caller was given
     /// may already belong to somebody else by the time it is handed back, and clearing it would
     /// take that child out of the next sweep.
+    ///
+    /// Returning also quiesces sweeps that extracted this identity before the slot was cleared.
     fn release(&self, slot: usize, group: i32) {
+        self.release_with(slot, group, || {});
+    }
+
+    fn release_with(&self, slot: usize, group: i32, waiting: impl FnMut()) {
         if let Some(entry) = self.groups.get(slot) {
             let _released = entry.compare_exchange(group, EMPTY, Ordering::SeqCst, Ordering::SeqCst);
+        }
+
+        // A sweep may already hold the extracted identity. Wait before callers can reap the
+        // leader and let the OS reuse that numeric identity for an unrelated process.
+        self.quiesce_with(waiting);
+    }
+
+    /// Called only by ordinary lifecycle code, never from a signal handler.
+    fn quiesce_with(&self, mut waiting: impl FnMut()) {
+        while self.handling.load(Ordering::SeqCst) != 0 {
+            waiting();
+            #[cfg(not(loom))]
+            std::thread::yield_now();
+            #[cfg(loom)]
+            loom::thread::yield_now();
         }
     }
 
@@ -275,30 +305,26 @@ impl Registry {
             let _released = entry.compare_exchange(encoded, EMPTY, Ordering::SeqCst, Ordering::SeqCst);
         }
 
-        while self.handling.load(Ordering::SeqCst) != 0 {
-            std::thread::yield_now();
-        }
+        self.quiesce_with(|| {});
     }
 
     /// One pass of the signal handler, and whether it may go on to die of the signal.
     ///
-    /// `None` means it must not: a spawn was in flight, so a child may exist that this pass could
-    /// not see, and dying now would leave it running. The spawner finishes the job in
-    /// [`Registry::close`].
-    #[cfg(any(all(test, not(miri)), loom))]
+    /// `None` transfers responsibility to an outstanding spawn or sweep owner. It must finish
+    /// its effects before the final owner can re-raise, even if all registry slots are now empty.
+    #[cfg(any(test, loom))]
     fn interrupt<K: Fn(i32)>(&self, signal: i32, kill: &K) -> Option<i32> {
         self.interrupt_with(signal, kill, &|_descriptor| {})
     }
 
     fn interrupt_with<K: Fn(i32), C: Fn(i32)>(&self, signal: i32, kill: &K, kill_cgroup: &C) -> Option<i32> {
+        self.open();
         let _previous = self.interrupted.swap(signal, Ordering::SeqCst);
+        let _previous = self.owners.fetch_or(STOPPING, Ordering::SeqCst);
 
         self.sweep_with(kill, kill_cgroup);
 
-        // Pairs the signal store with the window-count load in Loom's SC fence order.
-        #[cfg(loom)]
-        fence(Ordering::SeqCst);
-        (self.spawning.load(Ordering::SeqCst) == 0).then_some(signal)
+        self.finish()
     }
 
     fn sweep_with<K: Fn(i32), C: Fn(i32)>(&self, kill: &K, kill_cgroup: &C) {
@@ -491,8 +517,9 @@ impl Spawning {
     ///
     /// Kills the group at once when the run is already being interrupted, because the handler that
     /// began it may have scanned this slot before it was claimed.
+    /// The caller must keep the leader unreaped until [`forget`] returns.
     ///
-    /// `None` means the group is **not** being watched — either it is not a valid group id, or
+    /// `None` means the group is **not** being watched — either its id is at most one, or
     /// every one of [`capacity`]'s slots is already taken. A caller that goes on to run a child it
     /// was given `None` for has a child no interrupt can reach, which is the leak this module
     /// exists to prevent, so the answer has to be acted on rather than stored.
@@ -627,6 +654,9 @@ impl TestRegistry {
 /// The group is named as well as the slot because a slot is only ever this caller's while the
 /// group it was claimed for is still in it: a handler empties every slot it kills, and a run that
 /// deferred its own death goes on spawning into the slots that frees.
+///
+/// Waits for sweeps already holding an extracted identity before returning. Call only from ordinary
+/// lifecycle code, before reaping the leader; this wait is not signal-handler-safe.
 pub fn forget(slot: usize, group: i32) {
     registry().release(slot, group);
 }
@@ -645,8 +675,8 @@ pub(crate) fn release_watched_cgroup(slot: usize, descriptor: i32) {
 /// Kills a process group, which is the only thing the registry does to the world outside itself.
 fn kill_group(group: i32) {
     // SAFETY: `kill` is POSIX async-signal-safe, takes two integers and touches no caller memory.
-    // `Registry::claim` admits only positive group ids, so negation is defined and addresses that
-    // process group rather than an individual process.
+    // `Registry::claim` admits only group ids greater than one, so negation is defined and cannot
+    // select Linux's `kill(-1, ...)` broadcast.
     let _sent = unsafe { libc::kill(-group, libc::SIGKILL) };
 }
 
@@ -697,6 +727,125 @@ extern "C" fn handler(signal: i32) {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod ownership_tests {
+    use core::cell::RefCell;
+    use std::sync::Barrier;
+    use std::thread;
+
+    use super::*;
+
+    /// A registry and a record of every group it asked to have killed.
+    ///
+    /// Fake effects keep fabricated group identities away from the operating system.
+    pub(super) fn recorded<T>(body: impl FnOnce(&Registry, &dyn Fn(i32), &RefCell<Vec<i32>>) -> T) -> T {
+        let registry = Registry::new();
+        let killed = RefCell::new(Vec::new());
+        let kill = |group: i32| killed.borrow_mut().push(group);
+
+        body(&registry, &kill, &killed)
+    }
+
+    #[test]
+    fn release_quiesces_an_extracted_kill_before_reap_and_identity_reuse() {
+        let registry = Registry::new();
+        let slot = registry.claim(41, &|_| panic!("a calm claim must not kill")).expect("free slot");
+        // Script an outstanding sweep; Loom separately explores real extraction/release schedules.
+        registry.handling.store(1, Ordering::SeqCst);
+        let mut notifications = 0;
+        registry.release_with(slot, 41, || {
+            notifications += 1;
+            assert_eq!(notifications, 1, "release must stop waiting once the effect completes");
+            assert_eq!(registry.holding(slot), EMPTY, "release clears admission before quiescing");
+            assert_eq!(registry.handling.load(Ordering::SeqCst), 1);
+            registry.handling.store(0, Ordering::SeqCst);
+        });
+        assert_eq!(notifications, 1, "release must observe the outstanding effect");
+        assert_eq!(registry.handling.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.claim(41, &|_| panic!("a calm reuse must not kill")), Some(slot));
+        registry.release_with(slot, 41, || panic!("a quiescent release must not wait"));
+        assert_eq!(registry.holding(slot), EMPTY);
+    }
+
+    #[test]
+    fn a_nested_sweeper_defers_fatal_responsibility_without_waiting() {
+        recorded(|registry, _kill, killed| {
+            let _slot = registry.claim(41, &|_| {}).expect("free slot");
+            let fatal = registry.interrupt(libc::SIGINT, &|group| {
+                assert_eq!(registry.interrupt(libc::SIGTERM, &|_| panic!("already extracted")), None);
+                assert!(killed.borrow().is_empty(), "the outer effect has not completed");
+                killed.borrow_mut().push(group);
+            });
+            assert_eq!(*killed.borrow(), [41]);
+            assert_eq!(fatal, Some(libc::SIGTERM));
+        });
+    }
+
+    #[test]
+    fn final_close_defers_to_an_interrupted_sweeper_without_waiting() {
+        recorded(|registry, _kill, killed| {
+            registry.open();
+            let _slot = registry.claim(41, &|_| {}).expect("free slot");
+            let fatal = registry.interrupt(libc::SIGINT, &|group| {
+                assert_eq!(registry.close(&|_| panic!("already extracted")), None);
+                assert!(killed.borrow().is_empty(), "close must not end the outstanding effect");
+                killed.borrow_mut().push(group);
+            });
+            assert_eq!(*killed.borrow(), [41]);
+            assert_eq!(fatal, Some(libc::SIGINT));
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_sweep_and_final_close_defer_to_an_extracted_cgroup_kill() {
+        for final_close in [false, true] {
+            let registry = Registry::new();
+            if final_close {
+                registry.open();
+            }
+            let _slot = registry.claim_cgroup(17, &|_| {}).expect("free descriptor slot");
+            let completed = core::cell::Cell::new(false);
+            let fatal = registry.interrupt_with(libc::SIGINT, &|_| {}, &|descriptor| {
+                assert_eq!(descriptor, 17);
+                let other = if final_close {
+                    registry.close_with(&|_| {}, &|_| panic!("already extracted"))
+                } else {
+                    registry.interrupt_with(libc::SIGINT, &|_| {}, &|_| panic!("already extracted"))
+                };
+                assert_eq!(other, None);
+                completed.set(true);
+            });
+            assert!(completed.get());
+            assert_eq!(fatal, Some(libc::SIGINT));
+        }
+    }
+
+    #[test]
+    fn concurrent_owner_completion_hands_fatal_responsibility_to_exactly_one_owner() {
+        let registry = Registry::new();
+        registry.open();
+        registry.open();
+        assert_eq!(registry.interrupt(libc::SIGINT, &|_| panic!("no groups were registered")), None);
+        let ready = Barrier::new(2);
+
+        let results = thread::scope(|threads| {
+            let complete = || {
+                ready.wait();
+                registry.close(&|_| panic!("no groups were registered"))
+            };
+            let first = threads.spawn(complete);
+            let second = threads.spawn(complete);
+            [first.join().expect("first owner"), second.join().expect("second owner")]
+        });
+
+        assert_eq!(results.iter().flatten().copied().collect::<Vec<_>>(), [libc::SIGINT]);
+        assert_eq!(registry.owners.load(Ordering::SeqCst), STOPPING);
+        assert_eq!(registry.handling.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -710,27 +859,22 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
+    use super::ownership_tests::recorded;
     use super::*;
 
-    /// A registry and a record of every group it asked to have killed.
-    ///
-    /// The kill is a parameter of the protocol precisely so that it can be recorded here: what
-    /// these tests assert is which groups were reached and when, which a real `SIGKILL` answers
-    /// only by leaving a process behind or not.
-    fn recorded<T>(body: impl FnOnce(&Registry, &dyn Fn(i32), &RefCell<Vec<i32>>) -> T) -> T {
-        let registry = Registry::new();
-        let killed = RefCell::new(Vec::new());
-        let kill = |group: i32| killed.borrow_mut().push(group);
-
-        body(&registry, &kill, &killed)
-    }
-
     fn run_process_case(case: &str) -> std::process::ExitStatus {
-        Command::new(std::env::current_exe().expect("test executable"))
+        let output = Command::new(std::env::current_exe().expect("test executable"))
             .args(["--exact", "interrupt::tests::process_case", "--nocapture"])
             .env("CARGO_GAMMA_INTERRUPT_CASE", case)
-            .status()
-            .expect("run process case")
+            .output()
+            .expect("run process case");
+        if output.status.success() {
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(&format!("interrupt process case {case} completed")),
+                "the survivable process helper did not execute"
+            );
+        }
+        output.status
     }
 
     #[test]
@@ -763,8 +907,10 @@ mod tests {
                 assert_eq!(registry().signal(), libc::SIGCHLD);
                 drop(spawning);
             }
+            "reset" => verify_default_disposition_before_reraise(),
             other => panic!("unknown process case {other}"),
         }
+        println!("interrupt process case {case} completed");
     }
 
     #[test]
@@ -807,6 +953,10 @@ mod tests {
     /// be installed by the time the raise lands.
     #[test]
     fn dying_resets_the_disposition_to_the_default_before_re_raising() {
+        assert!(run_process_case("reset").success());
+    }
+
+    fn verify_default_disposition_before_reraise() {
         static DELIVERED: AtomicBool = AtomicBool::new(false);
 
         #[cfg_attr(coverage_nightly, coverage(off))]
@@ -904,6 +1054,7 @@ mod tests {
         recorded(|registry, kill, killed| {
             assert_eq!(registry.claim(EMPTY, &kill), None);
             assert_eq!(registry.claim(-1, &kill), None);
+            assert_eq!(registry.claim(1, &kill), None);
             assert_eq!(registry.claim(i32::MIN, &kill), None);
 
             assert!(killed.borrow().is_empty(), "nothing that was refused may be signalled");
@@ -1173,13 +1324,19 @@ mod tests {
     fn a_full_registry_refuses_the_group_it_cannot_watch() {
         recorded(|registry, kill, killed| {
             for group in 0..capacity() {
-                let slot = registry.claim(i32::try_from(group).expect("a slot index fits a group id") + 1, &kill);
+                let slot = registry.claim(i32::try_from(group).expect("the fixed slot index plus two fits i32") + 2, &kill);
 
                 assert!(slot.is_some(), "slot {group} of {} was refused", capacity());
             }
 
             assert_eq!(registry.claim(9999, &kill), None, "a full registry accepted one more group");
             assert!(killed.borrow().is_empty(), "a refusal killed a group that was already watched");
+            assert_eq!(registry.interrupt(libc::SIGINT, &kill), Some(libc::SIGINT));
+            assert_eq!(
+                *killed.borrow(),
+                (2..=i32::try_from(capacity()).expect("the fixed registry capacity plus one fits i32") + 1).collect::<Vec<_>>(),
+                "all fabricated identities must go only to this fake effect"
+            );
         });
     }
 
@@ -1193,7 +1350,7 @@ mod tests {
             let mut taken = Vec::with_capacity(capacity());
 
             for group in 0..capacity() {
-                let group = i32::try_from(group).expect("a slot index fits a group id") + 1;
+                let group = i32::try_from(group).expect("the fixed slot index plus two fits i32") + 2;
 
                 taken.push((registry.claim(group, &kill).expect("a free slot"), group));
             }
@@ -1324,12 +1481,84 @@ mod tests {
 
 #[cfg(loom)]
 mod loom_models {
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use loom::sync::{Arc, Mutex};
 
     use super::Registry;
 
     /// An arbitrary positive process-group identifier, distinct from the registry's empty marker.
     const PROCESS_GROUP: i32 = 41;
+
+    pub(super) fn extracted_kills_finish_before_release_reap_and_reuse() {
+        loom::model(|| {
+            let registry = Arc::new(Registry::new());
+            let slot = registry.claim(PROCESS_GROUP, &|_| {}).expect("free slot");
+            let reused = Arc::new(AtomicBool::new(false));
+            let sweeping = {
+                let registry = Arc::clone(&registry);
+                let reused = Arc::clone(&reused);
+                loom::thread::spawn(move || {
+                    let _fatal = registry.interrupt(libc::SIGINT, &|group| {
+                        assert_eq!(group, PROCESS_GROUP);
+                        loom::thread::yield_now();
+                        assert!(!reused.load(Ordering::SeqCst), "kill used an identity after release/reap/reuse");
+                    });
+                })
+            };
+            registry.release(slot, PROCESS_GROUP);
+            reused.store(true, Ordering::SeqCst);
+            sweeping.join().expect("sweep thread");
+        });
+    }
+
+    pub(super) fn only_the_final_cleanup_owner_can_take_fatal_responsibility() {
+        for final_close in [false, true] {
+            loom::model(move || {
+                let registry = Arc::new(Registry::new());
+                let _slot = registry.claim(PROCESS_GROUP, &|_| {}).expect("free slot");
+                registry.cgroups[0].store(18, Ordering::SeqCst);
+                if final_close {
+                    registry.open();
+                }
+                let groups_done = Arc::new(AtomicBool::new(false));
+                let cgroups_done = Arc::new(AtomicBool::new(false));
+                let fatalities = Arc::new(AtomicUsize::new(0));
+                let mut threads = Vec::new();
+                for closing in [false, final_close] {
+                    let registry = Arc::clone(&registry);
+                    let groups_done = Arc::clone(&groups_done);
+                    let cgroups_done = Arc::clone(&cgroups_done);
+                    let fatalities = Arc::clone(&fatalities);
+                    threads.push(loom::thread::spawn(move || {
+                        let kill = |group| {
+                            assert_eq!(group, PROCESS_GROUP);
+                            loom::thread::yield_now();
+                            groups_done.store(true, Ordering::SeqCst);
+                        };
+                        let kill_cgroup = |descriptor| {
+                            assert_eq!(descriptor, 17);
+                            loom::thread::yield_now();
+                            cgroups_done.store(true, Ordering::SeqCst);
+                        };
+                        let fatal = if closing {
+                            registry.close_with(&kill, &kill_cgroup)
+                        } else {
+                            registry.interrupt_with(libc::SIGINT, &kill, &kill_cgroup)
+                        };
+                        if fatal.is_some() {
+                            assert!(groups_done.load(Ordering::SeqCst), "fatal before the extracted group kill");
+                            assert!(cgroups_done.load(Ordering::SeqCst), "fatal before the extracted cgroup kill");
+                            let _previous = fatalities.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }));
+                }
+                for thread in threads {
+                    thread.join().expect("cleanup owner");
+                }
+                assert!(fatalities.load(Ordering::SeqCst) >= 1, "fatal responsibility was lost");
+            });
+        }
+    }
 
     pub(super) fn claim_versus_sweep_never_orphans_the_claimed_group() {
         loom::model(|| {
@@ -1486,6 +1715,8 @@ mod loom_models {
 
 #[cfg(loom)]
 pub(crate) fn run_loom_models() {
+    loom_models::extracted_kills_finish_before_release_reap_and_reuse();
+    loom_models::only_the_final_cleanup_owner_can_take_fatal_responsibility();
     loom_models::claim_versus_sweep_never_orphans_the_claimed_group();
     loom_models::a_spawn_window_never_leaves_an_unwatched_child();
     loom_models::a_terminal_signal_always_has_a_reraise_owner();

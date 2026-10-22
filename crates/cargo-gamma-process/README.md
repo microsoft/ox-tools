@@ -44,10 +44,12 @@ Containment itself is not conditional on that request. A Unix process group is e
 descendant that calls `setsid` leaves it, and every later signal to the group misses it — so
 every Windows launch enters a job and every Linux launch attempts to enter a cgroup leaf whether
 or not anything is being measured. An unmetered Linux launch may use best-effort process-group
-containment only when the host has no supported cgroup facility. Sealed containment means a
-boundary descendants cannot leave: [`containment`][__link4] reports when the host cannot provide one
-before repository-controlled code executes, and [`ProcessTree::sealed`][__link5] reports the resulting
-state for one launch.
+containment only when the host has no supported cgroup facility. Sealed containment retains
+descendants across `setsid`/`setpgid`: [`containment`][__link4] reports when the host cannot provide that
+boundary before repository-controlled code executes, and [`ProcessTree::sealed`][__link5] reports the
+resulting state for one launch. Linux cgroups cover accidental process-group/session escape,
+not a hostile same-credential sandbox: code with writable cgroup interfaces can deliberately
+migrate out of the leaf.
 
 The boundary is in force from the child’s first instruction. On Linux the child moves itself
 into the cgroup between fork and exec; on Windows it normally starts suspended, enters the
@@ -81,7 +83,7 @@ installs explicit interruption handling through `cargo-gamma-unsafe`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-process">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbzJIscAd99o8bNjOMWNtQqzob7B-tkBhXsbcbeRzSwG3PJgJhZIGDc2NhcmdvLWdhbW1hLXByb2Nlc3NlMC4zLjBzY2FyZ29fZ2FtbWFfcHJvY2Vzcw
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbl1pml4diR1EbhYHTezIEy3AboCM4iWLpFxobTDQy5AH8Tm1hZIGDc2NhcmdvLWdhbW1hLXByb2Nlc3NlMC4zLjBzY2FyZ29fZ2FtbWFfcHJvY2Vzcw
  [__link0]: https://crates.io/crates/cargo-gamma
  [__link1]: https://docs.rs/cargo-gamma-process/0.3.0/cargo_gamma_process/?search=MemoryRequest
  [__link10]: https://docs.rs/cargo-gamma-process/0.3.0/cargo_gamma_process/?search=SpawnFailure

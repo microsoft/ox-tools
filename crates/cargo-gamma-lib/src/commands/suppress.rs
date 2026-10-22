@@ -16,7 +16,7 @@ use crate::discover::{Plan, RunRecord, TargetFile};
 use crate::elements::Publication;
 use crate::error::error;
 use crate::fix::Edit;
-use crate::model::{Mutant, Outcome};
+use crate::model::{Mutant, Outcome, Suppression};
 use crate::report::{Styler, quantity};
 
 /// Implements `suppress`.
@@ -241,16 +241,13 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
             continue;
         };
 
-        let mut mutant = (*candidate).clone();
-        mutant.outcome = outcome.outcome;
-        mutant.suppression = outcome.suppression;
-        // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's elapsed_ms to zero")]
-        mutant.elapsed_ms = 0;
-        mutant.killed_by = None;
-        // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's note to None")]
-        mutant.note = None;
-        mutants.push(mutant);
+        mutants.push(recorded_mutant(candidate, outcome.outcome, outcome.suppression));
     }
+
+    let recorded: BTreeSet<_> = mutants.iter().map(|mutant| mutant.id.clone()).collect();
+    // Keep unrecorded candidates pending: partial evidence must not authorize their collateral
+    // suppression merely because a directive shares the recorded candidates' syntactic scope.
+    mutants.extend(generated.into_values().flatten().filter(|mutant| !recorded.contains(&mutant.id)));
 
     for (path, source) in contents {
         let package = mutants
@@ -283,6 +280,18 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     apply_source_policy(&mut plan)?;
 
     Ok((plan, stale))
+}
+
+fn recorded_mutant(candidate: &Mutant, outcome: Outcome, suppression: Option<Suppression>) -> Mutant {
+    let mut mutant = candidate.clone();
+    mutant.outcome = outcome;
+    mutant.suppression = suppression;
+    // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's elapsed_ms to zero")]
+    mutant.elapsed_ms = 0;
+    mutant.killed_by = None;
+    // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's note to None")]
+    mutant.note = None;
+    mutant
 }
 
 fn apply_source_policy(plan: &mut Plan) -> crate::Result<()> {
@@ -850,6 +859,11 @@ fn unclean(result: &crate::fix::Verification, before: &Plan) -> crate::error::Er
         findings.join("\n- ")
     )
 }
+
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod native_test_util;
 
 #[cfg(test)]
 #[cfg(not(miri))]
@@ -1651,7 +1665,7 @@ mod tests {
         let (plan, stale) =
             plan_from_record(&root, &record, &crate::fix::Eligible::parse("timeout").expect("eligible")).expect("source-only relocation");
 
-        assert!(plan.mutants.is_empty());
+        assert!(plan.mutants.iter().all(|mutant| mutant.outcome != Outcome::Timeout));
         assert_eq!(stale.len(), 1);
         assert!(stale[0].contains("changed, disappeared, or became ambiguous"), "{}", stale[0]);
     }
@@ -2528,8 +2542,19 @@ mod tests {
             });
             let (plan, stale) =
                 plan_from_record(&root, &changed, &[crate::fix::Eligible::Timeout]).expect("corrupt sites are stale, not parse failures");
-            assert_eq!(plan.mutants.len(), 1, "{field}: {stale:?}");
-            assert_eq!(plan.mutants[0].id, later.id, "{field}");
+            assert_eq!(plan.mutants.len(), 2, "{field}: {stale:?}");
+            assert!(
+                plan.mutants
+                    .iter()
+                    .any(|mutant| mutant.id == later.id && mutant.outcome == Outcome::Timeout),
+                "{field}"
+            );
+            assert!(
+                plan.mutants
+                    .iter()
+                    .any(|mutant| mutant.id == first.id && mutant.outcome == Outcome::Pending),
+                "{field}"
+            );
             assert_eq!(stale.len(), 1, "{field}");
             assert!(stale[0].starts_with("src/lib.rs:"), "{field}: {stale:?}");
             assert_eq!(plan.suppressed, 0);
@@ -2559,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_unselected_sites_in_affected_files_are_skipped_without_spurious_stale_warnings() {
+    fn malformed_unselected_evidence_is_ignored_but_current_sites_remain_in_collateral_checks() {
         let (_dir, root) = crate::fixtures::crate_dir("suppress-unselected-identity-", "pub fn answer() -> i32 { 41 + 42 }\n");
         let first = recorded_mutant_in(&root, "src/lib.rs", "41", "", Outcome::Killed);
         let second = recorded_mutant_in(&root, "src/lib.rs", "42", "", Outcome::Timeout);
@@ -2588,8 +2613,19 @@ mod tests {
             let (plan, stale) =
                 plan_from_record(&root, &changed, &[crate::fix::Eligible::Timeout]).expect("only selected stale sites warn");
             assert!(stale.is_empty(), "{mode}: {stale:?}");
-            assert_eq!(plan.mutants.len(), 1, "{mode}");
-            assert_eq!(plan.mutants[0].id, second.id, "{mode}");
+            assert_eq!(plan.mutants.len(), 2, "{mode}");
+            assert!(
+                plan.mutants
+                    .iter()
+                    .any(|mutant| mutant.id == second.id && mutant.outcome == Outcome::Timeout),
+                "{mode}"
+            );
+            assert!(
+                plan.mutants
+                    .iter()
+                    .any(|mutant| mutant.id == first.id && mutant.outcome == Outcome::Pending),
+                "{mode}"
+            );
         }
     }
 

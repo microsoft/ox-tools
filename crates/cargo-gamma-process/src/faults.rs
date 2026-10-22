@@ -13,6 +13,10 @@ pub enum Fault {
     /// Moving an already-spawned child into its containment boundary is refused.
     Adopt,
 
+    /// The interrupt registry refuses a freshly spawned child's registration.
+    #[cfg(unix)]
+    Watch,
+
     /// Installing containment before a spawn is refused.
     Prepare,
 

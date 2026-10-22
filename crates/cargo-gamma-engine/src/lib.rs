@@ -45,6 +45,7 @@ mod unwind_contracts {
     use core::panic::{RefUnwindSafe, UnwindSafe};
 
     use crate::model::{MutantId, SiteIndex};
+    use crate::ops::collect::ResourceDependency;
     use crate::schema::{AssignedMutant, Guard, Ordinal, Position};
 
     fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
@@ -53,6 +54,7 @@ mod unwind_contracts {
     fn public_value_types_are_unwind_safe() {
         assert_unwind_safe::<MutantId>();
         assert_unwind_safe::<SiteIndex>();
+        assert_unwind_safe::<ResourceDependency>();
         assert_unwind_safe::<Position>();
         assert_unwind_safe::<Guard>();
         assert_unwind_safe::<Ordinal>();

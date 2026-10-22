@@ -3,9 +3,7 @@
 
 use core::error::Error as StdError;
 use core::num::NonZeroUsize;
-#[cfg(any(test, feature = "internals"))]
-use core::sync::atomic::AtomicUsize;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, TryLockError};
 use std::io::{Read as _, Write as _};
@@ -185,6 +183,8 @@ struct TestingSnapshot {
     launch: Launch,
     harness_threads: Option<String>,
     resources: Resources,
+    #[serde(default)]
+    scheduler_version: Option<u32>,
 }
 
 /// I/O needed to resume a prepared workspace, separate from decoding and hydration.
@@ -217,6 +217,11 @@ impl TestingSnapshot {
     ) -> Result<(Self, Option<C>, J)> {
         let saved: Self = serde_json::from_value(snapshot)
             .map_err(|cause| error!("prepared testing workspace is invalid; start a new campaign").caused_by(cause))?;
+        if saved.scheduler_version != Some(2) {
+            return Err(error!(
+                "prepared testing workspace uses a different scheduler; start a new campaign without --resume-testing to use exact-first adaptive testing"
+            ));
+        }
         let scratch = saved
             .root
             .parent()
@@ -528,7 +533,8 @@ impl Workspace {
     /// The root may be synthetic for command/policy tests, or an owned real tree for native
     /// acceptance. It is left in place on drop because this handle never owns its storage.
     #[cfg(any(test, feature = "internals"))]
-    pub(crate) fn adopt(root: Utf8PathBuf, target: Utf8PathBuf) -> Self {
+    #[must_use]
+    pub fn adopt(root: Utf8PathBuf, target: Utf8PathBuf) -> Self {
         let test_cache_home = crate::testing::cache_home(&root);
         let base = target.parent().unwrap_or(&target).to_owned();
 
@@ -589,6 +595,8 @@ impl Workspace {
             launch: &'a Launch,
             harness_threads: Option<&'a str>,
             resources: &'a Resources,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            scheduler_version: Option<u32>,
         }
         serde_json::to_value(Snapshot {
             base: &self.base,
@@ -602,6 +610,7 @@ impl Workspace {
             launch: self.launch(),
             harness_threads: self.harness_threads(),
             resources: &self.resources,
+            scheduler_version: Some(2),
         })
         .map_err(|cause| error!("could not encode the prepared testing workspace").caused_by(cause))
     }
@@ -676,12 +685,95 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn retain_sweep_cost(&mut self, cost: Option<super::session::SweepCost>) {
+    pub(super) fn retain_sweep_cost(&mut self, mut cost: Option<super::session::SweepCost>) {
         if let Some(journal) = &mut self.testing_journal {
+            journal.prior_confirmations = cost.as_mut().map_or_else(std::collections::BTreeSet::new, |cost| {
+                core::mem::take(&mut cost.confirmed_initial_killers)
+            });
             journal.previous_sweep = cost;
         }
     }
 
+    pub(super) fn retain_initial_hints(&mut self, hints: Option<super::session::InitialHints>) {
+        if let Some(journal) = &mut self.testing_journal {
+            journal.initial_hints = hints;
+        }
+    }
+
+    pub(super) const fn has_testing_journal(&self) -> bool {
+        self.testing_journal.is_some()
+    }
+
+    pub(super) fn initial_hints(&self) -> Option<&super::session::InitialHints> {
+        self.testing_journal.as_ref().and_then(|journal| journal.initial_hints.as_ref())
+    }
+
+    pub(super) fn prior_initial_confirmations(&self) -> std::collections::BTreeSet<crate::model::MutantId> {
+        self.testing_journal
+            .as_ref()
+            .map_or_else(std::collections::BTreeSet::new, |journal| journal.prior_confirmations.clone())
+    }
+
+    pub(super) fn with_sweep_diagnostics(&self, cost: Option<super::session::SweepCost>) -> Option<super::session::SweepCost> {
+        let failures = self
+            .testing_journal
+            .as_ref()
+            .map_or(0, |journal| journal.live_refresh_failures.load(Ordering::Relaxed));
+        Self::sweep_diagnostics(cost, failures)
+    }
+
+    fn sweep_diagnostics(mut cost: Option<super::session::SweepCost>, failures: usize) -> Option<super::session::SweepCost> {
+        if let Some(accounting) = cost.as_mut().and_then(|cost| cost.accounting.as_mut()) {
+            accounting.live_refresh_failures = accounting.live_refresh_failures.saturating_add(failures);
+        }
+        cost
+    }
+
+    pub(super) fn checkpoint_sweep(&self, cost: &super::session::SweepCost) -> Result<()> {
+        if let Some(journal) = &self.testing_journal {
+            let cumulative = self
+                .with_sweep_diagnostics(super::session::SweepCost::combine_checkpoint(
+                    journal.previous_sweep.clone(),
+                    Some(cost.clone()),
+                ))
+                .expect("a supplied sweep cost always produces a combined cost");
+            journal.publish_cost(cumulative.clone())?;
+            self.refresh_live_sweep(journal, cumulative)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_live_sweep(&self, journal: &super::testing_state::TestingJournal, cumulative: super::session::SweepCost) -> Result<()> {
+        let refreshed = self.write_live_sweep(&cumulative);
+        Self::record_live_refresh(&journal.live_refresh_failures, cumulative, refreshed, |cost, detail| {
+            journal.publish_diagnostic(cost, detail)
+        })
+    }
+
+    /// Live diagnostics are derived output; a failed refresh is recoverable only after the durable
+    /// journal records that failure. Losing the journal write must still stop execution.
+    fn record_live_refresh(
+        failures: &AtomicUsize,
+        mut cost: super::session::SweepCost,
+        refreshed: Result<()>,
+        publish: impl FnOnce(super::session::SweepCost, String) -> Result<()>,
+    ) -> Result<()> {
+        if let Err(failure) = refreshed {
+            let _updated = failures.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| Some(count.saturating_add(1)));
+            let accounting = cost.accounting.get_or_insert_default();
+            accounting.live_refresh_failures = accounting.live_refresh_failures.saturating_add(1);
+            publish(cost, format!("live sweep diagnostics refresh failed: {failure}"))?;
+        }
+        Ok(())
+    }
+
+    fn write_live_sweep(&self, cost: &super::session::SweepCost) -> Result<()> {
+        let path = self.base.join("gamma-sweep-live.json");
+        let contents = cost
+            .live_json()
+            .map_err(|cause| error!("could not encode live sweep diagnostics").caused_by(cause))?;
+        crate::elements::write(&path, &contents)
+    }
     pub(super) fn checkpoint_mutant(
         &self,
         mutant: &crate::model::Mutant,
@@ -689,8 +781,14 @@ impl Workspace {
         cost: &super::session::SweepCost,
     ) -> Result<()> {
         if let Some(journal) = &self.testing_journal {
-            let cumulative = super::session::SweepCost::combine(journal.previous_sweep.clone(), Some(cost.clone()));
-            journal.publish_with_cost(mutant, killers, cumulative)?;
+            let cumulative = self.with_sweep_diagnostics(super::session::SweepCost::combine_checkpoint(
+                journal.previous_sweep.clone(),
+                Some(cost.clone()),
+            ));
+            journal.publish_with_cost(mutant, killers, cumulative.clone())?;
+            if let Some(cumulative) = cumulative {
+                self.refresh_live_sweep(journal, cumulative)?;
+            }
         }
         Ok(())
     }
@@ -765,6 +863,14 @@ impl Workspace {
     }
 
     /// Propagates the self-test cache boundary to Cargo, test binaries, and nested Gamma commands.
+    #[cfg_attr(
+        not(any(test, feature = "internals")),
+        expect(
+            clippy::unused_self,
+            clippy::needless_pass_by_ref_mut,
+            reason = "normal builds intentionally retain the same no-op adapter signature as self-test builds"
+        )
+    )]
     pub(super) fn inherit_test_cache_home(&self, command: &mut Command) {
         #[cfg(any(test, feature = "internals"))]
         crate::testing::inherit_cache_home(command, self.test_cache_home.as_deref());
@@ -850,13 +956,6 @@ impl Workspace {
     #[cfg(test)]
     pub(super) fn set_harness_threads(&mut self, threads: &str) {
         self.harness_threads = OnceLock::from(Some(threads.to_owned()));
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_rustc_captures(&mut self, captures: Option<Utf8PathBuf>) {
-        // Exclusive access prevents readers; this store does not publish the following assignment.
-        self.rustc_captures_ready.store(captures.is_some(), Ordering::Release);
-        self.rustc_captures = captures;
     }
 
     /// Settles how wide each spawned test harness runs, from the run's own job count.
@@ -1445,12 +1544,6 @@ pub(crate) fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn mark_cache_owned_for_test(root: &Utf8Path, base: &Utf8Path) {
-    fs::write(base.join(CACHE_OWNER), physical(root).as_str()).expect("test cache owner");
-    assert!(cache_owner_root(base).is_some(), "test cache owner must resolve");
-}
-
 fn metadata_workspace(selected: &Utf8Path) -> Option<(Utf8PathBuf, Utf8PathBuf)> {
     let mut command = cargo_metadata::MetadataCommand::new();
     let _command = command.current_dir(selected).no_deps();
@@ -2010,11 +2103,6 @@ fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
     fs::create_dir_all(path.as_std_path())
-}
-
-#[cfg(test)]
-pub(crate) fn create_private_dir_all_for_test(path: &Utf8Path) {
-    create_private_dir_all(path).expect("the private test directory should be creatable");
 }
 
 /// Refuses a cache directory that is reached through a link.
@@ -2819,6 +2907,28 @@ mod testing_resume_tests {
     }
 
     #[test]
+    fn testing_resume_rejects_other_scheduler_versions_before_io() {
+        for version in [None, Some(0), Some(1), Some(3)] {
+            let mut encoded = snapshot(Utf8Path::new("cache"), Utf8Path::new("cache"));
+            if let Some(version) = version {
+                encoded["scheduler_version"] = version.into();
+            } else {
+                encoded.as_object_mut().unwrap().remove("scheduler_version");
+            }
+            let failure = TestingSnapshot::resume_with::<(), ()>(
+                encoded,
+                Utf8Path::new("source"),
+                Utf8Path::new("cache"),
+                || panic!("scheduler validation must precede scratch resolution"),
+                |_, _| panic!("scheduler validation must precede cache admission"),
+                |_| panic!("scheduler validation must precede journal recovery"),
+            )
+            .unwrap_err();
+            assert!(failure.to_string().contains("start a new campaign without --resume-testing"));
+        }
+    }
+
+    #[test]
     fn testing_resume_default_scratch_does_not_claim_a_redirected_cache() {
         let default_scratch = Utf8Path::new("default-scratch");
         for base in [Utf8Path::new("cache"), default_scratch] {
@@ -3035,6 +3145,85 @@ mod tests {
 
     use super::*;
     use crate::testing::private_system_tempdir;
+
+    #[test]
+    fn telemetry_live_refresh_failures_publish_evidence_and_propagate_failed_evidence() {
+        use crate::exec::{SweepAccounting, SweepCost};
+
+        let failures = AtomicUsize::new(0);
+        let cost = SweepCost {
+            accounting: Some(SweepAccounting::default()),
+            ..SweepCost::default()
+        };
+        let mut evidence = None;
+        Workspace::record_live_refresh(
+            &failures,
+            cost,
+            Err(error!("could not refresh diagnostics").caused_by(io::Error::from(io::ErrorKind::PermissionDenied))),
+            |cost, detail| {
+                evidence = Some((cost, detail));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let (cost, detail) = evidence.unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 1);
+        assert_eq!(cost.accounting.as_ref().unwrap().live_refresh_failures, 1);
+        assert!(detail.contains("live sweep diagnostics refresh failed"));
+        assert!(detail.contains("could not refresh diagnostics"));
+        assert!(detail.contains(&io::Error::from(io::ErrorKind::PermissionDenied).to_string()));
+        Workspace::record_live_refresh(&failures, cost.clone(), Ok(()), |_, _| {
+            panic!("successful refreshes produce no failure evidence")
+        })
+        .unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 1);
+        let failure = Workspace::record_live_refresh(&failures, cost, Err(error!("second refresh failed")), |updated, detail| {
+            assert_eq!(updated.accounting.unwrap().live_refresh_failures, 2);
+            assert!(detail.contains("second refresh failed"));
+            Err(error!("durable evidence unavailable"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "durable evidence unavailable",
+            "an unavailable journal is fatal, never silently ignored"
+        );
+        assert_eq!(failures.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn telemetry_live_refresh_failure_overlay_is_segment_local_across_snapshots_and_resume() {
+        use crate::exec::{SweepAccounting, SweepCost};
+
+        let prior = SweepCost {
+            accounting: Some(SweepAccounting {
+                live_refresh_failures: 2,
+                complete: true,
+                ..SweepAccounting::default()
+            }),
+            ..SweepCost::default()
+        };
+        let segment = SweepCost {
+            accounting: Some(SweepAccounting {
+                complete: true,
+                ..SweepAccounting::default()
+            }),
+            ..SweepCost::default()
+        };
+        let snapshots: Vec<_> = [3, 3]
+            .into_iter()
+            .map(|failures| Workspace::sweep_diagnostics(SweepCost::combine(Some(prior.clone()), Some(segment.clone())), failures).unwrap())
+            .collect();
+        assert_eq!(snapshots[0].accounting.as_ref().unwrap().live_refresh_failures, 5);
+        assert_eq!(snapshots[0].accounting, snapshots[1].accounting);
+        let resumed: SweepCost = serde_json::from_value(serde_json::to_value(&snapshots[1]).unwrap()).unwrap();
+        let completed = Workspace::sweep_diagnostics(SweepCost::combine(Some(resumed), Some(segment)), 1).unwrap();
+        assert_eq!(
+            completed.accounting.unwrap().live_refresh_failures,
+            6,
+            "resume adds only its own refresh failures"
+        );
+    }
 
     type CaptureScript = Box<dyn FnMut(&Command, &str) -> io::Result<Captured>>;
     type JournalArmHook = Box<dyn FnOnce(&Utf8Path)>;
@@ -8431,3 +8620,9 @@ mod tests {
         assert_eq!(fs::read_to_string(outside.as_std_path()).unwrap(), original);
     }
 }
+
+#[cfg(any(test, feature = "internals"))]
+mod native_test_util;
+#[cfg(any(test, feature = "internals"))]
+#[doc(hidden)]
+pub(crate) use native_test_util::{create_private_dir_all_for_test, mark_cache_owned_for_test};

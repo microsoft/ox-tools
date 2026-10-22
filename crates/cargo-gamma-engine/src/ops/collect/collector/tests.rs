@@ -23,6 +23,260 @@ fn with_source_facts(source: &str, selector: &str, check: impl FnOnce(&mut Colle
 }
 
 #[test]
+fn campaign_generic_types_without_default_keep_only_constructible_return_alternatives() {
+    let source = r"
+        struct Region<'a>(&'a str);
+        struct Holder<T>(T);
+        fn region(text: &str) -> Region<'_> { Region(text) }
+        fn optional(text: &str) -> Option<Region<'_>> { Some(Region(text)) }
+        fn regions(text: &str) -> Vec<Region<'_>> { vec![Region(text)] }
+        fn holder(value: u8) -> Holder<u8> { Holder(value) }
+        fn unknown() -> dependency::Value { dependency::make() }
+    ";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_with(
+        &file,
+        &Selection::parse("fn_value").unwrap(),
+        &CfgSet::unconditional(),
+        &Defaults::of(&file.ast),
+    );
+    let actual = found
+        .iter()
+        .map(|candidate| (candidate.item_path.as_ref(), candidate.mutator, candidate.replacement.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        [
+            ("optional", "fn_value.none", "None"),
+            ("regions", "fn_value.empty_collection", "Vec::new()"),
+            ("unknown", "fn_value.default", "Default::default()"),
+        ]
+    );
+    assert_eq!(found.last().unwrap().confidence, super::Confidence::Optimistic);
+}
+
+#[test]
+fn campaign_conditional_generic_defaults_remain_eligible_without_unconditional_proof() {
+    let source = r"
+        struct Holder<T>(T);
+        impl<T: Default> Default for Holder<T> {
+            fn default() -> Self { Self(T::default()) }
+        }
+        fn holder(value: u8) -> Holder<u8> { Holder(value) }
+    ";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_with(
+        &file,
+        &Selection::parse("fn_value.default").unwrap(),
+        &CfgSet::unconditional(),
+        &Defaults::of(&file.ast),
+    );
+    assert!(
+        found.iter().any(|candidate| candidate.item_path.as_ref() == "holder"),
+        "a bounded generic implementation must not be mistaken for absence: {found:?}"
+    );
+}
+
+#[test]
+fn campaign_reference_arithmetic_rejects_mutable_references_without_removing_values() {
+    let source = "fn next(remaining: &mut usize) { consume(remaining); consume(*remaining); } fn consume<T>(_: T) {}";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(
+        &file,
+        &Selection::parse("expr.increment,expr.decrement").unwrap(),
+        &CfgSet::unconditional(),
+    );
+    assert!(
+        found.iter().all(|candidate| file.slice(&candidate.span) != "remaining"),
+        "numeric-use evidence must not turn an exclusive reference into an arithmetic operand: {found:?}"
+    );
+    let numeric = "fn next(remaining: &mut usize) -> usize { *remaining }";
+    let file = SourceFile::parse("fixture.rs", numeric.into()).unwrap();
+    let found = collect_in(
+        &file,
+        &Selection::parse("expr.increment,expr.decrement").unwrap(),
+        &CfgSet::unconditional(),
+    );
+    assert_eq!(found.len(), 2, "dereferenced numeric values must remain eligible: {found:?}");
+    assert!(found.iter().all(|candidate| file.slice(&candidate.span) == "*remaining"));
+}
+
+#[test]
+fn campaign_reader_bounds_and_adapters_are_not_iterator_take_calls() {
+    for source in [
+        "fn f(reader: impl std::io::Read) { reader.take(10); }",
+        "use std::io::Read; fn f(mut reader: impl Read) { reader.by_ref().take(10); }",
+        "use std::io::BufRead; fn f(reader: &mut impl BufRead) { reader.by_ref().take(10); }",
+        "use std::io::Read; fn f<R: Read>(reader: R) { reader.take(10); }",
+        "use std::io; fn f<R>(reader: R) where R: io::Read { reader.take(10); }",
+        "use std::io::Read; fn f(reader: &mut std::fs::File) { reader.by_ref().take(10); }",
+    ] {
+        let found = mutators(source, "iter.take_to_skip", &CfgSet::unconditional());
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+    for source in [
+        "fn f(reader: impl Iterator<Item = u8>) { reader.take(10); }",
+        "trait Read {} fn f(reader: impl Read) { reader.take(10); }",
+        "fn f<R: std::io::Read>(reader: R) { fn nested<R>(reader: R) { reader.take(10); } }",
+    ] {
+        assert_eq!(
+            mutators(source, "iter.take_to_skip", &CfgSet::unconditional()),
+            ["iter.take_to_skip"],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn campaign_result_breaks_do_not_request_a_nonexistent_default() {
+    let source = "fn f() -> Result<Option<u8>, ()> { loop { break Ok(Some(1)); } }";
+    assert!(
+        mutators(source, "loop.break_value_default", &CfgSet::unconditional()).is_empty(),
+        "Result has no Default implementation even when both payloads do"
+    );
+    let control = "fn f() -> u8 { loop { break 1u8; } }";
+    assert_eq!(
+        mutators(control, "loop.break_value_default", &CfgSet::unconditional()),
+        ["loop.break_value_default"]
+    );
+}
+
+#[test]
+fn campaign_match_and_destructuring_propagate_reader_payloads_without_guessing_custom_variants() {
+    for statement in [
+        "match opened() { Ok(mut reader) => { reader.take(10); }, Err(_) => {} }",
+        "let Ok(mut reader) = opened() else { return; }; reader.take(10);",
+        "let (mut reader, _) = (file, 1u8); reader.take(10);",
+    ] {
+        let source = format!(
+            "use std::io::Read; use std::fs::File;
+             fn opened() -> std::io::Result<File> {{ todo!() }}
+             fn f(file: File) {{ {statement} }}"
+        );
+        assert!(
+            mutators(&source, "iter.take_to_skip", &CfgSet::unconditional()).is_empty(),
+            "{source}"
+        );
+    }
+    let source = "struct Ok<T>(T); fn f(value: Unknown) { match value { Ok(reader) => { reader.take(10); } } }";
+    assert_eq!(
+        mutators(source, "iter.take_to_skip", &CfgSet::unconditional()),
+        ["iter.take_to_skip"]
+    );
+}
+
+#[test]
+fn campaign_inferred_character_casing_keeps_mutations_with_iterator_unification() {
+    for source in [
+        "fn f(text: &str) { for character in text.chars() { character.to_lowercase(); } }",
+        "fn f(text: &str) { let mut chars = text.chars(); chars.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>()); }",
+        "fn f(text: &str) { let mut chars = text.chars(); let Some(first) = chars.next() else { return; }; first.to_uppercase(); }",
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let found = collect_in(&file, &Selection::parse("string").unwrap(), &CfgSet::unconditional());
+        let casing = found
+            .iter()
+            .filter(|candidate| matches!(candidate.mutator, "string.lower_to_upper" | "string.upper_to_lower"))
+            .collect::<Vec<_>>();
+        assert_eq!(casing.len(), 1, "{source}: {found:?}");
+        assert_eq!(casing[0].shape, super::Shape::IterExpr, "{source}");
+    }
+    let source = "struct Text; impl Text { fn chars(&self) -> Custom { todo!() } } fn f(text: Text) { for character in text.chars() { character.to_lowercase(); } }";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("string").unwrap(), &CfgSet::unconditional());
+    let casing = found
+        .iter()
+        .filter(|candidate| matches!(candidate.mutator, "string.lower_to_upper" | "string.upper_to_lower"))
+        .collect::<Vec<_>>();
+    assert_eq!(casing.len(), 1);
+    assert_eq!(casing[0].shape, super::Shape::Expr);
+}
+
+#[test]
+fn campaign_result_breaks_propagate_through_matches_and_blocks() {
+    for value in ["{ Ok(Some(1u8)) }", "match value { true => Ok(Some(1u8)), false => Err(()) }"] {
+        let source = format!("fn f(value: bool) -> Result<Option<u8>, ()> {{ loop {{ break {value}; }} }}");
+        assert!(
+            mutators(&source, "loop.break_value_default", &CfgSet::unconditional()).is_empty(),
+            "{source}"
+        );
+    }
+    let source = "fn f(value: bool) -> u8 { loop { break match value { true => 1u8, false => 2u8 }; } }";
+    assert_eq!(
+        mutators(source, "loop.break_value_default", &CfgSet::unconditional()),
+        ["loop.break_value_default"]
+    );
+}
+
+#[test]
+fn campaign_open_options_propagate_file_payloads_without_defaulting_unknown_tuple_members() {
+    let source = r#"
+        use std::fs::OpenOptions;
+        fn f() {
+            loop {
+                match OpenOptions::new().create_new(true).write(true).open("file") {
+                    Ok(file) => break (unknown(), file),
+                    Err(_) => {}
+                }
+            }
+        }
+    "#;
+    assert!(mutators(source, "loop.break_value_default", &CfgSet::unconditional()).is_empty());
+    let control = "struct OpenOptions; fn f() { loop { break (unknown(), OpenOptions::new().open(\"file\")); } }";
+    assert_eq!(
+        mutators(control, "loop.break_value_default", &CfgSet::unconditional()),
+        ["loop.break_value_default"]
+    );
+}
+
+#[test]
+fn campaign_structural_ownership_does_not_require_a_closed_crate_or_treat_copy_fields_as_moves() {
+    let source = r#"
+        mod dependency;
+        #[derive(Debug)] struct Owned { value: String }
+        struct CopyValue { value: u8 }
+        struct Borrowed { value: &'static str }
+        #[transform] struct Transformed { value: String }
+        #[transform] mod altered { pub struct Nested { value: String } }
+        struct Conditional { #[cfg(feature = "owning")] value: String }
+    "#;
+    with_source_facts(source, "stmt.delete_assign", |collector| {
+        for (ty, expected) in [
+            (syn::parse_quote!(Owned), true),
+            (syn::parse_quote!(CopyValue), false),
+            (syn::parse_quote!(Borrowed), false),
+            (syn::parse_quote!(Transformed), false),
+            (syn::parse_quote!(altered::Nested), false),
+            (syn::parse_quote!(Conditional), false),
+        ] {
+            assert_eq!(collector.noncopy_type(&ty, 8), expected, "{ty:?}");
+        }
+    });
+}
+
+#[test]
+fn campaign_method_self_results_and_tuple_rest_patterns_keep_their_actual_owners() {
+    let source = r"
+        struct Other;
+        impl Other { fn owned(self) -> Self { self } }
+        struct Caller;
+        impl Caller { fn run(value: Other) { let result = value.owned(); } }
+        fn tuple() { let (.., last) = (false, 1u8, String::new()); }
+    ";
+    with_source_facts(source, "fn_value.default", |collector| {
+        collector.impl_self_type = Some(syn::parse_quote!(Caller));
+        collector.bind_type("value".into(), syn::parse_quote!(Other));
+        assert_eq!(
+            collector.inferred_expression_type(&syn::parse_quote!(value.owned())),
+            Some(syn::parse_quote!(crate::Other)),
+        );
+        let pattern: syn::Pat = syn::parse_quote!((.., last));
+        collector.bind_pattern(&pattern, Some(&syn::parse_quote!((bool, u8, String))));
+        assert_eq!(collector.binding_types["last"].ty, syn::parse_quote!(String));
+    });
+}
+
+#[test]
 fn local_literal_and_range_patterns_do_not_emit_expression_mutations() {
     for (source, selector, original, replacement, mutator) in [
         (
@@ -654,7 +908,7 @@ fn lexical_default_imports_do_not_erase_the_independent_root_default_path_veto()
 }
 
 #[test]
-fn textual_arithmetic_vetoes_are_independent_on_both_sides_and_do_not_hide_comparisons() {
+fn unresolved_textual_operands_preserve_custom_operator_possibilities_and_comparisons() {
     for source in [
         "fn f(){let _=String::from(\"a\")+suffix();}",
         "fn f(){let _=prefix()+\"suffix\";}",
@@ -663,7 +917,7 @@ fn textual_arithmetic_vetoes_are_independent_on_both_sides_and_do_not_hide_compa
     ] {
         let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
         assert!(
-            collect_in(&file, &Selection::parse("arith.add_to_sub").unwrap(), &CfgSet::unconditional()).is_empty(),
+            collect_in(&file, &Selection::parse("arith.add_to_sub").unwrap(), &CfgSet::unconditional()).len() == 1,
             "{source}"
         );
     }
@@ -674,13 +928,13 @@ fn textual_arithmetic_vetoes_are_independent_on_both_sides_and_do_not_hide_compa
 }
 
 #[test]
-fn right_hand_temporal_evidence_keeps_subtraction_but_rejects_other_arithmetic_swaps() {
+fn right_hand_temporal_evidence_does_not_resolve_an_unknown_left_operand() {
     let file = SourceFile::parse("fixture.rs", "fn f(right:std::time::Duration){let _=left+right;}".into()).unwrap();
     let found = collect_in(&file, &Selection::parse("arith").unwrap(), &CfgSet::unconditional());
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].mutator, "arith.add_to_sub");
-    assert_eq!(found[0].replacement, "(left) - (right)");
-    assert_eq!(found[0].replacement_index, 0);
+    assert_eq!(found.len(), 2);
+    let found = found.iter().find(|candidate| candidate.mutator == "arith.add_to_sub").unwrap();
+    assert_eq!(found.replacement, "(left) - (right)");
+    assert_eq!(found.replacement_index, 0);
 }
 
 #[test]
@@ -1368,7 +1622,7 @@ fn module_prelude_policy_is_inherited_and_restored_for_unit_result_proofs() {
         assert_eq!(found.len(), 1, "{source}: {found:?}");
         assert_eq!(&*found[0].item_path, expected);
         assert_eq!(file.slice(&found[0].span), "inner_unit()");
-        assert_eq!(found[0].replacement, "{ let _ = inner_unit(); Default::default() }");
+        assert_eq!(found[0].replacement, "::gamma_rt::default_after(inner_unit())");
     }
 }
 
@@ -1755,7 +2009,7 @@ fn initial_state_and_identity_occurrences_are_independent_of_emission_order() {
     assert!(!collector.in_default_impl);
     assert!(!collector.numeric_return);
     assert!(!collector.foreign_error_return);
-    assert_eq!(collector.function_iterator_depth, None);
+    assert_eq!(collector.function_bound_depth, None);
     let spans = file
         .text
         .match_indices("same")
@@ -1820,7 +2074,7 @@ fn exact_numeric_unsigned_signed_and_alias_receiver_evidence_is_preserved() {
     });
     assert!(collector.is_known_signed(&grouped));
     assert!(!collector.is_known_signed(&syn::parse_quote!(true)));
-    assert!(collector.is_known_textual_or_temporal(&syn::parse_quote!(object.textual)));
+    assert!(!collector.is_known_textual_or_temporal(&syn::parse_quote!(object.textual)));
     assert!(collector.is_known_textual_or_temporal(&syn::parse_quote!(text)));
     assert!(collector.is_known_temporal(&syn::parse_quote!(time)));
     assert!(collector.receiver_has_first(&syn::parse_quote!(sequence)));
@@ -1834,8 +2088,9 @@ fn exact_numeric_unsigned_signed_and_alias_receiver_evidence_is_preserved() {
     ] {
         assert_eq!(collector.is_known_numeric(&syn::parse_str(text).unwrap()), expected, "{text}");
     }
-    let _old = collector.numeric_uses.names.insert("inferred".into());
-    assert!(collector.is_known_numeric(&syn::parse_quote!(inferred)));
+    let inferred: Expr = syn::parse_quote!(inferred);
+    let _old = collector.numeric_evidence.numeric.insert(inferred.span().byte_range());
+    assert!(collector.is_known_numeric(&inferred));
     assert!(!collector.is_known_numeric(&syn::parse_quote!(<T>::inferred)));
     for name in ["u8", "u16", "u32", "u64", "u128", "usize"] {
         assert!(super::is_unsigned_type_name(name), "{name}");
@@ -1925,6 +2180,10 @@ fn seeded_result_and_option_admission_preserves_exact_payloads_and_ordinals() {
         }
         if reusable {
             collector.reusable_payloads.push((expression.span().byte_range(), "reused".into()));
+            let _previous = collector
+                .parameter_types
+                .insert("reused".into(), syn::parse_quote!(core::num::NonZeroU8));
+            collector.bind_type("reused".into(), syn::parse_quote!(core::num::NonZeroU8));
         }
         collector.visit_expr(expression);
         let candidates = collector.finish();
@@ -2159,7 +2418,7 @@ fn call_default_candidates_and_regex_rewrites_match_exact_output_matrices() {
 
     for (selector, replacement) in [
         ("call.replace_with_default", "Default::default()"),
-        ("call_result.default", "{ let _ = helper(7); Default::default() }"),
+        ("call_result.default", "::gamma_rt::default_after(helper(7))"),
     ] {
         let source = "fn helper(v:u8)->u8{v} fn f(){helper(7)}";
         let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
@@ -2640,7 +2899,7 @@ fn control_flow_output_matrix_preserves_shapes_labels_and_statement_spans() {
         ("fn f(){ if ready {a()} }", "cond.always_true", "ready", "true", Shape::Expr),
         ("fn f(){ if ready {a()} }", "cond.always_false", "ready", "false", Shape::Expr),
         ("fn f(){ -value }", "unary.remove_neg", "-value", "value", Shape::Expr),
-        ("fn f(){ !value }", "unary.remove_not", "!value", "value", Shape::Expr),
+        ("fn f(value: bool){ !value }", "unary.remove_not", "!value", "value", Shape::Expr),
         (
             "fn f()->u8 { return 7; }",
             "return_value.default",
@@ -2652,7 +2911,7 @@ fn control_flow_output_matrix_preserves_shapes_labels_and_statement_spans() {
             "fn f()->Result<u8,u8> { helper()?; Ok(1) }",
             "try.propagate_to_unwrap",
             "helper()?",
-            "(helper()).unwrap()",
+            "::gamma_rt::panic_on_failure(helper())?",
             Shape::Expr,
         ),
     ] {
@@ -2808,12 +3067,9 @@ fn logical_and_arithmetic_output_metadata_and_temporal_vetoes_are_exact() {
     )
     .unwrap();
     let candidates = collect_in(&file, &Selection::parse("arith").unwrap(), &CfgSet::unconditional());
-    assert!(
-        candidates
-            .iter()
-            .all(|candidate| candidate.replacement == "(left) - (right)" || !candidate.mutator.starts_with("arith."))
-    );
-    assert!(candidates.is_empty());
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].mutator, "arith.sub_to_add");
+    assert_eq!(candidates[0].replacement, "(left) + (right)");
 }
 
 #[test]
@@ -2897,19 +3153,19 @@ fn generic_default_and_iterator_bounds_are_isolated_between_nested_functions() {
     assert_eq!(collector.defaulted, ["OuterDefault"]);
     assert_eq!(collector.iterator_bounded, ["OuterIterator"]);
     collector.with_function_parameters(&generic, |collector| {
-        assert_eq!(collector.function_iterator_depth, Some(1));
+        assert_eq!(collector.function_bound_depth, Some((1, 0)));
         assert_eq!(collector.iterator_bounded, ["OuterIterator", "I"]);
         let nested: syn::Generics = syn::parse_quote!(<J: core::iter::Iterator<Item = bool>>);
         collector.with_function_parameters(&nested, |collector| {
-            assert_eq!(collector.function_iterator_depth, Some(1));
+            assert_eq!(collector.function_bound_depth, Some((1, 0)));
             assert_eq!(collector.iterator_bounded, ["OuterIterator", "J"]);
         });
         assert_eq!(collector.iterator_bounded, ["OuterIterator", "I"]);
-        assert_eq!(collector.function_iterator_depth, Some(1));
+        assert_eq!(collector.function_bound_depth, Some((1, 0)));
     });
     assert_eq!(collector.iterator_bounded, ["OuterIterator"]);
     assert_eq!(collector.defaulted, ["OuterDefault"]);
-    assert_eq!(collector.function_iterator_depth, None);
+    assert_eq!(collector.function_bound_depth, None);
 }
 
 #[test]
@@ -2935,7 +3191,7 @@ fn expression_type_and_import_evidence_tracks_dereferences_not_unrelated_operato
         ("signed as u8", Some(syn::parse_quote!(u8))),
         ("helper()", Some(syn::parse_quote!(i16))),
         ("(helper)()", None),
-        ("(*ptr)", Some(syn::parse_quote!(&u32))),
+        ("(*ptr)", Some(syn::parse_quote!(u32))),
         ("!ptr", None),
         ("-ptr", None),
         ("unknown", None),
@@ -2964,6 +3220,12 @@ fn expression_type_and_import_evidence_tracks_dereferences_not_unrelated_operato
     collector.reusable_payloads.push((1..2, "outer".into()));
     collector.reusable_payloads.push((3..4, "other".into()));
     collector.reusable_payloads.push((1..2, "inner".into()));
+    for name in ["inner", "other"] {
+        let _previous = collector
+            .parameter_types
+            .insert(name.into(), syn::parse_quote!(core::num::NonZeroU8));
+        collector.bind_type(name.into(), syn::parse_quote!(core::num::NonZeroU8));
+    }
     assert_eq!(collector.reusable_payload(&(1..2)), Some("inner"));
     assert_eq!(collector.reusable_payload(&(3..4)), Some("other"));
     assert_eq!(collector.reusable_payload(&(5..6)), None);
@@ -3187,13 +3449,13 @@ fn recursive_default_admissibility_and_payload_reuse_match_exact_typed_sites() {
         ("Option<Missing>", "None", 0, 0),
         ("Option<String>", "None", 1, 0),
         ("Option<NonZeroU8>", "None", 0, 1),
-        ("Option<&u8>", "(None)", 0, 1),
-        ("Option<&u8>", "{ work(); None }", 0, 1),
-        ("Option<&u8>", "if ready { None } else { None }", 0, 2),
-        ("Option<&u8>", "match value { true => None, false => None }", 0, 2),
+        ("Option<&u8>", "(None)", 0, 0),
+        ("Option<&'a u8>", "{ work(); None }", 0, 1),
+        ("Option<&'a u8>", "if ready { None } else { None }", 0, 2),
+        ("Option<&'a u8>", "match value { true => None, false => None }", 0, 2),
         ("Option<&mut u8>", "None", 0, 0),
-        ("Result<u8,&u8>", "Ok(7)", 0, 1),
-        ("Result<&u8,u8>", "Err(7)", 0, 1),
+        ("Result<u8,&'a u8>", "Ok(7)", 0, 1),
+        ("Result<&'a u8,u8>", "Err(7)", 0, 1),
     ] {
         let source = format!("fn f() {{ {expression} }}");
         let file = SourceFile::parse("fixture.rs", source).unwrap();
@@ -3952,24 +4214,13 @@ fn local_unit_call_results_are_omitted_but_call_deletion_remains() {
 #[test]
 fn ambiguous_unit_callees_and_nonunit_results_stay_in_the_population() {
     for source in [
-        "fn helper() {} fn f(helper: fn() -> u8) { helper(); }",
-        "fn helper() {} fn f() { let helper = || 1u8; helper(); }",
-        "fn helper() {} fn f() { let (helper, _) = (|| 1u8, 0); helper(); }",
-        "fn helper() {} fn f() { const helper: fn() -> u8 = other; helper(); }",
-        "fn helper() {} fn f() { static helper: fn() -> u8 = other; helper(); }",
-        "fn helper() {} fn f() { unsafe extern \"C\" { fn helper() -> u8; } helper(); }",
-        "fn helper() {} fn f() { (|helper: fn() -> u8| helper())(other); }",
-        "fn helper() {} mod nested { use dependency::helper; fn f() { helper(); } }",
-        "fn helper() {} mod nested { use dependency::*; fn f() { helper(); } }",
         "mod first { fn helper() {} } mod second { fn helper() {} fn f() { helper(); } }",
-        "mod nested { fn helper() {} } fn f() { helper(); }",
         "fn helper() {} fn f() { inject_binding!(); helper(); }",
         "fn helper() {} fn f() { #[derive(Custom)] struct Local; helper(); }",
         "fn helper() {} fn f() { #[custom_attribute] other(); helper(); }",
         "#[custom_attribute] fn helper() {} fn f() { helper(); }",
         "fn helper() {} #[custom_attribute] fn f() { helper(); }",
         "#[cfg_attr(feature = \"transform\", custom_attribute)] fn helper() {} fn f() { helper(); }",
-        "async fn helper() {} fn f() { helper(); }",
         "type Unit = (); fn helper() -> Unit {} fn f() { helper(); }",
         "fn helper() -> u8 { 1 } fn f() { helper(); }",
         "#[derive(Default)] struct Guard; impl Drop for Guard { fn drop(&mut self) {} } fn helper() -> Guard { Guard } fn f() { helper(); }",
@@ -3982,6 +4233,17 @@ fn ambiguous_unit_callees_and_nonunit_results_stay_in_the_population() {
         assert_eq!(found, ["call_result.default"], "{source}: {found:?}");
     }
     for source in [
+        "fn helper() {} fn f(helper: fn() -> u8) { helper(); }",
+        "fn helper() {} fn f() { let helper = || 1u8; helper(); }",
+        "fn helper() {} fn f() { let (helper, _) = (|| 1u8, 0); helper(); }",
+        "fn helper() {} fn f() { const helper: fn() -> u8 = other; helper(); }",
+        "fn helper() {} fn f() { static helper: fn() -> u8 = other; helper(); }",
+        "fn helper() {} fn f() { unsafe extern \"C\" { fn helper() -> u8; } helper(); }",
+        "fn helper() {} fn f() { (|helper: fn() -> u8| helper())(other); }",
+        "fn helper() {} mod nested { use dependency::helper; fn f() { helper(); } }",
+        "fn helper() {} mod nested { use dependency::*; fn f() { helper(); } }",
+        "mod nested { fn helper() {} } fn f() { helper(); }",
+        "async fn helper() {} fn f() { helper(); }",
         "fn helper() {} fn f() { dependency::helper(); }",
         "fn helper() {} fn f() { <Thing as Trait>::helper(); }",
         "fn helper() {} fn f() { (helper)(); }",
@@ -4659,7 +4921,6 @@ fn parameter_shadowing_skips_const_functions_and_reference_patterns() {
     for source in [
         "const fn f(value: usize) -> usize { value }",
         "fn f(ref value: usize) -> usize { *value }",
-        "fn f<'a>(value: Option<&'a u8>) -> impl Iterator<Item = &'a u8> { value.into_iter() }",
     ] {
         let found = mutators(source, "parameter.default_shadow", &CfgSet::unconditional());
 
@@ -4732,7 +4993,7 @@ fn mutators_remain_available_with_positive_evidence() {
             "call.replace_with_default,call_result.default",
             vec![
                 ("call.replace_with_default", "Default::default()", "local()"),
-                ("call_result.default", "{ let _ = local(); Default::default() }", "local()"),
+                ("call_result.default", "::gamma_rt::default_after(local())", "local()"),
             ],
         ),
         (
