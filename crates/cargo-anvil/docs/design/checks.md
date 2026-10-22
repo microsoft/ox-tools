@@ -332,6 +332,13 @@ publish a full-coverage snapshot for the current state of `main`.
 | `aprz`   | `cargo aprz check`                                                  | oxidizer |
 | `clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 
+The generated license allow list is a shared policy, not an inventory of one
+repository's dependencies. `licenses.unused-allowed-license = "allow"` suppresses
+warnings for licenses absent from the current dependency graph without narrowing
+that policy. Unused crate-specific license exceptions retain cargo-deny's default
+warning. Keep repository-specific duplicate-version exceptions in `bans.skip`
+outside its managed region, with a version bound and a reason.
+
 These checks share a property: their outcome can change without a commit to this repo.
 `deny`/`audit`/`aprz` consult external databases (RustSec advisory DB, license registries,
 Azure risk indices). `clippy` reflects whatever lint set ships with the currently-installed
