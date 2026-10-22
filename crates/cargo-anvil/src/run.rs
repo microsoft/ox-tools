@@ -21,7 +21,8 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
+use crate::emit::managed_region::plan_managed_region_with_scanner;
+use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -291,6 +292,7 @@ fn build_plan_with_hosts(
             &mut plan,
             hosts,
             &mut composed,
+            &array_hosts,
         )?;
     }
 
@@ -388,6 +390,7 @@ fn plan_catalog_artifact(
     plan: &mut Plan,
     hosts: &mut HostTextCache,
     composed: &mut ComposedHosts,
+    array_hosts: &ArrayHosts,
 ) -> Result<(), AppError> {
     match artifact {
         Artifact::OwnedFile(spec) => {
@@ -428,7 +431,7 @@ fn plan_catalog_artifact(
                     plan.push(item);
                 }
             } else {
-                push_region(repo_root, workspace, manifest, plan, hosts, composed, spec)?;
+                push_region(repo_root, workspace, manifest, plan, hosts, composed, array_hosts, spec)?;
             }
         }
     }
@@ -753,6 +756,7 @@ fn region_host_paths<'a>(workspace: &'a Workspace, spec: &'a RegionSpec) -> Vec<
 
 /// Dispatch one managed-region artifact into the plan, expanding its host
 /// selector against the discovered workspace.
+#[expect(clippy::too_many_arguments, reason = "threads planner state plus structural host classification")]
 fn push_region(
     repo_root: &Path,
     workspace: &Workspace,
@@ -760,10 +764,20 @@ fn push_region(
     plan: &mut Plan,
     hosts: &mut HostTextCache,
     composed: &mut ComposedHosts,
+    array_hosts: &ArrayHosts,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     for host in region_host_paths(workspace, spec) {
-        push_region_at(repo_root, manifest, plan, hosts, composed, host, spec)?;
+        let resolved = (hosts.resolve)(repo_root, host)?;
+        let scanner = if array_hosts
+            .get(&resolved)
+            .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
+        {
+            HostScanner::Json
+        } else {
+            HostScanner::for_path(&resolved)
+        };
+        push_region_at_with_scanner(repo_root, manifest, plan, hosts, composed, host, spec, scanner)?;
     }
     Ok(())
 }
@@ -777,6 +791,7 @@ fn push_region(
 /// writes, the spliced result is fed back into the cache so the next
 /// region targeting this host builds on it instead of re-reading the
 /// original disk state.
+#[cfg(test)]
 fn push_region_at(
     repo_root: &Path,
     manifest: &Manifest,
@@ -786,12 +801,29 @@ fn push_region_at(
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
+    push_region_at_with_scanner(repo_root, manifest, plan, hosts, composed, host, spec, HostScanner::for_path(host))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads explicit host scanning through ordinary-region planning"
+)]
+fn push_region_at_with_scanner(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &mut ComposedHosts,
+    host: &str,
+    spec: &RegionSpec,
+    scanner: HostScanner,
+) -> Result<(), AppError> {
     let host = (hosts.resolve)(repo_root, host)?;
     let current = hosts.get_or_read(repo_root, &host)?;
-    if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref()) {
+    if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref(), scanner) {
         return Ok(());
     }
-    if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
+    if !repair_or_refuse_with_scanner(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false, scanner)? {
         return Ok(());
     }
     let composed_host = composed_host_spec(&host);
@@ -858,7 +890,7 @@ fn push_region_at(
         placement,
         newline: hosts.newlines.get(&host).copied(),
     };
-    let item = match plan_managed_region(manifest, current.as_deref(), request) {
+    let item = match plan_managed_region_with_scanner(manifest, current.as_deref(), request, scanner) {
         Ok(item) => item,
         Err(refusal) => {
             let reason = refusal.reason.to_string();
@@ -915,13 +947,19 @@ fn region_placement_or_refuse(
     }
 }
 
-fn refuse_region_syntax_change(plan: &mut Plan, manifest: &Manifest, host: &str, spec: &RegionSpec, current: Option<&str>) -> bool {
+fn refuse_region_syntax_change(
+    plan: &mut Plan,
+    manifest: &Manifest,
+    host: &str,
+    spec: &RegionSpec,
+    current: Option<&str>,
+    scanner: HostScanner,
+) -> bool {
     let Some(text) = current else {
         return false;
     };
     let current_checksum = checksum_str(&spec.body);
     let recorded_checksum = manifest.region_checksum(host, spec.id.as_str()).unwrap_or(&current_checksum);
-    let scanner = HostScanner::for_path(host);
     let other_syntaxes = match spec.syntax {
         CommentSyntax::Hash => [CommentSyntax::SlashSlash, CommentSyntax::Xml],
         CommentSyntax::SlashSlash => [CommentSyntax::Hash, CommentSyntax::Xml],
@@ -1189,6 +1227,7 @@ fn settle_composed_host(
 /// with no provable end, and treating it as absent makes the writer append the
 /// template beside it — two copies of the same content, only one of them
 /// tracked.
+#[cfg(test)]
 fn repair_or_refuse(
     repo_root: &Path,
     plan: &mut Plan,
@@ -2211,6 +2250,72 @@ mod tests {
 
         assert_eq!(retired.items()[0].decision, Decision::Remove);
         assert_eq!(retired.items()[0].spliced_host.as_deref(), Some(source));
+    }
+
+    #[test]
+    fn ordinary_region_in_structural_json_host_preserves_block_comment_examples() {
+        let ordinary = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": false,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(ordinary))
+            .with_json_array_region(array)
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+            "  \"entries\": []\n",
+            "}\n",
+        );
+        let example = concat!(
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+
+        let _plan = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+
+        assert!(output.contains(example));
+        assert!(output.contains("\"setting\": false,\n"), "{output}");
     }
 
     #[test]

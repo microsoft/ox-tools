@@ -157,14 +157,22 @@ impl ManagedRegionRequest<'_> {
 ///
 /// Returns the fault that stopped the region being planned, classified so the
 /// caller can offer the remedy that actually applies.
-pub fn plan_managed_region(
+#[cfg(test)]
+pub(crate) fn plan_managed_region(
     manifest: &Manifest,
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
-    plan_region_with_splice(manifest, host_text, request, HostScanner::for_path(request.host_relpath), || {
-        splice(HostScanner::for_path(request.host_relpath), host_text, request)
-    })
+    plan_managed_region_with_scanner(manifest, host_text, request, HostScanner::for_path(request.host_relpath))
+}
+
+pub(crate) fn plan_managed_region_with_scanner(
+    manifest: &Manifest,
+    host_text: Option<&str>,
+    request: ManagedRegionRequest<'_>,
+    scanner: HostScanner,
+) -> Result<PlanItem, ManagedRegionRefusal> {
+    plan_region_with_splice(manifest, host_text, request, scanner, || splice(scanner, host_text, request))
 }
 
 pub(crate) fn plan_region_with_splice(
