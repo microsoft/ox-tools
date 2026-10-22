@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-10-22
+
+- ✨ Features
+
+  - cargo-gamma: improve campaign reliability and mutation detection ([#282](https://github.com/microsoft/ox-tools/pull/282))
+  - cargo-anvil: roll out filtered coverage reports
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: update immutable action pins and release 0.15.1 ([#288](https://github.com/microsoft/ox-tools/pull/288))
+  - cargo-anvil: hide internal recipes from just listings ([#272](https://github.com/microsoft/ox-tools/pull/272))
+  - pass release and container inputs explicitly ([#265](https://github.com/microsoft/ox-tools/pull/265))
+  - cargo-anvil: use just_executable for nested invocations ([#266](https://github.com/microsoft/ox-tools/pull/266))
+
+- ⚡ Performance
+
+  - cargo-anvil: keep Miri under 30 minutes ([#279](https://github.com/microsoft/ox-tools/pull/279))
+
+- 📚 Documentation
+
+  - cargo-anvil: explain Windows ARM coverage fallback
+  - align coverage topology and helper names
+
+- ✔️ Tasks
+
+  - clean up cargo-deny warnings without narrowing license policy ([#287](https://github.com/microsoft/ox-tools/pull/287))
+  - cargo-anvil: pin coverage gate 0.7.1
+
+- 🧩 Miscellaneous
+
+  - Merge cargo-anvil 0.15.1 from main
+  - Merge cargo-deny cleanup from main
+  - Merge current main into coverage rollout
+  - Merge main into coverage rollout
+  - Merge origin/main into anvil coverage rollout
+
 ## [0.15.1] - 2026-10-22
 
 - ✨ Features
