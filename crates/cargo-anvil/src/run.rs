@@ -322,21 +322,42 @@ fn repair_structural_json_markers(
     hosts: &mut HostTextCache,
     plan: &mut Plan,
 ) -> Result<(), AppError> {
-    let mut regions = BTreeSet::new();
+    let mut regions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for artifact in catalog.artifacts() {
         if let Artifact::Region(spec) = artifact
             && catalog.json_array_path(spec).is_some()
         {
             for host in region_host_paths(workspace, spec) {
-                regions.insert(((hosts.resolve)(repo_root, host)?, spec.id.as_str().to_owned()));
+                regions
+                    .entry((hosts.resolve)(repo_root, host)?)
+                    .or_default()
+                    .insert(spec.id.as_str().to_owned());
             }
         }
     }
     for key in manifest.json_array_paths.keys() {
-        regions.insert(((hosts.resolve)(repo_root, &key.host)?, key.id.clone()));
+        regions
+            .entry((hosts.resolve)(repo_root, &key.host)?)
+            .or_default()
+            .insert(key.id.clone());
     }
-    for (host, id) in regions {
-        let _ = repair_host_markers(repo_root, plan, hosts, &host, &id, CommentSyntax::SlashSlash, HostScanner::Json)?;
+    for (host, ids) in regions {
+        let Some(mut text) = hosts.get_or_read(repo_root, &host)? else {
+            continue;
+        };
+        let mut repaired_id = None;
+        for id in ids {
+            if let MarkerRepair::Repaired(repaired) = HostScanner::Json.repair(&text, &id, CommentSyntax::SlashSlash)
+                && repaired != text
+            {
+                text = repaired;
+                repaired_id.get_or_insert(id);
+            }
+        }
+        if let Some(id) = repaired_id {
+            hosts.set(&host, text.clone());
+            plan.push(PlanItem::repair_region(host, id, text));
+        }
     }
     Ok(())
 }
@@ -2519,6 +2540,173 @@ mod tests {
     }
 
     #[test]
+    fn scanner_only_host_supports_single_quoted_strings_during_update_and_retirement() {
+        let settings = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": false,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  'quote\"': true,\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+            "}\n",
+        );
+        let example = concat!(
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let updated = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let updated_host = hosts.cached("config.json").unwrap();
+        let updated_manifest = updated.projected_manifest(&manifest);
+        assert!(updated_host.contains("\"setting\": false,\n"));
+        assert!(updated_host.contains(example));
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", updated_host);
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+        let _retired = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &updated_manifest,
+            &[],
+            &empty,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+
+        assert!(output.contains(example));
+        assert!(!output.contains("\"setting\": false,\n"));
+    }
+
+    #[test]
+    fn ordinary_region_round_trips_in_bare_cr_structural_json_host() {
+        let ordinary = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": true,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(ordinary))
+            .with_json_array_region(array)
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\r",
+            "  // >>> anvil-managed: settings\r",
+            "  // <<< anvil-managed: settings\r",
+            "  \"entries\": []\r",
+            "}\r",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str(""));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\r");
+
+        let introduced = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+        let projected = introduced.projected_manifest(&manifest);
+        assert!(!output.contains('\n'));
+        let expected_checksum = checksum_str("\"setting\": true,\r");
+        assert_eq!(
+            projected.region_checksum("config.json", "settings"),
+            Some(expected_checksum.as_str()),
+            "{output:?}"
+        );
+        let region = HostScanner::Json
+            .find(&output, "settings", CommentSyntax::SlashSlash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checksum_str(region.body_str()), expected_checksum, "{output:?}");
+        let entries = HostScanner::Json
+            .find(&output, "entries", CommentSyntax::SlashSlash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            projected.region_checksum("config.json", "entries"),
+            Some(checksum_str(entries.body_str()).as_str()),
+            "{output:?}"
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", output);
+        hosts.newlines.insert("config.json".to_owned(), "\r");
+
+        let rerun = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &projected,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+
+        assert_eq!(rerun.dry_run_exit_code(), 0);
+    }
+
+    #[test]
     fn json_array_invalid_retirement_resolves_repeated_separators() {
         let source = concat!(
             "{\"entries\":[\n",
@@ -2627,6 +2815,69 @@ mod tests {
 
         assert!(plan.refusals().is_empty());
         assert!(!output.contains("anvil-managed: entries"));
+    }
+
+    #[test]
+    fn json_array_preflight_coalesces_repairs_for_multiple_regions() {
+        let mut builder = Catalog::builder(test_cli());
+        let mut manifest = Manifest::default();
+        for id in ["a", "b"] {
+            builder = builder.with_json_array_region(crate::JsonArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("config.json".to_owned()),
+                    id: RegionId::new(id),
+                    body: format!("\"{id}\",\n"),
+                    syntax: CommentSyntax::SlashSlash,
+                },
+                path: vec![id.to_owned()],
+            });
+            manifest.set_region("config.json", id, checksum_str(&format!("    \"{id}\",\n")));
+            manifest.json_array_paths.insert(
+                crate::manifest::RegionKey {
+                    host: "config.json".to_owned(),
+                    id: id.to_owned(),
+                },
+                vec![id.to_owned()],
+            );
+        }
+        let catalog = builder.build().unwrap();
+        let source = concat!(
+            "{\n",
+            "  \"a\": [\n",
+            "    // >>> anvil-managed: a\n",
+            "    // >>> anvil-managed: a\n",
+            "    \"a\",\n",
+            "    // <<< anvil-managed: a\n",
+            "  ],\n",
+            "  \"b\": [\n",
+            "    // >>> anvil-managed: b\n",
+            "    // >>> anvil-managed: b\n",
+            "    \"b\",\n",
+            "    // <<< anvil-managed: b\n",
+            "  ]\n",
+            "}\n",
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+
+        assert!(plan.refusals().is_empty());
+        assert_eq!(output.matches("// >>> anvil-managed: a").count(), 1);
+        assert_eq!(output.matches("// >>> anvil-managed: b").count(), 1);
     }
 
     #[test]

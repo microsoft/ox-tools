@@ -26,8 +26,8 @@ use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
     CommentSyntax, HostScanner, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, legacy_lint_region_id, lint_region_placement,
-    mask_retiring_toml_regions as mask_retiring_managed_regions, start_region_offset, text_newline, toml_region_ids as managed_region_ids,
-    upsert_located_region_with_newline,
+    mask_retiring_toml_regions as mask_retiring_managed_regions, render_body_with_newline, start_region_offset, text_newline,
+    toml_region_ids as managed_region_ids, upsert_located_region_with_newline,
 };
 
 /// What the reader should do about a refused region.
@@ -188,9 +188,11 @@ pub(crate) fn plan_region_with_splice(
         rendered_body,
         syntax,
         placement,
-        ..
+        newline,
     } = request;
-    let template_checksum = checksum_str(rendered_body);
+    let newline = newline.unwrap_or_else(|| text_newline(host_text.unwrap_or("")));
+    let rendered_body = render_body_with_newline(rendered_body, newline);
+    let template_checksum = checksum_str(&rendered_body);
     // Case-insensitively, as the retirement path does. `push_region_at`
     // resolves the host to its on-disk spelling, so after a rename such as
     // `Deny.toml` to `deny.toml` an exact lookup misses the lock entry, and a
@@ -261,7 +263,7 @@ pub(crate) fn plan_region_with_splice(
     Ok(PlanItem::write_region(
         host_relpath,
         region_id,
-        rendered_body.to_owned(),
+        rendered_body,
         spliced,
         template_checksum,
     ))

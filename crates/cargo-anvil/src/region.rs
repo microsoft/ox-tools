@@ -506,30 +506,30 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
 #[mutants::skip] // Byte-level JSONC lexical state machine; marker/string/block-comment behavior is covered exhaustively by json_array_region tests.
 pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> + '_ {
     iterate_lines(text)
-        .scan((false, false, false), move |(string, escaped, block_comment), line| {
+        .scan((None, false, false), move |(string, escaped, block_comment), line| {
             let content = &text[line.start..line.end];
             let leading = content.len() - content.trim_start_matches(is_horizontal_whitespace).len();
             let bytes = content.as_bytes();
             let full_line_comment =
-                !*string && !*block_comment && bytes.get(leading) == Some(&b'/') && bytes.get(leading + 1) == Some(&b'/');
+                string.is_none() && !*block_comment && bytes.get(leading) == Some(&b'/') && bytes.get(leading + 1) == Some(&b'/');
             let mut index = 0;
             while index < bytes.len() {
                 let byte = bytes[index];
-                if *string {
+                if let Some(quote) = *string {
                     if *escaped {
                         *escaped = false;
                     } else if byte == b'\\' {
                         *escaped = true;
-                    } else if byte == b'"' {
-                        *string = false;
+                    } else if byte == quote {
+                        *string = None;
                     }
                 } else if *block_comment {
                     if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
                         *block_comment = false;
                         index += 1;
                     }
-                } else if byte == b'"' {
-                    *string = true;
+                } else if matches!(byte, b'"' | b'\'') {
+                    *string = Some(byte);
                 } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
                     break;
                 } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
@@ -792,15 +792,29 @@ fn render_region(id: &str, body: &str, syntax: CommentSyntax, newline: &str) -> 
     let mut out = String::with_capacity(body.len() + 80);
     out.push_str(&syntax.marker(id, true));
     out.push_str(newline);
-    for line in body.split_inclusive('\n') {
-        let content = line
-            .strip_suffix('\n')
-            .map_or(line, |content| content.strip_suffix('\r').unwrap_or(content));
-        out.push_str(content);
-        out.push_str(newline);
-    }
+    out.push_str(&render_body_with_newline(body, newline));
     out.push_str(&syntax.marker(id, false));
     out.push_str(newline);
+    out
+}
+
+pub(crate) fn render_body_with_newline(body: &str, newline: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.as_bytes().iter().position(|byte| matches!(byte, b'\r' | b'\n')) {
+        out.push_str(&rest[..at]);
+        out.push_str(newline);
+        let ending_len = if rest.as_bytes()[at] == b'\r' && rest.as_bytes().get(at + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        rest = &rest[at + ending_len..];
+    }
+    if !rest.is_empty() {
+        out.push_str(rest);
+        out.push_str(newline);
+    }
     out
 }
 
