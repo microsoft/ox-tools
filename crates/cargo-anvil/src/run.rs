@@ -271,10 +271,7 @@ fn build_plan_with_hosts(
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let scanner = if manifest.json_array_paths.contains_key(key)
-                || manifest.json_scanner_regions.contains(key)
-                || json_scanner_hosts.contains(&host)
-            {
+            let scanner = if manifest.json_array_paths.contains_key(key) || json_scanner_hosts.contains(&host) {
                 HostScanner::Json
             } else {
                 HostScanner::for_path(&host)
@@ -303,12 +300,14 @@ fn build_plan_with_hosts(
 
     plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &json_scanner_hosts)?;
 
-    for key in manifest.regions.keys() {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
-        if json_scanner_hosts.contains(&host) {
-            plan.retain_json_scanner(key.host.clone(), key.id.clone());
-        }
-    }
+    let retained_scanner_hosts = composed
+        .live
+        .iter()
+        .map(|(host, _)| host)
+        .filter(|host| json_scanner_hosts.contains(*host))
+        .cloned()
+        .collect();
+    plan.set_json_scanner_hosts(retained_scanner_hosts);
 
     validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
 
@@ -655,9 +654,9 @@ fn json_scanner_hosts(
         .filter(|(_, array_host)| array_host.format == ArrayFormat::Json)
         .map(|(host, _)| host.clone())
         .collect();
-    for key in &manifest.json_scanner_regions {
-        if crate::emit::json_array_region::is_json_host(&key.host) {
-            scanner_hosts.insert((hosts.resolve)(repo_root, &key.host)?);
+    for host in &manifest.json_scanner_hosts {
+        if crate::emit::json_array_region::is_json_host(host) {
+            scanner_hosts.insert((hosts.resolve)(repo_root, host)?);
         }
     }
     Ok(scanner_hosts)
@@ -1789,7 +1788,7 @@ fn plan_removals_with_array_hosts(
                 );
                 if let Some(path) = previous.json_array_paths.get(key) {
                     retained = retained.with_json_array_path(path.clone());
-                } else if previous.json_scanner_regions.contains(key) || json_scanner_hosts.contains(&resolved_host) {
+                } else if json_scanner_hosts.contains(&resolved_host) {
                     retained = retained.with_json_scanner();
                 }
                 plan.push(retained);
@@ -1800,10 +1799,7 @@ fn plan_removals_with_array_hosts(
             }));
             continue;
         }
-        let scanner = if previous.json_array_paths.contains_key(key)
-            || previous.json_scanner_regions.contains(key)
-            || json_scanner_hosts.contains(&resolved_host)
-        {
+        let scanner = if previous.json_array_paths.contains_key(key) || json_scanner_hosts.contains(&resolved_host) {
             HostScanner::Json
         } else {
             HostScanner::for_path(&resolved_host)
@@ -2902,12 +2898,8 @@ mod tests {
         .unwrap();
         let retired = hosts.cached("Config.json").unwrap();
         let projected = retirement.projected_manifest(&manifest);
-        let settings_key = crate::manifest::RegionKey {
-            host: "Config.json".to_owned(),
-            id: "settings".to_owned(),
-        };
         assert!(projected.json_array_paths.is_empty());
-        assert!(projected.json_scanner_regions.contains(&settings_key));
+        assert!(projected.json_scanner_hosts.contains("Config.json"));
         let recorded_settings = checksum_str("  \"setting\": original,\n");
         assert_eq!(
             projected.region_checksum("Config.json", "settings"),
@@ -2937,6 +2929,114 @@ mod tests {
 
         assert_eq!(rerun.refusals().len(), 1);
         assert!(output.contains(example));
+    }
+
+    #[test]
+    fn untracked_refused_region_keeps_host_scanner_after_array_retirement() {
+        let settings = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": false,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let initial_catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings.clone()))
+            .with_json_array_region(array)
+            .build()
+            .unwrap();
+        let settings_only = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+            "  \"entries\": []\n",
+            "}\n",
+        );
+        let example = concat!(
+            "  /* repository example:\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"example\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "  */\n",
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+        let adopted = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &[],
+            &initial_catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let adopted_host = hosts.cached("config.json").unwrap();
+        let adopted_manifest = adopted.projected_manifest(&Manifest::default());
+        assert_eq!(adopted.refusals().len(), 1);
+        assert_eq!(adopted_manifest.region_checksum("config.json", "settings"), None);
+        assert!(adopted_manifest.json_scanner_hosts.contains("config.json"));
+        assert!(adopted_host.contains(example));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", adopted_host);
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+        let retired = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &adopted_manifest,
+            &[],
+            &settings_only,
+            &mut hosts,
+        )
+        .unwrap();
+        let retired_host = hosts.cached("config.json").unwrap();
+        let retired_manifest = retired.projected_manifest(&adopted_manifest);
+        assert!(retired_manifest.json_array_paths.is_empty());
+        assert!(retired_manifest.json_scanner_hosts.contains("config.json"));
+        assert!(retired_host.contains(example));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", retired_host);
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let rerun = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &retired_manifest,
+            &[],
+            &settings_only,
+            &mut hosts,
+        )
+        .unwrap();
+
+        assert_eq!(rerun.refusals().len(), 1);
+        assert!(hosts.cached("config.json").unwrap().contains(example));
     }
 
     #[test]

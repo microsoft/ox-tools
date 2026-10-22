@@ -74,11 +74,12 @@ participate in the catalog checksum, but are not persisted or part of the
 region's identity. Structural JSON regions additionally record an optional
 `json_array_path` on their existing region entry. This additive provenance
 selects JSON-aware retirement after the catalog declaration disappears.
-Ordinary regions that coexist with a structural JSON array record
-`json_scanner = true`; the flag remains on each surviving ordinary region if
-the final array region retires, so later runs keep ignoring marker-shaped text
-inside block comments. Historical and standalone ordinary JSON region records
-without either field retain the line-oriented retirement contract.
+Hosts containing ordinary regions alongside a structural JSON array are listed
+in top-level `json_scanner_hosts`; the host remains listed while any catalog
+region targets it, even if that region is untracked or refused. If the final
+array region retires, later runs therefore keep ignoring marker-shaped text
+inside block comments. Historical and standalone ordinary JSON hosts without
+either provenance form retain the line-oriented retirement contract.
 Schema 1 locks remain readable with no JSON provenance and are rewritten as
 schema 2; older binaries refuse schema 2 rather than silently dropping fields
 they do not understand.

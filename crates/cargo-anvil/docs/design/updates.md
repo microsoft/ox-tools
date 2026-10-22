@@ -37,10 +37,12 @@ Schema 2 regions introduced through the structural JSON-array API also record an
 distinguishes strict JSON-array retirement from ordinary slash-comment regions
 whose host may use a more permissive JSON-like dialect. Locks without the field
 remain valid and keep the ordinary line-oriented retirement behavior.
-Ordinary regions that coexist with a structural JSON array also record
-`json_scanner = true`. That marker survives retirement of the final array region
-for as long as the ordinary region remains managed, preventing later runs from
-reinterpreting repository block-comment examples as ownership sentinels.
+Hosts containing ordinary regions alongside a structural JSON array are also
+listed in the top-level `json_scanner_hosts` array. Host-level provenance is
+independent of checksum ownership, so it also covers refused untracked regions.
+It survives retirement of the final array region for as long as any catalog
+region remains in that host, preventing later runs from reinterpreting
+repository block-comment examples as ownership sentinels.
 Schema 1 remains readable with both provenance collections empty. Schema 2 is
 written whenever the lock is refreshed so older binaries refuse instead of
 silently erasing provenance they do not understand.

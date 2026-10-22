@@ -262,7 +262,8 @@ impl PlanItem {
 #[derive(Debug, Default)]
 pub struct Plan {
     items: Vec<PlanItem>,
-    json_scanner_regions: BTreeSet<RegionKey>,
+    json_scanner_hosts: BTreeSet<String>,
+    json_scanner_hosts_authoritative: bool,
     notes: Vec<String>,
     refusals: Vec<String>,
     manifest_update_required: bool,
@@ -305,8 +306,9 @@ impl Plan {
         &self.items
     }
 
-    pub(crate) fn retain_json_scanner(&mut self, host: String, id: String) {
-        self.json_scanner_regions.insert(RegionKey { host, id });
+    pub(crate) fn set_json_scanner_hosts(&mut self, hosts: BTreeSet<String>) {
+        self.json_scanner_hosts = hosts;
+        self.json_scanner_hosts_authoritative = true;
     }
 
     pub(crate) fn region_has_checksum_update(&self, host: &str, id: &str) -> bool {
@@ -521,18 +523,18 @@ impl Plan {
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
             json_array_paths: previous_manifest.json_array_paths.clone(),
-            json_scanner_regions: previous_manifest.json_scanner_regions.clone(),
+            json_scanner_hosts: if self.json_scanner_hosts_authoritative {
+                self.json_scanner_hosts.clone()
+            } else {
+                previous_manifest.json_scanner_hosts.clone()
+            },
         };
-        next.json_scanner_regions.extend(self.json_scanner_regions.iter().cloned());
 
         for item in &self.items {
             if item.json_scanner
-                && let Target::Region { host, id } = &item.target
+                && let Target::Region { host, .. } = &item.target
             {
-                next.json_scanner_regions.insert(RegionKey {
-                    host: host.clone(),
-                    id: id.clone(),
-                });
+                next.json_scanner_hosts.insert(host.clone());
             }
             match item.decision {
                 Decision::Write | Decision::Propose | Decision::InSync => {
@@ -565,7 +567,6 @@ impl Plan {
                         };
                         next.regions.remove(&key);
                         next.json_array_paths.remove(&key);
-                        next.json_scanner_regions.remove(&key);
                     }
                 },
                 Decision::LeaveAlone => {}
