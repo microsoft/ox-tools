@@ -2948,6 +2948,8 @@ fn coverage_recipe_delegation_contract_is_exact() {
         '--configuration', 'all-features',
         '--configuration', 'no-default-features',
         '--coverage-dir', 'target/coverage',
+        # LLVM produces unusable coverage profiles on Windows ARM, so
+        # coverage-gate runs that target's tests without measuring coverage.
         '--no-coverage-target', 'aarch64-pc-windows-msvc'
     )
     & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
