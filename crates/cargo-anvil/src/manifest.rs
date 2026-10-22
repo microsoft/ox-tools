@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err, bail};
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// File name of the manifest at the repo root.
 pub const MANIFEST_FILE_NAME: &str = ".anvil.lock";
@@ -50,6 +50,10 @@ pub struct Manifest {
     /// Last-rendered checksum per managed region, keyed by `(host_path,
     /// region_id)`.
     pub regions: BTreeMap<RegionKey, String>,
+
+    /// JSON array selector recorded for regions created through the structural
+    /// JSON array API. Ordinary slash-comment regions have no entry here.
+    pub json_array_paths: BTreeMap<RegionKey, Vec<String>>,
 }
 
 /// Composite key identifying one managed region.
@@ -203,6 +207,7 @@ impl Manifest {
         }
 
         let mut regions = BTreeMap::new();
+        let mut json_array_paths = BTreeMap::new();
         if let Some(arr) = doc.get("region").and_then(Item::as_array_of_tables) {
             for table in arr {
                 let host = table
@@ -224,6 +229,24 @@ impl Manifest {
                 if regions.insert(key.clone(), checksum).is_some() {
                     bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
+                if let Some(path) = table.get("json_array_path").and_then(Item::as_array) {
+                    let path = path
+                        .iter()
+                        .map(|component| {
+                            component.as_str().map(str::to_owned).ok_or_else(|| {
+                                app_err!(
+                                    "[[region]] entry '{}'/'{}' has a non-string `json_array_path` component",
+                                    key.host,
+                                    key.id
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if path.is_empty() {
+                        bail!("[[region]] entry '{}'/'{}' has an empty `json_array_path`", key.host, key.id);
+                    }
+                    json_array_paths.insert(key.clone(), path);
+                }
                 ensure_contained(&key.host, "[[region]] host")?;
             }
         }
@@ -234,6 +257,7 @@ impl Manifest {
             catalog_checksum,
             files,
             regions,
+            json_array_paths,
         })
     }
 
@@ -271,6 +295,13 @@ impl Manifest {
             table.insert("host", value(key.host.as_str()));
             table.insert("id", value(key.id.as_str()));
             table.insert("checksum", value(checksum.as_str()));
+            if let Some(path) = self.json_array_paths.get(key) {
+                let mut array = Array::new();
+                for component in path {
+                    array.push(component.as_str());
+                }
+                table.insert("json_array_path", Item::Value(array.into()));
+            }
             region_tables.push(table);
         }
         doc.insert("region", Item::ArrayOfTables(region_tables));
@@ -424,6 +455,14 @@ mod tests {
         m.set_file("justfiles/anvil/checks/fmt.just", "sha256:bbbb");
         m.set_region("Cargo.toml", "anvil-workspace-lints", "sha256:cccc");
         m.set_region("Justfile", "anvil-imports", "sha256:dddd");
+        m.json_array_paths.insert(
+            RegionKey {
+                host: "CloudBuild.json".to_owned(),
+                id: "anvil-source-root".to_owned(),
+            },
+            vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+        );
+        m.set_region("CloudBuild.json", "anvil-source-root", "sha256:eeee");
         m
     }
 

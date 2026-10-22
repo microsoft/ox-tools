@@ -506,6 +506,7 @@ pub(crate) fn plan_json_array_region(
         validated_regions(&spliced)?;
         Ok(spliced)
     })
+    .map(|item| item.with_json_array_path(spec.path.clone()))
 }
 
 fn array_indent(text: &str, array: &Array<'_>) -> String {

@@ -77,6 +77,9 @@ pub struct PlanItem {
     /// whenever it is present, so a decision that leaves it `None` leaves
     /// the previously recorded checksum untouched.
     pub rendered_checksum: Option<String>,
+    /// Structural JSON array selector whose provenance must be retained in
+    /// the manifest. `None` for every other plan item.
+    pub(crate) json_array_path: Option<Vec<String>>,
 }
 
 impl PlanItem {
@@ -92,6 +95,7 @@ impl PlanItem {
             rendered: None,
             spliced_host: Some(spliced_host),
             rendered_checksum: None,
+            json_array_path: None,
         }
     }
     /// Construct a plan item for an in-sync, skipped, or leave-alone
@@ -105,6 +109,7 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
         }
     }
 
@@ -125,6 +130,7 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: Some(template_checksum),
+            json_array_path: None,
         }
     }
 
@@ -137,6 +143,7 @@ impl PlanItem {
             rendered: Some(rendered),
             spliced_host: None,
             rendered_checksum: Some(checksum),
+            json_array_path: None,
         }
     }
 
@@ -156,6 +163,7 @@ impl PlanItem {
             rendered: Some(rendered),
             spliced_host: None,
             rendered_checksum: Some(template_checksum),
+            json_array_path: None,
         }
     }
 
@@ -171,6 +179,7 @@ impl PlanItem {
             rendered: Some(body),
             spliced_host: Some(spliced_host),
             rendered_checksum: Some(body_checksum),
+            json_array_path: None,
         }
     }
 
@@ -185,6 +194,7 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
         }
     }
 
@@ -202,6 +212,7 @@ impl PlanItem {
             rendered: None,
             spliced_host: Some(spliced_host),
             rendered_checksum: None,
+            json_array_path: None,
         }
     }
 
@@ -217,7 +228,14 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_json_array_path(mut self, path: Vec<String>) -> Self {
+        self.json_array_path = Some(path);
+        self
     }
 }
 
@@ -465,6 +483,7 @@ impl Plan {
             catalog_checksum: previous_manifest.catalog_checksum.clone(),
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
+            json_array_paths: previous_manifest.json_array_paths.clone(),
         };
 
         for item in &self.items {
@@ -476,13 +495,14 @@ impl Plan {
                                 next.files.insert(path.clone(), checksum.clone());
                             }
                             Target::Region { host, id } => {
-                                next.regions.insert(
-                                    RegionKey {
-                                        host: host.clone(),
-                                        id: id.clone(),
-                                    },
-                                    checksum.clone(),
-                                );
+                                let key = RegionKey {
+                                    host: host.clone(),
+                                    id: id.clone(),
+                                };
+                                next.regions.insert(key.clone(), checksum.clone());
+                                if let Some(path) = &item.json_array_path {
+                                    next.json_array_paths.insert(key, path.clone());
+                                }
                             }
                         }
                     }
@@ -492,10 +512,12 @@ impl Plan {
                         next.files.remove(path);
                     }
                     Target::Region { host, id } => {
-                        next.regions.remove(&RegionKey {
+                        let key = RegionKey {
                             host: host.clone(),
                             id: id.clone(),
-                        });
+                        };
+                        next.regions.remove(&key);
+                        next.json_array_paths.remove(&key);
                     }
                 },
                 Decision::LeaveAlone => {}
@@ -639,6 +661,7 @@ mod tests {
             rendered: Some("[advisories]\n".to_owned()),
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
         });
 
         drop(plan.apply_files(tmp.path()));

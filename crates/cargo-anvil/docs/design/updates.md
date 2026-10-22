@@ -32,6 +32,11 @@ checksum = "sha256:..."
 
 Paths are repository-relative, slash-separated, and must stay inside the repository.
 Entries are deterministic: files sorted by path, regions by `(host, id)`.
+Regions introduced through the structural JSON-array API also record an optional
+`json_array_path = ["property", "nested-property"]`. This additive provenance
+distinguishes strict JSON-array retirement from ordinary slash-comment regions
+whose host may use a more permissive JSON-like dialect. Locks without the field
+remain valid and keep the ordinary line-oriented retirement behavior.
 The lock is read at startup and refreshed after applying the plan; `--dry-run`
 does not write it. Missing tracking means an item has not previously been rendered.
 The schema version controls format compatibility; a newer schema is refused.
