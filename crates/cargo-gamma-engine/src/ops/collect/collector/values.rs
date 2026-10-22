@@ -80,11 +80,12 @@ pub(super) fn return_values(output: &ReturnType, types: &Types<'_>) -> Vec<Repla
 pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<ReplacementValue> {
     let alias_resolved = types.resolve_alias(ty);
     let source = types.concrete_self_type_or_associated(alias_resolved).unwrap_or(ty);
-    let resolved = types.resolve_alias(source);
-    let aliased = !core::ptr::eq(source, resolved);
+    let instantiated = types.instantiate_alias(source);
+    let resolved = instantiated.as_ref().unwrap_or_else(|| types.resolve_alias(source));
+    let aliased = instantiated.is_some() || !core::ptr::eq(source, resolved);
     // The zero-argument alias has a concrete success type that ordinary payload lookup cannot see.
     let fmt_result = types.is_fmt_result(resolved);
-    let kind = if fmt_result { Kind::Result } else { resolve_type(resolved) };
+    let kind = if fmt_result { Kind::Result } else { types.value_kind(resolved) };
 
     // An abstract type contributes nothing rather than a guess. `Default::default()` is what this
     // family reaches for when it cannot name a value, and for a caller's type parameter or a
@@ -264,7 +265,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // covers all of them and the element values come from the recursion.
         Kind::Collection => {
             let constructor_supported = types.supports_collection_constructor(resolved);
-            let outer_confidence = if constructor_supported {
+            let outer_confidence = if constructor_supported && types.collection_elements_proven(resolved) {
                 Confidence::Proven
             } else {
                 Confidence::Optimistic
@@ -278,7 +279,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             } else if types.is_local_type(resolved) {
                 Vec::new()
             } else if !constructor_supported {
-                vec![optimistic("fn_value.empty_collection", "Default::default()")]
+                vec![if types.has_proven_default(resolved) {
+                    proven("fn_value.empty_collection", "Default::default()")
+                } else {
+                    optimistic("fn_value.empty_collection", "Default::default()")
+                }]
             } else {
                 vec![proven(
                     "fn_value.empty_collection",
@@ -309,7 +314,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // first alone.
         Kind::Map => {
             let constructor_supported = types.supports_collection_constructor(resolved);
-            let outer_confidence = if constructor_supported {
+            let outer_confidence = if constructor_supported && types.collection_elements_proven(resolved) {
                 Confidence::Proven
             } else {
                 Confidence::Optimistic
@@ -323,7 +328,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             } else if types.is_local_type(resolved) {
                 Vec::new()
             } else if !constructor_supported {
-                vec![optimistic("fn_value.empty_collection", "Default::default()")]
+                vec![if types.has_proven_default(resolved) {
+                    proven("fn_value.empty_collection", "Default::default()")
+                } else {
+                    optimistic("fn_value.empty_collection", "Default::default()")
+                }]
             } else {
                 vec![proven(
                     "fn_value.empty_collection",

@@ -210,6 +210,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn campaign_regression_maximum_medium_threshold_passes_range_validation_before_order_validation() {
+        let config = Config {
+            medium_risk_threshold: 100.0,
+            low_risk_threshold: 100.0,
+            ..Config::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "medium_risk_threshold (100) must be less than low_risk_threshold (100)"
+        );
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
     fn test_default_config_is_valid() {
         let config = Config::default();

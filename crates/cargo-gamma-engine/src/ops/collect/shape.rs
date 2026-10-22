@@ -1,12 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::num::NonZeroU8;
+
 use serde::{Deserialize, Serialize};
 
 /// What kind of construct a mutation site is.
 ///
-/// This decides how a guard can be wrapped around it: the three cases are not stylistic. Rust will
-/// not accept the same guard text in all three positions, so the shape has to travel with the
+/// This decides how a guard can be wrapped around it: the cases are not stylistic. Rust will
+/// not accept the same guard text in every position, so the shape has to travel with the
 /// mutant all the way to instrumentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Shape {
@@ -37,6 +39,14 @@ pub enum Shape {
     /// Both branches are wrapped in [`gamma_rt::Either`](https://docs.rs/cargo-gamma-rt) exactly as for
     /// [`Shape::IterBlock`], but the surrounding syntax remains an expression rather than a block.
     IterExpr,
+
+    /// A body returning an iterator inside `Option`/`Result` success containers.
+    ///
+    /// Each level maps the success payload; `depth` records the number of containers.
+    IterWrappedBlock {
+        /// Positive number of nested success containers surrounding the iterator.
+        depth: NonZeroU8,
+    },
 
     /// A `continue` replaced with `break`.
     ///

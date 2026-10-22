@@ -561,6 +561,71 @@ mod tests {
     }
 
     #[test]
+    fn mixed_string_and_nonstring_entries_are_rejected_in_any_position() {
+        for body in ["\"managed\", 1,", "false, \"managed\",", "\"first\", [], \"last\","] {
+            let refusal = body_array(body).unwrap_err();
+            assert_eq!(refusal.reason.to_string(), "generated array entries must be strings");
+            assert_eq!(refusal.remedy, RefusalRemedy::InvalidGeneratedToml);
+        }
+        assert_eq!(body_array("\"first\", \"last\",").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn existing_array_selectors_find_unpaired_markers_without_leaking_sibling_paths() {
+        let source = concat!(
+            "[first]\nitems = [\n# >>> anvil-managed: unfinished\n\"managed\",\n]\n",
+            "[second]\nplain = [\"# >>> anvil-managed: string-data\"]\n",
+            "items = [\n# <<< anvil-managed: missing\n\"other\",\n]\n",
+            "[third]\nplain = [\"unmanaged\"]\n",
+        );
+        assert_eq!(
+            existing_array_paths(source).unwrap(),
+            [
+                vec!["first".to_owned(), "items".to_owned()],
+                vec!["second".to_owned(), "items".to_owned()]
+            ]
+        );
+        assert!(
+            existing_array_paths("items = [\"# >>> anvil-managed: not-a-comment\"]\n")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            existing_array_paths("items = [\n# an ordinary comment\n\"user\",\n]\n")
+                .unwrap()
+                .is_empty()
+        );
+        let refusal = existing_array_paths("items = [").unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::HostAlreadyUnparsable);
+    }
+
+    #[test]
+    fn array_adoption_removes_only_the_requested_repetitions_and_preserves_comment_commas() {
+        let text = "items = [\"managed\" # preserve, this comma\n, \"managed\", \"managed\", \"user\"]\n";
+        let document = Document::parse(text).unwrap();
+        let array = document["items"].as_array().unwrap();
+        let adopted = adopt_entries(text, array, "\"managed\", \"managed\",").unwrap();
+        assert_eq!(adopted, "items = [ # preserve, this comma\n  \"managed\", \"user\"]\n");
+        let document = Document::parse(adopted).unwrap();
+        let entries = document["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["managed", "user"]);
+    }
+
+    #[test]
+    fn array_offsets_distinguish_lone_carriage_returns_from_crlf_normalization() {
+        let source = "a\r\nb\rc\r\n";
+        assert_eq!(
+            (0..=6).map(|offset| source_offset(source, offset)).collect::<Vec<_>>(),
+            [0, 1, 3, 4, 5, 6, 8]
+        );
+    }
+
+    #[test]
     fn array_splice_maps_only_unchanged_bytes_at_both_boundaries() {
         let map = splice_offset_map("α[old]ω", "α[newer]ω");
         assert_eq!(
@@ -604,6 +669,108 @@ mod tests {
                 ..spec().region
             },
         }
+    }
+
+    #[test]
+    fn campaign_regression_array_helpers_propagate_invalid_input_instead_of_panicking() {
+        let invalid = "items = [";
+        let expected = invalid.parse::<DocumentMut>().unwrap_err().to_string();
+        let error = scaffold(invalid, &["items".to_owned()]).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::HostAlreadyUnparsable);
+        assert_eq!(error.reason.to_string(), expected);
+        let error = validate_neighbor_splice(invalid, "", &[]).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::HostAlreadyUnparsable);
+        assert_eq!(error.reason.to_string(), expected);
+
+        let body = "\"unterminated";
+        let expected = Document::parse(format!("entries = [\n{body}\n]")).unwrap_err().to_string();
+        let error = render_body(body, "\n").unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::InvalidGeneratedToml);
+        assert_eq!(error.reason.to_string(), expected);
+
+        let document = Document::parse("items = []").unwrap();
+        let array = document["items"].as_array().unwrap();
+        let error = adopt_entries("items = []", array, "1,").unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::InvalidGeneratedToml);
+        assert_eq!(error.reason.to_string(), "generated array entries must be strings");
+        let error = adopt_entries("# <<< anvil-managed: missing\nitems = []", array, "\"managed\",").unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::MalformedMarkers);
+        assert_eq!(error.reason.to_string(), "closing sentinel without its matching opener");
+    }
+
+    #[test]
+    fn campaign_regression_missing_neighbor_selectors_do_not_disable_later_live_array_checks() {
+        let paths = [vec!["absent".to_owned()], vec!["items".to_owned()]];
+        let error = validate_neighbor_splice("items = []\n", "", &paths).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::ArrayDependency);
+        assert_eq!(
+            error.reason.to_string(),
+            "this change would remove or rebind the live TOML array selector [\"items\"]"
+        );
+        validate_neighbor_splice("items = []\n", "# retained\nitems = []\n", &paths).unwrap();
+    }
+
+    #[test]
+    fn campaign_regression_own_region_does_not_hide_a_later_enclosing_owner() {
+        let host = concat!(
+            "# >>> anvil-managed: entries\n# <<< anvil-managed: entries\n",
+            "# >>> anvil-managed: owner\nitems = []\n# <<< anvil-managed: owner\n",
+        );
+        let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &mutation_spec(&["items"])).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
+        assert_eq!(
+            error.reason.to_string(),
+            "the selected array belongs to managed region 'owner'; retire its enclosing ownership before managing array entries"
+        );
+    }
+
+    #[test]
+    fn campaign_regression_an_opener_before_the_array_cannot_claim_an_inside_closer() {
+        let host = "# >>> anvil-managed: entries\nitems = [\n# <<< anvil-managed: entries\n]\n";
+        let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &mutation_spec(&["items"])).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::MisplacedArrayMarkers);
+        assert_eq!(error.reason.to_string(), "the managed region is outside its selected TOML array");
+    }
+
+    #[test]
+    fn campaign_regression_scaffolding_an_owned_table_reports_why_relocation_is_unsafe() {
+        let host = "# >>> anvil-managed: owner\n[plugins]\nmode = true\n# <<< anvil-managed: owner\n";
+        let error = scaffold(host, &["plugins".to_owned(), "default".to_owned()]).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
+        assert_eq!(
+            error.reason.to_string(),
+            "creating the missing array would overlap another managed region; scaffold relocation is not supported"
+        );
+    }
+
+    #[test]
+    fn campaign_regression_adopting_the_final_entry_without_a_trailing_newline_preserves_the_closer() {
+        for (source, expected) in [
+            ("items = [\"managed\"]", "items = []"),
+            ("items = [\"user\", \"managed\"]", "items = [\"user\", ]"),
+        ] {
+            let document = Document::parse(source).unwrap();
+            let array = document["items"].as_array().unwrap();
+            assert_eq!(adopt_entries(source, array, "\"managed\",").unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn campaign_regression_retiring_a_nested_array_region_preserves_neighboring_blank_lines() {
+        let host = concat!(
+            "title = \"user\"\n[plugins]\ndefault = [\n\n",
+            "# >>> anvil-managed: entries\n\"managed\",\n# <<< anvil-managed: entries\n",
+            "\n\"user\"]\n",
+        );
+        assert_eq!(
+            remove_region(host, "entries", CommentSyntax::Hash).unwrap(),
+            "title = \"user\"\n[plugins]\ndefault = [\n\n\n\"user\"]\n"
+        );
+        let error = remove_region("# >>> anvil-managed: entries\n", "entries", CommentSyntax::Hash).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "region 'entries' has an opening sentinel but no closing sentinel"
+        );
     }
 
     fn assert_mutation_write(host: &str, expected: &str, spec: &TomlArrayRegionSpec, manifest: &Manifest, newline: &str) {

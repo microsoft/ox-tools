@@ -57,7 +57,8 @@ impl Killers {
     /// Unparseable and unreadable files are skipped rather than reported. A file that cannot be
     /// parsed contributes no names, so every kill attributed to it is re-run — the safe direction —
     /// and discovery proper will report the same file with a diagnostic worth reading.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internals"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[must_use]
     pub fn scan(files: &[Utf8PathBuf]) -> Self {
         Self::scan_complete(files, true)

@@ -154,6 +154,10 @@ fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: 
         let version = placeholders.workspace_rust_version().unwrap_or_default();
         replacements.push((WORKSPACE_RUST_VERSION_TOKEN, version));
     }
+    assert!(
+        replacements.iter().all(|(token, _)| !token.is_empty()),
+        "substitution tokens must not be empty"
+    );
 
     let mut rest = arg;
     let mut replaced = String::with_capacity(arg.len());
@@ -282,13 +286,9 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
             } => {
                 // #[gamma::skip(collection.reverse_vec, reason = "these distinct braced tokens cannot match at the same offset, so min_by_key selects the same earliest token in every insertion order")]
                 let replacements = vec![
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package name token was emptied")]
                     ("{name}", name.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package spec token was emptied")]
                     ("{spec}", spec.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package version token was emptied")]
                     ("{version}", version.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package manifest token was emptied")]
                     ("{manifest}", manifest.as_str()),
                 ];
                 let replaced = replace_arg(arg, placeholders, replacements);
@@ -304,13 +304,9 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
             } => {
                 // #[gamma::skip(collection.reverse_vec, reason = "these distinct braced tokens cannot match at the same offset, so min_by_key selects the same earliest token in every insertion order")]
                 let replacements = vec![
-                    // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode name token was emptied")]
                     ("{name}", name.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the target-mode spec token was emptied")]
                     ("{spec}", spec.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode version token was emptied")]
                     ("{version}", version.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the target-mode manifest token was emptied")]
                     ("{manifest}", manifest.as_str()),
                     (TARGET_TOKEN, target.as_str()),
                 ];
@@ -336,6 +332,12 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "substitution tokens must not be empty")]
+    fn empty_substitution_tokens_are_rejected_before_scanning() {
+        let _replaced = replace_arg("", &pkg(), vec![("", "replacement")]);
+    }
 
     #[test]
     fn json_field_errors_preserve_the_original_nondefault_line() {

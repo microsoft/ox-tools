@@ -5,7 +5,7 @@ use core::time::Duration;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -16,6 +16,7 @@ use std::{env, fmt, fs, thread};
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_process::{MemoryRequest, MemoryUsage, PlatformError, PreparedCommand, ProcessTree, SpawnedCommand, prepare};
 use serde::Serialize;
+use tick::{SimpleClock, Stopwatch};
 
 mod hubs;
 
@@ -63,30 +64,14 @@ pub(super) enum Only<'name> {
 
     /// One test, named exactly as the harness names it.
     One(&'name str),
-
-    /// Every test a census established can reach the mutant, and nothing else.
-    ///
-    /// Unlike [`Self::One`] this *is* a substitute for the binary, and a verdict may be read from
-    /// its absence of failures: the census measured that no other test executes the mutant's site,
-    /// so no other test can convict it. See `census` for why that is exact rather than a guess.
-    These(&'name [&'name str]),
 }
 
 impl<'name> Only<'name> {
     /// The tests to run, empty when the whole binary runs.
-    ///
-    /// Borrowed rather than copied wherever a borrow reaches far enough: a census's [`Self::These`]
-    /// selection can already name most of a large suite, and every reachable censused binary
-    /// launches at least one attempt against it, so cloning that slice into a second vector on every
-    /// one of those launches would allocate an unnecessary vector because `launcher` only reads
-    /// the result once to build one command. [`Self::One`] still allocates because the enum stores
-    /// only the string reference; returning a borrowed one-element slice would require storage
-    /// whose lifetime outlives this call.
-    fn names(self) -> Cow<'name, [&'name str]> {
+    pub(super) fn names(&self) -> &[&'name str] {
         match self {
-            Self::All => Cow::Owned(Vec::new()),
-            Self::One(name) => Cow::Owned(vec![name]),
-            Self::These(names) => Cow::Borrowed(names),
+            Self::All => &[],
+            Self::One(name) => core::slice::from_ref(name),
         }
     }
 }
@@ -119,12 +104,6 @@ pub(super) struct Attempt<'name> {
 
     /// How much of the binary's suite to run.
     pub(super) only: Only<'name>,
-
-    /// Where the runtime is to write the sites this run reached, for a census.
-    ///
-    /// `None` for every ordinary run. Setting it also selects unmutated behavior in the runtime,
-    /// which is why it is only ever paired with an `active` of `None`.
-    pub(super) census: Option<&'name Utf8Path>,
 }
 
 impl Attempt<'_> {
@@ -292,6 +271,7 @@ pub(super) struct FailureEvidence {
 /// The kill confirmation costs one extra run of the cheapest verdict class — the one that finishes
 /// as soon as a test fails rather than running the whole binary. `confirm` turns it off, at the
 /// price of a score that counts flakes as kills and cannot show which ones they were.
+#[cfg(test)]
 pub(super) fn run_binary(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> Verdict {
     run_binary_observed(work, binary, attempt, confirm).verdict
 }
@@ -315,15 +295,37 @@ pub(super) fn reach_hint_is_final(attempt: Attempt<'_>, confirm: bool) -> bool {
 
 pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> BinaryRun {
     #[cfg(test)]
-    if let Some(run) = SCRIPTED_RUNNER.with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(binary, attempt, confirm))) {
+    if let Some(run) = SCRIPTED_RUNNER
+        .with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(binary, attempt, confirm)))
+        .or_else(|| SHARED_RUNNER.with_borrow(|runner| runner.as_ref().map(|runner| runner(binary, attempt, confirm))))
+    {
+        super::sweep::record_observed_killer(binary, attempt.only, &run.verdict);
         return run;
     }
 
     let _resources = work.acquire_resources(binary, attempt.only);
-    run_binary_with_observer(attempt, confirm, |attempt| observe(work, binary, attempt))
+    let run = run_binary_with_observer(&SimpleClock::new_system(), attempt, confirm, |attempt| {
+        observe(work, binary, attempt)
+    });
+    super::sweep::record_observed_killer(binary, attempt.only, &run.verdict);
+    run
 }
 
-fn run_binary_with_observer(attempt: Attempt<'_>, confirm: bool, mut observe: impl FnMut(Attempt<'_>) -> Observation) -> BinaryRun {
+fn run_binary_with_observer(
+    clock: &SimpleClock,
+    attempt: Attempt<'_>,
+    confirm: bool,
+    mut observe: impl FnMut(Attempt<'_>) -> Observation,
+) -> BinaryRun {
+    let mut first = true;
+    let mut observe = |attempt: Attempt<'_>| {
+        super::sweep::record_binary_launch_attempt(!first);
+        let started = Stopwatch::new(clock);
+        let observed = observe(attempt);
+        super::sweep::record_binary_execution(!first, started.elapsed(), &observed.verdict);
+        first = false;
+        observed
+    };
     let mut reach = ReachObservation::Unknown;
     let confirmed = settle_suspicions(attempt, |attempt| {
         let observed = observe(attempt);
@@ -350,8 +352,35 @@ fn run_binary_with_observer(attempt: Attempt<'_>, confirm: bool, mut observe: im
 type ScriptedRunner = Box<dyn FnMut(&TestBinary, Attempt<'_>, bool) -> BinaryRun>;
 
 #[cfg(test)]
+pub(super) type SharedRunner = Arc<dyn Fn(&TestBinary, Attempt<'_>, bool) -> BinaryRun + Send + Sync>;
+
+#[cfg(test)]
 std::thread_local! {
     static SCRIPTED_RUNNER: std::cell::RefCell<Option<ScriptedRunner>> = const { std::cell::RefCell::new(None) };
+    static SHARED_RUNNER: std::cell::RefCell<Option<SharedRunner>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn shared_runner() -> Option<SharedRunner> {
+    SHARED_RUNNER.with_borrow(Clone::clone)
+}
+
+#[cfg(test)]
+pub(super) fn set_shared_runner(runner: Option<SharedRunner>) {
+    SHARED_RUNNER.with_borrow_mut(|slot| *slot = runner);
+}
+
+#[cfg(test)]
+pub(super) fn with_shared_runner<T>(runner: SharedRunner, body: impl FnOnce() -> T) -> T {
+    struct Reset(Option<SharedRunner>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            set_shared_runner(self.0.take());
+        }
+    }
+    let _reset = Reset(shared_runner());
+    set_shared_runner(Some(runner));
+    body()
 }
 
 /// Supplies final verdict/reach results for caller ordering tests, bypassing resource acquisition,
@@ -756,9 +785,8 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
         return Ok(command);
     };
 
-    let resource_bearing = !work.required_resources(binary, only).is_empty();
     harness
-        .command(work, binary, &only.names(), fail_fast, resource_bearing)
+        .command(work, binary, only.names(), fail_fast, true)
         .map_err(|cause| Verdict::Unmetered(cause.to_string()))
 }
 
@@ -860,7 +888,7 @@ pub(super) fn baseline_environment(work: &Workspace, binary: &TestBinary, only: 
 
     serde_json::json!({
         "set": set,
-        "removed": [gamma_rt::ACTIVE_VAR, gamma_rt::CENSUS_VAR, "NEXTEST", "NEXTEST_*"],
+        "removed": [gamma_rt::ACTIVE_VAR, gamma_rt::REACH_VAR, "NEXTEST", "NEXTEST_*"],
         "valuesOmitted": [STACK_VAR],
         "loaderPathConfigured": launch.loader.is_some(),
     })
@@ -876,7 +904,7 @@ fn configure(
     launch: &Launch,
     threads: Option<&str>,
     active: Option<u32>,
-    census: Option<&Utf8Path>,
+    reach: Option<&Utf8Path>,
 ) {
     let _ = command
         .stdout(Stdio::piped())
@@ -939,15 +967,12 @@ fn configure(
         }
     }
 
-    // Removed rather than left alone on an ordinary run, because it is inherited: a census that
-    // crashed leaving the variable set in a developer's shell would otherwise turn every later run
-    // into one that activates no mutant and reports the whole population as surviving.
-    match census {
+    match reach {
         Some(path) => {
-            let _ = command.env(gamma_rt::CENSUS_VAR, path.as_std_path());
+            let _ = command.env(gamma_rt::REACH_VAR, path.as_std_path());
         }
         None => {
-            let _ = command.env_remove(gamma_rt::CENSUS_VAR);
+            let _ = command.env_remove(gamma_rt::REACH_VAR);
         }
     }
 }
@@ -963,11 +988,12 @@ fn configured_launcher(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
         Some("1")
     };
     // #[gamma::skip(call_result.default, reason = "configure returns unit and this mutator retains all command mutations before replacing unit with unit")]
-    configure(&mut command, binary, launch, threads, attempt.active, attempt.census);
+    configure(&mut command, binary, launch, threads, attempt.active, None);
     Ok(command)
 }
 
 /// Runs one binary, publishing the harness's progress into `progress` as it goes.
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn run_with(
     work: &Workspace,
@@ -976,7 +1002,7 @@ fn run_with(
     progress: &Arc<Mutex<Progress>>,
     retain_failure: bool,
 ) -> (Verdict, MemoryUsage, Option<FailureEvidence>) {
-    run_with_observation(work, binary, attempt, progress, retain_failure, ask_after)
+    run_with_observation(work, binary, attempt, progress, retain_failure, None, ask_after)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -986,14 +1012,18 @@ fn run_with_observation(
     attempt: Attempt<'_>,
     progress: &Arc<Mutex<Progress>>,
     retain_failure: bool,
+    reach: Option<&Utf8Path>,
     mut observe_exit: impl FnMut(&mut ProcessTree) -> io::Result<Option<ExitStatus>>,
 ) -> (Verdict, MemoryUsage, Option<FailureEvidence>) {
     let (active, timeout, stall, request) = (attempt.active, attempt.timeout, attempt.stall, attempt.request);
 
-    let command = match configured_launcher(work, binary, attempt) {
+    let mut command = match configured_launcher(work, binary, attempt) {
         Ok(command) => command,
         Err(verdict) => return (verdict, MemoryUsage::default(), None),
     };
+    if let Some(path) = reach {
+        let _ = command.env(gamma_rt::REACH_VAR, path.as_std_path());
+    }
 
     // Nextest reports on stderr: the per-test `FAIL` lines that name what convicted a mutant, and
     // the progress that tells the stall detector the child is alive. Left discarded, every nextest
@@ -1333,7 +1363,12 @@ fn collected_with_grace(drained: &Receiver<Drained>, grace: Option<Duration>) ->
         match received {
             Ok(chunk) => {
                 if chunk.authoritative {
-                    authoritative.extend_from_slice(&chunk.text);
+                    let complete_prefix = if chunk.complete {
+                        chunk.text.len()
+                    } else {
+                        chunk.text.iter().rposition(|byte| *byte == b'\n').map_or(0, |last| last + 1)
+                    };
+                    authoritative.extend_from_slice(&chunk.text[..complete_prefix]);
                 }
                 text.extend_from_slice(&chunk.text);
                 match chunk.stream {
@@ -1599,12 +1634,16 @@ pub(super) fn observe_baseline(work: &Workspace, binary: &TestBinary, attempt: A
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn observe_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, retain_failure: bool) -> Observation {
     let capture = ReachCapture::new(work, attempt);
-    let attempt = capture.as_ref().map_or(attempt, |capture| Attempt {
-        census: Some(&capture.path),
-        ..attempt
-    });
     let progress = Arc::new(Mutex::new(Progress::new(watch(work))));
-    let (verdict, usage, failure) = run_with(work, binary, attempt, &progress, retain_failure);
+    let (verdict, usage, failure) = run_with_observation(
+        work,
+        binary,
+        attempt,
+        &progress,
+        retain_failure,
+        capture.as_ref().map(|capture| capture.path.as_path()),
+        ask_after,
+    );
     let reach = capture.map_or(ReachObservation::Unknown, ReachCapture::finish);
     let quiet = quiet_of(&progress);
 
@@ -1637,10 +1676,6 @@ impl ReachCapture {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn new_with_sequence(work: &Workspace, attempt: Attempt<'_>, next: &AtomicUsize) -> Option<Self> {
         let ordinal = attempt.active?;
-        if attempt.census.is_some() {
-            return None;
-        }
-
         let sequence = next.fetch_add(1, Ordering::Relaxed);
         let path = work.target.join(format!(".gamma-reach-{}-{sequence}.bin", std::process::id()));
         let _created = fs::create_dir_all(work.target.as_std_path());
@@ -1756,7 +1791,6 @@ mod pulse_wait_regression_tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         };
         let (verdict, _usage, evidence) = Pulse::with_wait_observer(
             move |pulse, _seen, upto| {
@@ -1773,6 +1807,7 @@ mod pulse_wait_regression_tests {
                     attempt,
                     &Arc::new(Mutex::new(Progress::new(Watch::Libtest))),
                     false,
+                    None,
                     |subtree| {
                         observations += 1;
                         if observations == 1 { Ok(None) } else { ask_after(subtree) }
@@ -2003,19 +2038,21 @@ fn drain<R: Read>(
     authoritative: bool,
     retain_tail: bool,
 ) -> (Vec<u8>, Vec<u8>, bool, bool) {
-    use std::io::BufRead as _;
-
     let mut reader = BufReader::new(pipe);
     let mut kept = Vec::new();
     let mut tail = VecDeque::new();
     let mut tail_truncated = false;
     let mut line = Vec::new();
     let mut whole = true;
+    let mut continuing = false;
+    let marker_overlap_cap = gamma_rt::ENVIRONMENT_ERROR_MARKER
+        .len()
+        .max(gamma_rt::PRE_INSTALL_ERROR_MARKER.len())
+        .saturating_sub(1);
+    let mut marker_overlap = Vec::new();
 
     loop {
-        line.clear();
-
-        match reader.read_until(b'\n', &mut line) {
+        match read_output_fragment(&mut reader, &mut line) {
             Ok(0) => return (kept, tail.into_iter().collect(), tail_truncated, whole),
 
             // The partial line this read was building goes with the bytes it lost: half a line is
@@ -2024,6 +2061,16 @@ fn drain<R: Read>(
             Err(_truncated) => return (kept, tail.into_iter().collect(), tail_truncated, false),
 
             Ok(_read) => {
+                let fragmented = continuing || line.len() > OUTPUT_CAP;
+                continuing = fragmented && line.last() != Some(&b'\n');
+                whole &= !fragmented;
+                marker_overlap.extend_from_slice(&line[..line.len().min(marker_overlap_cap)]);
+                let boundary_error = runtime_startup_failure(&marker_overlap);
+                marker_overlap.clear();
+                if continuing {
+                    marker_overlap.extend_from_slice(&line[line.len().saturating_sub(marker_overlap_cap)..]);
+                }
+
                 // Published before the text is kept, so a binary past the cap still counts as
                 // making progress. Silence is the signal, not volume.
                 #[expect(clippy::unwrap_used, reason = "the watcher only panics if the process is unwinding")]
@@ -2033,7 +2080,8 @@ fn drain<R: Read>(
                     let environment_error = progress.environment_error;
 
                     let line = String::from_utf8_lossy(&line);
-                    if authoritative {
+                    progress.environment_error |= boundary_error;
+                    if authoritative && !fragmented {
                         progress.heard(&line);
                     } else {
                         progress.heard_diagnostic(&line);
@@ -2062,6 +2110,11 @@ fn drain<R: Read>(
             }
         }
     }
+}
+
+fn read_output_fragment(reader: &mut impl io::BufRead, line: &mut Vec<u8>) -> io::Result<usize> {
+    line.clear();
+    reader.take(OUTPUT_CAP as u64 + 1).read_until(b'\n', line)
 }
 
 /// Bytes retained from the end of each test-process stream for failure diagnostics.
@@ -2136,7 +2189,104 @@ mod final_survivor_tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
+        }
+    }
+
+    #[test]
+    fn telemetry_pre_spawn_refusal_is_reported_as_an_inconclusive_runner_launch_attempt() {
+        let control = tick::ClockControl::new();
+        let clock = control.to_simple_clock();
+        super::super::sweep::begin_selection_trace();
+        let run = run_binary_with_observer(
+            &clock,
+            Attempt {
+                active: Some(37),
+                ..baseline_attempt()
+            },
+            false,
+            |_| {
+                control.advance_millis(17);
+                Observation {
+                    verdict: Verdict::Unmetered("runner unavailable; no child spawned".into()),
+                    reach: ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: None,
+                    peak: None,
+                }
+            },
+        );
+        assert!(matches!(run.verdict, Verdict::Unmetered(_)));
+        let costs = super::super::sweep::take_execution_costs();
+        let [(confirmation, cost)] = costs.as_slice() else {
+            panic!("exactly one runner invocation was attempted")
+        };
+        assert!(!confirmation);
+        assert_eq!((cost.launches, cost.hits, cost.misses, cost.inconclusive), (1, 0, 0, 1));
+        assert_eq!(cost.execution_ms, 17);
+        let mut json = serde_json::to_value(cost).unwrap();
+        assert_eq!(json["launchAttempts"], 1);
+        assert!(
+            json.get("launches").is_none(),
+            "runner invocations must never be labelled physical process launches"
+        );
+        let attempts = json.as_object_mut().unwrap().remove("launchAttempts").unwrap();
+        json["launches"] = attempts;
+        let legacy: super::super::session::AttemptCost = serde_json::from_value(json).unwrap();
+        assert_eq!(&legacy, cost, "previously named attempt counters remain readable");
+        assert!(super::super::sweep::take_selection_trace().is_empty());
+    }
+
+    #[test]
+    fn telemetry_records_each_confirmation_observation_once_without_launching_processes() {
+        for (confirm, verdicts) in [
+            (true, vec![Verdict::Failed(Some("killer".into())), Verdict::Passed]),
+            (false, vec![Verdict::TimedOut, Verdict::TimedOut]),
+            (false, vec![Verdict::TestEnumerationFailed("diagnostic".into()), Verdict::Passed]),
+            (
+                true,
+                vec![Verdict::TimedOut, Verdict::Failed(Some("killer".into())), Verdict::Passed],
+            ),
+            (
+                true,
+                vec![Verdict::Failed(Some("killer".into())), Verdict::Failed(Some("killer".into()))],
+            ),
+        ] {
+            let expected = verdicts.len();
+            let mut verdicts = verdicts.into_iter().enumerate();
+            let control = tick::ClockControl::new();
+            let clock = control.to_simple_clock();
+            super::super::sweep::begin_selection_trace();
+            let _run = run_binary_with_observer(
+                &clock,
+                Attempt {
+                    active: Some(37),
+                    ..baseline_attempt()
+                },
+                confirm,
+                |_| {
+                    let (index, verdict) = verdicts.next().expect("only the scripted observations may be executed");
+                    control.advance(Duration::from_millis(u64::try_from(index + 1).unwrap() * 7));
+                    Observation {
+                        verdict,
+                        reach: ReachObservation::Unknown,
+                        failure: None,
+                        quiet: Duration::ZERO,
+                        tests: Some(1),
+                        peak: None,
+                    }
+                },
+            );
+            assert!(verdicts.next().is_none());
+            let costs = super::super::sweep::take_execution_costs();
+            assert_eq!(costs.len(), expected);
+            for (index, (_, cost)) in costs.iter().enumerate() {
+                assert_eq!(cost.execution_ms, u64::try_from(index + 1).unwrap() * 7);
+            }
+            assert!(!costs[0].0, "only the first observation is a primary execution");
+            assert!(costs[1..].iter().all(|(confirmation, cost)| *confirmation && cost.launches == 1));
+            assert_eq!(costs.iter().map(|(_, cost)| cost.launches).sum::<usize>(), expected);
+            assert!(super::super::sweep::take_selection_trace().is_empty());
         }
     }
 
@@ -2155,6 +2305,7 @@ mod final_survivor_tests {
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Off))),
             false,
+            None,
             |_subtree| panic!("an empty filter intersection must return before starting a process"),
         );
         assert!(
@@ -2175,13 +2326,13 @@ mod final_survivor_tests {
         ] {
             let mut results = [(Verdict::TimedOut, first), (Verdict::Passed, second)].into_iter();
             let result = run_binary_with_observer(
+                &SimpleClock::new_system(),
                 Attempt {
                     active: Some(37),
                     timeout: Some(Duration::from_secs(1)),
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 false,
                 |_| {
@@ -2206,13 +2357,13 @@ mod final_survivor_tests {
     fn enumeration_suspicions_are_exonerated_even_when_kill_confirmation_is_disabled() {
         let mut calls = Vec::new();
         let result = run_binary_with_observer(
+            &SimpleClock::new_system(),
             Attempt {
                 active: Some(37),
                 timeout: None,
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             false,
             |attempt| {
@@ -2665,7 +2816,7 @@ mod final_survivor_tests {
     }
 
     #[test]
-    fn nextest_launch_preparation_forwards_active_mutants_and_resource_serialization() {
+    fn nextest_launch_preparation_forwards_active_mutants_and_serializes_each_mutant() {
         for resource in [false, true] {
             let mut work = policy_workspace();
             let binary = crate::testing::test_binary("/t/deps/nxspike-abc");
@@ -2689,11 +2840,7 @@ mod final_survivor_tests {
                     active.is_some(),
                     "{arguments:?}"
                 );
-                assert_eq!(
-                    arguments.windows(2).any(|pair| pair == ["--test-threads", "1"]),
-                    resource,
-                    "{arguments:?}"
-                );
+                assert!(arguments.windows(2).any(|pair| pair == ["--test-threads", "1"]), "{arguments:?}");
             }
         }
     }
@@ -2919,7 +3066,7 @@ mod final_survivor_tests {
     }
 
     #[test]
-    fn simultaneous_reach_captures_never_remove_each_others_records_and_census_owns_its_capture() {
+    fn simultaneous_reach_captures_never_remove_each_others_records() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
         let work = Workspace::adopt(root.clone(), root.join("target"));
@@ -2929,9 +3076,8 @@ mod final_survivor_tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         };
-        let first = ReachCapture::new(&work, attempt).expect("a mutant run without a census needs its own capture");
+        let first = ReachCapture::new(&work, attempt).expect("an active mutant run needs its own capture");
         fs::write(&first.path, 37_u32.to_le_bytes()).unwrap();
         let second = ReachCapture::new(&work, attempt).expect("a second in-flight run needs an independent capture");
         assert_ne!(first.path, second.path);
@@ -2939,19 +3085,6 @@ mod final_survivor_tests {
         fs::write(&second.path, gamma_rt::SEAL.to_le_bytes()).unwrap();
         assert_eq!(first.finish(), ReachObservation::Reached);
         assert_eq!(second.finish(), ReachObservation::NotReached);
-        let census = root.join("owned-census");
-        fs::write(&census, "existing census bytes").unwrap();
-        assert!(
-            ReachCapture::new(
-                &work,
-                Attempt {
-                    census: Some(&census),
-                    ..attempt
-                }
-            )
-            .is_none()
-        );
-        assert_eq!(fs::read(&census).unwrap(), b"existing census bytes");
         assert!(ReachCapture::new(&work, Attempt { active: None, ..attempt }).is_none());
     }
 
@@ -2966,7 +3099,6 @@ mod final_survivor_tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         };
         let previous = AtomicUsize::new(1);
         let live = ReachCapture::new_with_sequence(&work, attempt, &previous).unwrap();
@@ -3209,7 +3341,6 @@ mod tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         };
         assert_eq!(attempt.patient().timeout, None);
 
@@ -3265,7 +3396,6 @@ mod tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         };
         assert!(reach_hint_is_final(base, false));
         assert!(!reach_hint_is_final(
@@ -3296,7 +3426,7 @@ mod tests {
 
     #[test]
     fn an_ordinary_mutant_run_harvests_reach_without_an_extra_launch() {
-        let directive = format!("write-le:{}|7|{}", gamma_rt::CENSUS_VAR, gamma_rt::SEAL);
+        let directive = format!("write-le:{}|7|{}", gamma_rt::REACH_VAR, gamma_rt::SEAL);
         let (_directory, work) = crate::testing::helper_workspace("reach-observation", &[&directive]);
         let binary = crate::testing::helper();
 
@@ -3309,7 +3439,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             false,
         );
@@ -3422,7 +3551,7 @@ mod tests {
         assert_eq!(set[INSTA_FORCE_PASS_VAR], "0");
         assert_eq!(
             environment["removed"],
-            serde_json::json!([gamma_rt::ACTIVE_VAR, gamma_rt::CENSUS_VAR, "NEXTEST", "NEXTEST_*"])
+            serde_json::json!([gamma_rt::ACTIVE_VAR, gamma_rt::REACH_VAR, "NEXTEST", "NEXTEST_*"])
         );
         assert_eq!(environment["valuesOmitted"], serde_json::json!([STACK_VAR]));
 
@@ -3438,7 +3567,7 @@ mod tests {
             &launch,
             Some("3"),
             Some(11),
-            Some(Utf8Path::new("census.bin")),
+            Some(Utf8Path::new("reach.bin")),
         );
         let env: BTreeMap<_, _> = command
             .get_envs()
@@ -3456,7 +3585,7 @@ mod tests {
         assert_eq!(env[INSTA_FORCE_PASS_VAR].as_deref(), Some("0"));
         assert_eq!(env[TEST_THREADS_VAR].as_deref(), Some("3"));
         assert_eq!(env[gamma_rt::ACTIVE_VAR].as_deref(), Some("11"));
-        assert_eq!(env[gamma_rt::CENSUS_VAR].as_deref(), Some("census.bin"));
+        assert_eq!(env[gamma_rt::REACH_VAR].as_deref(), Some("reach.bin"));
         assert_eq!(env["CARGO_MANIFEST_DIR"].as_deref(), Some("manifest"));
     }
 
@@ -3495,7 +3624,6 @@ mod tests {
                 limit: Some(100),
             },
             only: Only::All,
-            census: None,
         };
 
         let patient = base.patient();
@@ -3597,6 +3725,84 @@ mod tests {
             "the diagnostic tail did not retain the evidence discarded from the parsing prefix"
         );
         assert!(environment_failure(&progress), "the marker remains visible outside the output cap");
+    }
+
+    #[test]
+    fn unterminated_output_is_read_in_bounded_fragments_through_newline_and_eof() {
+        for ending in [b"".as_slice(), b"\nfollowing line\n".as_slice()] {
+            let bytes = OUTPUT_CAP * 3 + 17;
+            let pipe = io::repeat(b'x').take(bytes as u64).chain(io::Cursor::new(ending));
+            let mut reader = BufReader::new(pipe);
+            let mut fragment = Vec::new();
+            let mut observed = 0;
+            let mut largest = 0;
+            loop {
+                let read = read_output_fragment(&mut reader, &mut fragment).unwrap();
+                assert!(fragment.len() <= OUTPUT_CAP + 1);
+                assert!(fragment.capacity() <= (OUTPUT_CAP + 1) * 2);
+                largest = largest.max(fragment.len());
+                observed += read;
+                if read == 0 {
+                    break;
+                }
+            }
+            assert_eq!(largest, OUTPUT_CAP + 1);
+            assert_eq!(observed, bytes + ending.len());
+        }
+    }
+
+    #[test]
+    fn overlong_line_fragments_cannot_forge_failures_and_later_lines_still_count() {
+        let pipe = io::Cursor::new(b"running 1 test\n")
+            .chain(io::repeat(b'x').take(OUTPUT_CAP as u64 + 1))
+            .chain(io::Cursor::new(b"test forged::failure ... FAILED\ntest real::killer ... FAILED\n"));
+        let progress = Mutex::new(Progress::new(Watch::Libtest));
+        let (kept, tail, truncated, whole) = drain(pipe, &progress, &Pulse::default(), true, true);
+        assert_eq!(kept.len(), OUTPUT_CAP);
+        assert!(tail.len() <= OUTPUT_TAIL_CAP);
+        assert!(truncated);
+        assert!(!whole);
+        let progress = progress.lock().unwrap();
+        assert_eq!(progress.failed.as_deref(), Some("real::killer"));
+        assert_eq!(progress.failures, ["real::killer"]);
+    }
+
+    #[test]
+    fn startup_markers_split_across_overlong_fragments_remain_diagnostic_evidence() {
+        for marker in [gamma_rt::ENVIRONMENT_ERROR_MARKER, gamma_rt::PRE_INSTALL_ERROR_MARKER] {
+            let pipe = io::repeat(b'x')
+                .take((OUTPUT_CAP + 1 - marker.len() / 2) as u64)
+                .chain(io::Cursor::new(marker))
+                .chain(io::Cursor::new(b"\n"));
+            let progress = Mutex::new(Progress::new(Watch::Libtest));
+            let (_kept, _tail, _truncated, whole) = drain(pipe, &progress, &Pulse::default(), true, false);
+            assert!(!whole);
+            assert!(environment_failure(&progress));
+            assert!(progress.lock().unwrap().failed.is_none());
+        }
+    }
+
+    #[test]
+    fn truncated_output_prefixes_never_supply_a_partial_final_failure_line() {
+        for complete in [false, true] {
+            let (sink, drained) = mpsc::channel();
+            sink.send(Drained {
+                text: b"running 1 test\ntest forged::failure ... FAILED".to_vec(),
+                tail: Vec::new(),
+                tail_truncated: false,
+                complete,
+                authoritative: true,
+                stream: ReaderStream::Stdout,
+            })
+            .unwrap();
+            drop(sink);
+            let output = collected(&drained, Duration::from_secs(1));
+            assert_eq!(
+                first_failure(&String::from_utf8_lossy(&output.authoritative)),
+                complete.then_some("forged::failure")
+            );
+            assert!(String::from_utf8_lossy(&output.text).contains("forged::failure"));
+        }
     }
 
     #[test]
@@ -3714,7 +3920,6 @@ mod tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         }
     }
 
@@ -3935,7 +4140,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 &Arc::new(Mutex::new(Progress::new(Watch::Libtest))),
                 false,
@@ -3993,7 +4197,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest { meter: false, limit: None },
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -4028,7 +4231,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest { meter: true, limit: None },
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -4131,7 +4333,6 @@ mod tests {
             stall: Stall::NONE,
             request: MemoryRequest { meter: false, limit: None },
             only: Only::All,
-            census: None,
         }
     }
 
@@ -4160,7 +4361,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest { meter: true, limit: None },
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -4192,7 +4392,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
         );
 
@@ -4234,7 +4433,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
             );
 
@@ -4276,7 +4474,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
             );
 
@@ -4322,7 +4519,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
             );
 
@@ -4376,7 +4572,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4399,7 +4594,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest { meter: false, limit: None },
                 only: Only::All,
-                census: None,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Off))),
             false,
@@ -4430,7 +4624,6 @@ mod tests {
                 },
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -4452,7 +4645,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
         );
 
@@ -4468,7 +4660,6 @@ mod tests {
                 },
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
         );
 
@@ -4503,7 +4694,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4527,7 +4717,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4554,7 +4743,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -4585,7 +4773,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
         );
 
@@ -4616,7 +4803,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4641,7 +4827,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4667,7 +4852,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4696,7 +4880,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4730,7 +4913,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4763,7 +4945,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -4823,7 +5004,6 @@ mod tests {
                     limit: Some(limit),
                 },
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -4869,7 +5049,6 @@ mod tests {
                     limit: Some(limit),
                 },
                 only: Only::All,
-                census: None,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Libtest))),
             false,
@@ -4905,7 +5084,6 @@ mod tests {
                         limit: Some(512 * 1024 * 1024)
                     },
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -5061,7 +5239,6 @@ mod tests {
                     limit: Some(limit),
                 },
                 only: Only::All,
-                census: None,
             },
             false,
         );
@@ -5091,7 +5268,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             true,
         );
@@ -5122,7 +5298,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             Some("a::b".to_owned()),
         );
@@ -5140,7 +5315,6 @@ mod tests {
             stall: Stall::NONE,
             request: MemoryRequest::default(),
             only: Only::All,
-            census: None,
         };
         for test in [None, Some("original".to_owned())] {
             let check = |actual: Attempt<'_>, expected: Only<'_>| {
@@ -5149,7 +5323,6 @@ mod tests {
                 assert_eq!(actual.timeout, attempt.timeout);
                 assert_eq!(actual.stall.budget, attempt.stall.budget);
                 assert_eq!(actual.request, attempt.request);
-                assert_eq!(actual.census, attempt.census);
             };
             assert_eq!(
                 confirm_kill_with(attempt, test.clone(), |actual| {
@@ -5246,7 +5419,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             "nextest could not list the tests".to_owned(),
         );
@@ -5277,7 +5449,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -5305,7 +5476,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 false
             ),
@@ -5332,7 +5502,6 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                    census: None,
                 },
                 true
             ),
@@ -5605,7 +5774,6 @@ mod tests {
                 stall: Stall { budget: None },
                 request: MemoryRequest { meter: false, limit: None },
                 only: Only::All,
-                census: None,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Nextest))),
             false,
@@ -5706,37 +5874,6 @@ mod tests {
         assert_eq!(args, vec!["--gamma-step=exit:0", "tests::parses", "--exact"]);
     }
 
-    /// A run narrowed by a census asks for every test the census named, in one launch.
-    ///
-    /// libtest matches a test that any one of its positional filters matches, so several names mean
-    /// "any of these" — and one `--exact` covers them all, which is why it comes last rather than
-    /// once per name.
-    #[test]
-    fn a_run_narrowed_by_a_census_asks_for_all_of_its_tests_at_once() {
-        let (_scratch, work) = crate::testing::helper_workspace("launch-censused", &["exit:0"]);
-        let binary = crate::testing::helper();
-        let names = ["tests::parses", "tests::rejects"];
-        let command = launcher(&work, &binary, Only::These(&names), false).expect("a direct launch needs nothing from a runner");
-        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
-
-        assert_eq!(args, vec!["--gamma-step=exit:0", "tests::parses", "tests::rejects", "--exact"]);
-    }
-
-    /// An empty census selection is not a filter that matches nothing.
-    ///
-    /// It reaches here only from a caller that had no names to give, and a launch carrying just
-    /// `--exact` would run the whole binary anyway — so the shape that says "everything" is the one
-    /// with no filter at all, which is what the whole-binary path already produces.
-    #[test]
-    fn a_census_selection_with_no_names_runs_the_binary_whole() {
-        let (_scratch, work) = crate::testing::helper_workspace("launch-censused-empty", &["exit:0"]);
-        let binary = crate::testing::helper();
-        let command = launcher(&work, &binary, Only::These(&[]), false).expect("a direct launch needs nothing from a runner");
-        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
-
-        assert_eq!(args, vec!["--gamma-step=exit:0"]);
-    }
-
     /// A test this run chose that the user's own filter excludes is refused, not run.
     ///
     /// libtest matches a test that any *one* of its positional filters matches, so appending the
@@ -5776,21 +5913,6 @@ mod tests {
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args, vec!["--skip", "slow", "tests::allowed_case", "--exact"]);
-    }
-
-    /// A census selection keeps the part the user's filter admits rather than being refused whole.
-    #[test]
-    fn a_census_selection_keeps_only_the_tests_the_users_filter_admits() {
-        let (_scratch, mut work) = crate::testing::helper_workspace("launch-intersected", &["exit:0"]);
-        let binary = crate::testing::helper();
-
-        work.set_test_args(vec!["allowed".to_owned()]);
-
-        let names = ["tests::allowed_one", "tests::excluded", "tests::allowed_two"];
-        let command = launcher(&work, &binary, Only::These(&names), false).expect("the selection is not empty");
-        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
-
-        assert_eq!(args, vec!["tests::allowed_one", "tests::allowed_two", "--exact"]);
     }
 
     /// A wakeup raised while the waiter was busy elsewhere is not slept through.
@@ -5891,7 +6013,6 @@ mod tests {
                 stall: Stall::NONE,
                 request: MemoryRequest::default(),
                 only: Only::All,
-                census: None,
             },
             false,
         );

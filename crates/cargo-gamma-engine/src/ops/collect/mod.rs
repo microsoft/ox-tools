@@ -9,9 +9,13 @@
 mod candidate;
 mod collector;
 mod confidence;
+mod default_identity;
 mod defaults;
 mod definitions;
+mod resource_dependency;
+mod resource_namespaces;
 mod shape;
+mod source_identities;
 mod stated;
 mod traversal;
 
@@ -24,6 +28,8 @@ pub use defaults::Defaults;
 #[doc(inline)]
 pub use definitions::into_definitions;
 #[doc(inline)]
+pub use resource_dependency::ResourceDependency;
+#[doc(inline)]
 pub use shape::Shape;
 #[doc(inline)]
 pub use stated::{StatedValueError, check as check_stated};
@@ -33,3 +39,7 @@ pub use traversal::{check_stated_and_collect_with, collect, collect_in, collect_
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod inference_tests;

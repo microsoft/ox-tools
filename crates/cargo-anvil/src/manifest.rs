@@ -10,9 +10,8 @@
 //! template content.
 //!
 //! Schema is documented in [`updates.md §1`](../../docs/design/updates.md).
-//! The schema version is `1`. Newer schemas cause the tool to refuse
-//! running; older schemas are migrated automatically (no older schemas
-//! exist today).
+//! The schema version is `2`. Newer schemas cause the tool to refuse
+//! running; schema 1 is read without JSON scanner or selector provenance.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -24,7 +23,7 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 pub const MANIFEST_FILE_NAME: &str = ".anvil.lock";
 
 /// Current schema version we read/write.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The full parsed manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -166,6 +165,7 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error on malformed TOML or unsupported schema version.
+    #[expect(clippy::too_many_lines, reason = "parses one compact versioned lock schema in declaration order")]
     pub fn parse(text: &str) -> Result<Self, AppError> {
         let doc: DocumentMut = text.parse::<DocumentMut>().into_app_err("manifest is not valid TOML")?;
 
@@ -234,7 +234,9 @@ impl Manifest {
                 if regions.insert(key.clone(), checksum).is_some() {
                     bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
-                if let Some(path) = table.get("json_array_path") {
+                if version >= 2
+                    && let Some(path) = table.get("json_array_path")
+                {
                     let path = path
                         .as_array()
                         .ok_or_else(|| app_err!("[[region]] entry '{}'/'{}' has a non-array `json_array_path`", key.host, key.id))?;
@@ -255,7 +257,9 @@ impl Manifest {
                     }
                     json_array_paths.insert(key.clone(), path);
                 }
-                if let Some(scanner) = table.get("json_scanner") {
+                if version >= 2
+                    && let Some(scanner) = table.get("json_scanner")
+                {
                     let scanner = scanner
                         .as_bool()
                         .ok_or_else(|| app_err!("[[region]] entry '{}'/'{}' has a non-boolean `json_scanner`", key.host, key.id))?;
@@ -502,7 +506,7 @@ mod tests {
     fn empty_manifest_round_trip() {
         let m1 = Manifest::default();
         let text = m1.to_toml();
-        assert_eq!(text, "version = 1\n");
+        assert_eq!(text, "version = 2\n");
         let m2 = Manifest::parse(&text).unwrap();
         assert_eq!(m1, m2);
     }
@@ -628,25 +632,42 @@ mod tests {
                 "[[region]] entry 'Cargo.toml'/'anvil-x' is missing `checksum`",
             ),
             (
-                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = \"entries\"\n",
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = \"entries\"\n",
                 "[[region]] entry 'config.json'/'entries' has a non-array `json_array_path`",
             ),
             (
-                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = []\n",
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = []\n",
                 "[[region]] entry 'config.json'/'entries' has an empty `json_array_path`",
             ),
             (
-                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"root\", 1]\n",
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"root\", 1]\n",
                 "[[region]] entry 'config.json'/'entries' has a non-string `json_array_path` component",
             ),
             (
-                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_scanner = \"yes\"\n",
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_scanner = \"yes\"\n",
                 "[[region]] entry 'config.json'/'entries' has a non-boolean `json_scanner`",
             ),
         ] {
             let err = Manifest::parse(text).unwrap_err();
             assert!(err.to_string().contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn schema_one_ignores_json_provenance_fields() {
+        let manifest = Manifest::parse(concat!(
+            "version = 1\n",
+            "[[region]]\n",
+            "host = \"config.json\"\n",
+            "id = \"entries\"\n",
+            "checksum = \"sha256:x\"\n",
+            "json_array_path = [\"entries\"]\n",
+            "json_scanner = true\n",
+        ))
+        .unwrap();
+
+        assert!(manifest.json_array_paths.is_empty());
+        assert!(manifest.json_scanner_regions.is_empty());
     }
 
     #[test]

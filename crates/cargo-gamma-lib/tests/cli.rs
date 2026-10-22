@@ -380,21 +380,28 @@ fn a_run_reports_what_it_found() {
 }
 
 #[test]
-fn test_execution_optimization_is_explicit_and_conflicts_with_whole_binaries() {
-    let dir = workspace(SUBJECT);
-    let (code, host) = invoke(&dir, &["run", "--dry-run", "--optimize-test-execution"]);
+fn removed_test_execution_option_is_rejected() {
+    let path = Utf8PathBuf::from("parser-only-workspace");
+    let (code, host) = invoke_at(&path, &["run", "--dry-run", "--optimize-test-execution"]);
 
-    assert_eq!(code, EXIT_OK, "{}", host.err());
-
-    let (conflict_code, conflict) = invoke(&dir, &["run", "--dry-run", "--optimize-test-execution", "--whole-test-binaries"]);
-
-    assert_eq!(conflict_code, EXIT_USAGE, "{}", conflict.err());
-    assert!(conflict.err().contains("--optimize-test-execution"), "{}", conflict.err());
-    assert!(conflict.err().contains("--whole-test-binaries"), "{}", conflict.err());
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains("unexpected argument"), "{}", host.err());
 }
 
 #[test]
-fn a_default_measured_run_skips_and_reports_the_census() {
+fn removed_experimental_sweep_option_is_rejected_and_absent_from_help() {
+    let path = Utf8PathBuf::from("parser-only-workspace");
+    let (code, host) = invoke_at(&path, &["run", "--dry-run", "--experimental-staged-sweep"]);
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains("unexpected argument"), "{}", host.err());
+
+    let (code, host) = invoke_at(&path, &["run", "--help"]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(!host.out().contains("experimental-staged-sweep"), "{}", host.out());
+}
+
+#[test]
+fn a_default_measured_run_reports_its_active_phases() {
     let dir = workspace(SUBJECT);
     let (code, host) = invoke(&dir, &["run", "--jobs", "1"]);
 
@@ -405,11 +412,14 @@ fn a_default_measured_run_skips_and_reports_the_census() {
     let diagnostics: serde_json::Value = serde_json::from_str(&diagnostics).expect("diagnostics are JSON");
     let phases = &diagnostics["phases"];
 
-    assert_eq!(phases["censusStatus"], "disabled", "{diagnostics}");
-    assert!(
-        phases.get("census").is_none(),
-        "a disabled census must perform no measured work: {diagnostics}"
-    );
+    let mut names: Vec<_> = phases
+        .as_object()
+        .expect("phases are an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["baseline", "copy", "preflight", "sweep"], "{diagnostics}");
 }
 
 #[test]

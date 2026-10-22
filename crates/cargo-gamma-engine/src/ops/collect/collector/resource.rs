@@ -13,6 +13,30 @@ use syn::{BinOp, Block, Expr, Lit, Stmt, UnOp};
 
 use crate::HashMap;
 
+mod effects;
+mod fixed;
+mod grouping;
+mod patterns;
+mod provenance;
+mod sources;
+
+pub(super) use effects::{StableCall, certify};
+pub(super) use fixed::{Primitive, projection_sites};
+pub(super) use patterns::{enclosing_pattern_shadows, supported_match};
+pub(super) use sources::scalar_sources;
+const CHAR_WIDTH: &str = "#standard-char-width";
+
+pub(super) fn bool_cache_type(ty: &syn::Type) -> bool {
+    ty == &syn::parse_quote!(std::collections::HashMap<u32, bool>)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod acceptance;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod source_acceptance;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Binding {
     Bool,
@@ -20,6 +44,15 @@ pub(super) enum Binding {
     String,
     PeekableChars,
     StrReference,
+    Vec,
+    VecChar,
+    VecString,
+    Char,
+    Primitive(Primitive),
+    BoolCache,
+    Opaque,
+    CharReference,
+    MaybeChar,
 }
 
 pub(super) struct LoopProof {
@@ -27,6 +60,12 @@ pub(super) struct LoopProof {
     bindings: HashMap<String, Binding>,
     standard_char: bool,
     literals: HashMap<String, Literal>,
+    initializers: HashMap<String, Expr>,
+    original: Expr,
+    helpers: HashMap<String, syn::ItemFn>,
+    numeric_names: bool,
+    stable_calls: HashMap<String, StableCall>,
+    grouping: Option<grouping::Grouping>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -42,18 +81,49 @@ struct Iteration {
 
 impl LoopProof {
     pub(super) fn new(expression: &Expr, bindings: HashMap<String, Binding>, standard_char: bool) -> Option<Self> {
+        let span = expression.span().byte_range();
+        // Conservative defaults bound cloned loop syntax, abstract-state entries, and name storage.
+        // These are not measured capacities or semantic limits; exhaustion retains the candidate.
+        if span.len() > 4096 || bindings.len() > 64 || bindings.keys().any(|name| name.len() > 256) {
+            return None;
+        }
         let mut proof = Self {
-            span: expression.span().byte_range(),
+            span,
             bindings,
             standard_char,
             literals: HashMap::default(),
+            initializers: HashMap::default(),
+            original: expression.clone(),
+            helpers: HashMap::default(),
+            numeric_names: true,
+            stable_calls: HashMap::default(),
+            grouping: None,
         };
-        // Keep proof work bounded; exceeding the budget never excludes a candidate.
-        if proof.span.len() > 4096 {
-            return None;
-        }
         Self::collect_literals(expression.to_token_stream(), &mut proof.literals);
         proof.proves(expression).is_none().then_some(proof)
+    }
+
+    pub(super) fn initializers(mut self, file: &syn::File) -> Self {
+        self.initializers = fixed::initializers(file, &self.span);
+        self.helpers = fixed::helpers(file, &self.span);
+        self.numeric_names = fixed::numeric_names(file, &self.span);
+        self
+    }
+
+    pub(super) fn stable_calls(mut self, calls: HashMap<String, StableCall>) -> Self {
+        self.stable_calls = calls;
+        self
+    }
+
+    pub(super) fn grouping(
+        mut self,
+        file: &syn::File,
+        sources: &crate::ops::collect::resource_namespaces::Namespaces,
+        source: &str,
+        inline: &[String],
+    ) -> Self {
+        self.grouping = grouping::Grouping::new(file, &self.original, &self.bindings, sources, source, inline);
+        self
     }
 
     pub(super) fn omits(&self, source: &str, span: &Range<usize>, replacement: &str) -> bool {
@@ -68,7 +138,29 @@ impl LoopProof {
         let Some(tokens) = Self::proof_tokens(&mutated, &self.literals) else {
             return false;
         };
-        syn::parse2::<Expr>(tokens).is_ok_and(|expression| self.proves(&expression).is_some())
+        syn::parse2::<Expr>(tokens).is_ok_and(|expression| {
+            self.grouping
+                .as_ref()
+                .is_some_and(|grouping| grouping.proves(&self.original, &expression))
+                || self.proves(&expression).is_some()
+                || (!fixed::proves_with_effects(
+                    &self.original,
+                    &self.original,
+                    &self.bindings,
+                    &self.initializers,
+                    &self.helpers,
+                    self.numeric_names,
+                    &self.stable_calls,
+                ) && fixed::proves_with_effects(
+                    &self.original,
+                    &expression,
+                    &self.bindings,
+                    &self.initializers,
+                    &self.helpers,
+                    self.numeric_names,
+                    &self.stable_calls,
+                ))
+        })
     }
 
     fn collect_literals(tokens: TokenStream, literals: &mut HashMap<String, Literal>) {
@@ -130,6 +222,8 @@ impl LoopProof {
                         literal.clone()
                     } else if spelling == "\"\"" {
                         Literal::string("")
+                    } else if matches!(kind, LiteralKind::Char { terminated: true }) && suffix_start == spelling.len() {
+                        Literal::character(rustc_lexer::unescape::unescape_char(spelling.strip_prefix('\'')?.strip_suffix('\'')?).ok()?)
                     } else if matches!(kind, LiteralKind::Int { empty_int: false, .. })
                         && suffix_start == spelling.len()
                         && let Ok(value) = spelling.replace('_', "").parse::<u128>()
@@ -240,14 +334,20 @@ impl LoopProof {
             Expr::Assign(node) if node.attrs.is_empty() => {
                 let name = bare_name(&node.left)?;
                 let kind = *self.bindings.get(&name)?;
-                if !matches!(kind, Binding::Bool | Binding::Integer) || bare_name(&node.right).as_ref() != Some(&name) {
+                if !matches!(kind, Binding::Bool | Binding::Integer | Binding::Primitive(_))
+                    || bare_name(&node.right).as_ref() != Some(&name)
+                {
                     return None;
                 }
                 Some(false)
             }
             Expr::Binary(node) if node.attrs.is_empty() && matches!(node.op, BinOp::AddAssign(_) | BinOp::SubAssign(_)) => {
                 let name = bare_name(&node.left)?;
-                if self.bindings.get(&name) != Some(&Binding::Integer) || !integer_zero(&node.right) {
+                if !matches!(
+                    self.bindings.get(&name),
+                    Some(Binding::Integer | Binding::Primitive(Primitive::Signed(_) | Primitive::Unsigned(_)))
+                ) || !integer_zero(&node.right)
+                {
                     return None;
                 }
                 Some(false)
@@ -279,7 +379,10 @@ impl LoopProof {
             Expr::Group(node) if node.attrs.is_empty() => self.scalar(&node.expr),
             Expr::Path(node) if node.attrs.is_empty() => {
                 let name = bare_name(expression)?;
-                let kind = *self.bindings.get(&name)?;
+                let kind = match *self.bindings.get(&name)? {
+                    Binding::Primitive(Primitive::Unsigned(_) | Primitive::Signed(_)) => Binding::Integer,
+                    kind => kind,
+                };
                 if !matches!(kind, Binding::Bool | Binding::Integer) {
                     return None;
                 }
@@ -468,10 +571,16 @@ mod tests {
     #[test]
     fn resource_proofs_distinguish_growth_from_spinning_and_unreachable_appends() {
         let proof = LoopProof {
+            grouping: None,
             span: 0..0,
             bindings: HashMap::from_iter([("s".to_owned(), Binding::String)]),
             standard_char: true,
             literals: HashMap::default(),
+            initializers: HashMap::default(),
+            original: syn::parse_quote!(loop {}),
+            stable_calls: HashMap::default(),
+            helpers: HashMap::default(),
+            numeric_names: true,
         };
         for (expression, expected) in [
             ("loop { s.push_str(\"x\"); }", Some(Hazard::UnboundedGrowth)),
@@ -487,6 +596,7 @@ mod tests {
 
     fn scalar_proof() -> LoopProof {
         LoopProof {
+            grouping: None,
             span: 0..0,
             bindings: HashMap::from_iter([
                 ("i".to_owned(), Binding::Integer),
@@ -497,6 +607,11 @@ mod tests {
             ]),
             standard_char: true,
             literals: HashMap::default(),
+            initializers: HashMap::default(),
+            original: syn::parse_quote!(loop {}),
+            stable_calls: HashMap::default(),
+            helpers: HashMap::default(),
+            numeric_names: true,
         }
     }
 

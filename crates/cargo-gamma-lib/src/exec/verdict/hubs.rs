@@ -103,7 +103,6 @@ impl Pulse {
         // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
         *generation = generation.wrapping_add(1);
 
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         drop(generation);
 
         self.woken.notify_all();

@@ -9,34 +9,25 @@ implementation, not a proposed replacement.
 1. [Target-linkage discovery](#1-target-linkage-discovery)
 2. [Baselining](#2-baselining)
 3. [Loading hints](#3-loading-hints)
-4. [Census admission](#4-census-admission)
-5. [Census walk](#5-census-walk)
-6. [Projecting census results](#6-projecting-census-results)
-7. [Scheduling mutant work](#7-scheduling-mutant-work)
-8. [Testing one mutant](#8-testing-one-mutant)
-9. [Learning during the sweep](#9-learning-during-the-sweep)
-10. [Persistence and reporting](#10-persistence-and-reporting)
+4. [Scheduling mutant work](#4-scheduling-mutant-work)
+5. [Testing one mutant](#5-testing-one-mutant)
+6. [Learning during the sweep](#6-learning-during-the-sweep)
+7. [Persistence and reporting](#7-persistence-and-reporting)
 
 ```mermaid
 flowchart TD
     build[1. Build and target-linkage discovery]
     baseline[2. Baseline measurements]
     hints[3. Loaded execution hints]
-    candidates[4. Census candidates and budget]
-    census[5. Per-binary reach observations]
-    selections[6. Mutant/binary selections]
-    queue[7. Assignment-time scheduler]
-    tests[8. Mutant verdicts]
-    learning[9. Updated in-memory knowledge]
-    persistence[10. Run record and diagnostics]
+    queue[4. Assignment-time scheduler]
+    tests[5. Mutant verdicts]
+    learning[6. Updated in-memory knowledge]
+    persistence[7. Run record and diagnostics]
 
     build --> baseline
-    baseline --> candidates
-    hints --> candidates
-    candidates --> census --> selections
     baseline --> queue
     hints --> queue
-    selections --> queue --> tests --> learning --> persistence
+    queue --> tests --> learning --> persistence
 ```
 
 ## Shared test resources
@@ -51,24 +42,22 @@ the `[resources]` table in `gamma.toml`, may be overridden by repeatable
 Capacities for resources outside the selected packages remain inactive rather than
 invalidating a package-scoped campaign.
 
-Before launching a baseline, census, mutant, or confirmation process,
+Before launching a baseline, mutant, or confirmation process,
 cargo-gamma atomically reserves every resource required by that selection and
-releases it when the complete process tree has ended. Sweep assignment also
-tracks conservative per-mutant resource requirements: when a capacity is
-occupied, the scheduler skips blocked mutants and admits unrelated queued work
-instead of assigning a worker that would wait at process launch. The
-process-level reservation remains authoritative. Unrelated tests remain
+releases it when the complete process tree has ended. Reservations apply to the
+actual test selection rather than the union of a mutant's possible future work.
+The process-level reservation remains authoritative. Unrelated tests remain
 parallel.
 
 ## 1. Target-linkage discovery
 
-**Goal:** avoid building, baselining, censusing, or running test binaries that
+**Goal:** avoid building, baselining, or running test binaries that
 can be proven unrelated to every pending mutant.
 
 This is a logical scheduling phase within the existing build/preflight work; it
 does not currently have its own progress-display label. Its purpose is to
 remove test targets proven unable to link any pending mutated source before
-paying to baseline or census them.
+paying to baseline or run them.
 
 ### 1.1. Coarse package admission
 
@@ -188,7 +177,7 @@ Cargo-gamma runs every retained test binary without an active mutant.
 - the binary's candidate mutated source files: proven linked files when exact
   capture succeeded, or conservative package-level candidates when linkage is
   unknown. Neither case proves that a test executes a particular mutation
-  site; that is the census's job.
+  site; ordinary active-mutant launches observe that separately.
 
 ## 3. Loading hints
 
@@ -240,123 +229,7 @@ ignored rather than partially trusted.
 - stable source site to previously observed reaching tests;
 - likely-unviable mutant IDs for build ordering only.
 
-## 4. Census admission
-
-**Goal:** decide whether spending test launches now to learn site reachability
-is likely to avoid more test execution during the mutant sweep.
-
-The census is disabled by default. `--optimize-test-execution` or the equivalent
-`optimize-test-execution = true` configuration enables this experimental phase;
-without the opt-in, cargo-gamma performs no census listing or sampling launches.
-`--whole-test-binaries` conflicts with the opt-in and explicitly suppresses all
-case-level selection.
-
-When enabled, the census asks which baseline tests execute each pending mutation site.
-Here, **cost** is the estimated time spent listing tests and launching census
-scopes. **Savings** is the upper bound on future whole-binary baseline time
-that narrower test selections could avoid across all pending mutants.
-
-- Only binaries that may link pending mutated code are candidates.
-- A mutant with a usable exact killer hint does not add to the census's
-  potential savings, although its site may ride along in a census justified by
-  other mutants.
-- Maximum possible savings is the sum of whole-binary baseline durations over
-  eligible mutant/binary pairs.
-- Each binary is asked to list its tests, with a 30-second listing limit.
-- Initial scopes are top-level test-module groups when names expose that
-  structure; otherwise they are deterministic contiguous chunks.
-- Estimated initial census cost is:
-
-  ```text
-  max(test-listing duration, 5 ms) * initial scope count
-  ```
-
-- The census is skipped when that estimate is not less than the maximum
-  possible savings.
-- If admitted, the maximum possible savings also becomes the global census
-  deadline.
-
-**Output:**
-
-- a mapping from each pending `(mutated package, source file)` to its potential
-  test binaries;
-- a mapping from each census-candidate binary to the pending site ordinals it
-  should observe;
-- initial test scopes for each candidate binary;
-- estimated census cost, maximum possible savings, and the admission decision.
-
-When census is disabled or declined, the empty census carries no negative
-reachability evidence. Exact-hint and inferred-test probes remain active, and a probe
-that does not kill falls back to the complete reachable binary.
-
-Diagnostics classify census as `disabled`, `declined`, `incomplete`, or
-`complete`. Attempted census timing, candidate binary and site counts, listing
-attempts and successes, estimated walk cost and admission, sampling launches,
-and complete versus partial binary evidence accompany the latter two states,
-allowing its sweep savings to be compared with its cost.
-
-## 5. Census walk
-
-**Goal:** measure which baseline test groups execute which pending mutation
-sites, without changing program behavior.
-
-The current census walk is serial: binaries and their scopes are sampled one
-after another even though `jobs` is passed into the census API.
-
-For each scope:
-
-- No mutant is active.
-- Every reached guard writes its site ordinal to the census stream.
-- The scope must pass and produce a complete, sealed, internally consistent
-  stream.
-- Every reached site is conservatively attributed to every test in that
-  scope.
-
-A scope is subdivided only when:
-
-- it contains more than one test;
-- it reaches some, but not all, wanted sites; and
-- twice the estimated subdivision launch cost is less than the remaining
-  mutant-test work that subdivision could save.
-
-The resulting per-binary data contains:
-
-- ordered test names;
-- mutation-site ordinal to reaching-test-set mappings;
-- deduplicated reaching-test sets;
-- measured scope costs;
-- whether the hierarchy completed;
-- the number of sample processes launched.
-
-**Output:** per test binary, a site-ordinal-to-reaching-test-set map, measured
-scope costs, a completeness flag, and the total number of census launches.
-
-## 6. Projecting census results
-
-**Goal:** turn raw reach observations into conservative instructions the
-mutant sweep can execute safely.
-
-For each mutant and test binary, census data becomes one of:
-
-| Selection | Meaning | Sweep behavior |
-|---|---|---|
-| `Whole` | No usable narrowing | Run the complete binary |
-| `Uncovered` | A complete census proved no test reaches the site | Skip the binary |
-| `Selected` | A complete census identified the reaching tests | Run only those tests |
-| `Hinted` | An incomplete census observed some reaching tests | Try them first, then fall back to the whole binary |
-
-Additional rules:
-
-- A reaching set containing more than half the binary's tests becomes `Whole`.
-- Missing, malformed, failed, or inconsistent evidence never proves absence.
-- A non-passing `Selected` run is repeated against the whole binary before its
-  outcome is accepted because filtering can change resource use and failure
-  order.
-
-**Output:** a `(mutant, test binary) -> Whole | Uncovered | Selected(tests) |
-Hinted(tests)` selection map used by cost estimation and execution.
-
-## 7. Scheduling mutant work
+## 4. Scheduling mutant work
 
 **Goal:** overlap independent work, expose useful learning before related work
 starts, and avoid leaving expensive work as a long serial tail.
@@ -365,12 +238,8 @@ Cargo-gamma estimates each pending mutant's serial test cost:
 
 - exact killer hint: a short filtered probe plus a small miss-weighted
   whole-suite fallback;
-- `Selected`: half the measured duration of the selected tests for the initial
+- whole-binary fallback: half the whole-binary baseline for the initial
   killed-mutant prior;
-- `Whole`: half the whole-binary baseline for the initial killed-mutant prior;
-- `Hinted`: measured hinted-test duration plus a miss-weighted whole-binary
-  fallback;
-- `Uncovered`: zero.
 
 Saved selection hints seed inferred candidates' scheduling probability and probe
 cost from the hint artifact's hit, miss, measured-time, and sample counters.
@@ -388,78 +257,91 @@ the global frontier contains only the best candidate from each package.
 Selection reads the first global entry instead of rescanning all mutants.
 Claims and completions rekey only candidates in the affected source file;
 package-turn fairness updates only that package's global entry. Claimed work is
-removed permanently, and a separate remaining count distinguishes an exhausted
-sweep from a cold same-item tail that is waiting for its scout.
+removed permanently within each pass, and a separate remaining count identifies
+an exhausted pass. After the global exact-hint pass, completed mutants leave the
+frontier and sibling benefits and full-binary discovery costs are recomputed
+for the unresolved population.
 
-For unhinted work the scheduler ranks distance first:
+The scheduler preserves package-turn fairness first. Within a package, a
+function with a fresh named killer takes priority while that candidate's
+seed-plus-transfer-hit count is at least its transfer-miss count. Freshness
+requires a named kill in this campaign, not merely a persisted hint. Repeated
+misses remove this exploitation boost without retiring the candidate.
+
+The next priority is discovery distance:
 
 1. an item in a file with no active mutant;
 2. an inactive item in an active file, preferring the least-contended file;
-3. no assignment for a still-cold item that already has an unhinted scout
-   active.
+3. another mutant in an already-active item.
 
-The third rule is stronger than file separation because an exact same-item
-test is more reusable than file-level binary evidence. Within the same
-distance tier the scheduler preserves package turns, prefers greater learning
-leverage per estimated evaluation cost, retains longest-work-first value, and
-finally uses the stable pre-sweep order. Learning leverage is the number of
-pending siblings that can reuse the scout.
+Within the same distance tier the scheduler prefers
+greater learning leverage per estimated evaluation cost, retains longest-work-first
+value, and finally uses the stable pre-sweep order. Learning leverage is the
+number of pending siblings that can reuse the completed mutant's observations.
 
-A mutant with an exact killer hint is already informed and may share an active
-item. It still participates in file contention so cold work is steered toward
-more independent files when possible.
-
-The explicit tail policy is **wait for learning**: when only unhinted
-same-item conflicts remain for a cold item, capacity stays idle until the
-active item changes state. Once that scout publishes, its informed siblings
-may run concurrently. The waiter holds no file or item reservation and blocks
-on the scheduler condition variable; there is no duration-based sleep or
-timeout.
+Same-item mutants may execute concurrently; there is no scout gate that leaves
+workers idle while siblings remain queued. Every phase uses the configured job
+count, even when it exceeds available CPU parallelism. There is no aggregate
+memory reservation or scheduler-imposed memory envelope. Users reduce the job
+count when concurrent execution exhausts system memory; per-process memory
+limits and named-resource capacities remain enforced.
 
 **Output:** immutable scheduling-cost metadata and a synchronized
-assignment-time scheduler tracking remaining work and active file, item, and
-shared-resource reservations.
+assignment-time scheduler tracking remaining work and active file and item
+reservations.
 
-## 8. Testing one mutant
+## 5. Testing one mutant
 
-**Goal:** reach the first trustworthy verdict with the least test work while
-preserving canonical failure, resource, and metering precedence.
+**Goal:** reach the first trustworthy verdict with the least test work.
 
-Reachable binaries have a canonical order:
+Remaining fallback binaries are ordered at entry to fallback:
 
 1. binaries from the mutant's own package;
 2. binaries from other selected test packages;
-3. shorter baseline duration first within each tier;
-4. stable package, target, and path tie-breakers.
+3. most distinct mutants killed to date first within each tier;
+4. shorter baseline duration when kill counts tie;
+5. stable package, target, and path tie-breakers.
 
-Evidence is attempted in this order:
+Counts are seeded from known exact-killer hints, including historical mutants,
+and updated by confirmed kills from any execution stage. Reconfirming a known
+mutant does not count it twice; a different killer moves that mutant's credit
+to the new binary. Unnamed confirmed kills also count. Passing, flaky, and
+resource-failing probes do not add kills. Each mutant snapshots the latest
+counts when entering fallback; concurrent discoveries affect later snapshots.
+Baseline-sorted reachable order remains the reference for final non-killing
+outcome precedence, independently of execution order.
 
-1. The mutant's exact checked-in or local killer hint.
-2. Persisted exact-site reach candidates.
-3. Ranked same-item exact tests.
-4. Binaries observed reaching the same item.
-5. Binaries observed reaching another site in the same file.
-6. Binaries that killed another mutant in the same file.
-7. Canonical census-selected or whole-binary execution.
+The campaign drains exact hints across the population first. Each worker then
+takes an unresolved mutant through the remaining stages to a final verdict:
 
-The exact killer test is probed before inferred tests even when its binary is
-later in canonical order. A confirmed exact kill suppresses inferred probes;
-if it belongs to a later binary, it is held until canonical iteration reaches
-that binary, so it cannot bypass an earlier failure, timeout, resource failure,
-flake, or metering error. Inferred binary results are likewise adjudicated in
-canonical order. Targeted attempts are deduplicated by resolved binary and
-test name across exact and inferred selections, including target aliases.
-Confirmation and necessary whole-binary fallback still run.
+1. Exact checked-in or local killing-test hints.
+2. Ranked same-item exact tests, followed by persisted exact-site reach candidates.
+   Both libtest and nextest retain the first six eligible distinct cases and
+   execute them individually in priority order, without grouping by binary.
+3. Every distinct inferred full binary, best-first, including binaries identified
+   by named cases, item/file reach observations, and file-local kills.
+4. Remaining reachable full binaries in kill-count order, reusing all full-binary
+   results from phase 3.
+
+Only the exact-hint pass is a global barrier. Each later stage reads the current
+learning state. A named killer discovered by full-binary execution is published
+before the worker claims another mutant, so queued siblings can immediately
+benefit from named inference.
+
+A confirmed kill settles immediately, regardless of its binary's position.
+Loss of containment aborts the campaign immediately. Without a kill, the first
+non-passing full-binary result in stable reachable order determines the outcome.
+Only passing named probes suppress duplicate cases; inconclusive named probes
+remain eligible. Passing selected cases never proves survival. Each mutant runs
+one selection at a time, including under nextest; parallelism is across mutants.
+Unreachable, filtered, duplicate, and already-passing cases do not consume the
+six-case allowance. Full-binary inference retains all candidates regardless of
+the named-case cap.
 
 Inferred-test evidence distinguishes the exact kill or reach observation that
 seeded a candidate from transfer evidence gathered against other mutants. A
-candidate is admitted only while its smoothed transfer probability can repay
-its measured launch cost from the fallback work it may avoid. Unmeasured
-candidates may be explored once; two misses without a transfer hit retire
-them. One mutant tries at most two same-item tests and one candidate binary
-from each inferred tier. After eight attempts without a hit, that tier's
-campaign-wide circuit breaker rejects further exploration. Exact hints and
-canonical fallback remain available.
+candidate's transfer history ranks it without an economic admission filter,
+two-miss retirement, or a campaign-wide cold-start circuit breaker.
 
 A candidate failure is a transfer hit and a clean pass is a transfer miss.
 Timeouts, stalls, memory exhaustion, flakes, enumeration failures, metering
@@ -467,22 +349,20 @@ loss, and unjudged launches are inconclusive and do not alter that candidate's
 hit or miss counters. Canonical execution also supplies soft negative evidence
 for binaries that are already item or file candidates: two clean canonical
 passes have the ranking weight of one explicit transfer miss. Soft evidence
-may demote or economically retire a candidate, but it never creates one and
+may demote a candidate, but it never creates one and
 cannot exclude canonical work or determine a verdict.
 
 **Output:** one mutant outcome, elapsed time, optional killing test, and
 optional diagnostic note.
 
-## 9. Learning during the sweep
+## 6. Learning during the sweep
 
 **Goal:** let completed mutant work improve the ordering of related mutants
 that have not yet committed to their test work.
 
-The scheduler makes the first assigned unhinted mutant in an item its scout.
-Same-item siblings remain unreserved while it runs. Workers use unrelated
-files first, then inactive items in the least-contended active file. If no
-independent item remains, they wait for a scheduler state-change notification
-rather than for an elapsed duration.
+Workers prefer independent files and items, but do not withhold same-item
+siblings while waiting for learning. All exact hinted kills are published before
+the inferred named-test phase starts.
 
 A completed mutant publishes:
 
@@ -493,21 +373,28 @@ A completed mutant publishes:
 - safe negative reach evidence for another replacement at the exact same
   stable source site.
 
+Ordinary active-mutant launches report reach through `GAMMA_REACH`; no
+pre-run reach sampling is performed. Only a complete, sealed, passing
+whole-binary observation can establish that its binary did not reach the
+active site. That absence transfers only to another replacement at the same
+stable site while deterministic reach narrowing is enabled. Filtered,
+failed, incomplete, and nondeterministic observations never establish absence.
+`--whole-test-binaries` suppresses case-level probes and deterministic reach
+narrowing.
+
 The worker publishes all exact-test, reaching-binary, file-binary, soft
 canonical-negative, and safe negative-reach learning before releasing its
-file/item reservation. Releasing the reservation wakes waiters, so a related
-follow-on assignment observes the completed learning. Hinted mutants are not
-spaced, but their checked result is published before their reservation is
-released in the same way.
+file/item reservation, so a related follow-on assignment observes the completed
+learning.
 
-**Output:** updated in-memory exact killers, bounded ranked item/file
+**Output:** updated in-memory exact killers, ranked item/file
 candidates with separate seed and transfer evidence, and safe exact-site reach
 exclusions for work that has not started yet.
 
-## 10. Persistence and reporting
+## 7. Persistence and reporting
 
 **Goal:** preserve score-neutral scheduling knowledge for later campaigns and
-report whether census and hints repaid their execution cost.
+report whether hints and learned reach evidence reduced execution cost.
 
 After the sweep:
 
@@ -519,13 +406,9 @@ After the sweep:
 - build-round diagnostics attribute each round's withdrawals to packages. The
   elapsed time remains the measured workspace-wide Cargo invocation and is not
   divided into fictitious package durations;
-- census diagnostics report admission size, listing and sampling work, and
-  complete versus partial evidence;
-- selection diagnostics count whole, case-selected, hinted-fallback, and
-  uncovered decisions, plus selected and available named tests;
-- hint funnels report candidates, attempts, hits, and economically, cap-, or
-  circuit-breaker-rejected opportunities for exact mutant hints and
-  inferred item, reach, file, and census tiers;
+- selection diagnostics count whole-binary and uncovered decisions;
+- hint funnels report candidates, attempts, and hits for exact mutant hints and
+  inferred item, reach, and file tiers;
 - `gamma-selection.jsonl` receives each mutant's completed attempts as one worker-side batch, then
   records and immediately flushes every retained selection attempt with its mutant ordinal,
   candidate tier and rank, binary and optional test identity, hit/miss/inconclusive result, elapsed
@@ -562,5 +445,5 @@ Persisted knowledge changes ordering and selection only. It never carries a
 verdict into a new campaign without executing the relevant test again.
 
 **Output:** `last-gamma-run.json`, promoted `gamma-hints.yaml` when requested,
-final reports, and diagnostics containing census and sweep effectiveness
+final reports, and diagnostics containing hint and sweep effectiveness
 metrics.

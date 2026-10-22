@@ -353,7 +353,7 @@ in the population and are left for the compiler-withdrawal pass.
 
 ### `range`
 
-Moves a range's endpoint by one rather than rewriting `..` as `..=`, since the two literal spellings are different types and a rewrite could never type-check as one arm of the mutant's guarding `if`. A surviving mutant means no test is sensitive to whether the range's own endpoint is included.
+Moves a range's endpoint by one rather than rewriting `..` as `..=`, since the two literal spellings are different types and a rewrite could never type-check as one arm of the mutant's guarding `if`. For integer ranges, a surviving mutant means no test is sensitive to whether the range's own endpoint is included.
 
 ```rust
 // original
@@ -367,6 +367,12 @@ for i in 0..=(last_index - 1) { … }
 ```
 
 On an unsigned endpoint that is already zero, `inclusive_to_exclusive` underflows and is caught by the panic rather than by an assertion — the right result reached for an incidental reason.
+
+Proven floating-point endpoints use `1.0`. This shifts the boundary by one floating-point
+unit of value, not one representable step, and does not emulate changing inclusivity.
+Rounding can leave a large endpoint unchanged; infinities and NaNs retain ordinary
+floating-point arithmetic behavior. Unresolved or overloaded endpoint types are not
+assumed to be primitive floats.
 
 ### `literal`
 
@@ -870,9 +876,11 @@ would mean asserting the exact wording of a panic, which pins phrasing that shou
 improve and turns a typo fix into a failing suite. The call itself is still mutated: `expect` can be
 renamed, and the value it is asked of is ordinary code.
 
-**`range` moves the endpoint rather than rewriting `..` as `..=`.** The two say the same thing —
-`a..b + 1` covers exactly what `a..=b` covers — but `Range` and `RangeInclusive` are different
-types, so the literal rewrite could never compile.
+**`range` moves the endpoint rather than rewriting `..` as `..=`.** For discrete integer
+endpoints, `a..b + 1` covers what `a..=b` covers, subject to overflow. `Range` and
+`RangeInclusive` are different types, so the literal rewrite could never compile.
+For proven floats the mutation instead shifts the endpoint by `1.0`; it does not
+claim equivalent inclusivity semantics.
 
 **`iter` adapts type-changing iterator pipelines explicitly.** `any`/`all` return `bool`, while
 `min`/`max` and `first`/`last` return `Option<T>`, so those swaps already agree on a type.

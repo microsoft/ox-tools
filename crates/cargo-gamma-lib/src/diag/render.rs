@@ -200,34 +200,18 @@ fn write_session(text: &mut String, session: &Session) {
 
 /// Reports where the run's time went, phase by phase.
 ///
-/// The build total folds the copy, the preflight and the compile into one number, and the census's
-/// cost hides inside it too — so whether the per-test census pays for itself against the launches it
-/// spares the sweep cannot be read from the aggregates alone. These phase timings are what make that
-/// trade visible: the census's `walked` count against the sweep's `launches`, with the probe count
-/// saying whether the killer hints earn their keep. The copy and the preflight are components of the
-/// build, and the census and the sweep of the testing window, so neither set sums to its aggregate.
+/// The copy and preflight are components of the build; the sweep is a component of the testing
+/// window. The probe and launch counts show whether hints reduced the work done during that window.
 fn write_phases(text: &mut String, session: &Session) {
     let phases = &session.phases;
 
     let _ = writeln!(
         text,
-        "phases    copy {}, preflight {}, baseline {}, census {}",
+        "phases    copy {}, preflight {}, baseline {}",
         human(phases.copy),
         human(phases.preflight),
-        human(session.baseline_wall),
-        phases.census_status.as_str()
+        human(session.baseline_wall)
     );
-
-    if let Some(census) = &phases.census {
-        let _ = writeln!(
-            text,
-            "          census {}, {} over {} binaries (up to {} sweep savings)",
-            human(census.elapsed),
-            quantity(census.walked, "test"),
-            census.binaries,
-            human(census.maximum_savings),
-        );
-    }
 
     if let Some(sweep) = &phases.sweep {
         let _ = writeln!(
@@ -246,14 +230,8 @@ fn write_phases(text: &mut String, session: &Session) {
         );
         let _ = writeln!(
             text,
-            "          selection {} whole, {} narrowed, {} hinted ({} fell back), {} uncovered; {} of {} named tests selected",
-            sweep.whole_selections,
-            sweep.case_selections,
-            sweep.hinted_selections,
-            sweep.hinted_fallbacks,
-            sweep.uncovered_selections,
-            sweep.selected_tests,
-            sweep.available_tests,
+            "          selection {} whole, {} uncovered",
+            sweep.whole_selections, sweep.uncovered_selections,
         );
     }
 }
@@ -987,22 +965,42 @@ mod tests {
         assert!(text.contains(&format!("disk      2.0 KB under {base}")), "{text}");
     }
 
-    /// The build total folds the copy, the preflight and the census into one number, so the phase
-    /// line is the only place the dump says where the fixed and testing time actually went — the
-    /// census's walk against the sweep's launches, with the probe count on whether the hints paid.
+    #[test]
+    fn telemetry_does_not_change_terminal_diagnostic_prose() {
+        let plan = plan(Vec::new());
+        let mut live = session(Vec::new());
+        live.scratch = r"C:\gamma-in-process\missing".into();
+        live.phases.sweep = Some(crate::exec::SweepCost {
+            elapsed: Duration::from_secs(42),
+            launches: 47,
+            probes: 12,
+            ..crate::exec::SweepCost::default()
+        });
+        let before = render(&plan, Some(&live), 4, Duration::from_mins(1));
+        live.phases.sweep.as_mut().unwrap().accounting = Some(crate::exec::SweepAccounting {
+            complete: true,
+            initial_population: Some(43_164),
+            initial_exact_hints: Some(34_603),
+            initial_killer_confirmed: Some(245),
+            exact: crate::exec::AttemptCost {
+                launches: 50,
+                execution_ms: 200_000,
+                ..crate::exec::AttemptCost::default()
+            },
+            duplicate_launches_avoided: 999,
+            ..crate::exec::SweepAccounting::default()
+        });
+        assert_eq!(render(&plan, Some(&live), 4, Duration::from_mins(1)), before);
+    }
+
+    /// Phase timings distinguish fixed preparation from the sweep's launches and hint probes.
     #[test]
     fn a_live_run_reports_where_each_phase_spent_its_time() {
         let live = Session {
             phases: crate::exec::Phases {
+                initial_hints: None,
                 copy: Duration::from_secs(1),
                 preflight: Duration::from_secs(2),
-                census_status: crate::exec::CensusStatus::Complete,
-                census: Some(crate::exec::CensusCost {
-                    elapsed: Duration::from_secs(8),
-                    walked: 1_681,
-                    binaries: 30,
-                    ..crate::exec::CensusCost::default()
-                }),
                 sweep: Some(crate::exec::SweepCost {
                     elapsed: Duration::from_secs(42),
                     launches: 47,
@@ -1013,6 +1011,8 @@ mod tests {
                     inferred_hits: 3,
                     launches_saved: 9,
                     reach_launches_saved: 4,
+                    whole_selections: 31,
+                    uncovered_selections: 6,
                     ..crate::exec::SweepCost::default()
                 }),
             },
@@ -1022,21 +1022,11 @@ mod tests {
         let text = render(&plan(Vec::new()), Some(&live), 4, Duration::from_mins(1));
 
         assert!(text.contains("phases    copy 1.0s, preflight 2.0s, baseline 2.0s"), "{text}");
-        assert!(text.contains("census 8.0s, 1681 tests over 30 binaries"), "{text}");
         assert!(
             text.contains("sweep 42.0s, 47 launches, 12 probes, 9 saved (4 from reach; exact 4/5, inferred tests 3/7, 0 rejected)"),
             "{text}"
         );
-    }
-
-    /// A census that did not run leaves no census line, because a run that was not asked to census
-    /// did not census in zero time — it did not census, and inventing a zero would say otherwise.
-    #[test]
-    fn a_live_run_without_a_census_prints_no_census_phase() {
-        let text = render(&plan(Vec::new()), Some(&session(Vec::new())), 4, Duration::from_secs(20));
-
-        assert!(text.contains("phases    copy"), "{text}");
-        assert!(!text.contains("census 0"), "an unrun census must not be printed: {text}");
+        assert!(text.contains("selection 31 whole, 6 uncovered"), "{text}");
     }
 
     /// The withdrawal count says a number; only the codes behind it say whether the number is a

@@ -283,7 +283,6 @@ fn repair_markers_in_lines(text: &str, id: &str, syntax: CommentSyntax, lines: i
     }
     let start = markers.iter().position(|(_, opens)| *opens);
     let end = start.and_then(|start| {
-        // #[gamma::skip(expr.increment, reason = "markers[start] is an opener and the search accepts only closers, so starting at start + 1 finds the same closer")]
         let mut candidates = markers.iter().enumerate().skip(start);
         candidates.find(|(_, (_, opens))| !opens).map(|(index, _)| index)
     });
@@ -673,7 +672,6 @@ pub(crate) fn upsert_located_region_with_newline(
             let without_region = remove_located_region(text, Some(region));
             return prepend_region(&without_region, &rendered, syntax, newline);
         }
-        // #[gamma::skip(literal.int_increment, reason = "changes only spare String capacity; emitted region text is identical")]
         // #[gamma::skip(arith.add_to_mul, reason = "the allocation estimate changes capacity only; all three region slices are still appended")]
         let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
@@ -1222,7 +1220,6 @@ fn adopt_dotted_child_assignments(
         .iter()
         // #[gamma::skip(logical.and_remove_left, tag = "timeout", reason = "accepting array tables as parents drives malformed dotted adoption through a search that exceeds the campaign budget")]
         .find(|table| !table.array_of_tables && table.path == parent_path)?;
-    // #[gamma::skip(expr.increment, reason = "every use clamps this fallback with an entry span ending at or before text.len(); increasing only the fallback cannot change a slice")]
     let fallback_end = text.len();
     let end = boundary_after(boundaries, candidate.header.start, fallback_end);
     let mut deletions = Vec::new();
@@ -1359,8 +1356,9 @@ fn tidy_residue(residue: &str, host_newline: &str) -> String {
 
 /// The first line ending in `text`, or LF when there is no line break.
 pub(crate) fn text_newline(text: &str) -> &'static str {
-    match text.find('\n') {
-        Some(at) if text[..at].ends_with('\r') => "\r\n",
+    match text.as_bytes().iter().position(|byte| matches!(byte, b'\r' | b'\n')) {
+        Some(at) if text.as_bytes()[at] == b'\r' && text.as_bytes().get(at + 1) == Some(&b'\n') => "\r\n",
+        Some(at) if text.as_bytes()[at] == b'\r' => "\r",
         _ => "\n",
     }
 }
@@ -1545,7 +1543,6 @@ fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) 
     let mut out = String::new();
     let mut cursor = 0;
     let mut adopted = false;
-    // #[gamma::skip(expr.increment, reason = "table_entries bounds every entry end by text.len(); increasing only the boundary fallback is erased by the surrounding min")]
     let fallback_end = text.len();
     for entry in table_entries(document.as_table(), &masked) {
         let Some(value) = values.get(&entry.path) else { continue };

@@ -25,17 +25,9 @@
 //! comments name as a nesting hazard — so a scanner that omitted a family, or counted it against a
 //! different threshold, disagrees with its sibling at whatever depth that first matters.
 //!
-//! The scanners keep distinct contracts because they are deliberately not equal everywhere:
-//!
-//! - For delimiters, prefix operators, binary chains, casts and `else if` ladders they agree
-//!   exactly, and [`nesting_guards`] asserts that verdict for verdict.
-//! - For postfix calls, indexes, and method links, the engine charges several
-//!   units per link where the proc macro charges one, on purpose: the engine's cost stands in for
-//!   the parser stack a postfix chain will actually cost, and the proc macro is guarding a much
-//!   shallower walk over one attribute's tokens. Equality there was a contract neither side was
-//!   written to keep. [`nesting_guards_are_ordered`] asserts the guarantee that is actually
-//!   intended and actually matters: the engine is never the more permissive of the two, and its
-//!   rejection boundary falls strictly earlier.
+//! Both scanners charge delimiter entry and propagate completed-child peaks to subsequent links.
+//! [`nesting_guards`] checks exact agreement for every family, including calls and method chains
+//! whose final token is a group.
 //!
 //! [`the_two_channels_agree_on_timeout_multiplier_arguments`] pins a third kind of agreement: the
 //! attribute and the comment directive are the same text with `//` in front of it, so an argument
@@ -74,11 +66,6 @@ fn the_proc_macro_limits_match_the_library() {
 /// Sweeps one syntax family from shallow to `ceiling`, and asserts the engine's and the
 /// proc-macro's scanners give the same accept-or-reject verdict at every depth.
 ///
-/// For the families this is used on — delimiters, prefix operators, binary chains, casts, `else if`
-/// ladders — the two scanners charge the same cost per level, so equality is a contract both were
-/// written to keep. The three postfix families are not among them; see
-/// [`nesting_guards_are_ordered`].
-///
 /// A per-step comparison, rather than a single check at a hand-computed "the" boundary, is what
 /// lets this catch a threshold that drifted on one side without this test needing to reproduce
 /// either scanner's internal arithmetic: whatever depth the two disagree at, that depth is where
@@ -110,56 +97,6 @@ fn nesting_guards(family: &str, ceiling: usize, generate: impl Fn(usize) -> Stri
     );
 }
 
-/// Sweeps one postfix family and asserts the ordering the two scanners are actually written to
-/// keep, rather than the equality they are not.
-///
-/// The engine charges roughly five units for a postfix call or index and six for a method link,
-/// because its number stands in for the parser stack a chain of them really costs; the proc-macro
-/// scanner charges one, because it is guarding a walk over one attribute's tokens. Both weightings
-/// are deliberate, so the contract between them is directional, and it has two halves:
-///
-/// 1. At every depth, the engine is never the more permissive of the two. It is the scanner
-///    standing in front of the deeper recursion, so text the engine accepts must not be text the
-///    proc macro refused — that would be the one direction in which a disagreement is a defect
-///    rather than a difference in weighting.
-/// 2. Each scanner's *first* rejection is a real boundary, both are reached inside `ceiling`, and
-///    the engine's comes strictly first. That is what pins the weighting itself: flatten the
-///    engine's postfix cost to one unit per link and the two boundaries coincide, which this
-///    rejects; raise the proc macro's above the engine's and the first assertion fails instead.
-#[track_caller]
-fn nesting_guards_are_ordered(family: &str, ceiling: usize, generate: impl Fn(usize) -> String) {
-    let mut engine_first = None;
-    let mut attrs_first = None;
-
-    for n in 1..=ceiling {
-        let (engine_rejects, attrs_rejects) = verdicts(family, n, &generate);
-
-        assert!(
-            engine_rejects || !attrs_rejects,
-            "{family} at n={n}: the proc-macro rejects what the engine accepts, so the guard in front of the deeper recursion is the more permissive of the two\n{}",
-            generate(n)
-        );
-
-        if engine_rejects && engine_first.is_none() {
-            engine_first = Some(n);
-        }
-
-        if attrs_rejects && attrs_first.is_none() {
-            attrs_first = Some(n);
-        }
-    }
-
-    let engine_first =
-        engine_first.unwrap_or_else(|| panic!("{family}: the engine accepted every depth up to n={ceiling}, so no boundary was reached"));
-    let attrs_first = attrs_first
-        .unwrap_or_else(|| panic!("{family}: the proc macro accepted every depth up to n={ceiling}, so no boundary was reached"));
-
-    assert!(
-        engine_first < attrs_first,
-        "{family}: the engine's first rejection is at n={engine_first} and the proc macro's at n={attrs_first}; the engine charges more per postfix link, so its boundary must fall strictly earlier"
-    );
-}
-
 /// Both scanners' verdicts on one family at one depth.
 ///
 /// The corpus text is parsed here rather than in either caller, so a generator that emits something
@@ -177,8 +114,7 @@ fn verdicts(family: &str, n: usize, generate: impl Fn(usize) -> String) -> (bool
     )
 }
 
-/// The engine's postfix boundary must be reached well inside this ceiling and the proc macro's
-/// must be reached too, since [`nesting_guards_are_ordered`] requires both.
+/// Each generated chain family must cross both scanners' rejection boundary inside this ceiling.
 const CHAIN_CEILING: usize = NESTING_LIMIT * CHAIN_FACTOR * 2;
 
 #[test]
@@ -188,17 +124,17 @@ fn the_two_nesting_guards_agree_on_delimiters() {
 
 #[test]
 fn the_engine_guards_postfix_calls_no_later_than_the_proc_macro() {
-    nesting_guards_are_ordered("postfix calls", CHAIN_CEILING, corpus::postfix_calls);
+    nesting_guards("postfix calls", CHAIN_CEILING, corpus::postfix_calls);
 }
 
 #[test]
 fn the_engine_guards_postfix_indexes_no_later_than_the_proc_macro() {
-    nesting_guards_are_ordered("postfix indexes", CHAIN_CEILING, corpus::postfix_indexes);
+    nesting_guards("postfix indexes", CHAIN_CEILING, corpus::postfix_indexes);
 }
 
 #[test]
 fn the_engine_guards_postfix_methods_no_later_than_the_proc_macro() {
-    nesting_guards_are_ordered("postfix methods", CHAIN_CEILING, corpus::postfix_methods);
+    nesting_guards("postfix methods", CHAIN_CEILING, corpus::postfix_methods);
 }
 
 #[test]
@@ -237,12 +173,58 @@ fn the_two_nesting_guards_agree_on_mixed_operator_and_cast_chains() {
 
 #[test]
 fn the_engine_guards_mixed_postfix_and_cast_chains_no_later_than_the_proc_macro() {
-    nesting_guards_are_ordered("mixed postfix and cast chains", CHAIN_CEILING, corpus::mixed_postfix_and_cast_chain);
+    nesting_guards("mixed postfix and cast chains", CHAIN_CEILING, corpus::mixed_postfix_and_cast_chain);
+}
+
+#[test]
+fn completed_nested_groups_propagate_their_peak_before_outer_postfix_links() {
+    let fields = NESTING_LIMIT * CHAIN_FACTOR - 2 * CHAIN_FACTOR;
+    let boundary = format!("((value{}))", ".field".repeat(fields));
+    let overflow = format!("{boundary}.field");
+    for (source, exceeds) in [(boundary, false), (overflow, true)] {
+        let tokens = source.parse().expect("the fixed-depth regression tokenizes");
+        assert_eq!(attrs_exceeds_nesting_limit(&tokens, NESTING_LIMIT), exceeds, "{source}");
+        assert_eq!(engine_exceeds_nesting_limit(&source), exceeds, "{source}");
+    }
 }
 
 #[test]
 fn the_two_nesting_guards_agree_on_else_if_ladders() {
     nesting_guards("else if ladders", CHAIN_CEILING, corpus::else_if_ladder);
+}
+
+#[test]
+fn generated_mixed_syntax_agrees_at_the_public_cumulative_boundary() {
+    bolero::check!().with_type::<[u8; 16]>().for_each(|choices| {
+        let source = corpus::mixed_nesting(choices);
+        let rejects = |prefixes: usize| {
+            let text = format!("{}{source}", "!".repeat(prefixes));
+            assert!(text.len() <= 4096, "generated source must stay bounded");
+            let tokens = text.parse().expect("the bounded grammar produces balanced Rust tokens");
+            let engine = engine_exceeds_nesting_limit(&text);
+            let attrs = attrs_exceeds_nesting_limit(&tokens, NESTING_LIMIT);
+            assert_eq!(engine, attrs, "nesting guards disagree:\n{text}");
+            engine
+        };
+
+        let mut accepted = 0;
+        let mut rejected = NESTING_LIMIT * CHAIN_FACTOR + 1;
+        assert!(!rejects(accepted), "the shallow grammar must begin below the production limit");
+        assert!(rejects(rejected), "the leading unary run must exceed the production limit");
+        while rejected - accepted > 1 {
+            let width = rejected - accepted;
+            let middle = accepted + width / 2;
+            if rejects(middle) {
+                rejected = middle;
+            } else {
+                accepted = middle;
+            }
+            assert!(rejected - accepted < width, "every search step must make progress");
+        }
+        for prefixes in accepted.saturating_sub(1)..=rejected + 1 {
+            assert_eq!(rejects(prefixes), prefixes >= rejected, "the cumulative boundary must be adjacent");
+        }
+    });
 }
 
 /// The multiplier the comment-directive channel reads out of one argument list, or `None` when it
@@ -386,6 +368,33 @@ fn the_two_channels_agree_on_timeout_multiplier_arguments() {
 /// but one flat is what lets the corpus safely sweep hundreds of repetitions on an ordinary thread
 /// stack.
 mod corpus {
+    /// Eight balanced wrappers keep tokenization shallow while mixing path resets and child peaks.
+    pub(super) fn mixed_nesting(choices: &[u8; 16]) -> String {
+        const LITERALS: [&str; 4] = ["true", "0", "\"[!;]\"", "r#\"/*[!?;]*/\"#"];
+        const COMMENTS: [&str; 4] = [" ", " /* [(!;)] */ ", " // [(!;)]\n ", " /* [ /* ! */ ; ] */ "];
+        let mut text = LITERALS[usize::from(choices[0] % 4)].to_owned();
+        for pair in choices.chunks_exact(2) {
+            let shape = pair[0];
+            let detail = pair[1];
+            let (open, close, separator) = match shape % 3 {
+                0 => ("(", ")", ", "),
+                1 => ("[", "]", ", "),
+                _ => ("{", "}", "; "),
+            };
+            let sibling = LITERALS[usize::from(detail % 4)];
+            text = match (detail >> 6) % 3 {
+                0 => text,
+                1 => format!("{sibling}{separator}{text}"),
+                _ => format!("{text}{separator}{sibling}"),
+            };
+            let prefix = "!".repeat(usize::from((shape >> 2) % 4));
+            let comment = COMMENTS[usize::from((detail >> 2) % 4)];
+            let postfix = ["", ".field", "()", "[0]", "?"][usize::from((shape >> 4) % 5)];
+            text = format!("{prefix}{open}{comment}{text}{close}{postfix}");
+        }
+        text
+    }
+
     /// `n` levels of parenthesis nesting around a literal.
     ///
     /// The one family here that is genuinely nested rather than flat, so it alone is swept over a

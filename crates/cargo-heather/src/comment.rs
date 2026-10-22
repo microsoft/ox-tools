@@ -105,7 +105,6 @@ impl CommentStyle {
     /// Returns `None` for unsupported file types.
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
-        // #[gamma::skip(option.none_to_some, reason = "path-only detection treats absent and empty content identically")]
         FileKind::detect(path, None).map(FileKind::comment_style)
     }
 

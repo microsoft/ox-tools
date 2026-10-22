@@ -69,7 +69,7 @@ ownership uses the selector provenance recorded when the structural region was
 written; JSON marker-shaped text in strings and block comments is not ownership
 evidence.
 
-The lock remains **schema 1**. TOML selectors are static catalog metadata and
+The lock uses **schema 2**. TOML selectors are static catalog metadata and
 participate in the catalog checksum, but are not persisted or part of the
 region's identity. Structural JSON regions additionally record an optional
 `json_array_path` on their existing region entry. This additive provenance
@@ -79,6 +79,9 @@ Ordinary regions that coexist with a structural JSON array record
 the final array region retires, so later runs keep ignoring marker-shaped text
 inside block comments. Historical and standalone ordinary JSON region records
 without either field retain the line-oriented retirement contract.
+Schema 1 locks remain readable with no JSON provenance and are rewritten as
+schema 2; older binaries refuse schema 2 rather than silently dropping fields
+they do not understand.
 Rejecting zero-entry templates does not change empty on-disk body regeneration
 or retirement. After declaration removal, TOML placement is inferred from the
 current structure; JSON placement is checked against the recorded selector.

@@ -74,7 +74,8 @@ pub(crate) struct WorkspaceSnapshot {
 
 impl WorkspaceSnapshot {
     /// Captures a complete conservative workspace input set.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internals"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn capture(root: &Utf8Path, excluded: &[Utf8PathBuf]) -> Self {
         Self::capture_with_external(root, excluded, &[], false)
     }
@@ -218,7 +219,8 @@ impl WorkspaceSnapshot {
     }
 
     /// Rust files known before the run, for the declaring-file index.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internals"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn rust_files(&self, root: &Utf8Path) -> Vec<Utf8PathBuf> {
         self.files
             .iter()

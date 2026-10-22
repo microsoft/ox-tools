@@ -17,6 +17,11 @@ bitset
 catchable
 Ctrl
 unanalyzable
+journaled
+quiesces
+unmerged
+unselected
+unvalidated
 acyclic
 addrs
 ado
@@ -896,6 +901,7 @@ VCS
 wasm
 weakenings
 worklist
+Kahn
 XFS
 ~
 Baselining

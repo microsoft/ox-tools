@@ -23,6 +23,7 @@ with its default. For the command-line flags these mirror, see [CMDLINE.md](CMDL
 * [Memory](#memory)
 * [Run control](#run-control)
 * [`artifact-dir`](#artifact-dir)
+* [Report population authority](#report-population-authority)
 * [`[shard]`](#shard)
 
 ## Where the file lives
@@ -173,8 +174,12 @@ all-features = false
 no-default-features = false
 ```
 
-Discovery and the build always agree on these. Finding mutants under one feature set and compiling
-under another would produce mutants that cannot exist, which is not a failure a user could diagnose.
+Discovery forwards these settings to Cargo and resolves workspace feature activation before
+evaluating cfg predicates. Inactive optional dependencies do not contribute their declared features
+or defaults; weak `dependency?/feature` forwarding requires an activated dependency. When dependency
+activation cannot be established (for example, target-conditioned edges or contributions from
+unselected members), feature predicates remain unknown. Both positive and negated branches then
+remain discoverable, including nested cfg expressions; uncertainty never becomes definite "on".
 
 ## Building
 
@@ -205,6 +210,14 @@ the whole campaign rather than one mutant, which is why compiler work has its ow
 `build-timeout-multiplier` covers later convergence rounds: they check the same warm tree with fewer
 admitted mutants, so a round taking far longer than the first is evidence of a problem rather than
 of a slow machine.
+
+Discovery helpers are an intentional exception to campaign process containment: ordinary and
+offline `cargo metadata`, `rustc --print cfg`, and compiler host/version probes are trusted,
+unbounded setup commands. They do not receive `build-timeout`, campaign process-tree ownership,
+memory limits, or cooperative cancellation. A blocked helper can delay discovery indefinitely;
+stopping Gamma is not a guarantee that the helper or its descendants are terminated. Supervise
+these tools externally when a whole-command deadline or descendant cleanup is required.
+`build-timeout` bounds compiler/schema-build invocations, not discovery or the whole command.
 
 An optimized profile can pay when mutant execution dominates a CPU-heavy run: the slower build is
 paid once, while the faster suite is paid once per mutant. It is less useful for build-heavy narrow
@@ -242,12 +255,7 @@ test-workspace = false
 # Default: false.
 test-lib = false
 
-# Experimentally measure case-level reachability before testing mutants.
-# Default: false.
-optimize-test-execution = false
-
 # Explicitly suppress case-level selection and run each reachable test binary whole.
-# This conflicts with optimize-test-execution.
 whole-test-binaries = false
 
 # Test target name globs that may or may not decide a verdict.
@@ -299,19 +307,14 @@ not merely slower under a threaded harness; it is red, and a red baseline stops 
 still judged against binaries this run built itself, so nextest never invokes cargo and a mutant
 costs one extra process rather than one extra build.
 
-By default gamma performs no case-level census: exact-hint and inferred-test probes still run first, and
-anything they do not kill falls back to the complete reachable test binary. Set
-`optimize-test-execution = true` (or pass `--optimize-test-execution`) to enable the experimental
-census. The opt-in still passes through an economic gate: gamma measures listing startup cost and
-skips sampling when its projected process-launch cost cannot repay the maximum test work it could
-save. A census that proceeds is bounded by that same maximum saving, and sampling stops early when
-every relevant site already reaches more than half the binary's tests.
+Exact-hint and inferred-test probes run first; anything they do not kill falls back to the
+complete reachable test binary. Ordinary mutant launches record whether the active guard was
+reached. Complete, sealed, passing whole-binary observations may exclude that binary for another
+replacement at the same stable source site when reachability is deterministic. Missing or
+incomplete observations never prove absence.
 
-Only a complete census may exclude tests or establish that a site is uncovered. Positive reach
-observations from a budget-limited census are checked hints: the named cases run first, and any result
-other than a kill falls back to the whole binary. Failed samples are discarded.
 `whole-test-binaries = true` (or `--whole-test-binaries`) explicitly forbids case-level selection
-and conflicts with the census opt-in. Both modes keep target and package filters intact.
+and deterministic reach narrowing. Target and package filters remain intact.
 
 ## Baseline
 
@@ -382,15 +385,21 @@ min-score = 70.0
 max-flaky = 0
 ```
 
-| Mode | Reuses unviability | Reuses killer hints | Reuses test verdicts |
+| Mode | Reuses context-gated build evidence | Reuses killer hints | Reuses test verdicts |
 | --- | --- | --- | --- |
 | `no` | no | no | no |
 | `build` | yes, under matching compilation inputs and context | yes, after checking the hinted test | no |
 
-`incremental` defaults to `build`. It skips compiler-unviable mutants only when cryptographic input
-digests and the compilation context match. It may try a previous killer first, but every score-bearing
-outcome is established again: unchanged inputs cannot prove that a test result is deterministic. Set
-`incremental = "no"` or pass `--incremental no` for a completely cold run.
+`incremental` defaults to `build`. Context-gated build reuse requires matching cryptographic input
+digests and compilation context. It may try a previous killer first, but every score-bearing outcome
+is established again: unchanged inputs cannot prove that a test result is deterministic.
+`incremental = "no"` or `--incremental no` disables that reuse, not all historical policy.
+The authoritative `compiler-exclusions.json` inventory in the effective campaign cache applies
+independently, by stable mutant ID, including with incremental mode `no`; it does not require
+matching input or context digests.
+To reconsider an excluded identity, remove its entry from that inventory. Removing the entire
+inventory can reimport earlier compiler failures from retained campaign records and checked-in hints,
+so it is not itself a cold-run guarantee.
 
 Set it below where you are today and ratchet upwards. A gate set above the current score turns every
 build red on the day it lands, and a gate that is red by default gets switched off within a week.
@@ -402,6 +411,27 @@ score or flaky count over only the completed subset.
 `max-flaky` is independent of the score because flaky outcomes are inconclusive and excluded from
 its denominator. `max-flaky = 0` requires a fully conclusive population; it cannot be combined with
 `no-confirm = true`, which removes the observation needed to identify a flaky outcome.
+
+## Report population authority
+
+JSON and embedded HTML reports use the `mutation-testing-elements` schema, with Gamma metadata
+in its free-format `config` object. `config.populationComplete` is an explicit boolean:
+
+* `true` means each successfully analyzed file entry lists its complete population under the
+  selected mutation configuration. A newer complete report can retire older IDs absent from that
+  file, including its last ID when the new entry has an empty `mutants` array.
+* `false` means observations only. Exact-ID runs, survivor-only runs, mutator-selected or diff-filtered
+  listings/runs, shards, and merged reports cannot withdraw IDs merely because they omit them.
+  Any explicit mutator selector, including `all` or `@all`, conservatively makes a report partial;
+  this includes selectors supplied by configuration. Whole-file and package selection alone do not
+  remove authority for the successfully analyzed files that remain included.
+* Reports written before this field existed remain readable, but absence defaults to `false`.
+  Their positive verdicts remain usable; their omissions are not population evidence.
+
+Shard and merged metadata always preclude withdrawal even if `populationComplete` is `true`.
+Files that failed analysis or were never analyzed supply no empty-population claim.
+`config.notBuilt`, when nonzero, counts retained distinct not-built outcomes; duplicate reports or
+staged merges do not add input counters together.
 
 ## `[shard]`
 

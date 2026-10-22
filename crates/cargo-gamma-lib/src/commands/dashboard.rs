@@ -301,12 +301,11 @@ impl Dashboard {
         }
 
         // Exact is the explicit persisted-hint row; item, reach, and file are inferred hints.
-        // Census, selected, whole, and hinted fallback remain ordinary selection telemetry.
         // A successful explicit or inferred probe avoids the remainder of its fallback estimate.
         match attempt.tier {
             SelectionTier::Exact => self.explicit_hints.record(attempt),
             SelectionTier::Item | SelectionTier::Reach | SelectionTier::File => self.inferred_hints.record(attempt),
-            SelectionTier::Census | SelectionTier::Selected | SelectionTier::Whole | SelectionTier::HintedFallback => {}
+            SelectionTier::Whole => {}
         }
         if attempt.all_tests {
             self.all_test_launches = self.all_test_launches.saturating_add(1);
@@ -335,8 +334,16 @@ impl Dashboard {
     }
 
     pub(super) fn mutant_started(&mut self) {
+        self.mutant_activity(true);
+    }
+
+    pub(super) fn mutant_activity(&mut self, active: bool) {
         if self.enabled {
-            self.active_workers = self.active_workers.saturating_add(1);
+            self.active_workers = if active {
+                self.active_workers.saturating_add(1)
+            } else {
+                self.active_workers.saturating_sub(1)
+            };
             self.dirty = true;
         }
     }
@@ -1498,14 +1505,13 @@ mod tests {
         let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
         dashboard.record_selection(&selection(SelectionTier::Exact, SelectionResult::Hit, false, 100, 1_000));
         dashboard.record_selection(&selection(SelectionTier::Item, SelectionResult::Miss, true, 300, 2_000));
-        dashboard.record_selection(&selection(SelectionTier::Census, SelectionResult::Hit, false, 500, 3_000));
         dashboard.record_selection(&selection(SelectionTier::Whole, SelectionResult::Miss, true, 700, 4_000));
 
         assert_eq!(dashboard.explicit_hints, Attempts { total: 1, hits: 1 });
         assert_eq!(dashboard.inferred_hints, Attempts { total: 1, hits: 0 });
-        assert_eq!(dashboard.specific_test_launches, 2);
+        assert_eq!(dashboard.specific_test_launches, 1);
         assert_eq!(dashboard.all_test_launches, 2);
-        assert_eq!(dashboard.runtime_ms, 1_600);
+        assert_eq!(dashboard.runtime_ms, 1_100);
         assert_eq!(dashboard.maximum_runtime_ms, 700);
         assert_eq!(dashboard.saved_ms, 900);
     }
@@ -1842,10 +1848,7 @@ mod tests {
                 SelectionTier::Item,
                 SelectionTier::Reach,
                 SelectionTier::File,
-                SelectionTier::Census,
-                SelectionTier::Selected,
                 SelectionTier::Whole,
-                SelectionTier::HintedFallback,
             ] {
                 for result in [SelectionResult::Hit, SelectionResult::Miss, SelectionResult::Inconclusive] {
                     for all_tests in [false, true] {

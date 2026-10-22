@@ -15,7 +15,7 @@ See [README.md](./README.md) for the CLI, [local.md](./local.md) for recipes,
 of the last rendered content for each owned file and each `(host, id)` region:
 
 ```toml
-version = 1
+version = 2
 tool = "anvil"
 tool_version = "0.4.1"
 catalog_checksum = "sha256:..."
@@ -32,7 +32,7 @@ checksum = "sha256:..."
 
 Paths are repository-relative, slash-separated, and must stay inside the repository.
 Entries are deterministic: files sorted by path, regions by `(host, id)`.
-Regions introduced through the structural JSON-array API also record an optional
+Schema 2 regions introduced through the structural JSON-array API also record an optional
 `json_array_path = ["property", "nested-property"]`. This additive provenance
 distinguishes strict JSON-array retirement from ordinary slash-comment regions
 whose host may use a more permissive JSON-like dialect. Locks without the field
@@ -41,6 +41,9 @@ Ordinary regions that coexist with a structural JSON array also record
 `json_scanner = true`. That marker survives retirement of the final array region
 for as long as the ordinary region remains managed, preventing later runs from
 reinterpreting repository block-comment examples as ownership sentinels.
+Schema 1 remains readable with both provenance collections empty. Schema 2 is
+written whenever the lock is refreshed so older binaries refuse instead of
+silently erasing provenance they do not understand.
 The lock is read at startup and refreshed after applying the plan; `--dry-run`
 does not write it. Missing tracking means an item has not previously been rendered.
 The schema version controls format compatibility; a newer schema is refused.
