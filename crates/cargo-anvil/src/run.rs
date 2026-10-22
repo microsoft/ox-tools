@@ -303,6 +303,16 @@ fn build_plan_with_hosts(
 
     plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &array_hosts)?;
 
+    for key in manifest.regions.keys() {
+        let host = (hosts.resolve)(repo_root, &key.host)?;
+        if array_hosts
+            .get(&host)
+            .is_some_and(|array_host| array_host.format == ArrayFormat::Json)
+        {
+            plan.retain_json_scanner(key.host.clone(), key.id.clone());
+        }
+    }
+
     validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
 
     Ok(plan)
@@ -2533,7 +2543,7 @@ mod tests {
         let settings = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),
             id: RegionId::new("settings"),
-            body: "\"setting\": true,\n".to_owned(),
+            body: "\"setting\": false,\n".to_owned(),
             syntax: CommentSyntax::SlashSlash,
         };
         let catalog = Catalog::builder(test_cli())
@@ -2565,7 +2575,7 @@ mod tests {
             "  */\n",
         );
         let mut manifest = Manifest::default();
-        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": original,\n"));
         manifest.set_region("config.json", "entries", checksum_str("    \"managed\",\n"));
         manifest.json_array_paths.insert(
             crate::manifest::RegionKey {
@@ -2598,6 +2608,7 @@ mod tests {
         };
         assert!(projected.json_array_paths.is_empty());
         assert!(projected.json_scanner_regions.contains(&settings_key));
+        assert_eq!(retirement.refusals().len(), 1);
         assert!(retired.contains(example));
         let newline = crate::region::text_newline(&retired);
         let mut hosts = memory_hosts();
@@ -2618,7 +2629,7 @@ mod tests {
         .unwrap();
         let output = hosts.cached("config.json").unwrap();
 
-        assert_eq!(rerun.dry_run_exit_code(), 0);
+        assert_eq!(rerun.refusals().len(), 1);
         assert!(output.contains(example));
     }
 

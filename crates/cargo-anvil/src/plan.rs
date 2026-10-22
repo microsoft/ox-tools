@@ -17,6 +17,7 @@
 //! See [`updates.md §7`](../../docs/design/updates.md) for the proposed-file
 //! protocol.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -261,6 +262,7 @@ impl PlanItem {
 #[derive(Debug, Default)]
 pub struct Plan {
     items: Vec<PlanItem>,
+    json_scanner_regions: BTreeSet<RegionKey>,
     notes: Vec<String>,
     refusals: Vec<String>,
     manifest_update_required: bool,
@@ -301,6 +303,10 @@ impl Plan {
     #[must_use]
     pub fn items(&self) -> &[PlanItem] {
         &self.items
+    }
+
+    pub(crate) fn retain_json_scanner(&mut self, host: String, id: String) {
+        self.json_scanner_regions.insert(RegionKey { host, id });
     }
 
     /// Record whether applying this plan would change `.anvil.lock`.
@@ -504,6 +510,7 @@ impl Plan {
             json_array_paths: previous_manifest.json_array_paths.clone(),
             json_scanner_regions: previous_manifest.json_scanner_regions.clone(),
         };
+        next.json_scanner_regions.extend(self.json_scanner_regions.iter().cloned());
 
         for item in &self.items {
             if item.json_scanner
