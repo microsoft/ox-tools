@@ -5438,7 +5438,7 @@ mod tests {
     }
 
     fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {
-        let survey = crate::discover::Survey::for_build_with_metadata_reader(
+        let survey = crate::discover::Survey::for_build_using(
             &crate::commands::SelectArgs {
                 dir: source.to_owned(),
                 ..crate::commands::SelectArgs::default()

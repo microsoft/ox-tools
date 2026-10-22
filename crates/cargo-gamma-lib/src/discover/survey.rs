@@ -325,7 +325,7 @@ impl Survey {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_build_with_metadata_reader(
+    pub(crate) fn for_build_using(
         args: &SelectArgs,
         shard: Option<(u32, u32)>,
         cargo: &CargoOptions,
@@ -360,7 +360,7 @@ impl Survey {
         metadata: &Metadata,
         external_inputs: ExternalPathInputs,
         cache_inputs: bool,
-        resolve_configuration: impl FnOnce(&Utf8Path, &CargoOptions, &HashMap<String, Vec<String>>) -> Cfgs,
+        configuration: impl FnOnce(&Utf8Path, &CargoOptions, &HashMap<String, Vec<String>>) -> Cfgs,
     ) -> Result<Self> {
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
         let target = Utf8PathBuf::from(metadata.target_directory.as_str());
@@ -513,7 +513,7 @@ impl Survey {
         files.sort_by(|left, right| left.path.cmp(&right.path));
         normalize_file_lists(&mut declaration_files, &mut exclusion_files);
 
-        let cfgs = resolve_configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(metadata, &selected));
+        let cfgs = configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(metadata, &selected));
         validate_trait_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
 
         // The diff names files; only the workspace can say which files those are. Resolving it

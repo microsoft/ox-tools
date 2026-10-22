@@ -6,19 +6,7 @@
 
 - ✨ Features
 
-  - cargo-gamma: improve campaign reliability and mutation detection ([#282](https://github.com/microsoft/ox-tools/pull/282))
   - cargo-anvil: roll out filtered coverage reports
-
-- 🐛 Bug Fixes
-
-  - cargo-anvil: update immutable action pins and release 0.15.1 ([#288](https://github.com/microsoft/ox-tools/pull/288))
-  - cargo-anvil: hide internal recipes from just listings ([#272](https://github.com/microsoft/ox-tools/pull/272))
-  - pass release and container inputs explicitly ([#265](https://github.com/microsoft/ox-tools/pull/265))
-  - cargo-anvil: use just_executable for nested invocations ([#266](https://github.com/microsoft/ox-tools/pull/266))
-
-- ⚡ Performance
-
-  - cargo-anvil: keep Miri under 30 minutes ([#279](https://github.com/microsoft/ox-tools/pull/279))
 
 - 📚 Documentation
 
@@ -27,7 +15,7 @@
 
 - ✔️ Tasks
 
-  - clean up cargo-deny warnings without narrowing license policy ([#287](https://github.com/microsoft/ox-tools/pull/287))
+  - cargo-anvil: prepare 0.15.2 release
   - cargo-anvil: pin coverage gate 0.7.1
 
 - 🧩 Miscellaneous
