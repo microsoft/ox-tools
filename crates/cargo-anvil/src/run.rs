@@ -858,6 +858,16 @@ fn push_region(
         } else {
             HostScanner::for_path(&resolved)
         };
+        if scanner == HostScanner::Json && spec.syntax != CommentSyntax::SlashSlash {
+            refuse_region(
+                plan,
+                resolved,
+                spec.id.as_str(),
+                "this host retains JSON-aware marker scanning, so regions in it must use slash-slash comment markers",
+                RefusalRemedy::SyntaxChange,
+            );
+            continue;
+        }
         push_region_at_with_scanner(repo_root, manifest, plan, hosts, composed, host, spec, scanner)?;
     }
     Ok(())
@@ -2676,6 +2686,50 @@ mod tests {
 
         assert!(output.contains(example));
         assert!(!output.contains("\"setting\": false,\n"));
+    }
+
+    #[test]
+    fn retained_json_scanner_host_refuses_hash_comment_regions() {
+        let region = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "setting = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(region))
+            .build()
+            .unwrap();
+        let source = "{\n  'json5': true\n}\n";
+        let mut manifest = Manifest::default();
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
+        let standalone = Manifest::default();
+        for previous in [&manifest, &standalone] {
+            let mut hosts = memory_hosts();
+            hosts.set("config.json", source.to_owned());
+            hosts.newlines.insert("config.json".to_owned(), "\n");
+
+            let plan = build_plan_with_hosts(
+                Path::new("in-memory-json-region-tests"),
+                &Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+                previous,
+                &[],
+                &catalog,
+                &mut hosts,
+            )
+            .unwrap();
+
+            if previous.json_scanner_hosts.is_empty() {
+                assert!(plan.refusals().is_empty());
+            } else {
+                assert_eq!(plan.refusals().len(), 1);
+                assert!(plan.refusals()[0].contains("must use slash-slash comment markers"));
+                assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
+            }
+        }
     }
 
     #[test]
