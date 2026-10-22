@@ -532,6 +532,15 @@ fn array_host_inputs(
                         .map(|_| ())
                         .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?,
                 }
+                if format == ArrayFormat::Json {
+                    for (key, path) in &manifest.json_array_paths {
+                        let recorded_host = (hosts.resolve)(repo_root, &key.host)?;
+                        if recorded_host.eq_ignore_ascii_case(&host) {
+                            crate::emit::json_array_region::validate_recorded_placement(&text, &key.id, path)
+                                .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+                        }
+                    }
+                }
                 paths
                     .entry(host.clone())
                     .or_insert_with(|| ArrayHost {
@@ -2243,6 +2252,67 @@ mod tests {
         .to_string();
 
         assert!(error.starts_with("Refused JSON array host a/config.json:"), "{error}");
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    fn misplaced_json_array_retirement_error(source: &str) -> String {
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "entries", checksum_str(""));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+
+        build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &empty,
+            &mut hosts,
+        )
+        .unwrap_err()
+        .to_string()
+    }
+
+    #[test]
+    fn json_array_retirement_refuses_empty_markers_moved_outside_arrays() {
+        let error = misplaced_json_array_retirement_error(concat!(
+            "{\n",
+            "  \"entries\": [],\n",
+            "  // >>> anvil-managed: entries\n",
+            "  // <<< anvil-managed: entries\n",
+            "  \"tail\": true\n",
+            "}\n",
+        ));
+
+        assert!(error.contains("outside its recorded JSON array"), "{error}");
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn json_array_retirement_refuses_empty_markers_moved_to_another_array() {
+        let error = misplaced_json_array_retirement_error(concat!(
+            "{\n",
+            "  \"entries\": [],\n",
+            "  \"other\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "    // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        ));
+
+        assert!(error.contains("outside its recorded JSON array"), "{error}");
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
     }
 

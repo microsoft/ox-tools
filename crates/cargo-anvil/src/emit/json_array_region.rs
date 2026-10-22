@@ -600,6 +600,43 @@ pub(crate) fn validate_required_entries(text: &str, spec: &JsonArrayRegionSpec) 
     Ok(())
 }
 
+/// Validate that a recorded structural region still belongs wholly to its
+/// recorded JSON array.
+pub(crate) fn validate_recorded_placement(text: &str, id: &str, path: &[String]) -> Result<(), ManagedRegionRefusal> {
+    let regions = validated_regions(text)?;
+    let Some(region) = regions.iter().find(|region| region.id == id) else {
+        return Ok(());
+    };
+    let parsed = parse(text)?;
+    let root = parsed
+        .value
+        .as_ref()
+        .ok_or_else(|| validation_refusal(JsonValidationCondition::HostNotObject, RefusalRemedy::ArrayShape))?;
+    let array = lookup(root, path)?.and_then(Value::as_array).ok_or_else(|| {
+        validation_refusal(
+            JsonValidationCondition::SelectedItemNotArray { path: path.to_vec() },
+            RefusalRemedy::ArrayShape,
+        )
+    })?;
+    let span = array.range.start..array.range.end;
+    if !span.contains(&region.start_line.start) || !span.contains(&region.end_line.end) {
+        return Err(refusal(
+            "the managed region is outside its recorded JSON array",
+            RefusalRemedy::MisplacedArrayMarkers,
+        ));
+    }
+    if array.elements.iter().any(|value| {
+        let value = value_range(value);
+        contains_interior(&value, region.body.start) || contains_interior(&value, region.body.end)
+    }) {
+        return Err(refusal(
+            "the region splits a JSON array value",
+            RefusalRemedy::MisplacedArrayMarkers,
+        ));
+    }
+    Ok(())
+}
+
 fn validate_unique_properties(value: &Value<'_>) -> Result<(), ManagedRegionRefusal> {
     if let Some(object) = value.as_object() {
         let mut names = BTreeSet::new();
