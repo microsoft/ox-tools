@@ -63,18 +63,26 @@ and drops its lock entry. Adjacent repository blank lines are preserved;
 unlike ordinary regions, array retirement removes exactly the sentinel lines
 and body, without consuming a separator blank line. Edited retirements retain
 their ownership record until reconciled. Removing the final catalog declaration
-still uses the format-aware scanner, derived from the host suffix. JSON
-marker-shaped text in strings and block comments is not ownership evidence.
+still uses format-aware retirement for structural array regions. TOML array
+ownership is rediscovered from the host structure and suffix. JSON array
+ownership uses the selector provenance recorded when the structural region was
+written; JSON marker-shaped text in strings and block comments is not ownership
+evidence.
 
-The lock remains **schema 1**: no scanner provenance or array selectors are
-persisted. Selectors are static catalog metadata and participate in the
-catalog checksum, but not the region's identity.
+The lock remains **schema 1**. TOML selectors are static catalog metadata and
+participate in the catalog checksum, but are not persisted or part of the
+region's identity. Structural JSON regions additionally record an optional
+`json_array_path` on their existing region entry. This additive provenance
+selects JSON-aware retirement after the catalog declaration disappears.
+Historical and ordinary JSON region records without that field retain the
+line-oriented retirement contract.
 Rejecting zero-entry templates does not change empty on-disk body regeneration
-or retirement. After declaration removal, array placement is inferred from the
-current TOML or JSON structure, not historical provenance. A historical body
-that the user empties and moves outside its array cannot be identified as an
-array region; ordinary retirement behavior, including separator blank removal,
-applies there. No historical-placement guarantee is made for such edits.
+or retirement. After declaration removal, TOML placement is inferred from the
+current structure; JSON placement is checked against the recorded selector.
+A historical TOML body that the user empties and moves outside its array cannot
+be identified as an array region, so ordinary retirement behavior, including
+separator blank removal, applies there. JSON regions with selector provenance
+instead refuse when their markers no longer belong to the recorded array.
 
 ## Composition and deterministic refusal
 
@@ -89,10 +97,11 @@ pending writes cannot expose a partially composed invalid host.
 Overlapping/malformed ownership, misplaced markers, split values,
 non-array selectors, duplicate JSON properties, owned-file/array-host overlap,
 structural dependencies, and insertions requiring relocation refuse. Invalid
-TOML or JSON retirement hosts also refuse: schema 1 cannot prove that a
-historical region did not own array entries when the document cannot be
-parsed. Existing live ordinary regions otherwise retain their behavior. Dry
-runs run the same planning checks without writing anything.
+TOML retirement hosts refuse while structural ownership is being inferred.
+Invalid JSON retirement hosts refuse when the lock carries `json_array_path`;
+records without that provenance remain ordinary line-oriented regions.
+Existing live ordinary regions otherwise retain their behavior. Dry runs run
+the same planning checks without writing anything.
 
 Whole-file overlap checks resolve both catalog paths and recorded ownership
 paths using the same path resolver as writes, including repeated path separators.
