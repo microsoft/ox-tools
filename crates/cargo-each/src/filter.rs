@@ -48,12 +48,12 @@ impl Expression<PackageAtom> {
     }
 
     /// Parse one atomic predicate from its command-line spelling.
-    fn parse_atom(spec: &str) -> Result<Self, EachError> {
+    fn parse_atom(spec: &str) -> Result<PackageAtom, EachError> {
         match spec {
-            "lib" => Ok(Self::Atom(PackageAtom::HasTargetKind(TargetKind::Lib))),
-            "bin" => Ok(Self::Atom(PackageAtom::HasTargetKind(TargetKind::Bin))),
-            "doctest" => Ok(Self::Atom(PackageAtom::Doctest)),
-            "publishable" => Ok(Self::Atom(PackageAtom::Publishable)),
+            "lib" => Ok(PackageAtom::HasTargetKind(TargetKind::Lib)),
+            "bin" => Ok(PackageAtom::HasTargetKind(TargetKind::Bin)),
+            "doctest" => Ok(PackageAtom::Doctest),
+            "publishable" => Ok(PackageAtom::Publishable),
             _ => {
                 if let Some(kind) = spec.strip_prefix("target-kind:") {
                     let Some(kind) = parse_target_kind(kind) else {
@@ -62,17 +62,17 @@ impl Expression<PackageAtom> {
                             "unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build",
                         ));
                     };
-                    Ok(Self::Atom(PackageAtom::HasTargetKind(kind)))
+                    Ok(PackageAtom::HasTargetKind(kind))
                 } else if let Some(name) = spec.strip_prefix("feature:") {
                     if name.is_empty() {
                         return Err(invalid(spec, "empty feature name"));
                     }
-                    Ok(Self::Atom(PackageAtom::HasFeature(name.to_owned())))
+                    Ok(PackageAtom::HasFeature(name.to_owned()))
                 } else if let Some(name) = spec.strip_prefix("dep:") {
                     if name.is_empty() {
                         return Err(invalid(spec, "empty dependency name"));
                     }
-                    Ok(Self::Atom(PackageAtom::DependsOn(name.to_owned())))
+                    Ok(PackageAtom::DependsOn(name.to_owned()))
                 } else if let Some(rest) = spec.strip_prefix("metadata:") {
                     parse_metadata(spec, rest)
                 } else {
@@ -111,20 +111,20 @@ impl Expression<TargetAtom> {
         ExpressionParser::new(spec, Self::parse_atom, false)?.parse()
     }
 
-    fn parse_atom(spec: &str) -> Result<Self, EachError> {
+    fn parse_atom(spec: &str) -> Result<TargetAtom, EachError> {
         if let Some(pattern) = spec.strip_prefix("name:") {
             if pattern.is_empty() {
                 return Err(invalid(spec, "empty target name glob"));
             }
-            Ok(Self::Atom(TargetAtom::Name(pattern.to_owned())))
+            Ok(TargetAtom::Name(pattern.to_owned()))
         } else if let Some(name) = spec.strip_prefix("required-feature:") {
             if name.is_empty() {
                 return Err(invalid(spec, "empty required feature name"));
             }
-            Ok(Self::Atom(TargetAtom::RequiredFeature(name.to_owned())))
+            Ok(TargetAtom::RequiredFeature(name.to_owned()))
         } else if let Some(key) = spec.strip_prefix("name-in-metadata:") {
             validate_key(spec, key)?;
-            Ok(Self::Atom(TargetAtom::NameInMetadata(key.to_owned())))
+            Ok(TargetAtom::NameInMetadata(key.to_owned()))
         } else {
             Err(invalid(
                 spec,
@@ -221,16 +221,16 @@ pub(crate) type Predicate = Expression<PackageAtom>;
 pub(crate) type TargetPredicate = Expression<TargetAtom>;
 
 /// Parse the portion of a `metadata:` predicate after the prefix.
-fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
+fn parse_metadata(spec: &str, rest: &str) -> Result<PackageAtom, EachError> {
     if let Some((key, value)) = rest.split_once('=') {
         validate_key(spec, key)?;
-        Ok(Predicate::Atom(PackageAtom::MetadataEquals {
+        Ok(PackageAtom::MetadataEquals {
             key: key.to_owned(),
             value: parse_metadata_value(spec, value)?,
-        }))
+        })
     } else {
         validate_key(spec, rest)?;
-        Ok(Predicate::Atom(PackageAtom::MetadataPresent(rest.to_owned())))
+        Ok(PackageAtom::MetadataPresent(rest.to_owned()))
     }
 }
 
@@ -311,18 +311,14 @@ struct ExpressionParser<'a, Atom> {
     tokens: Vec<Token<'a>>,
     position: usize,
     nesting: usize,
-    parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>,
+    parse_atom: fn(&str) -> Result<Atom, EachError>,
     allow_whitespace_in_atom: bool,
 }
 
 impl<'a, Atom> ExpressionParser<'a, Atom> {
     const MAX_NESTING: usize = 64;
 
-    fn new(
-        spec: &'a str,
-        parse_atom: fn(&str) -> Result<Expression<Atom>, EachError>,
-        allow_whitespace_in_atom: bool,
-    ) -> Result<Self, EachError> {
+    fn new(spec: &'a str, parse_atom: fn(&str) -> Result<Atom, EachError>, allow_whitespace_in_atom: bool) -> Result<Self, EachError> {
         Ok(Self {
             spec,
             tokens: tokenize(spec)?,
@@ -338,7 +334,7 @@ impl<'a, Atom> ExpressionParser<'a, Atom> {
             return Err(invalid(self.spec, "empty expression"));
         }
         if self.allow_whitespace_in_atom && self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
-            return (self.parse_atom)(self.spec.trim());
+            return (self.parse_atom)(self.spec.trim()).map(Expression::Atom);
         }
         let expression = self.parse_or()?;
         if let Some(token) = self.peek() {
@@ -380,7 +376,7 @@ impl<'a, Atom> ExpressionParser<'a, Atom> {
         match self.peek() {
             Some(Token::Atom(atom)) => {
                 self.advance();
-                (self.parse_atom)(atom)
+                (self.parse_atom)(atom).map(Expression::Atom)
             }
             Some(Token::Not) => {
                 self.advance();
@@ -662,8 +658,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn target_filter_atoms_match_and_validate() {
+    fn target_filter_fixture() -> (Member, MemberTarget) {
         let mut member = member_with(&[], json!({"checks": {"skip": ["loom-test"]}}), true, false);
         member.name = "alpha".to_owned();
         let target = MemberTarget {
@@ -671,14 +666,27 @@ mod tests {
             kinds: std::iter::once(TargetKind::Test).collect(),
             required_features: std::iter::once("loom".to_owned()).collect(),
         };
+        (member, target)
+    }
 
-        let name = TargetPredicate::parse("name:loom-*").expect("name filter");
-        let feature = TargetPredicate::parse("required-feature:loom").expect("required feature filter");
-        let metadata = TargetPredicate::parse("name-in-metadata:checks.skip").expect("metadata filter");
-        for predicate in [&name, &feature, &metadata] {
-            predicate.validate(&member).expect("valid metadata");
-            assert!(predicate.matches(&member, &target));
-        }
+    #[test]
+    fn target_filter_name_glob_matches() {
+        let (member, target) = target_filter_fixture();
+        assert!(
+            TargetPredicate::parse("name:loom-*")
+                .expect("name filter")
+                .matches(&member, &target)
+        );
+        assert!(
+            !TargetPredicate::parse("name:unit-*")
+                .expect("name filter")
+                .matches(&member, &target)
+        );
+    }
+
+    #[test]
+    fn target_filter_literal_name_matches() {
+        let (member, target) = target_filter_fixture();
         assert!(
             TargetPredicate::parse("name:loom-test")
                 .expect("literal name filter")
@@ -689,9 +697,14 @@ mod tests {
                 .expect("literal name filter")
                 .matches(&member, &target)
         );
+    }
+
+    #[test]
+    fn target_filter_required_feature_matches() {
+        let (member, target) = target_filter_fixture();
         assert!(
-            !TargetPredicate::parse("name:unit-*")
-                .expect("name filter")
+            TargetPredicate::parse("required-feature:loom")
+                .expect("required feature filter")
                 .matches(&member, &target)
         );
         assert!(
@@ -699,6 +712,14 @@ mod tests {
                 .expect("required feature filter")
                 .matches(&member, &target)
         );
+    }
+
+    #[test]
+    fn target_filter_name_in_metadata_matches_and_validates() {
+        let (member, target) = target_filter_fixture();
+        let predicate = TargetPredicate::parse("name-in-metadata:checks.skip").expect("metadata filter");
+        predicate.validate(&member).expect("valid metadata");
+        assert!(predicate.matches(&member, &target));
     }
 
     #[test]

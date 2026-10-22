@@ -543,14 +543,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_target_metadata_matches_under_not_and_empty_results_are_valid() {
+    fn example_member() -> Member {
         let mut a = member("alpha");
         a.targets.push(MemberTarget {
             name: "demo".to_owned(),
             kinds: std::iter::once(TargetKind::Example).collect(),
             required_features: BTreeSet::new(),
         });
+        a
+    }
+
+    #[test]
+    fn missing_target_metadata_matches_under_not() {
+        let a = example_member();
         let kinds = std::iter::once(TargetKind::Example).collect();
         let include_missing = [TargetPredicate::parse("not name-in-metadata:cargo-each.excluded-targets").expect("target filter")];
         let plan = Plan::build(
@@ -568,7 +573,12 @@ mod tests {
         )
         .expect("missing metadata does not exclude the target");
         assert_eq!(plan.invocations[0].argv, ["echo", "demo"]);
+    }
 
+    #[test]
+    fn empty_target_result_is_valid() {
+        let a = example_member();
+        let kinds = std::iter::once(TargetKind::Example).collect();
         let exclude_all = [TargetPredicate::parse("name:no-such-target").expect("target filter")];
         assert!(
             Plan::is_empty(
