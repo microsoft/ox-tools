@@ -30,13 +30,12 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
-# `unicode-ident` is a deliberate compatibility bound, never referenced from this crate's
-# code. See the dependency comment below.
+# These dependencies constrain transitive versions without being used directly.
 [package.metadata.cargo-udeps.ignore]
-normal = ["unicode-ident"]
+normal = ["constant_time_eq", "unicode-ident"]
 
 [package.metadata.unused-deps]
-allowed = ["unicode-ident"]
+allowed = ["constant_time_eq", "unicode-ident"]
 
 [package.metadata.coverage-gate]
 # Production-only coverage excludes test modules and scaffolding. The measured
@@ -78,6 +77,7 @@ clap = { workspace = true, features = [
     "wrap_help",
 ] }
 compact_str = { workspace = true, features = ["std", "serde"] }
+constant_time_eq = { workspace = true }
 csv = { workspace = true }
 env_logger = { workspace = true }
 fetch = { workspace = true, features = ["json", "native-tls", "tokio"] }

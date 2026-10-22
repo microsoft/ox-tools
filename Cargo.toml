@@ -48,6 +48,8 @@ clap = { version = "4.6.6", default-features = false }
 clap_complete = { version = "4.6.9", default-features = false }
 command-group = { version = "5.0.1", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
+# blake3 accepts yanked 0.4.3; the registry mirror still selects it.
+constant_time_eq = { version = "=0.4.2", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duct = { version = "1.1.1", default-features = false }
 env_logger = { version = "0.11.11", default-features = false }
