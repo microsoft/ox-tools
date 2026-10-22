@@ -229,7 +229,10 @@ impl Manifest {
                 if regions.insert(key.clone(), checksum).is_some() {
                     bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
-                if let Some(path) = table.get("json_array_path").and_then(Item::as_array) {
+                if let Some(path) = table.get("json_array_path") {
+                    let path = path
+                        .as_array()
+                        .ok_or_else(|| app_err!("[[region]] entry '{}'/'{}' has a non-array `json_array_path`", key.host, key.id))?;
                     let path = path
                         .iter()
                         .map(|component| {
@@ -602,6 +605,18 @@ mod tests {
             (
                 "version = 1\n[[region]]\nhost = \"Cargo.toml\"\nid = \"anvil-x\"\n",
                 "[[region]] entry 'Cargo.toml'/'anvil-x' is missing `checksum`",
+            ),
+            (
+                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = \"entries\"\n",
+                "[[region]] entry 'config.json'/'entries' has a non-array `json_array_path`",
+            ),
+            (
+                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = []\n",
+                "[[region]] entry 'config.json'/'entries' has an empty `json_array_path`",
+            ),
+            (
+                "version = 1\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"root\", 1]\n",
+                "[[region]] entry 'config.json'/'entries' has a non-string `json_array_path` component",
             ),
         ] {
             let err = Manifest::parse(text).unwrap_err();

@@ -64,8 +64,6 @@ impl HostScanner {
     pub(crate) fn for_path(host: &str) -> Self {
         if host.to_ascii_lowercase().ends_with(".toml") {
             Self::Toml
-        } else if host.to_ascii_lowercase().ends_with(".json") {
-            Self::Json
         } else {
             Self::Lines
         }

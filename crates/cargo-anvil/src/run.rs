@@ -268,10 +268,15 @@ fn build_plan_with_hosts(
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let Some(syntax) = retirement_syntax_or_refuse(repo_root, &mut plan, hosts, &host, &key.id, recorded_checksum)? else {
+            let scanner = if manifest.json_array_paths.contains_key(key) {
+                HostScanner::Json
+            } else {
+                HostScanner::for_path(&host)
+            };
+            let Some(syntax) = retirement_syntax_or_refuse(repo_root, &mut plan, hosts, &host, &key.id, recorded_checksum, scanner)? else {
                 continue;
             };
-            let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, syntax)?;
+            let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, syntax, scanner)?;
         }
     }
 
@@ -561,10 +566,13 @@ fn add_historical_array_inputs(
     candidates: &mut std::collections::BTreeMap<String, ArrayFormat>,
 ) -> Result<(), AppError> {
     for key in manifest.regions.keys() {
-        let format = match HostScanner::for_path(&key.host) {
-            HostScanner::Toml => Some(ArrayFormat::Toml),
-            HostScanner::Json if manifest.json_array_paths.contains_key(key) => Some(ArrayFormat::Json),
-            HostScanner::Lines | HostScanner::Json => None,
+        let extension = Path::new(&key.host).extension().and_then(std::ffi::OsStr::to_str);
+        let format = if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("toml")) {
+            Some(ArrayFormat::Toml)
+        } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("json")) && manifest.json_array_paths.contains_key(key) {
+            Some(ArrayFormat::Json)
+        } else {
+            None
         };
         if let Some(format) = format {
             let host = (hosts.resolve)(repo_root, &key.host)?;
@@ -969,7 +977,7 @@ fn prepare_composed_host(
     for id in declared.order {
         // Each region of a composed host refuses for itself when it is planned;
         // this pre-pass only performs the repairs that are safe.
-        let _ = repair_host_markers(repo_root, plan, hosts, host, id, CommentSyntax::Hash)?;
+        let _ = repair_host_markers(repo_root, plan, hosts, host, id, CommentSyntax::Hash, HostScanner::Toml)?;
     }
     let state = match hosts.get_or_read(repo_root, host)? {
         Some(text) => composed_host_state(declared.order, host, &text, manifest),
@@ -1181,7 +1189,24 @@ fn repair_or_refuse(
     syntax: CommentSyntax,
     retiring: bool,
 ) -> Result<bool, AppError> {
-    if repair_host_markers(repo_root, plan, hosts, host, id, syntax)? != MarkerRepair::Unpaired {
+    repair_or_refuse_with_scanner(repo_root, plan, hosts, host, id, syntax, retiring, HostScanner::for_path(host))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps explicit marker-repair context at the retirement boundary"
+)]
+fn repair_or_refuse_with_scanner(
+    repo_root: &Path,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    syntax: CommentSyntax,
+    retiring: bool,
+    scanner: HostScanner,
+) -> Result<bool, AppError> {
+    if repair_host_markers(repo_root, plan, hosts, host, id, syntax, scanner)? != MarkerRepair::Unpaired {
         return Ok(true);
     }
     let reason = if retiring {
@@ -1206,11 +1231,12 @@ fn repair_host_markers(
     host: &str,
     id: &str,
     syntax: CommentSyntax,
+    scanner: HostScanner,
 ) -> Result<MarkerRepair, AppError> {
     let Some(text) = hosts.get_or_read(repo_root, host)? else {
         return Ok(MarkerRepair::Repaired(String::new()));
     };
-    let outcome = HostScanner::for_path(host).repair(&text, id, syntax);
+    let outcome = scanner.repair(&text, id, syntax);
     if let MarkerRepair::Repaired(repaired) = &outcome
         && repaired != &text
     {
@@ -1648,16 +1674,21 @@ fn plan_removals(
             }));
             continue;
         }
-        let Some(syntax) = retirement_syntax_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, last)? else {
+        let scanner = if previous.json_array_paths.contains_key(key) {
+            HostScanner::Json
+        } else {
+            HostScanner::for_path(&resolved_host)
+        };
+        let Some(syntax) = retirement_syntax_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, last, scanner)? else {
             continue;
         };
-        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true)? {
+        if !repair_or_refuse_with_scanner(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true, scanner)? {
             // The lock entry survives with the region, so the next run still
             // knows it is anvil's to retire once the boundary is repaired.
             continue;
         }
         if let Some(host_text) = hosts.cached(&resolved_host) {
-            let region = HostScanner::for_path(&resolved_host)
+            let region = scanner
                 .find(&host_text, &key.id, syntax)
                 .expect("repair_or_refuse above established that this host has well-formed region markers");
             let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
@@ -1675,7 +1706,7 @@ fn plan_removals(
                     // cache is keyed by the resolved spelling, which is what
                     // the writes used; reading under the recorded spelling
                     // would miss it and splice into the pre-pass text.
-                    let spliced = HostScanner::for_path(&resolved_host)
+                    let spliced = scanner
                         .remove(&host_text, &key.id, syntax)
                         .expect("the region markers were validated by repair_or_refuse above");
                     hosts.set(&resolved_host, spliced.clone());
@@ -1732,9 +1763,10 @@ fn retirement_syntax_or_refuse(
     host: &str,
     id: &str,
     recorded_checksum: &str,
+    scanner: HostScanner,
 ) -> Result<Option<CommentSyntax>, AppError> {
     let text = hosts.get_or_read(repo_root, host)?;
-    match infer_recorded_region_syntax(text.as_deref(), HostScanner::for_path(host), host, id, recorded_checksum) {
+    match infer_recorded_region_syntax(text.as_deref(), scanner, host, id, recorded_checksum) {
         Ok(syntax) => Ok(Some(syntax)),
         Err(reason) => {
             refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::RetirementInference);
@@ -2111,7 +2143,7 @@ mod tests {
             syntax: CommentSyntax::SlashSlash,
         };
         let catalog = Catalog::builder(test_cli()).with_artifact(Artifact::region(spec)).build().unwrap();
-        let source = "{\n  'json5': true\n}\n";
+        let source = "{\n  'quote\"': true\n}\n";
         let mut hosts = memory_hosts();
         hosts.set("config.json", source.to_owned());
         hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
@@ -2130,6 +2162,24 @@ mod tests {
         let managed = introduced.items()[0].spliced_host.as_deref().unwrap();
         let manifest = introduced.projected_manifest(&Manifest::default());
         assert!(manifest.json_array_paths.is_empty());
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", managed.to_owned());
+        hosts
+            .newlines
+            .insert("config.json".to_owned(), crate::region::text_newline(managed));
+        let synced = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(synced.dry_run_exit_code(), 0);
         let empty = Catalog::builder(test_cli()).build().unwrap();
         let mut hosts = memory_hosts();
         hosts.set("config.json", managed.to_owned());
