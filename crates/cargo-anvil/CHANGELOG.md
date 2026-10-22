@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-22
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: preserve immutable action tags
+  - cargo-anvil: synchronize advisory and coverage action pins
+  - pass release and container inputs explicitly ([#265](https://github.com/microsoft/ox-tools/pull/265))
+  - cargo-anvil: use just_executable for nested invocations ([#266](https://github.com/microsoft/ox-tools/pull/266))
+
+- ⚡ Performance
+
+  - cargo-anvil: keep Miri under 30 minutes ([#279](https://github.com/microsoft/ox-tools/pull/279))
+
 ## [0.15.0] - 2026-10-13
 
 - ✨ Features
