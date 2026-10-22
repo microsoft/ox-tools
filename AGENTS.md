@@ -10,6 +10,19 @@ The spell checker dictionary is in the `.spelling` file, one word per line in ar
 
 Do not manually edit `CHANGELOG.md` files. Changelogs are automatically updated on release.
 
+## cargo-anvil Versioning
+
+When a PR changes cargo-anvil's catalog (including template-only updates),
+include an appropriate `cargo-anvil` crate version bump in the same PR. Use
+`.\scripts\release-crate.ps1 cargo-anvil -Version <new-version>` to update
+the version and generate the changelog, then regenerate the Anvil artifacts,
+snapshots, and `.anvil.lock` from the updated sources.
+
+A changed `catalog_checksum` with an unchanged `tool_version` in
+`.anvil.lock`, compared with the PR base, is likely a bug: a version bump
+may be missing. Keep the crate version, `Cargo.lock`, and generated lock
+metadata synchronized; do not hand-edit `.anvil.lock` to fix this.
+
 ## Design Docs Are Part of the Source
 
 Each crate's design is captured under `crates/<crate>/docs/`, kept in

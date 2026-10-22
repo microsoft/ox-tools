@@ -66,7 +66,7 @@ flowchart LR
     impact_act[".github/actions/<br/>anvil-impact"]:::action
     setup_act[".github/actions/<br/>anvil-setup"]:::action
     run_group_act[".github/actions/<br/>anvil-run-group"]:::action
-    codecov_act["codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5<br/>v7.1.1"]:::external
+    codecov_act["codecov/codecov-action@v7.1.1"]:::external
     impact_just["just anvil-impact"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
@@ -132,7 +132,7 @@ flowchart LR
     publish_job["publish-failure<br/>upsert incident issue"]:::job
     setup_act[".github/actions/<br/>anvil-setup"]:::action
     run_group_act[".github/actions/<br/>anvil-run-group"]:::action
-    codecov_act["codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5<br/>v7.1.1"]:::external
+    codecov_act["codecov/codecov-action@v7.1.1"]:::external
     github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
@@ -1040,34 +1040,33 @@ Recommended root workflow shape:
 
 ### Action pinning
 
-Third-party actions can use a full commit SHA with the release version in a trailing
-comment, including actions published as GitHub [immutable releases][immutable]. The
-generated coverage uploads both use
-`codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1`, and both
-advisory-comment steps use
-`marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5`.
-SHA-pinned references must not carry a comment claiming they are pinned by tag.
+Third-party actions are pinned in one of two ways, and the split is deliberate rather
+than inconsistent.
 
-Verified immutable releases may also be pinned by tag. In the generated setup action,
-that is currently `cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained
-workflows may use additional immutable-release tags.
+Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
+by tag. In the generated workflows that is, at the time of writing,
+`codecov/codecov-action@v7.1.1`, `marocchino/sticky-pull-request-comment@v3.0.5` and
+`cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
+the same rule to the actions they use, so the list a reader sees there may be longer.
 An immutable release locks its Git tag to one commit: the tag cannot be moved, and
 cannot be deleted while the release exists. The tag name cannot be reused even after
 the repository is deleted and recreated, and publishing generates a release
 attestation covering the tag, commit SHA and assets. The tag is a stable identifier
-under those rules. Tag-pinned references carry a
+under those rules, and unlike a SHA it stays readable in the diff when the pin is
+bumped. Generated files carry a
 `# pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)`
 comment at each such pin, so the reason a tag appears where a SHA is otherwise
 expected is visible at the use site.
 
-Actions without an immutable release must use a full commit SHA.
+Every other action is pinned by commit SHA with the version in a trailing comment, for
+example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
 
 Immutability is a property of one published release, not a standing guarantee about
 the publisher. When bumping a tag-pinned action, confirm the new release still reports
 it:
 
 ```console
-$ gh api repos/cargo-bins/cargo-binstall/releases/tags/v1.21.0 --jq .immutable
+$ gh api repos/codecov/codecov-action/releases/tags/v7.1.1 --jq .immutable
 true
 ```
 
@@ -1101,7 +1100,7 @@ The upload step:
 ```yaml
 - name: Upload coverage to Codecov
   if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
-  uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+  uses: codecov/codecov-action@v7.1.1 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
     files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
     flags: ${{ matrix.os }}
@@ -1202,7 +1201,7 @@ recipes emit comments today). Two steps run after the composite that executes th
   if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
       && github.event.pull_request.head.repo.full_name == github.repository
       && hashFiles('target/anvil/comments/semver.md') != ''
-  uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+  uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
     header: anvil-semver
     path: target/anvil/comments/semver.md
@@ -1210,7 +1209,7 @@ recipes emit comments today). Two steps run after the composite that executes th
   if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
       && github.event.pull_request.head.repo.full_name == github.repository
       && hashFiles('target/anvil/comments/semver.md') == ''
-  uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+  uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
     header: anvil-semver
     delete: true
