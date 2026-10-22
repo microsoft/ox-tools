@@ -5,8 +5,6 @@
 //! root workflows, each an owned file gated on [`Backend::GitHub`].
 //!
 //! Holds the embedded templates and registry functions.
-//!
-//! See [`github.md`](../../../docs/design/github.md).
 
 use crate::backend::Backend;
 use crate::catalog::Artifact;
@@ -212,6 +210,33 @@ mod tests {
         assert!(REPORT_STATUS_ACTION.contains("name: anvil-report-status"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
+    }
+
+    #[test]
+    fn advisory_and_coverage_actions_use_consistent_sha_pins() {
+        for action in ["marocchino/sticky-pull-request-comment", "codecov/codecov-action"] {
+            let prefix = format!("uses: {action}@");
+            let references: Vec<_> = [PR_IMPL_WORKFLOW, SCHEDULED_IMPL_WORKFLOW]
+                .into_iter()
+                .flat_map(str::lines)
+                .filter_map(|line| line.trim().strip_prefix(&prefix))
+                .collect();
+            let [first, second] = references.as_slice() else {
+                panic!("{action} must have exactly two workflow references, got {references:?}");
+            };
+            assert_eq!(first, second, "{action} must use the same release at both call sites");
+            let (sha, version) = first
+                .split_once(" # v")
+                .expect("SHA-pinned actions must annotate their release version, not claim tag pinning");
+            assert!(
+                sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{action} must use a full commit SHA, got {sha}"
+            );
+            assert!(
+                !version.is_empty() && !version.contains(char::is_whitespace),
+                "{action} must have a release-version annotation, got {version}"
+            );
+        }
     }
 
     #[test]
