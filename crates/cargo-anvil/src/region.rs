@@ -1823,7 +1823,8 @@ impl Iterator for LineIter<'_> {
         }
         let start = self.pos;
         let rest = &self.text[start..];
-        let end = match rest.find('\n') {
+        let end = match rest.as_bytes().iter().position(|byte| matches!(byte, b'\r' | b'\n')) {
+            Some(i) if rest.as_bytes()[i] == b'\r' && rest.as_bytes().get(i + 1) == Some(&b'\n') => start + i + 2,
             Some(i) => start + i + 1,
             None => self.text.len(),
         };

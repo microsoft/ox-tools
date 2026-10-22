@@ -2407,6 +2407,80 @@ mod tests {
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
     }
 
+    #[test]
+    fn json_array_lifecycle_preserves_block_comment_after_bare_cr_line_comment() {
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli()).with_json_array_region(array).build().unwrap();
+        let source = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    \"managed\",\n",
+            "    // repository\r",
+            "    /* example:\n",
+            "    // >>> anvil-managed: entries\n",
+            "    \"managed\",\n",
+            "    // <<< anvil-managed: entries\n",
+            "    */\n",
+            "  ]\n",
+            "}\n",
+        );
+        let example = concat!(
+            "    // repository\r",
+            "    /* example:\n",
+            "    // >>> anvil-managed: entries\n",
+            "    \"managed\",\n",
+            "    // <<< anvil-managed: entries\n",
+            "    */\n",
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
+        let introduced = build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let managed = hosts.cached("config.json").unwrap();
+        assert!(managed.contains(example));
+        let manifest = introduced.projected_manifest(&Manifest::default());
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let newline = crate::region::text_newline(&managed);
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", managed);
+        hosts.newlines.insert("config.json".to_owned(), newline);
+
+        let _retired = build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &empty,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+
+        assert!(output.contains(example));
+    }
+
     fn misplaced_json_array_retirement_error(source: &str) -> String {
         let mut manifest = Manifest::default();
         manifest.set_region("config.json", "entries", checksum_str(""));
