@@ -6,9 +6,9 @@ detail of the command-line tool, not a stable library API.
 
 ## Policy string sizes
 
-For string metrics in custom policies, both `size(description)` and
-`description.size()` count Unicode scalar values, not UTF-8 bytes, UTF-16 code
-units, or grapheme clusters. An empty string has size 0, and `"rust"` has size 4.
+For string metrics in custom policies, both `size(crate.description)` and
+`crate.description.size()` count Unicode scalar values, not UTF-8 bytes, UTF-16
+code units, or grapheme clusters. An empty string has size 0, and `"rust"` has size 4.
 U+00E9 and the supplementary-plane character U+1F980 each have size 1. In contrast,
 `e` followed by the combining acute accent U+0301 has size 2, even when displayed
 as one character.
