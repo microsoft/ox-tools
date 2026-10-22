@@ -542,6 +542,25 @@ mod tests {
     }
 
     #[test]
+    fn test_string_size_counts_unicode_scalar_values() {
+        static DESCRIPTION_DEF: MetricDef = MetricDef {
+            name: "description",
+            description: "Crate description",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+
+        for (description, size) in [("", 0), ("rust", 4), ("\u{00e9}", 1), ("\u{1f980}", 1), ("e\u{0301}", 2)] {
+            let metrics = [Metric::with_value(&DESCRIPTION_DEF, MetricValue::String(description.into()))];
+
+            for expression in [format!("size(description) == {size}"), format!("description.size() == {size}")] {
+                assert!(eval_expr(&expression, &metrics).unwrap(), "{expression} for {description:?}");
+            }
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn test_high_risk_true_no_description() {
         // Expression is true => crate passes this high-risk check => not high risk
