@@ -13,7 +13,10 @@ use jsonc_parser::{CollectOptions, ParseOptions, parse_to_ast};
 use crate::emit::managed_region::{ManagedRegionRefusal, ManagedRegionRequest, RefusalRemedy, plan_region_with_splice};
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
-use crate::region::{HostScanner, Region, RegionPlacement, find_region_in_lines, json_comment_lines, remove_located_region, text_newline};
+use crate::region::{
+    HostScanner, Region, RegionPlacement, find_region_in_lines, json_comment_lines, remove_located_region, render_body_with_newline,
+    text_newline,
+};
 use crate::{CommentSyntax, JsonArrayRegionSpec};
 
 fn refusal(reason: impl std::fmt::Display, remedy: RefusalRemedy) -> ManagedRegionRefusal {
@@ -231,6 +234,7 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
 
 fn render_body(body: &str, indent: &str, newline: &str) -> String {
     let mut rendered = String::with_capacity(body.len() + indent.len() * body.lines().count());
+    let body = render_body_with_newline(body, "\n");
     for line in body.split_inclusive('\n') {
         let content = line.trim_end_matches(['\r', '\n']);
         if !content.trim().is_empty() {

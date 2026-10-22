@@ -324,6 +324,19 @@ impl Plan {
         })
     }
 
+    pub(crate) fn region_tracking_removed(&self, host: &str, id: &str) -> bool {
+        self.items.iter().any(|item| {
+            matches!(item.decision, Decision::Remove | Decision::OrphanedKept)
+                && matches!(
+                    &item.target,
+                    Target::Region {
+                        host: item_host,
+                        id: item_id
+                    } if item_host == host && item_id == id
+                )
+        })
+    }
+
     /// Record whether applying this plan would change `.anvil.lock`.
     pub(crate) fn set_manifest_update_required(&mut self, required: bool) {
         self.manifest_update_required = required;
