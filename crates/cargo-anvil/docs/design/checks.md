@@ -332,11 +332,11 @@ publish a full-coverage snapshot for the current state of `main`.
 | `aprz`   | `cargo aprz check`                                                  | oxidizer |
 | `clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 
-The generated license allow list contains MIT, Apache-2.0 (including the LLVM
-exception), BSD-2-Clause, BSD-3-Clause, Unicode-3.0, and Zlib. ISC, MPL-2.0, and
-Unicode-DFS-2016 are not default allowances. Repositories that need another
-license can add a crate-scoped `licenses.exceptions` entry outside the managed
-region. Keep repository-specific duplicate-version exceptions in `bans.skip`
+The generated license allow list is a shared policy, not an inventory of one
+repository's dependencies. `licenses.unused-allowed-license = "allow"` suppresses
+warnings for licenses absent from the current dependency graph without narrowing
+that policy. Unused crate-specific license exceptions retain cargo-deny's default
+warning. Keep repository-specific duplicate-version exceptions in `bans.skip`
 outside its managed region, with a version bound and a reason.
 
 These checks share a property: their outcome can change without a commit to this repo.
