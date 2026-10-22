@@ -16,8 +16,7 @@ wildcards = "deny"
 allow-wildcard-paths = true
 # <<< anvil-managed: anvil-deny-bans
 
-# Upstream dependencies require incompatible release lines. Keep these bounds
-# narrow so new release lines still warn; cargo-deny reports stale skips.
+# allowed duplicated dependencies
 skip = [
     { crate = "allocator-api2", version = "0.2", reason = "hashbrown/rallocator require 0.2; plurality requires 0.4" },
     { crate = "getrandom", version = "0.3", reason = "Bolero/tempfile require 0.3; jobserver requires 0.4" },
