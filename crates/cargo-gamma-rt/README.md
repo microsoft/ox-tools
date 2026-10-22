@@ -27,8 +27,8 @@ of launching a process.
 
 ## What a guard looks like
 
-[`a`][__link0] is the only function the instrumented source calls. Guard shape follows what Rust accepts
-at the mutation site:
+[`a`][__link0] selects the active guard branch. Guard shape follows what Rust accepts at the mutation
+site:
 
 ```text
 // an expression, whose value the mutant replaces
@@ -113,9 +113,9 @@ being driven by a mutation run must behave exactly as it did before, and the ord
 acquire the startup environment is different: the runtime emits [`ENVIRONMENT_ERROR_MARKER`][__link5]
 and exits, so the parent cannot mistake a mutant that never activated for a survivor.
 
-That distinction covers [`CENSUS_VAR`][__link6] as well as [`ACTIVE_VAR`][__link7]. With no active mutant it
-requests a baseline census; alongside a positive active ordinal it records whether that active
-guard was reached without changing mutant selection. A variable this process could not *read*
+That distinction covers [`REACH_VAR`][__link6] as well as [`ACTIVE_VAR`][__link7]. Alongside a positive active
+ordinal it records whether that active guard was reached without changing mutant selection.
+With no active mutant it records no guards. A variable this process could not *read*
 is a startup failure, not an absent one. A read interrupted by a signal is retried rather than
 counted as a failure, since an interruption is not evidence of anything.
 
@@ -140,24 +140,19 @@ above:
   not a proof of memory safety or proof that forbidden foreign mutation did not occur.
 
 ```rust
-use gamma_rt::{ACTIVE_VAR, CENSUS_VAR, NONE, a, active, any};
+use gamma_rt::{ACTIVE_VAR, NONE, a, active, any};
 
-// Stated for an ordinary process. A census is its own mode: it activates no mutant, so
-// `active` reports `NONE`, and every guard answers `false` while recording the site it stands
-// at — including the sites this example would walk past.
-if std::env::var_os(CENSUS_VAR).is_none_or(|path| path.is_empty()) {
-    // In an ordinary process nothing is selected, so every guard takes its original arm.
-    if active() == NONE {
-        assert!(!any());
-        assert!(!a(NONE));
-        assert!(!a(1));
-        assert!(!a(9_999));
-    }
+// With no mutant selected, every guard takes its original arm.
+if active() == NONE {
+    assert!(!any());
+    assert!(!a(NONE));
+    assert!(!a(1));
+    assert!(!a(9_999));
+}
 
-    // Only a positive ordinal can select a mutant.
-    if active() != NONE {
-        assert!(a(active()));
-    }
+// Only a positive ordinal can select a mutant.
+if active() != NONE {
+    assert!(a(active()));
 }
 
 assert_eq!(ACTIVE_VAR, "GAMMA_ACTIVE");
@@ -169,8 +164,9 @@ selection by launching a fresh process per mutant.
 
 ## Runtime entry points
 
-[`a`][__link10] is what the guards call, and the only runtime entry point instrumented source contains.
-[`active`][__link11] and [`any`][__link12] are there for the tool’s own diagnostics and for anyone inspecting a
+Guards call [`a`][__link10] to select a branch. Type-preserving replacements can additionally call
+[`default_after`][__link11], [`increment`][__link12], [`decrement`][__link13], or [`panic_on_failure`][__link14].
+[`active`][__link15] and [`any`][__link16] are there for the tool’s own diagnostics and for anyone inspecting a
 scratch tree by hand:
 
 ```rust
@@ -187,9 +183,9 @@ if any() {
 
 ## Making two iterators one type
 
-[`Either`][__link13] is the one other thing instrumented source mentions, and it exists because the guard
-is an `if`. A function returning `impl Iterator<Item = T>` returns a single concrete type that
-its body picks, so `if a(n) { core::iter::empty() } else { ..the real body.. }` has arms of two
+[`Either`][__link17] exists because the guard is an `if`. A function returning `impl Iterator<Item = T>`
+returns a single concrete type that its body picks, so
+`if a(n) { core::iter::empty() } else { ..the real body.. }` has arms of two
 different types and will not compile. Wrapping each arm in a variant makes them one type:
 
 ```text
@@ -197,7 +193,7 @@ different types and will not compile. Wrapping each arm in a variant makes them 
   else { ::gamma_rt::Either::R({ ..the real body.. }) } }
 ```
 
-See [`Either`][__link14] for why this is not a `Box<dyn Iterator>`.
+See [`Either`][__link18] for why this is not a `Box<dyn Iterator>`.
 
 ## `no_std`, and what it does not buy
 
@@ -222,19 +218,23 @@ how nearly every `no_std` library is tested anyway.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-rt">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQboc30_khWDIAb1hI-7Yvoldob0G-Y5y-3bOUbRyayOQZAf21hZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuMy4wbmNhcmdvX2dhbW1hX3J0
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbsh7x2mCzv-kbYJkjySbnBsIb0yTS9VDwrb4bqqehjM5c8v9hZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuMy4wbmNhcmdvX2dhbW1hX3J0
  [__link0]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=a
  [__link1]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=a
  [__link10]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=a
- [__link11]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=active
- [__link12]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=any
- [__link13]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=Either
- [__link14]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=Either
+ [__link11]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=default_after
+ [__link12]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=increment
+ [__link13]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=decrement
+ [__link14]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=panic_on_failure
+ [__link15]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=active
+ [__link16]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=any
+ [__link17]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=Either
+ [__link18]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=Either
  [__link2]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ACTIVE_VAR
  [__link3]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=NONE
  [__link4]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=NONE
  [__link5]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
- [__link6]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=CENSUS_VAR
+ [__link6]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=REACH_VAR
  [__link7]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ACTIVE_VAR
  [__link8]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ACTIVE_VAR
  [__link9]: https://docs.rs/cargo-gamma-rt/0.3.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER

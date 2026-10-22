@@ -57,24 +57,21 @@ campaign runs.
 
 ## Test selection and uncovered verdicts
 
-The reachability census is now opt-in. A default run still uses checked exact
-and inferred tests, but otherwise falls back to running each reachable test
-binary as a whole. Consequently, the up-front case selection and immediate
-`uncovered` classifications supplied by the census no longer occur by default.
-A default run can still establish `uncovered` later from a complete, sealed
-whole-binary observation learned while evaluating another mutant at the same
-site.
+Runs use checked exact and inferred tests, then fall back to each complete
+reachable test binary. There is no up-front reachability sampling phase.
+Remove the obsolete `--optimize-test-execution` CLI flag and
+`optimize-test-execution` TOML setting: optimization is now the default, and
+strict configuration parsing rejects the removed setting.
+A run can establish `uncovered` from complete, sealed, passing whole-binary
+observations learned while evaluating another replacement at the same stable
+source site, provided reachability is deterministic.
 
-Pass `--optimize-test-execution`, or set
-`optimize-test-execution = true` in `gamma.toml`, to restore census behavior.
-The census remains subject to its economic gate and may be declined when its
-projected launch cost cannot repay the work it could save.
-
-`--whole-test-binaries` previously opted out of the census. It now explicitly
-disables all case-level selection, including selection from checked hints. It
-conflicts with `--optimize-test-execution`; use it when tests have
-non-deterministic reachability and every selected case in a reachable binary
-must run for each mutant.
+`--whole-test-binaries` explicitly disables case-level selection, including
+selection from checked hints, and deterministic reach narrowing. Use it when
+tests have nondeterministic reachability and every selected case in a reachable
+binary must run for each mutant.
+This is a conservative opt-out of the new defaults, not a required replacement
+for the removed optimization flag or setting.
 
 ## Baseline-failure artifacts
 

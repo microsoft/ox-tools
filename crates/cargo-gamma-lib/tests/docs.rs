@@ -19,6 +19,7 @@ use std::fs;
 
 use camino::Utf8PathBuf;
 use cargo_gamma_lib::internals::config::Config;
+use cargo_gamma_lib::internals::discover::matches_glob;
 use cargo_gamma_lib::internals::docs;
 
 /// The documentation files carrying generated blocks, relative to the cargo-gamma crate.
@@ -155,7 +156,8 @@ fn the_optimized_campaign_profile_is_valid_and_preserves_development_checks() {
 
     assert!(prose.contains("cargo gamma run --profile gamma"));
     assert!(prose.contains("not directly comparable"));
-    assert!(prose.contains("invalidates unviability reuse"));
+    assert!(prose.contains("invalidates ordinary unviability reuse"));
+    assert!(prose.contains("but not the compiler-exclusion inventory"));
 }
 
 /// Every `docs/*.md` path the README mentions.
@@ -294,6 +296,25 @@ fn the_workspace_configuration_loads_with_its_settings_intact() {
         config.exclude_trait_impls,
         ["Debug"],
         "the diagnostic-output trait exclusion changed"
+    );
+
+    for fixture in [
+        "crates/cargo-gamma-engine/src/ops/collect/collector/fixtures/expanding_aliases.rs",
+        "crates/cargo-gamma-engine/src/ops/collect/collector/resource/fixtures/campaign/lib.rs",
+        "crates/cargo-gamma-engine/src/ops/collect/collector/resource/acceptance/guarded.rs",
+        "crates/cargo-gamma-engine/src/ops/collect/collector/resource/effects/fixture.rs",
+    ] {
+        assert!(
+            config.exclude_files.iter().any(|pattern| matches_glob(pattern, fixture)),
+            "embedded source fixture is eligible for mutation: {fixture}"
+        );
+    }
+    assert!(
+        !config
+            .exclude_files
+            .iter()
+            .any(|pattern| matches_glob(pattern, "crates/cargo-gamma-engine/src/ops/collect/collector/types.rs")),
+        "excluding fixture data must not exclude its production consumer"
     );
 }
 

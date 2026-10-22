@@ -19,12 +19,23 @@ const MAX_SYMLINKS: usize = 40;
 /// reporting where a later create or rename would land. Following components one at a time keeps
 /// that destination visible while still leaving a genuinely absent tail in place.
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
+pub fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     physical_with_links(path, |candidate| fs::read_link(candidate))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn physical_with_links(path: &Utf8Path, mut read_link: impl FnMut(&Utf8Path) -> std::io::Result<PathBuf>) -> Result<Utf8PathBuf> {
+    physical_with_filesystem(path, &mut read_link, |candidate| {
+        fs::symlink_metadata(candidate.as_std_path()).map(|metadata| metadata.file_type().is_symlink())
+    })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn physical_with_filesystem(
+    path: &Utf8Path,
+    mut read_link: impl FnMut(&Utf8Path) -> std::io::Result<PathBuf>,
+    mut is_link: impl FnMut(&Utf8Path) -> std::io::Result<bool>,
+) -> Result<Utf8PathBuf> {
     let mut pending = absolute(path)?;
     let mut followed_links = 0;
 
@@ -46,8 +57,8 @@ fn physical_with_links(path: &Utf8Path, mut read_link: impl FnMut(&Utf8Path) -> 
 
                 Utf8Component::Normal(name) => {
                     let candidate = resolved.join(name);
-                    let metadata = match fs::symlink_metadata(candidate.as_std_path()) {
-                        Ok(metadata) => metadata,
+                    let symlink = match is_link(&candidate) {
+                        Ok(symlink) => symlink,
 
                         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
                             append(
@@ -63,7 +74,7 @@ fn physical_with_links(path: &Utf8Path, mut read_link: impl FnMut(&Utf8Path) -> 
                         }
                     };
 
-                    if !metadata.file_type().is_symlink() {
+                    if !symlink {
                         resolved = candidate;
 
                         continue;
@@ -83,7 +94,9 @@ fn physical_with_links(path: &Utf8Path, mut read_link: impl FnMut(&Utf8Path) -> 
                         .map_err(|target| error!("the link `{candidate}` has a non-UTF-8 target `{}`", target.display()))?;
                     let mut next = if target.is_absolute() { target } else { resolved.join(target) };
 
-                    append(&mut next, components[at + 1..].iter().copied());
+                    for remaining in &components[at + 1..] {
+                        next.push(remaining.as_str());
+                    }
                     pending = absolute(&next)?;
                     restarted = true;
 
@@ -231,6 +244,7 @@ mod current_directory_tests {
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::VecDeque;
     #[cfg(any(unix, windows))]
     use std::ffi::OsString;
     #[cfg(unix)]
@@ -239,6 +253,49 @@ mod tests {
     use std::os::windows::ffi::OsStringExt as _;
 
     use super::*;
+
+    #[test]
+    fn two_links_are_followed_before_a_parent_without_filesystem_access() {
+        #[cfg(windows)]
+        let root = Utf8PathBuf::from(r"C:\synthetic");
+        #[cfg(not(windows))]
+        let root = Utf8PathBuf::from("/synthetic");
+        let first = root.join("link1");
+        let second = root.join("a").join("link2");
+        let mut links = VecDeque::from([
+            (first.clone(), PathBuf::from("a")),
+            (second.clone(), PathBuf::from("..").join("b").join("sub")),
+        ]);
+        let mut metadata = VecDeque::from([
+            (root.clone(), false),
+            (first, true),
+            (root.clone(), false),
+            (root.join("a"), false),
+            (second, true),
+            (root.clone(), false),
+            (root.join("a"), false),
+            (root.join("b"), false),
+            (root.join("b").join("sub"), false),
+            (root.join("b").join("victim"), false),
+        ]);
+        let destination = physical_with_filesystem(
+            &root.join("link1").join("link2").join("..").join("victim"),
+            |candidate| {
+                let (expected, target) = links.pop_front().expect("every link read must be scripted");
+                assert_eq!(candidate, expected);
+                Ok(target)
+            },
+            |candidate| {
+                let (expected, is_link) = metadata.pop_front().expect("every metadata query must be scripted");
+                assert_eq!(candidate, expected);
+                Ok(is_link)
+            },
+        )
+        .unwrap();
+        assert_eq!(destination, root.join("b").join("victim"));
+        assert!(links.is_empty());
+        assert!(metadata.is_empty());
+    }
 
     fn root() -> (tempfile::TempDir, Utf8PathBuf) {
         let directory = crate::testing::workdir("paths-");

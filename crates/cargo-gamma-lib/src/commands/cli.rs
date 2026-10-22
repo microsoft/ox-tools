@@ -550,15 +550,6 @@ pub struct MeasureArgs {
     #[arg(long, conflicts_with = "test_packages")]
     pub test_workspace: bool,
 
-    /// Measure which individual tests reach each mutation site before testing mutants.
-    ///
-    /// This experimental optimization may reduce sweep work by selecting only tests observed
-    /// reaching a site. It can add substantial listing and sampling work of its own, so it is
-    /// disabled unless explicitly requested. Incomplete observations remain checked hints and
-    /// always fall back to the whole binary when they do not kill.
-    #[arg(long, conflicts_with = "whole_test_binaries")]
-    pub optimize_test_execution: bool,
-
     /// Run every selected test in each reachable test binary.
     ///
     /// This explicitly suppresses case-level reachability selection and runs each reachable binary

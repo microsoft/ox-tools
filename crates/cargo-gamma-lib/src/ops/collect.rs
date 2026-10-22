@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use cargo_gamma_engine::ops::collect::into_definitions;
 pub use cargo_gamma_engine::ops::collect::{
-    Candidate, Defaults, Shape, check_stated, check_stated_and_collect_with, collect, collect_in, collect_with,
+    Candidate, Defaults, ResourceDependency, Shape, check_stated, check_stated_and_collect_with, collect, collect_in, collect_with,
 };
 
 use crate::model::Mutant;

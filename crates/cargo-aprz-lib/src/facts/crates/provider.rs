@@ -264,7 +264,6 @@ impl Provider {
         HashMap<CrateId, PerCrateData>,
         HashMap<CompactString, Vec<CompactString>>,
     ) {
-        // #[gamma::skip(literal.int_increment, reason = "hash-map capacity changes allocation behavior only and cannot change query results")]
         let mut crate_name_to_id = hash_map_with_capacity(requested_names.len());
         let mut crate_data = hash_map_with_capacity(requested_names.len());
 
@@ -489,18 +488,14 @@ impl Provider {
     ) -> VersionScanResult {
         let total_needed_versions: usize = needed_versions.values().map(HashMap::len).sum();
 
-        // #[gamma::skip(expr.increment, reason = "initial hash-table capacity affects allocation behavior only, not the collected version data")]
         let initial_version_capacity = total_needed_versions.saturating_add(need_latest_version.len());
         let mut version_data_map = hash_map_with_capacity(initial_version_capacity);
-        // #[gamma::skip(expr.increment, reason = "initial hash-table capacity affects allocation behavior only, not the collected resolved versions")]
         let mut resolved_versions = hash_map_with_capacity(need_latest_version.len());
         // The third tuple element records whether the candidate is a release users would
         // normally get: not yanked and not a pre-release.
         let mut latest_version_indices: HashMap<CrateId, (VersionsTableIndex, SemverVersion, bool)> =
-            // #[gamma::skip(expr.increment, reason = "initial hash-table capacity affects allocation behavior only, not latest-version selection")]
             hash_map_with_capacity(need_latest_version.len());
         let mut version_ids = hash_set_with_capacity(initial_version_capacity);
-        // #[gamma::skip(expr.increment, reason = "initial hash-table capacity affects allocation behavior only, not dependency mappings")]
         let mut version_id_to_crate_id = hash_map_with_capacity(needed_version_ids.len());
         let mut all_version_to_crate = HashMap::default();
 

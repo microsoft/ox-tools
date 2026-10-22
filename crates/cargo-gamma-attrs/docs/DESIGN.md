@@ -29,7 +29,8 @@ test target without runtime registration.
 - Resource arguments and annotated items are rejected before recursive parsing
   when their token shape exceeds the shared nesting and expression-chain
   limits, so malformed input produces a diagnostic rather than exhausting the
-  compiler stack.
+  compiler stack. Group and unary/postfix costs share a cumulative path budget;
+  entering a nested group does not restart the budget.
 
 ## Public contract
 

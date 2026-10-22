@@ -2491,6 +2491,42 @@ mod tests {
     }
 
     #[test]
+    fn campaign_regression_crate_name_without_version_propagates_its_escaped_value_write_error() {
+        struct ScriptedWriter {
+            calls: std::collections::VecDeque<&'static str>,
+        }
+
+        impl Write for ScriptedWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                assert_eq!(self.calls.pop_front(), Some(s), "unexpected HTML write");
+                if self.calls.is_empty() { Err(fmt::Error) } else { Ok(()) }
+            }
+
+            fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+                self.write_str(&args.to_string())
+            }
+        }
+
+        let metric = Metric::with_value(&CRATE_NAME_DEF, MetricValue::String("crate & name".into()));
+        let categories = HashMap::from_iter([(MetricCategory::Metadata, vec![CRATE_NAME_DEF.name])]);
+        let metrics = HashMap::from_iter([(CRATE_NAME_DEF.name, &metric)]);
+        let mut writer = ScriptedWriter {
+            calls: [
+                "          <table>\n",
+                "            <tbody>\n",
+                "            <tr>\n",
+                "              <td title=\"Crate name\">crate.name</td>\n",
+                "              <td>",
+                "crate &amp; name",
+            ]
+            .into(),
+        };
+        let error = write_metrics_category(&mut writer, MetricCategory::Metadata, &categories, &metrics).unwrap_err();
+        assert_eq!(error.to_string(), fmt::Error.to_string());
+        assert_eq!(writer.calls, std::collections::VecDeque::new());
+    }
+
+    #[test]
     fn medium_risk_header_uses_the_medium_class_and_label() {
         let crate_info = create_test_crate("medium", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 2, 1, 50.0)));
         let mut output = String::new();

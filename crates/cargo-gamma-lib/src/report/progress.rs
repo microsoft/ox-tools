@@ -63,6 +63,7 @@ pub struct Progress {
     survived: usize,
     timeouts: usize,
     out_of_memory: usize,
+    unviable: usize,
 }
 
 const _: () = {
@@ -93,6 +94,7 @@ impl Progress {
             survived: 0,
             timeouts: 0,
             out_of_memory: 0,
+            unviable: 0,
         }
     }
 
@@ -100,6 +102,15 @@ impl Progress {
     pub(crate) fn resize(&mut self, width: Option<u16>) {
         self.width = Self::normalized_width(width);
         self.dirty = true;
+    }
+
+    pub(crate) fn reset_unviable(&mut self) {
+        self.unviable = 0;
+    }
+
+    pub(crate) fn confirmed_unviable(&mut self, count: usize) -> usize {
+        self.unviable = self.unviable.max(count);
+        self.unviable
     }
 
     /// Sets the number of mutants that are about to be tested.
@@ -762,6 +773,38 @@ mod tests {
 
         assert!(rendered.contains("[    "), "{rendered}");
         assert!(!rendered.contains('>'), "{rendered}");
+    }
+
+    #[test]
+    fn progress_gauge_preserves_exact_cells_at_its_first_and_last_fill_boundaries() {
+        for (done, gauge) in [
+            (0, "                         "),
+            (3, "                         "),
+            (4, ">                        "),
+            (96, "=======================> "),
+            (99, "=======================> "),
+            (100, "========================="),
+            (101, "========================="),
+        ] {
+            assert_eq!(
+                bar(done, 80),
+                format!("     Testing [{gauge}] {done}/100 mutants evaluated"),
+                "{done} evaluated"
+            );
+        }
+    }
+
+    #[test]
+    fn a_phase_ending_without_an_open_phase_trims_only_leading_subject_separators() {
+        for extend in [false, true] {
+            let mut progress = Progress::new(true, Styler::new(false), Some(80));
+            let mut host = Sink::default();
+            progress.close(&mut host, "   ,   latest  ", extend);
+            assert_eq!(host.err(), "             latest  \n");
+            assert!(!progress.open);
+            assert!(progress.pending.is_none());
+            assert!(progress.dirty);
+        }
     }
 
     #[test]

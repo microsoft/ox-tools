@@ -95,9 +95,6 @@ pub struct Config {
     /// Let tests from every workspace package judge mutants they can reach.
     pub test_workspace: Option<bool>,
 
-    /// Run the experimental case-level reachability census.
-    pub optimize_test_execution: Option<bool>,
-
     /// Run every selected test in each reachable test binary instead of selecting cases by reachability.
     pub whole_test_binaries: Option<bool>,
 
@@ -257,7 +254,6 @@ impl Config {
             test_packages: Option<IgnoredAny>,
             test_lib: Option<IgnoredAny>,
             test_workspace: Option<IgnoredAny>,
-            optimize_test_execution: Option<IgnoredAny>,
             whole_test_binaries: Option<IgnoredAny>,
             include_tests: Option<IgnoredAny>,
             exclude_tests: Option<IgnoredAny>,
@@ -424,7 +420,6 @@ impl Config {
         args.measure.test_packages.extend(self.test_packages.iter().cloned());
         args.measure.test_lib = args.measure.test_lib || self.test_lib.unwrap_or(false);
         args.measure.test_workspace = args.measure.test_workspace || self.test_workspace.unwrap_or(false);
-        args.measure.optimize_test_execution = args.measure.optimize_test_execution || self.optimize_test_execution.unwrap_or(false);
         args.measure.whole_test_binaries = args.measure.whole_test_binaries || self.whole_test_binaries.unwrap_or(false);
         args.measure.include_tests.extend(self.include_tests.iter().cloned());
         args.measure.exclude_tests.extend(self.exclude_tests.iter().cloned());
@@ -442,15 +437,6 @@ impl Config {
                 self.test_workspace == Some(true),
             ));
         }
-        if args.measure.optimize_test_execution && args.measure.whole_test_binaries {
-            return Err(contradiction(
-                "optimize-test-execution",
-                self.optimize_test_execution == Some(true),
-                "whole-test-binaries",
-                self.whole_test_binaries == Some(true),
-            ));
-        }
-
         if args.measure.test_lib
             && let Some(argument) = args.measure.cargo_args.iter().find(|argument| {
                 matches!(
@@ -628,41 +614,6 @@ mod miri_tests {
             assert!(args.no_confirm);
             assert!(args.select.features.all_features);
             assert!(args.select.features.no_default_features);
-        }
-    }
-
-    #[test]
-    fn contradictory_execution_modes_report_the_actual_origin_of_each_setting() {
-        for first in [None, Some(false), Some(true)] {
-            for second in [None, Some(false), Some(true)] {
-                for (cli_first, cli_second) in [(false, false), (false, true), (true, false), (true, true)] {
-                    let config = Config {
-                        optimize_test_execution: first,
-                        whole_test_binaries: second,
-                        ..Config::default()
-                    };
-                    let mut args = RunArgs::default();
-                    args.measure.optimize_test_execution = cli_first;
-                    args.measure.whole_test_binaries = cli_second;
-                    let result = config.apply(&mut args);
-                    if (cli_first || first == Some(true)) && (cli_second || second == Some(true)) {
-                        let cause = result.expect_err("both effective execution modes are enabled");
-                        let first_source = if first == Some(true) { "gamma.toml" } else { "the command line" };
-                        let second_source = if second == Some(true) { "gamma.toml" } else { "the command line" };
-                        assert!(cause.is_usage());
-                        assert!(
-                            cause.to_string().starts_with(&format!(
-                                "`optimize-test-execution` from {first_source} and `whole-test-binaries` from {second_source} cannot both apply."
-                            )),
-                            "{cause}"
-                        );
-                    } else {
-                        result.expect("at most one effective execution mode is enabled");
-                        assert_eq!(args.measure.optimize_test_execution, cli_first || first == Some(true));
-                        assert_eq!(args.measure.whole_test_binaries, cli_second || second == Some(true));
-                    }
-                }
-            }
         }
     }
 
@@ -1203,30 +1154,6 @@ mod tests {
     }
 
     #[test]
-    fn test_execution_optimization_in_the_file_selects_the_same_mode_as_the_flag() {
-        let config = Config::parse("optimize-test-execution = true\n").expect("the documented equivalence must hold");
-        let mut args = RunArgs::default();
-
-        config.apply(&mut args).expect("the settings are compatible");
-
-        assert!(args.measure.optimize_test_execution);
-    }
-
-    #[test]
-    fn whole_binaries_and_test_execution_optimization_are_contradictory() {
-        let config = Config::parse("whole-test-binaries = true\n").expect("parses");
-        let mut args = RunArgs::default();
-        args.measure.optimize_test_execution = true;
-
-        let error = config
-            .apply(&mut args)
-            .expect_err("one mode selects cases and the other forbids doing so");
-
-        assert!(error.to_string().contains("optimize-test-execution"), "{error}");
-        assert!(error.to_string().contains("whole-test-binaries"), "{error}");
-    }
-
-    #[test]
     fn a_memory_size_that_is_not_a_size_is_reported_rather_than_ignored() {
         // A ceiling read as a handful of bytes would report every mutant as caught by tests that
         // could never have started, which is a far more expensive failure than a rejected file.
@@ -1250,6 +1177,14 @@ mod tests {
         let cause = Config::parse("exclude-file = [\"src/main.rs\"]\n").expect_err("must be rejected");
 
         assert!(cause.contains("unknown field"), "{cause}");
+    }
+
+    #[test]
+    fn removed_test_execution_key_is_rejected_by_full_and_reporting_parsers() {
+        let text = "optimize-test-execution = true";
+        for cause in [Config::parse(text).unwrap_err(), Config::parse_reporting_gates(text).unwrap_err()] {
+            assert!(cause.contains("unknown field `optimize-test-execution`"), "{cause}");
+        }
     }
 
     #[test]
@@ -1668,7 +1603,6 @@ mod tests {
             test_packages: vec!["test-package-from-the-file".to_owned()],
             test_lib: Some(true),
             test_workspace: Some(false),
-            optimize_test_execution: Some(false),
             whole_test_binaries: Some(true),
             include_tests: vec!["included-test-from-the-file".to_owned()],
             exclude_tests: vec!["excluded-test-from-the-file".to_owned()],
@@ -1747,7 +1681,6 @@ mod tests {
         assert_eq!(args.measure.test_packages, ["test-package-from-the-file"]);
         assert!(args.measure.test_lib);
         assert!(!args.measure.test_workspace, "the file said false, so nothing may turn it on");
-        assert!(!args.measure.optimize_test_execution);
         assert!(args.measure.whole_test_binaries);
         assert_eq!(args.measure.include_tests, ["included-test-from-the-file"]);
         assert_eq!(args.measure.exclude_tests, ["excluded-test-from-the-file"]);

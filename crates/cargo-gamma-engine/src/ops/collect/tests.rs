@@ -1698,6 +1698,29 @@ fn signed_aliases_prove_zero_decrements() {
 }
 
 #[test]
+fn inherited_primitive_aliases_ignore_later_type_shadows() {
+    for target in ["Signed", "Chained", "Nested"] {
+        let source = format!(
+            "type Signed = i32; type Chained = Signed;
+             fn f() {{ type i32 = u32; type Nested = Chained; let value: {target} = 0; consume(value); }}"
+        );
+        let found = candidates(&source, "@default");
+        let decrements = found
+            .iter()
+            .filter(|candidate| candidate.mutator == "literal.int_decrement" && candidate.replacement == "-1")
+            .collect::<Vec<_>>();
+        assert_eq!(decrements.len(), 1, "{target}: {found:?}");
+        assert_eq!(decrements[0].confidence, Confidence::Proven);
+    }
+    let found = candidates("type Generic<i32> = Option<i32>; fn f() -> Generic<bool> { None }", "fn_value.some");
+    assert_eq!(
+        found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+        ["Some(true)", "Some(false)"],
+        "an alias's type parameter named like a primitive remains substitutable"
+    );
+}
+
+#[test]
 fn wildcard_imports_do_not_prove_primitive_signedness() {
     let source = "mod aliases; use aliases::*; fn f() -> i32 { 0 }";
 
@@ -4009,6 +4032,52 @@ fn removing_not_preserves_the_value_type_of_borrowed_bools() {
     let replacements = found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>();
 
     assert_eq!(replacements, ["*(flag)", "owned"]);
+    assert_eq!(
+        found.iter().map(|candidate| candidate.replacement_index).collect::<Vec<_>>(),
+        [1, 0]
+    );
+}
+
+#[test]
+fn removing_not_emits_one_candidate_per_site_without_speculative_dereferences() {
+    let source = r"
+        fn flags(values: &[(u8, bool)], owned: bool, bits: u32) {
+            values.iter().any(|(_, flag)| !flag);
+            !owned;
+            !bits;
+            !values.is_empty();
+            !unknown();
+        }
+    ";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 5, "{found:?}");
+    assert_eq!(
+        found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+        ["*(flag)", "owned", "bits", "values.is_empty()", "unknown()"]
+    );
+}
+
+#[test]
+fn iterator_boolean_evidence_is_scoped_and_does_not_assume_custom_iterators() {
+    let source = r"
+        struct Custom;
+        impl Custom {
+            fn iter(&self) -> Custom { todo!() }
+            fn any(&self, callback: impl Fn(bool) -> bool) -> bool { todo!() }
+        }
+        fn flags(slice: &[(u8, bool)], vector: Vec<bool>, array: [bool; 2], custom: Custom, flag: bool) {
+            slice.iter().all(|(_, flag)| !flag);
+            vector.iter().any(|flag| !flag);
+            array.iter().any(|flag| !flag);
+            custom.iter().any(|flag| !flag);
+            !flag;
+        }
+    ";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(
+        found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+        ["*(flag)", "*(flag)", "*(flag)", "flag", "flag"]
+    );
 }
 
 #[test]
@@ -4463,21 +4532,72 @@ fn qualified_aliases_do_not_borrow_root_type_default_evidence() {
 fn cross_file_qualified_aliases_do_not_borrow_root_type_default_evidence() {
     let defaults_file = syn::parse_file("struct Value;").expect("the defaults fixture parses");
     let defaults = Defaults::of_in(&defaults_file, &CfgSet::unconditional());
-    let file = SourceFile::parse(
-        "model.rs",
-        "mod model { pub type Value = bool; } fn f() -> model::Value { original() }".to_owned(),
-    )
-    .expect("the candidate fixture parses");
-    let found = collect_with(
-        &file,
-        &Selection::parse("fn_value.default").expect("the selector resolves"),
-        &CfgSet::unconditional(),
-        &defaults,
-    );
+    for source in [
+        "mod model { pub type Value = bool; } fn f() -> model::Value { original() }",
+        "mod model { pub type Value = bool; } use model::Value; fn f() -> Value { original() }",
+    ] {
+        let file = SourceFile::parse("model.rs", source.to_owned()).expect("the candidate fixture parses");
+        let found = collect_with(
+            &file,
+            &Selection::parse("fn_value.default").expect("the selector resolves"),
+            &CfgSet::unconditional(),
+            &defaults,
+        );
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "Default::default()");
+        assert_eq!(found[0].confidence, Confidence::Optimistic);
+    }
+}
+
+#[test]
+fn local_aliases_keep_their_file_module_and_inline_module_identity() {
+    for (inline, defaulted) in [(false, false), (false, true), (true, false), (true, true)] {
+        let derive = if defaulted { "" } else { "#[derive(Default)]" };
+        let root = SourceFile::parse("lib.rs", format!("{derive} struct Value; mod model;")).unwrap();
+        let derive = if defaulted { "#[derive(Default)]" } else { "" };
+        let declarations = format!("{derive} pub struct Value; type Alias = Value; fn f() -> Alias {{ original() }}");
+        let source = if inline {
+            format!("mod nested {{ {declarations} }}")
+        } else {
+            declarations
+        };
+        let file = SourceFile::parse("model.rs", source).unwrap();
+        let cfg = CfgSet::unconditional();
+        let mut defaults = Defaults::of_source_in(&root.ast, &cfg, "lib.rs");
+        defaults.absorb(Defaults::of_source_in(&file.ast, &cfg, "model.rs"));
+        defaults.bind_sources(&[
+            ("lib.rs".into(), "lib.rs".into(), Vec::new()),
+            ("model.rs".into(), "lib.rs".into(), vec!["model".into()]),
+        ]);
+        let found = collect_with(&file, &Selection::parse("fn_value.default").unwrap(), &cfg, &defaults);
+        assert_eq!(
+            found.len(),
+            usize::from(defaulted),
+            "inline={inline}, defaulted={defaulted}: {found:?}"
+        );
+        if defaulted {
+            assert_eq!(found[0].confidence, Confidence::Proven);
+            assert_eq!(found[0].replacement, "Default::default()");
+        }
+    }
+}
+
+#[test]
+fn conditional_let_temporary_borrows_keep_the_binding_and_body_in_one_guard() {
+    for construct in [
+        "if let Some(value) = Some(make().as_str()) { consume(value); }",
+        "while let Some(value) = Some(make().as_str()) { consume(value); break; }",
+        "if true && let Some(value) = Some(make().as_str()) { consume(value); }",
+        "while true && let Some(value) = Some(make().as_str()) { consume(value); break; }",
+    ] {
+        let source = format!("fn f() {{ {construct} }}");
+        let found = candidates(&source, "option.some_to_none");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(&source[found[0].span.clone()], construct);
+        assert_eq!(found[0].shape, Shape::Expr);
+        assert_eq!(found[0].replacement, construct.replace("Some(make().as_str())", "None"));
+    }
 }
 
 #[test]

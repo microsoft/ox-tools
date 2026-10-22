@@ -68,7 +68,10 @@ therefore covers the complete descendant tree.
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.
   Failure to create a job is likewise a refusal rather than a degraded launch.
-- Sealed containment uses a boundary that descendants cannot leave. A host that
+- Sealed containment retains descendants across `setsid`/`setpgid` and inherited
+  process-group/session changes. Linux cgroups are not a hostile same-credential
+  sandbox: code with writable delegated-cgroup interfaces can deliberately migrate
+  out of the leaf. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish
   that the launch was sealed. A host that can seal but fails one launch refuses
@@ -84,11 +87,16 @@ therefore covers the complete descendant tree.
   lifecycle fault available to this crate's unit tests, including capture,
   observation, cleanup, and Windows job failures, so dependent-crate tests do
   not see a smaller fault vocabulary.
+- Before observation, termination, or drop reaps a Unix leader, registry release
+  clears its slot and waits for any sweep already holding its extracted identity
+  to finish. Slot removal alone does not permit numeric-identity reuse.
 - Tests that need a capability the host may not have are marked ignored and fail
   when asked for by name on a host that cannot supply it, rather than returning
   early and reporting a pass. Tests that spend process-wide state which cannot be
-  restored — the interrupt registry's interrupted flag, its finite watch slots —
-  run in a subprocess of their own.
+  restored — the interrupt registry's interrupted flag — run in a subprocess of
+  their own. Registry saturation is exercised only with fake effects in the unsafe
+  adapter; adoption refusal uses a thread-local registration fault, never fabricated
+  identifiers in the real interrupt registry.
 - The crate forbids unsafe code.
 
 Replaceable typestate, capture, and fault-injection mechanics are recorded in

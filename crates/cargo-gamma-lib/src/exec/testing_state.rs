@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek as _, Write as _};
 
@@ -8,20 +9,24 @@ use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_engine::ops::collect::Confidence;
 use serde::{Deserialize, Serialize};
 
-use super::census::Census;
 use super::killers::Killers;
 use super::measure::{Built, Oracle};
-use super::session::Session;
+use super::session::{Phases, Session};
 use crate::discover::{ContextDigest, Plan, RunRecord, WorkspaceSnapshot};
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::{Result, elements as publication};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const SNAPSHOT: &str = "testing-session.json";
 const JOURNAL: &str = "testing-verdicts.jsonl";
 const PHASE: &str = "testing-phase.json";
 const MAX_STATE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod native_test_util;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct RecordPreparation {
@@ -70,7 +75,6 @@ pub(crate) struct TestingState {
     pub(crate) oracle: Oracle,
     pub(crate) workspace: serde_json::Value,
     pub(crate) settings: TestingSettings,
-    pub(super) census: Census,
     pub(crate) killers: Killers,
     pub(crate) record: RecordPreparation,
     pub(crate) stuck: Vec<String>,
@@ -186,21 +190,113 @@ fn inspect_artifact(path: &Utf8Path, follow: bool) -> std::io::Result<(ArtifactK
 pub(crate) struct TestingJournal {
     file: File,
     pub(super) previous_sweep: Option<super::session::SweepCost>,
+    pub(super) prior_confirmations: std::collections::BTreeSet<crate::model::MutantId>,
+    pub(super) initial_hints: Option<super::session::InitialHints>,
+    /// Independent statistic, never a publication signal for corresponding journal contents.
+    /// Checkpoint callbacks run serially on the sweep coordinator. Final reporting follows
+    /// `test_all` joining its workers and completing those callbacks, so relaxed counting suffices;
+    /// journal-write completion establishes durability separately.
+    pub(super) live_refresh_failures: core::sync::atomic::AtomicUsize,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Settled {
-    mutant: Mutant,
-    probe: Option<crate::discover::Killer>,
+struct WireEntry<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    sweep: Option<super::session::SweepCost>,
+    mutant: Option<Cow<'a, Mutant>>,
+    probe: Option<Cow<'a, crate::discover::Killer>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sweep: Option<Cow<'a, super::session::SweepCost>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<Cow<'a, str>>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Committed {
+struct Committed<'a> {
     #[serde(flatten)]
-    verdict: Settled,
+    verdict: WireEntry<'a>,
     checksum: String,
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one short-lived journal entry is encoded or replayed at a time; retain the inline payload rather than allocating per record"
+)]
+enum JournalEntry {
+    Verdict {
+        mutant: Mutant,
+        probe: Option<crate::discover::Killer>,
+        sweep: Option<super::session::SweepCost>,
+        diagnostic: Option<String>,
+    },
+    Accounting {
+        sweep: super::session::SweepCost,
+        diagnostic: Option<String>,
+    },
+}
+
+impl JournalEntry {
+    fn wire(&self) -> WireEntry<'_> {
+        match self {
+            Self::Verdict {
+                mutant,
+                probe,
+                sweep,
+                diagnostic,
+            } => WireEntry {
+                mutant: Some(Cow::Borrowed(mutant)),
+                probe: probe.as_ref().map(Cow::Borrowed),
+                sweep: sweep.as_ref().map(Cow::Borrowed),
+                diagnostic: diagnostic.as_deref().map(Cow::Borrowed),
+            },
+            Self::Accounting { sweep, diagnostic } => WireEntry {
+                mutant: None,
+                probe: None,
+                sweep: Some(Cow::Borrowed(sweep)),
+                diagnostic: diagnostic.as_deref().map(Cow::Borrowed),
+            },
+        }
+    }
+}
+
+fn decode_committed(line: &[u8], path: &Utf8Path) -> Result<JournalEntry> {
+    let committed: Committed = serde_json::from_slice(line)
+        .map_err(|cause| error!("testing verdicts `{path}` are corrupt; start a new campaign").caused_by(cause))?;
+    let encoded =
+        serde_json::to_vec(&committed.verdict).map_err(|cause| error!("could not validate testing verdicts `{path}`").caused_by(cause))?;
+    if blake3::hash(&encoded).to_hex().as_str() != committed.checksum {
+        return Err(error!(
+            "testing verdicts `{path}` failed their integrity check; start a new campaign"
+        ));
+    }
+    let WireEntry {
+        mutant,
+        probe,
+        sweep,
+        diagnostic,
+    } = committed.verdict;
+    match (mutant, probe, sweep) {
+        (Some(mutant), probe, sweep) => Ok(JournalEntry::Verdict {
+            mutant: mutant.into_owned(),
+            probe: probe.map(Cow::into_owned),
+            sweep: sweep.map(Cow::into_owned),
+            diagnostic: diagnostic.map(Cow::into_owned),
+        }),
+        (None, None, Some(sweep)) => Ok(JournalEntry::Accounting {
+            sweep: sweep.into_owned(),
+            diagnostic: diagnostic.map(Cow::into_owned),
+        }),
+        _ => Err(error!("testing verdicts `{path}` contain an invalid accounting checkpoint")),
+    }
+}
+
+fn encode_committed(verdict: &JournalEntry) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(&verdict.wire()).map_err(|cause| error!("could not encode a testing verdict").caused_by(cause))?;
+    let checksum = blake3::hash(&bytes).to_hex();
+    assert_eq!(bytes.pop(), Some(b'}'), "WireEntry serializes as a JSON object");
+    bytes.extend_from_slice(b",\"checksum\":\"");
+    bytes.extend_from_slice(checksum.as_bytes());
+    bytes.extend_from_slice(b"\"}\n");
+    Ok(bytes)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Utf8Path) -> Result<T> {
@@ -286,10 +382,20 @@ fn partial_record(plan: &Plan, preparation: RecordPreparation, mut killers: Kill
 }
 
 impl TestingState {
+    pub(crate) fn is_settled(&self) -> bool {
+        self.plan.mutants.iter().all(|mutant| mutant.outcome != Outcome::Pending)
+    }
+
+    pub(crate) fn complete_testing(&self) -> Result<()> {
+        if !self.is_settled() {
+            return Err(error!("cannot publish a testing checkpoint with pending mutants"));
+        }
+        TestingJournal::complete(&self.record.base)
+    }
+
     pub(super) fn start(
         plan: &Plan,
         built: &Built,
-        census: Census,
         killers: Killers,
         settings: TestingSettings,
         record: &RecordPreparation,
@@ -305,7 +411,6 @@ impl TestingState {
             oracle: built.oracle.clone(),
             workspace: built.work.testing_snapshot()?,
             settings,
-            census,
             killers,
             record: record.clone(),
             stuck: omissions.0.to_vec(),
@@ -381,56 +486,24 @@ impl TestingState {
         if state.plan.files.iter().any(|file| !safe_path(&file.path)) || state.plan.mutants.iter().any(|mutant| !safe_path(&mutant.file)) {
             return Err(error!("testing state at `{base}` contains a source path outside the workspace"));
         }
+        if !RunRecord::contains_captured_sources(&state.plan, &state.record.inputs) {
+            return Err(error!("testing state at `{base}` does not match its captured source generation"));
+        }
         restore_confidences(&mut state.plan, &state.confidences, &ids, base)?;
         let path = base.join(JOURNAL);
         let file = File::open(&path).map_err(|cause| error!("could not read testing verdicts `{path}`").caused_by(cause))?;
         let mut reader = BufReader::new(file);
-        let mut valid_bytes = 0_u64;
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            let length = read_verdict_line(&path, &mut reader, &mut line, limit)?;
-            if length == 0 {
-                break;
-            }
-            if length as u64 > limit {
-                return Err(error!("testing verdict in `{path}` exceeds the supported size"));
-            }
-            // An interrupted append has no committed newline. Only that final fragment is ignored.
-            if line.last() != Some(&b'\n') {
-                break;
-            }
-            let committed: Committed = serde_json::from_slice(&line)
-                .map_err(|cause| error!("testing verdicts `{path}` are corrupt; start a new campaign").caused_by(cause))?;
-            let encoded = serde_json::to_vec(&committed.verdict)
-                .map_err(|cause| error!("could not validate testing verdicts `{path}`").caused_by(cause))?;
-            if blake3::hash(&encoded).to_hex().as_str() != committed.checksum {
-                return Err(error!(
-                    "testing verdicts `{path}` failed their integrity check; start a new campaign"
-                ));
-            }
-            let settled = committed.verdict;
-            if let Some(cost) = settled.sweep {
-                state.session.phases.sweep = Some(cost);
-            }
-            let index = ordinals
-                .get(&settled.mutant.ordinal)
-                .ok_or_else(|| error!("testing verdicts `{path}` name an unknown mutant"))?;
-            let mutant = &mut state.plan.mutants[*index];
-            if mutant.id != settled.mutant.id || mutant.outcome != Outcome::Pending || settled.mutant.outcome == Outcome::Pending {
-                return Err(error!("testing verdicts `{path}` contain conflicting or unfinished outcomes"));
-            }
-            mutant.outcome = settled.mutant.outcome;
-            mutant.elapsed_ms = settled.mutant.elapsed_ms;
-            mutant.killed_by = settled.mutant.killed_by;
-            mutant.killer = settled.mutant.killer;
-            mutant.note = settled.mutant.note;
-            match settled.probe {
-                Some(probe) => state.killers.record(mutant.id.clone(), probe),
-                None => state.killers.forget(&mutant.id),
-            }
-            valid_bytes += length as u64;
-        }
+        let valid_bytes = replay_verdicts(
+            &path,
+            &mut reader,
+            limit,
+            &mut state.plan.mutants,
+            &mut state.session.phases,
+            &mut state.killers,
+            &ordinals,
+        )?;
+        // A completed sweep can leave unjudged mutants pending. Until ledger publication, resume
+        // must preserve its settled prefix and retry those mutants rather than reject the phase.
         Ok((state, valid_bytes))
     }
 
@@ -462,6 +535,62 @@ impl TestingState {
     }
 }
 
+fn replay_verdicts(
+    path: &Utf8Path,
+    reader: &mut impl BufRead,
+    limit: u64,
+    mutants: &mut [Mutant],
+    phases: &mut Phases,
+    killers: &mut Killers,
+    ordinals: &crate::HashMap<u32, usize>,
+) -> Result<u64> {
+    let mut valid_bytes = 0_u64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let length = read_verdict_line(path, reader, &mut line, limit)?;
+        if length == 0 {
+            break;
+        }
+        if length as u64 > limit {
+            return Err(error!("testing verdict in `{path}` exceeds the supported size"));
+        }
+        // An interrupted append has no committed newline. Only that final fragment is ignored.
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let settled = decode_committed(&line, path)?;
+        valid_bytes += length as u64;
+        let (settled_mutant, probe) = match settled {
+            JournalEntry::Accounting { sweep, .. } => {
+                restore_sweep_cost(phases, Some(sweep));
+                continue;
+            }
+            JournalEntry::Verdict { mutant, probe, sweep, .. } => {
+                restore_sweep_cost(phases, sweep);
+                (mutant, probe)
+            }
+        };
+        let index = ordinals
+            .get(&settled_mutant.ordinal)
+            .ok_or_else(|| error!("testing verdicts `{path}` name an unknown mutant"))?;
+        let mutant = &mut mutants[*index];
+        if mutant.id != settled_mutant.id || mutant.outcome != Outcome::Pending || settled_mutant.outcome == Outcome::Pending {
+            return Err(error!("testing verdicts `{path}` contain conflicting or unfinished outcomes"));
+        }
+        mutant.outcome = settled_mutant.outcome;
+        mutant.elapsed_ms = settled_mutant.elapsed_ms;
+        mutant.killed_by = settled_mutant.killed_by;
+        mutant.killer = settled_mutant.killer;
+        mutant.note = settled_mutant.note;
+        match probe {
+            Some(probe) => killers.record(mutant.id.clone(), probe),
+            None => killers.forget(&mutant.id),
+        }
+    }
+    Ok(valid_bytes)
+}
+
 impl TestingJournal {
     #[cfg(test)]
     pub(super) fn replace_writer_for_test(&mut self, file: File) {
@@ -489,6 +618,9 @@ impl TestingJournal {
         Ok(Self {
             file,
             previous_sweep: None,
+            prior_confirmations: std::collections::BTreeSet::new(),
+            initial_hints: None,
+            live_refresh_failures: core::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -501,18 +633,28 @@ impl TestingJournal {
         if mutant.outcome == Outcome::Pending {
             return Ok(());
         }
-        let verdict = Settled {
+        let verdict = JournalEntry::Verdict {
             mutant: mutant.clone(),
             probe: killers.hint(&mutant.id).cloned(),
             sweep,
+            diagnostic: None,
         };
-        let encoded = serde_json::to_vec(&verdict).map_err(|cause| error!("could not encode a testing verdict").caused_by(cause))?;
-        let mut bytes = serde_json::to_vec(&Committed {
-            verdict,
-            checksum: blake3::hash(&encoded).to_hex().to_string(),
+        self.publish_entry(&verdict)
+    }
+
+    pub(super) fn publish_cost(&self, sweep: super::session::SweepCost) -> Result<()> {
+        self.publish_entry(&JournalEntry::Accounting { sweep, diagnostic: None })
+    }
+
+    pub(super) fn publish_diagnostic(&self, sweep: super::session::SweepCost, diagnostic: String) -> Result<()> {
+        self.publish_entry(&JournalEntry::Accounting {
+            sweep,
+            diagnostic: Some(diagnostic),
         })
-        .map_err(|cause| error!("could not encode a testing checkpoint").caused_by(cause))?;
-        bytes.push(b'\n');
+    }
+
+    fn publish_entry(&self, verdict: &JournalEntry) -> Result<()> {
+        let bytes = encode_committed(verdict)?;
         let mut file = &self.file;
         let length = file
             .seek(std::io::SeekFrom::End(0))
@@ -527,6 +669,19 @@ impl TestingJournal {
 
     pub(super) fn complete(base: &Utf8Path) -> Result<()> {
         set_phase(base, Phase::FinishedTesting)
+    }
+}
+
+/// Replaces cumulative counter snapshots but unions confirmation identities, which may be journal
+/// deltas to keep growth linear. Adding counters would double-count; replacing identities loses history.
+fn restore_sweep_cost(phases: &mut super::session::Phases, cost: Option<super::session::SweepCost>) {
+    if let Some(mut cost) = cost {
+        if let Some(previous) = &mut phases.sweep {
+            let mut confirmed = core::mem::take(&mut previous.confirmed_initial_killers);
+            confirmed.extend(core::mem::take(&mut cost.confirmed_initial_killers));
+            cost.confirmed_initial_killers = confirmed;
+        }
+        phases.sweep = Some(cost);
     }
 }
 
@@ -743,6 +898,10 @@ fn fingerprint_from(path: &Utf8Path, mut reader: impl Read) -> Result<String> {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::error::Error as _;
     use core::time::Duration;
@@ -753,11 +912,405 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::fs::OpenOptionsExt as _;
 
-    use super::super::census::CensusSelection;
     use super::*;
     use crate::discover::TargetFile;
-    use crate::exec::{CensusStatus, OrderingHints, Phases, Workspace};
+    use crate::exec::{OrderingHints, Workspace};
     use crate::fixtures;
+
+    #[cfg(not(miri))]
+    mod replay_model {
+        use std::io::Cursor;
+
+        use super::*;
+        use crate::exec::{AttemptCost, SweepAccounting, SweepCost};
+
+        struct Expected {
+            end: usize,
+            mutant: Option<Mutant>,
+            probe: Option<crate::discover::Killer>,
+            cost: Option<(usize, u64, u8, bool)>,
+            malformed: bool,
+        }
+
+        fn cost(initial: &[Mutant; 2], (launches, execution_ms, confirmations, complete): (usize, u64, u8, bool)) -> SweepCost {
+            SweepCost {
+                launches,
+                confirmed_initial_killers: initial
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| confirmations & (1 << index) != 0)
+                    .map(|(_, mutant)| mutant.id.clone())
+                    .collect(),
+                accounting: Some(SweepAccounting {
+                    complete,
+                    exact: AttemptCost {
+                        launches,
+                        execution_ms,
+                        ..AttemptCost::default()
+                    },
+                    ..SweepAccounting::default()
+                }),
+                ..SweepCost::default()
+            }
+        }
+
+        fn generate(
+            initial: &[Mutant; 2],
+            initial_probe: &crate::discover::Killer,
+            instructions: &[u8; 16],
+            count: u8,
+        ) -> (Vec<u8>, Vec<Expected>) {
+            let mut journal = Vec::new();
+            let mut expected = Vec::new();
+            for pair in instructions.chunks_exact(2).take(usize::from(count % 9)) {
+                let opcode = pair[0] % 8;
+                let value = pair[1];
+                let snapshot = (matches!(opcode, 0 | 1 | 7) || value & 16 != 0).then_some((
+                    usize::from(value % 8),
+                    u64::from(value) * 13,
+                    value & 3,
+                    value & 128 != 0,
+                ));
+                let mut mutant = matches!(opcode, 2 | 3 | 5 | 6).then(|| {
+                    let mut mutant = initial[usize::from(opcode % 2)].clone();
+                    mutant.outcome = if value & 1 == 0 { Outcome::Killed } else { Outcome::Survived };
+                    mutant.elapsed_ms = u64::from(value) * 17;
+                    mutant.note = Some(format!("verdict-{value}"));
+                    if opcode == 5 {
+                        match value % 4 {
+                            0 => mutant.id = "unknown".into(),
+                            1 => mutant.ordinal = 99,
+                            2 => mutant.outcome = Outcome::Pending,
+                            _ => mutant.ordinal = 0,
+                        }
+                    }
+                    mutant
+                });
+                let probe = (mutant.is_some() && value & 8 != 0).then(|| crate::discover::Killer {
+                    test: format!("probe-{value}"),
+                    ..initial_probe.clone()
+                });
+                if let Some(mutant) = &mut mutant {
+                    mutant.killed_by = probe.as_ref().map(|probe| probe.test.clone());
+                    mutant.killer = probe.as_ref().map(|probe| crate::model::KillerIdentity {
+                        package: probe.package.clone(),
+                        target: probe.target.clone(),
+                        test: probe.test.clone(),
+                    });
+                }
+                let malformed = opcode == 4;
+                let encoded = if malformed {
+                    b"{bad}\n".to_vec()
+                } else {
+                    let entry = match &mutant {
+                        Some(mutant) => JournalEntry::Verdict {
+                            mutant: mutant.clone(),
+                            probe: probe.clone(),
+                            sweep: snapshot.map(|snapshot| cost(initial, snapshot)),
+                            diagnostic: None,
+                        },
+                        None => JournalEntry::Accounting {
+                            sweep: cost(initial, snapshot.unwrap()),
+                            diagnostic: (opcode == 7).then(|| "generated diagnostic".into()),
+                        },
+                    };
+                    encode_committed(&entry).unwrap()
+                };
+                assert!(encoded.len() <= 4096, "each generated record is bounded");
+                journal.extend(encoded);
+                expected.push(Expected {
+                    end: journal.len(),
+                    mutant,
+                    probe,
+                    cost: snapshot,
+                    malformed,
+                });
+            }
+            assert!(journal.len() <= 32 * 1024, "at most eight bounded records are generated");
+            (journal, expected)
+        }
+
+        #[test]
+        fn bounded_journal_sequences_match_an_independent_replay_model() {
+            let mut first = fixtures::mutant();
+            first.ordinal = 1;
+            first.outcome = Outcome::Pending;
+            let mut second = first.clone();
+            second.id = "second".into();
+            second.ordinal = 2;
+            let initial = [first, second];
+            let ordinals = initial.iter().enumerate().map(|(index, mutant)| (mutant.ordinal, index)).collect();
+            let initial_probe = crate::discover::Killer {
+                package: "subject".into(),
+                target: "lib:subject".into(),
+                test: "initial".into(),
+            };
+            bolero::check!()
+                .with_type::<(u8, [u8; 16], u16, u8)>()
+                .for_each(|(count, instructions, cut, chunk)| {
+                    let (journal, expected) = generate(&initial, &initial_probe, instructions, *count);
+                    for end in [0, usize::from(*cut) % (journal.len() + 1), journal.len()] {
+                        let mut model_mutants = initial.clone();
+                        let mut model_probes = [Some(initial_probe.clone()), Some(initial_probe.clone())];
+                        let mut model_cost = (11, 13, 1, false);
+                        let mut confirmations = std::collections::BTreeSet::from([initial[0].id.clone()]);
+                        let mut valid_bytes = 0;
+                        let mut invalid = false;
+                        for record in &expected {
+                            if record.end > end {
+                                break;
+                            }
+                            if record.malformed {
+                                invalid = true;
+                                break;
+                            }
+                            if let Some(mutant) = &record.mutant {
+                                let index = model_mutants
+                                    .iter()
+                                    .position(|original| original.id == mutant.id && original.ordinal == mutant.ordinal);
+                                let Some(index) = index else {
+                                    invalid = true;
+                                    break;
+                                };
+                                if model_mutants[index].outcome != Outcome::Pending || mutant.outcome == Outcome::Pending {
+                                    invalid = true;
+                                    break;
+                                }
+                                model_mutants[index] = mutant.clone();
+                                model_probes[index].clone_from(&record.probe);
+                            }
+                            if let Some(snapshot) = record.cost {
+                                model_cost = snapshot;
+                                for (index, mutant) in initial.iter().enumerate() {
+                                    if snapshot.2 & (1 << index) != 0 {
+                                        let _inserted = confirmations.insert(mutant.id.clone());
+                                    }
+                                }
+                            }
+                            valid_bytes = record.end;
+                        }
+
+                        for capacity in [1 + usize::from(*chunk % 32), end.max(1)] {
+                            let mut reader = BufReader::with_capacity(capacity, Cursor::new(&journal[..end]));
+                            let mut mutants = initial.clone();
+                            let mut phases = Phases {
+                                sweep: Some(cost(&initial, (11, 13, 1, false))),
+                                ..Phases::default()
+                            };
+                            let mut killers = Killers::default();
+                            for mutant in &initial {
+                                killers.record(mutant.id.clone(), initial_probe.clone());
+                            }
+                            let replayed = replay_verdicts(
+                                Utf8Path::new("generated-verdicts.jsonl"),
+                                &mut reader,
+                                4096,
+                                &mut mutants,
+                                &mut phases,
+                                &mut killers,
+                                &ordinals,
+                            );
+                            assert_eq!(replayed.is_err(), invalid);
+                            if invalid {
+                                continue;
+                            }
+                            assert_eq!(replayed.unwrap(), valid_bytes as u64);
+                            assert_eq!(reader.stream_position().unwrap(), end as u64, "finite input must be consumed");
+                            assert_eq!(
+                                serde_json::to_value(&mutants).unwrap(),
+                                serde_json::to_value(&model_mutants).unwrap()
+                            );
+                            let restored = phases.sweep.unwrap();
+                            let accounting = restored.accounting.unwrap();
+                            assert_eq!(restored.launches, model_cost.0);
+                            assert_eq!(accounting.exact.launches, model_cost.0);
+                            assert_eq!(accounting.exact.execution_ms, model_cost.1);
+                            assert_eq!(accounting.complete, model_cost.3);
+                            assert_eq!(restored.confirmed_initial_killers, confirmations);
+                            for (mutant, expected_probe) in initial.iter().zip(&model_probes) {
+                                assert_eq!(killers.hint(&mutant.id), expected_probe.as_ref());
+                            }
+                        }
+                    }
+                });
+        }
+    }
+
+    #[test]
+    fn validated_journal_kinds_preserve_wire_bytes_and_reject_invalid_accounting() {
+        let path = Utf8Path::new("in-memory-verdicts.jsonl");
+        let mutant = fixtures::mutant();
+        let probe = crate::discover::Killer {
+            package: "subject".into(),
+            target: "lib:subject".into(),
+            test: "regression".into(),
+        };
+        let sweep = super::super::session::SweepCost::default();
+        let mutant_json = serde_json::to_string(&mutant).unwrap();
+        let probe_json = serde_json::to_string(&probe).unwrap();
+        let sweep_json = serde_json::to_string(&sweep).unwrap();
+        for (entry, payload) in [
+            (
+                JournalEntry::Verdict {
+                    mutant: mutant.clone(),
+                    probe: None,
+                    sweep: None,
+                    diagnostic: None,
+                },
+                format!(r#"{{"mutant":{mutant_json},"probe":null}}"#),
+            ),
+            (
+                JournalEntry::Verdict {
+                    mutant,
+                    probe: Some(probe),
+                    sweep: Some(sweep.clone()),
+                    diagnostic: Some("retained diagnostic".into()),
+                },
+                format!(r#"{{"mutant":{mutant_json},"probe":{probe_json},"sweep":{sweep_json},"diagnostic":"retained diagnostic"}}"#),
+            ),
+            (
+                JournalEntry::Accounting {
+                    sweep: sweep.clone(),
+                    diagnostic: None,
+                },
+                format!(r#"{{"probe":null,"sweep":{sweep_json}}}"#),
+            ),
+            (
+                JournalEntry::Accounting {
+                    sweep,
+                    diagnostic: Some("retained diagnostic".into()),
+                },
+                format!(r#"{{"probe":null,"sweep":{sweep_json},"diagnostic":"retained diagnostic"}}"#),
+            ),
+        ] {
+            let checksum = blake3::hash(payload.as_bytes()).to_hex();
+            let expected = format!("{},\"checksum\":\"{checksum}\"}}\n", payload.strip_suffix('}').unwrap());
+            let encoded = encode_committed(&entry).unwrap();
+            assert_eq!(encoded, expected.as_bytes());
+            assert_eq!(encode_committed(&decode_committed(&encoded, path).unwrap()).unwrap(), encoded);
+        }
+        for payload in [
+            r#"{"probe":null}"#.to_owned(),
+            format!(r#"{{"probe":{probe_json}}}"#),
+            format!(r#"{{"probe":{probe_json},"sweep":{sweep_json}}}"#),
+        ] {
+            let checksum = blake3::hash(payload.as_bytes()).to_hex();
+            let encoded = format!("{},\"checksum\":\"{checksum}\"}}\n", payload.strip_suffix('}').unwrap());
+            assert!(
+                decode_committed(encoded.as_bytes(), path)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("invalid accounting checkpoint")
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_journal_accepts_legacy_checksums_and_accounting_only_partial_checkpoints() {
+        use crate::discover::Killer;
+        use crate::exec::{AttemptCost, SweepAccounting, SweepCost};
+
+        let path = Utf8Path::new("in-memory-verdicts.jsonl");
+        let mutant = fixtures::mutant();
+        let payload = format!(r#"{{"mutant":{},"probe":null}}"#, serde_json::to_string(&mutant).unwrap());
+        let line = format!(
+            r#"{{"mutant":{},"probe":null,"checksum":"{}"}}"#,
+            serde_json::to_string(&mutant).unwrap(),
+            blake3::hash(payload.as_bytes()).to_hex()
+        );
+        let JournalEntry::Verdict { mutant: legacy, sweep, .. } = decode_committed(line.as_bytes(), path).unwrap() else {
+            panic!("a legacy mutant record must decode as a verdict");
+        };
+        assert_eq!(legacy.id, mutant.id);
+        assert!(sweep.is_none());
+
+        let original = Killer {
+            package: "original-package".into(),
+            target: "test:original-target".into(),
+            test: "original-test".into(),
+        };
+        let initial = super::super::session::InitialHints {
+            population: 3,
+            killers: std::iter::once((mutant.id.clone(), original.clone())).collect(),
+        };
+        let mut phases = Phases {
+            initial_hints: Some(initial),
+            ..Phases::default()
+        };
+        for launches in [2, 7, 7] {
+            let verdict = JournalEntry::Accounting {
+                sweep: SweepCost {
+                    launches,
+                    confirmed_initial_killers: std::iter::once(mutant.id.clone()).collect(),
+                    accounting: Some(SweepAccounting {
+                        complete: true,
+                        initial_population: Some(3),
+                        initial_exact_hints: Some(1),
+                        initial_killer_confirmed: Some(1),
+                        live_refresh_failures: usize::from(launches == 7),
+                        exact: AttemptCost {
+                            launches,
+                            execution_ms: launches as u64 * 10,
+                            ..AttemptCost::default()
+                        },
+                        ..SweepAccounting::default()
+                    }),
+                    ..SweepCost::default()
+                },
+                diagnostic: (launches == 7).then(|| "live diagnostics unavailable: permission denied".into()),
+            };
+            let bytes = encode_committed(&verdict).unwrap();
+            let JournalEntry::Accounting { sweep, diagnostic } = decode_committed(&bytes, path).unwrap() else {
+                panic!("partial costs must not invent a mutant verdict");
+            };
+            assert_eq!(
+                diagnostic.is_some(),
+                launches == 7,
+                "file-only failure evidence is checksummed and readable"
+            );
+            restore_sweep_cost(&mut phases, Some(sweep));
+            phases = serde_json::from_value(serde_json::to_value(phases).unwrap()).unwrap();
+        }
+        let cost = phases.sweep.take().unwrap();
+        assert_eq!(cost.launches, 7, "journal costs are snapshots, not deltas");
+        assert_eq!(cost.accounting.as_ref().unwrap().exact.execution_ms, 70);
+        let resumed = SweepCost {
+            launches: 3,
+            confirmed_initial_killers: std::iter::once(mutant.id.clone()).collect(),
+            accounting: Some(SweepAccounting {
+                complete: true,
+                initial_population: Some(3),
+                initial_exact_hints: Some(1),
+                initial_killer_confirmed: Some(1),
+                exact: AttemptCost {
+                    launches: 3,
+                    execution_ms: 30,
+                    ..AttemptCost::default()
+                },
+                ..SweepAccounting::default()
+            }),
+            ..SweepCost::default()
+        };
+        restore_sweep_cost(&mut phases, SweepCost::combine(Some(cost), Some(resumed)));
+        restore_sweep_cost(&mut phases, None);
+        let completed = phases.sweep.as_ref().unwrap();
+        assert_eq!(completed.launches, 10);
+        let accounting = completed.accounting.as_ref().unwrap();
+        assert_eq!((accounting.exact.launches, accounting.exact.execution_ms), (10, 100));
+        assert_eq!(
+            accounting.initial_killer_confirmed,
+            Some(1),
+            "observed identities deduplicate across resume"
+        );
+        assert_eq!(accounting.live_refresh_failures, 1);
+        assert_eq!(
+            phases.initial_hints.as_ref().unwrap().killers[&mutant.id],
+            original,
+            "completed publication retains the initial, not learned, hint"
+        );
+        assert!(decode_committed(line.replace("\"probe\":null", "\"probe\":{}").as_bytes(), path).is_err());
+    }
 
     #[test]
     fn testing_settings_preserve_selection_and_accept_legacy_snapshots() {
@@ -777,6 +1330,48 @@ mod tests {
         let legacy: TestingSettings = serde_json::from_value(encoded).unwrap();
         assert_eq!(legacy.jobs, 7);
         assert!(legacy.mutators.is_none());
+    }
+
+    #[test]
+    fn incremental_confirmation_records_have_bounded_size_and_linear_total_growth() {
+        use crate::exec::{SweepAccounting, SweepCost};
+
+        fn sizes(count: usize) -> (usize, usize) {
+            let mut total = 0;
+            let mut largest = 0;
+            for index in 0..count {
+                let verdict = JournalEntry::Accounting {
+                    sweep: SweepCost {
+                        confirmed_initial_killers: [format!("{index:012x}").into()].into(),
+                        accounting: Some(SweepAccounting {
+                            complete: true,
+                            initial_killer_confirmed: Some(index + 1),
+                            ..SweepAccounting::default()
+                        }),
+                        ..SweepCost::default()
+                    },
+                    diagnostic: None,
+                };
+                let bytes = encode_committed(&verdict).unwrap();
+                let JournalEntry::Accounting { sweep, .. } = decode_committed(&bytes, Utf8Path::new("bounded.jsonl")).unwrap() else {
+                    panic!("confirmation deltas must decode as accounting");
+                };
+                assert_eq!(sweep.confirmed_initial_killers.len(), 1);
+                total += bytes.len();
+                largest = largest.max(bytes.len());
+            }
+            (total, largest)
+        }
+        let (small, _) = sizes(128);
+        let (large, largest) = sizes(256);
+        assert!(
+            largest < 4096,
+            "a checkpoint must not grow with the accumulated confirmation set: {largest}"
+        );
+        assert!(
+            large <= small * 205 / 100,
+            "doubling observations must approximately double bytes: {small} -> {large}"
+        );
     }
 
     #[test]
@@ -839,13 +1434,14 @@ mod tests {
         };
 
         let root = Utf8PathBuf::from("workspace");
+        let source = include_str!("../../tests/fixtures/completed-recovery/lib.rs");
         let plan = Plan {
             root: root.clone(),
             files: vec![TargetFile {
                 path: "src/lib.rs".into(),
                 absolute: root.join("src/lib.rs"),
                 package: "subject".into(),
-                source: Some("a".into()),
+                source: Some(source.into()),
             }],
             mutants: vec![
                 fixtures::mutant(),
@@ -855,7 +1451,7 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            digests: crate::HashMap::default(),
+            digests: crate::HashMap::from_iter([("src/lib.rs".into(), crate::discover::digest(source.as_bytes()))]),
             skipped: Vec::new(),
             reach: crate::HashMap::default(),
             specs: crate::HashMap::default(),
@@ -865,7 +1461,7 @@ mod tests {
             context: ContextDigest::default(),
             inputs: serde_json::from_value(serde_json::json!({
                 "complete": true,
-                "files": [{"path": "src/lib.rs", "digest": crate::discover::digest(b"a"), "size": 1}]
+                "files": [{"path": "src/lib.rs", "digest": crate::discover::digest(source.as_bytes()), "size": source.len()}]
             }))
             .unwrap(),
             killers: crate::discover::Killers::default(),
@@ -997,10 +1593,7 @@ mod tests {
             filtered: 0,
             widened: false,
             ordering: OrderingHints::default(),
-            phases: Phases {
-                census_status: CensusStatus::Disabled,
-                ..Phases::default()
-            },
+            phases: Phases::default(),
         };
         let state = TestingState {
             version: VERSION,
@@ -1023,7 +1616,6 @@ mod tests {
                 narrowed: true,
                 incremental: false,
             },
-            census: Census::default(),
             killers: Killers::default(),
             record: RecordPreparation {
                 report_info: fixtures::report_with(Some((1, 3)), 123, Vec::new()).config,
@@ -1097,15 +1689,7 @@ mod tests {
             .work
             .testing_snapshot()
             .expect("OsString values serialize losslessly before testing_paths validates UTF-8");
-        let Err(failure) = TestingState::start(
-            &state.plan,
-            &built,
-            Census::default(),
-            Killers::default(),
-            state.settings,
-            &state.record,
-            (&[], &[]),
-        ) else {
+        let Err(failure) = TestingState::start(&state.plan, &built, Killers::default(), state.settings, &state.record, (&[], &[])) else {
             panic!("an unrepresentable runtime artifact must stop campaign preparation")
         };
         assert_eq!(failure.message(), "a prepared test artifact has a non-UTF-8 path");
@@ -1113,11 +1697,9 @@ mod tests {
     }
 
     #[test]
-    fn starting_testing_freezes_nondefault_census_killers_and_artifacts_before_opening_an_empty_journal() {
+    fn starting_testing_freezes_killers_and_artifacts_before_opening_an_empty_journal() {
         let (_directory, state, built) = prepared_start();
         let binary = &built.session.binaries[0];
-        let ordinal = state.plan.mutants[0].ordinal;
-        let census = Census::examined(&binary.path, ordinal, 1, 4);
         let mut killers = Killers::default();
         let killer = crate::discover::Killer {
             package: binary.package.clone(),
@@ -1129,7 +1711,6 @@ mod tests {
         let started = TestingState::start(
             &state.plan,
             &built,
-            census,
             killers,
             state.settings,
             &state.record,
@@ -1139,7 +1720,6 @@ mod tests {
         assert_eq!(fs::read(state.record.base.join(JOURNAL)).unwrap(), b"");
         assert_eq!(phase(&state.record.base).unwrap(), Some(Phase::Testing));
         assert_eq!(started.killers.hint(&state.plan.mutants[0].id), Some(&killer));
-        assert!(matches!(started.census.selection(binary, ordinal), CensusSelection::Selected(names) if names == ["tests::t0"]));
         assert_eq!(started.stuck, ["stuck package"]);
         assert_eq!(started.dropped, ["dropped package"]);
         assert!(started.artifacts.iter().any(
@@ -1148,7 +1728,6 @@ mod tests {
         let (loaded, valid_bytes) = TestingState::load(&state.record.base).unwrap();
         assert_eq!(valid_bytes, 0);
         assert_eq!(loaded.killers.hint(&state.plan.mutants[0].id), Some(&killer));
-        assert!(matches!(loaded.census.selection(binary, ordinal), CensusSelection::Selected(names) if names == ["tests::t0"]));
     }
 
     #[test]
@@ -1165,15 +1744,8 @@ mod tests {
                 "location" => fs::remove_file(state.record.base.join(".cargo-gamma-owner")).unwrap(),
                 _ => unreachable!("the boundary matrix is closed"),
             }
-            let Err(failure) = TestingState::start(
-                &state.plan,
-                &built,
-                Census::default(),
-                Killers::default(),
-                state.settings,
-                &state.record,
-                (&[], &[]),
-            ) else {
+            let Err(failure) = TestingState::start(&state.plan, &built, Killers::default(), state.settings, &state.record, (&[], &[]))
+            else {
                 panic!("{stage} failure must not open the testing phase")
             };
             if stage == "artifacts" {
@@ -1197,15 +1769,7 @@ mod tests {
         let (_directory, state, built) = prepared_start();
         let path = state.record.base.join(PHASE);
         let lock = OpenOptions::new().read(true).share_mode(SHARE_READ).open(&path).unwrap();
-        let Err(failure) = TestingState::start(
-            &state.plan,
-            &built,
-            Census::default(),
-            Killers::default(),
-            state.settings,
-            &state.record,
-            (&[], &[]),
-        ) else {
+        let Err(failure) = TestingState::start(&state.plan, &built, Killers::default(), state.settings, &state.record, (&[], &[])) else {
             panic!("successful snapshot and journal publication do not hide the final phase failure")
         };
         assert_eq!(failure.message(), format!("could not write `{path}`"));
@@ -1228,19 +1792,6 @@ mod tests {
         use super::super::sweep::{self, Judgement, Sweep};
         use super::super::test_binary::{Reachability, TestScope};
 
-        fn waiters(receiver: &mpsc::Receiver<std::thread::ThreadId>, active: std::thread::ThreadId) {
-            let mut waiting = crate::HashSet::default();
-            while waiting.len() < 3 {
-                let worker = receiver
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("three workers reach resource admission");
-                if worker != active {
-                    let _inserted = waiting.insert(worker);
-                }
-            }
-            while receiver.try_recv().is_ok() {}
-        }
-
         let (_directory, mut state) = fixture();
         let template = state.plan.mutants[0].clone();
         state.plan.mutants = (0..40)
@@ -1257,10 +1808,12 @@ mod tests {
         let failing = TestingJournal {
             file: File::open(base.join(JOURNAL)).unwrap(),
             previous_sweep: None,
+            prior_confirmations: std::collections::BTreeSet::new(),
+            initial_hints: None,
+            live_refresh_failures: core::sync::atomic::AtomicUsize::new(0),
         };
-        let mut work = Workspace::adopt(state.plan.root.clone(), state.plan.root.join("target"));
+        let work = Workspace::adopt(state.plan.root.clone(), state.plan.root.join("target"));
         let binary = crate::testing::test_binary(state.plan.root.join("fake-binary").as_str());
-        work.set_resources(super::super::resources::Resources::fake_binary(&binary));
         let binaries = vec![binary];
         let scope = TestScope {
             packages: &[],
@@ -1274,14 +1827,12 @@ mod tests {
             jobs: 4,
             meter: false,
             confirm: true,
-            census: &state.census,
         };
         let mut events = crate::testing::Recorder::default();
         let mut calls = 0;
         let claimed = AtomicUsize::new(0);
         let release = (Mutex::new(0), Condvar::new());
         let (running, active) = mpsc::channel();
-        let (waiting, blocked) = mpsc::channel();
         let failure = sweep::test_all_with_hooks(
             &work,
             &mut state.plan,
@@ -1293,24 +1844,35 @@ mod tests {
             (
                 |mutant, killers| {
                     calls += 1;
-                    let (phase, worker) = active
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("the next resource user becomes active");
-                    assert_eq!(phase, calls + 1);
-                    waiters(&blocked, worker);
+                    if calls == 1 {
+                        let mut phases: Vec<_> = (0..4)
+                            .map(|_| {
+                                active
+                                    .recv_timeout(Duration::from_secs(10))
+                                    .expect("all four workers become active")
+                            })
+                            .collect();
+                        phases.sort_unstable();
+                        assert_eq!(phases, [2, 3, 4, 5]);
+                    } else {
+                        assert_eq!(
+                            active.recv_timeout(Duration::from_secs(10)).expect("the released worker resumes"),
+                            6
+                        );
+                    }
                     let persisted = if calls == 1 {
                         journal.publish(mutant, killers)
                     } else {
                         failing.publish(mutant, killers)
                     };
-                    *release.0.lock().unwrap() = phase;
+                    *release.0.lock().unwrap() = if calls == 1 { 2 } else { usize::MAX };
                     release.1.notify_all();
                     persisted
                 },
                 |_| {
                     let phase = claimed.fetch_add(1, Ordering::SeqCst) + 1;
-                    if matches!(phase, 2 | 3) {
-                        running.send((phase, std::thread::current().id())).unwrap();
+                    if phase >= 2 {
+                        running.send(phase).unwrap();
                         let (_guard, deadline) = release
                             .1
                             .wait_timeout_while(release.0.lock().unwrap(), Duration::from_secs(10), |released| *released < phase)
@@ -1319,9 +1881,7 @@ mod tests {
                     }
                     Some(Judgement::Reached(Outcome::NoCoverage, None, None))
                 },
-                || {
-                    waiting.send(std::thread::current().id()).unwrap();
-                },
+                || {},
             ),
         )
         .unwrap_err();
@@ -1467,11 +2027,13 @@ mod tests {
         assert_eq!(restored.note, mutant.note);
         drop(journal);
         mutant.outcome = Outcome::Pending;
-        let verdict = Settled {
+        let verdict = JournalEntry::Verdict {
             mutant,
             probe: None,
             sweep: None,
+            diagnostic: None,
         };
+        let verdict = verdict.wire();
         let encoded = serde_json::to_vec(&verdict).unwrap();
         let mut bytes = serde_json::to_vec(&Committed {
             verdict,
@@ -1502,7 +2064,7 @@ mod tests {
         assert_eq!(
             failure.message(),
             format!(
-                "could not construct partial campaign evidence from `{}`; start a new campaign",
+                "testing state at `{}` does not match its captured source generation",
                 state.record.base
             )
         );
@@ -2248,7 +2810,6 @@ mod tests {
                 jobs: 1,
                 meter: false,
                 confirm: state.settings.confirm,
-                census: &state.census,
             },
             false,
             &mut state.killers,
@@ -2543,12 +3104,81 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses prepared snapshot files and filesystem-backed verdict journals")]
+    fn finished_sweeps_with_unjudged_mutants_remain_resumable_until_ledger_publication() {
+        for publication_failed in [false, true] {
+            let (_directory, mut state) = fixture();
+            let base = state.record.base.clone();
+            let journal = TestingJournal::open(&base, None).unwrap();
+            assert_eq!(
+                scripted_sweep(&mut state, |mutant, killers| journal.publish(mutant, killers), Outcome::Pending).unwrap(),
+                2
+            );
+            assert_eq!(state.plan.mutants[0].outcome, Outcome::Pending);
+            assert_eq!(state.plan.mutants[1].outcome, Outcome::Survived);
+            TestingJournal::complete(&base).unwrap();
+            drop(journal);
+            if publication_failed {
+                let ledger = base.join("last-gamma-run.json");
+                fs::create_dir(&ledger).unwrap();
+                let record = partial_testing_record(&base).unwrap().unwrap();
+                let failure = record
+                    .store_completed(&base)
+                    .expect_err("a directory must refuse final ledger replacement");
+                assert!(failure.message().contains(ledger.as_str()), "{failure}");
+                fs::remove_dir(&ledger).unwrap();
+            }
+
+            let (mut recovered, valid_bytes) = TestingState::load(&base).unwrap();
+            assert!(!recovered.is_settled());
+            assert_eq!(recovered.plan.mutants[0].outcome, Outcome::Pending);
+            assert_eq!(recovered.plan.mutants[1].outcome, Outcome::Survived);
+            let partial = partial_testing_record(&base).unwrap().unwrap();
+            assert_eq!(
+                partial.outcomes().iter().filter(|entry| entry.outcome == Outcome::Pending).count(),
+                1
+            );
+            let journal = TestingJournal::open(&base, Some(valid_bytes)).unwrap();
+            assert_eq!(
+                scripted_sweep(&mut recovered, |mutant, killers| journal.publish(mutant, killers), Outcome::Killed,).unwrap(),
+                1,
+                "resume must retry only the unjudged mutant"
+            );
+            assert!(recovered.is_settled());
+            assert_eq!(recovered.plan.mutants[1].outcome, Outcome::Survived);
+            recovered.complete_testing().unwrap();
+            partial_testing_record(&base).unwrap().unwrap().store_completed(&base).unwrap();
+            finish_testing_record(&base).unwrap();
+            assert_eq!(phase(&base).unwrap(), Some(Phase::Completed));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "publishes a filesystem-backed completed campaign ledger")]
+    fn publishing_a_reportable_pending_outcome_still_ends_resumability() {
+        let (_directory, mut state) = fixture();
+        let base = state.record.base.clone();
+        let journal = TestingJournal::open(&base, None).unwrap();
+        scripted_sweep(&mut state, |mutant, killers| journal.publish(mutant, killers), Outcome::Pending).unwrap();
+        TestingJournal::complete(&base).unwrap();
+        let record = partial_testing_record(&base).unwrap().unwrap();
+        assert!(record.outcomes().iter().any(|entry| entry.outcome == Outcome::Pending));
+        record.store_completed(&base).unwrap();
+        finish_testing_record(&base).unwrap();
+        assert_eq!(phase(&base).unwrap(), Some(Phase::Completed));
+        assert!(failure(&base).contains("not interrupted during testing"));
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "uses read-only filesystem-backed verdict journal handles")]
     fn a_checkpoint_write_failure_is_an_error_and_leaves_the_mutant_pending() {
         let (_directory, state) = fixture();
         let journal = TestingJournal {
             file: File::open(state.record.base.join(JOURNAL)).unwrap(),
             previous_sweep: None,
+            prior_confirmations: std::collections::BTreeSet::new(),
+            initial_hints: None,
+            live_refresh_failures: core::sync::atomic::AtomicUsize::new(0),
         };
         let mut mutant = state.plan.mutants[0].clone();
         mutant.outcome = Outcome::Killed;
@@ -2589,9 +3219,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "writes and reloads prepared snapshot files")]
     fn rejects_incompatible_identity_version_platform_and_missing_snapshot() {
         let (_directory, mut state) = fixture();
-        state.version += 1;
-        save(&state);
-        assert!(failure(&state.record.base).contains("incompatible"));
+        for incompatible in [1, VERSION + 1] {
+            state.version = incompatible;
+            save(&state);
+            assert!(failure(&state.record.base).contains("incompatible"));
+        }
         state.version = VERSION;
         state.platform = "foreign".into();
         save(&state);
@@ -2790,8 +3422,27 @@ mod tests {
             record.outcomes().iter().filter(|entry| entry.outcome == Outcome::Pending).count(),
             1
         );
+        let mut remaining = state.plan.mutants[1].clone();
+        remaining.outcome = Outcome::Survived;
+        TestingJournal::open(base, None)
+            .unwrap()
+            .publish(&remaining, &state.killers)
+            .unwrap();
         TestingJournal::complete(base).unwrap();
-        assert!(partial_testing_record(base).unwrap().is_some());
+        let finished = partial_testing_record(base).unwrap().unwrap();
+        assert_eq!(
+            finished.outcomes().iter().filter(|entry| entry.outcome == Outcome::Timeout).count(),
+            1
+        );
+        assert_eq!(
+            finished
+                .outcomes()
+                .iter()
+                .filter(|entry| entry.outcome == Outcome::Survived)
+                .count(),
+            1
+        );
+        assert!(!finished.outcomes().iter().any(|entry| entry.outcome == Outcome::Pending));
         finish_testing_record(base).unwrap();
         assert!(partial_testing_record(base).unwrap().is_none());
         assert!(failure(base).contains("not interrupted"));
@@ -2827,17 +3478,5 @@ mod tests {
         bytes.push(b'\n');
         fs::write(path, bytes).unwrap();
         assert!(failure(base).contains("integrity"));
-    }
-
-    #[test]
-    fn census_round_trip_preserves_positive_negative_and_incomplete_evidence() {
-        let binary = crate::testing::test_binary("test-binary");
-        for census in [Census::examined(&binary.path, 7, 1, 4), Census::partial(&binary.path, 7, 1, 4)] {
-            let restored: Census = serde_json::from_slice(&serde_json::to_vec(&census).unwrap()).unwrap();
-            assert_eq!(census.selection(&binary, 7), restored.selection(&binary, 7));
-            assert_eq!(census.selection(&binary, 99), restored.selection(&binary, 99));
-            assert_eq!(census.complete_binaries(), restored.complete_binaries());
-            assert_eq!(census.incomplete_binaries(), restored.incomplete_binaries());
-        }
     }
 }

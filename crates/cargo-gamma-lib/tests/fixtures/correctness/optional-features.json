@@ -1,0 +1,84 @@
+{
+  "packages": [
+    {
+      "name": "alpha",
+      "version": "0.0.0",
+      "id": "path+file:///fixture/alpha#0.0.0",
+      "license": null,
+      "license_file": null,
+      "description": null,
+      "source": null,
+      "dependencies": [
+        {
+          "name": "beta",
+          "source": null,
+          "req": "*",
+          "kind": null,
+          "rename": "bruce",
+          "optional": true,
+          "uses_default_features": true,
+          "features": ["extra"],
+          "target": null,
+          "registry": null,
+          "path": "/fixture/beta"
+        }
+      ],
+      "targets": [],
+      "features": {
+        "default": ["activate"],
+        "activate": ["dep:bruce"]
+      },
+      "manifest_path": "/fixture/alpha/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": null,
+      "repository": null,
+      "homepage": null,
+      "documentation": null,
+      "edition": "2024",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    },
+    {
+      "name": "beta",
+      "version": "0.0.0",
+      "id": "path+file:///fixture/beta#0.0.0",
+      "license": null,
+      "license_file": null,
+      "description": null,
+      "source": null,
+      "dependencies": [],
+      "targets": [],
+      "features": {
+        "default": ["from_default"],
+        "from_default": [],
+        "extra": []
+      },
+      "manifest_path": "/fixture/beta/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": null,
+      "repository": null,
+      "homepage": null,
+      "documentation": null,
+      "edition": "2024",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    }
+  ],
+  "workspace_members": ["path+file:///fixture/alpha#0.0.0", "path+file:///fixture/beta#0.0.0"],
+  "workspace_default_members": ["path+file:///fixture/alpha#0.0.0", "path+file:///fixture/beta#0.0.0"],
+  "resolve": null,
+  "workspace_root": "/fixture",
+  "target_directory": "/fixture/target",
+  "metadata": null,
+  "version": 1
+}

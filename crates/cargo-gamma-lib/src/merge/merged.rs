@@ -74,7 +74,7 @@ pub struct Merged {
 
     /// Files whose withdrawals could not be checked because no input supplied a complete population.
     ///
-    /// Sharded and previously merged reports can both describe incomplete populations, so their
+    /// Sharded, filtered, legacy, and previously merged reports can describe incomplete populations, so their
     /// silence about an id says nothing about whether that code still exists.
     pub unchecked: usize,
 

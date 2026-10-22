@@ -2185,6 +2185,7 @@ unknown-git = "deny"
 # Unscoped (consults external risk DB).
 
 # Analyze dependency features and version requirements with cargo-aprz.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2205,11 +2206,11 @@ anvil-aprz: anvil-aprz-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-aprz` recipe.
-[group("anvil-setup")]
+[private]
 anvil-aprz-setup installer="install": (anvil-tool-cargo-aprz-install installer)
 
 # Validate prerequisites for the `anvil-aprz` recipe.
-[group("anvil-setup")]
+[private]
 anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 
 === justfiles/anvil/checks/audit.just ===
@@ -2224,6 +2225,7 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # Unscoped (consults external advisory DB; reads Cargo.lock).
 
 # Audit dependencies for known security vulnerabilities.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-audit: anvil-audit-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2231,11 +2233,11 @@ anvil-audit: anvil-audit-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-audit` recipe.
-[group("anvil-setup")]
+[private]
 anvil-audit-setup installer="install": (anvil-tool-cargo-audit-install installer)
 
 # Validate prerequisites for the `anvil-audit` recipe.
-[group("anvil-setup")]
+[private]
 anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 
 === justfiles/anvil/checks/bench.just ===
@@ -2250,6 +2252,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 # Affected tier.
 
 # Build all workspace benchmarks.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2264,11 +2267,11 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 # is needed beyond the Rust toolchain.
 
 # Install prerequisites for the `anvil-bench` recipe.
-[group("anvil-setup")]
+[private]
 anvil-bench-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-bench` recipe.
-[group("anvil-setup")]
+[private]
 anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/bolero.just ===
@@ -2303,6 +2306,7 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # repo-specific to standardize).
 
 # Run Bolero tests for affected workspace packages.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2388,11 +2392,11 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
 # (libfuzzer engine requires nightly rustc features).
 
 # Install prerequisites for the `anvil-bolero` recipe.
-[group("anvil-setup")]
+[private]
 anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
 
 # Validate prerequisites for the `anvil-bolero` recipe.
-[group("anvil-setup")]
+[private]
 anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs
 
 === justfiles/anvil/checks/careful.just ===
@@ -2405,6 +2409,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run tests with cargo-careful for affected workspace packages.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2470,11 +2475,11 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-careful` recipe.
-[group("anvil-setup")]
+[private]
 anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
 
 # Validate prerequisites for the `anvil-careful` recipe.
-[group("anvil-setup")]
+[private]
 anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs
 
 === justfiles/anvil/checks/cargo-hack.just ===
@@ -2491,6 +2496,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 # is the right scope.
 
 # Check feature combinations for required workspace packages.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2502,11 +2508,11 @@ anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-hack` recipe.
-[group("anvil-setup")]
+[private]
 anvil-cargo-hack-setup installer="install": (anvil-tool-cargo-hack-install installer)
 
 # Validate prerequisites for the `anvil-cargo-hack` recipe.
-[group("anvil-setup")]
+[private]
 anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 
 === justfiles/anvil/checks/cargo-sort.just ===
@@ -2528,6 +2534,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 # (e.g. blank-line-separated dependency blocks) intact.
 
 # Check that Cargo.toml dependency tables are sorted.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2539,11 +2546,11 @@ anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-sort` recipe.
-[group("anvil-setup")]
+[private]
 anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer)
 
 # Validate prerequisites for the `anvil-cargo-sort` recipe.
-[group("anvil-setup")]
+[private]
 anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 
 === justfiles/anvil/checks/check-all-targets.just ===
@@ -2561,6 +2568,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 # defaults disabled, without linking or executing their test binaries.
 
 # Check all targets of affected packages independently.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2581,11 +2589,11 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     }
 
 # Install prerequisites for the `anvil-check-all-targets` recipe.
-[group("anvil-setup")]
+[private]
 anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-check-all-targets` recipe.
-[group("anvil-setup")]
+[private]
 anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/clippy.just ===
@@ -2605,6 +2613,7 @@ anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvi
 # rustup component; same reasoning as fmt for the require.
 
 # Lint affected workspace packages with Clippy.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2616,11 +2625,11 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-clippy` recipe.
-[group("anvil-setup")]
+[private]
 anvil-clippy-setup installer="install": anvil-component-default-clippy-install
 
 # Validate prerequisites for the `anvil-clippy` recipe.
-[group("anvil-setup")]
+[private]
 anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
 
 === justfiles/anvil/checks/deny.just ===
@@ -2637,6 +2646,7 @@ anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
 # depend on the adopter's default shell (absent/varying on Windows).
 
 # Check dependency licenses, bans, sources, and advisories.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-deny: anvil-deny-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2644,11 +2654,11 @@ anvil-deny: anvil-deny-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-deny` recipe.
-[group("anvil-setup")]
+[private]
 anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer)
 
 # Validate prerequisites for the `anvil-deny` recipe.
-[group("anvil-setup")]
+[private]
 anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 
 === justfiles/anvil/checks/doc-build.just ===
@@ -2665,6 +2675,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 # crate that wasn't itself modified.
 
 # Build documentation for required workspace packages.
+[group("anvil")]
 [arg("open", long, value="true")]
 [script("pwsh", "-NoProfile")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
@@ -2683,11 +2694,11 @@ anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
 # rely on it being present everywhere anvil runs.
 
 # Install prerequisites for the `anvil-doc-build` recipe.
-[group("anvil-setup")]
+[private]
 anvil-doc-build-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-doc-build` recipe.
-[group("anvil-setup")]
+[private]
 anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/doc-test.just ===
@@ -2712,6 +2723,7 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # explicit crate types such as rlib/cdylib and proc macros remain eligible.
 
 # Run documentation tests for affected workspace packages.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2756,11 +2768,11 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-doc-test` recipe.
-[group("anvil-setup")]
+[private]
 anvil-doc-test-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
-[group("anvil-setup")]
+[private]
 anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/ensure-no-cyclic-deps.just ===
@@ -2775,6 +2787,7 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Modified tier.
 
 # Check that workspace dependencies contain no cycles.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2786,11 +2799,11 @@ anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
-[group("anvil-setup")]
+[private]
 anvil-ensure-no-cyclic-deps-setup installer="install": (anvil-tool-cargo-ensure-no-cyclic-deps-install installer)
 
 # Validate prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
-[group("anvil-setup")]
+[private]
 anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs
 
 === justfiles/anvil/checks/ensure-no-default-features.just ===
@@ -2805,6 +2818,7 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 # Modified tier.
 
 # Check that workspace packages compile without default features.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -2816,11 +2830,11 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-ensure-no-default-features` recipe.
-[group("anvil-setup")]
+[private]
 anvil-ensure-no-default-features-setup installer="install": (anvil-tool-cargo-ensure-no-default-features-install installer)
 
 # Validate prerequisites for the `anvil-ensure-no-default-features` recipe.
-[group("anvil-setup")]
+[private]
 anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-default-features-validate-prereqs
 
 === justfiles/anvil/checks/examples.just ===
@@ -2835,6 +2849,7 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 # Affected tier.
 
 # Build examples, or run selected examples locally with `--run`.
+[group("anvil")]
 [arg("run", long, value="true")]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -2953,11 +2968,11 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
     if ($failed) { exit 1 }
 
 # Install prerequisites for the `anvil-examples` recipe.
-[group("anvil-setup")]
+[private]
 anvil-examples-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-examples` recipe.
-[group("anvil-setup")]
+[private]
 anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/external-types.just ===
@@ -2983,6 +2998,7 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 
 # Check public APIs for unapproved external types.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -3052,11 +3068,11 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     if ($failed) { exit 1 }
 
 # Install prerequisites for the `anvil-external-types` recipe.
-[group("anvil-setup")]
+[private]
 anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer)
 
 # Validate prerequisites for the `anvil-external-types` recipe.
-[group("anvil-setup")]
+[private]
 anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs
 
 === justfiles/anvil/checks/fmt.just ===
@@ -3085,6 +3101,7 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # formatting command does not mix stable and nightly toolchains.
 
 # Check Rust source formatting.
+[group("anvil")]
 [arg("fix", long, value="true")]
 [script("pwsh", "-NoProfile")]
 anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
@@ -3112,11 +3129,11 @@ anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
 # --- pr-fast members ---
 
 # Install prerequisites for the `anvil-fmt` recipe.
-[group("anvil-setup")]
+[private]
 anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-fmt` recipe.
-[group("anvil-setup")]
+[private]
 anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/license-headers.just ===
@@ -3131,6 +3148,7 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anv
 # Modified tier.
 
 # Check source files for required license headers.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -3142,11 +3160,11 @@ anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-license-headers` recipe.
-[group("anvil-setup")]
+[private]
 anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer)
 
 # Validate prerequisites for the `anvil-license-headers` recipe.
-[group("anvil-setup")]
+[private]
 anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs
 
 === justfiles/anvil/checks/llvm-cov.just ===
@@ -3166,6 +3184,7 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # etc.) wrongly counts against coverage.
 
 # Measure test coverage and enforce the coverage gate.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -3400,11 +3419,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
 # --- pr-test members (shared with scheduled-test) ---
 
 # Install prerequisites for the `anvil-llvm-cov` recipe.
-[group("anvil-setup")]
+[private]
 anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)
 
 # Validate prerequisites for the `anvil-llvm-cov` recipe.
-[group("anvil-setup")]
+[private]
 anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs
 
 === justfiles/anvil/checks/loom.just ===
@@ -3459,6 +3478,7 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # invocations cleanly on both pwsh/bash.
 
 # Run Loom concurrency tests for affected workspace packages.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -3531,11 +3551,11 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
 # is the only prerequisite.
 
 # Install prerequisites for the `anvil-loom` recipe.
-[group("anvil-setup")]
+[private]
 anvil-loom-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-loom` recipe.
-[group("anvil-setup")]
+[private]
 anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/miri-race-coverage.just ===
@@ -3555,14 +3575,15 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # per-seed crashes, so coverage matters more than depth-per-seed.
 
 # Run Miri tests with race coverage tracking.
+[group("anvil")]
 anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-test "race-coverage")
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-race-coverage-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri-race-coverage` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/miri-strict-provenance.just ===
@@ -3575,14 +3596,15 @@ anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.
+[group("anvil")]
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance")
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri-strict-provenance` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/miri-tree-borrows.just ===
@@ -3609,6 +3631,7 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 # honors --skip.
 
 # Run Miri tests with the Tree Borrows model.
+[group("anvil")]
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
 
 # The three nightly-miri profiles share the same toolchain prereqs
@@ -3617,11 +3640,11 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-t
 # regular (groups.just can iterate without special-casing).
 
 # Install prerequisites for the `anvil-miri-tree-borrows` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri-tree-borrows` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/miri.just ===
@@ -3656,6 +3679,7 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
 
 # Run Miri tests for affected workspace packages.
+[group("anvil")]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -3998,11 +4022,11 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
 # --- pr-runtime-analysis members ---
 
 # Install prerequisites for the `anvil-miri` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri` recipe.
-[group("anvil-setup")]
+[private]
 anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/msrv-test.just ===
@@ -4015,6 +4039,7 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run affected-package tests under the declared MSRV.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -4042,14 +4067,14 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install":
     & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
     $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
@@ -4099,6 +4124,7 @@ anvil-msrv-test-validate-prereqs:
 # affected leg. Coverage on the other three legs is unchanged.
 
 # Run mutation testing for changes relative to the base branch.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -4140,11 +4166,11 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
 # --- pr-mutants members ---
 
 # Install prerequisites for the `anvil-mutants-diff` recipe.
-[group("anvil-setup")]
+[private]
 anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer)
 
 # Validate prerequisites for the `anvil-mutants-diff` recipe.
-[group("anvil-setup")]
+[private]
 anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 
 === justfiles/anvil/checks/mutants-full.just ===
@@ -4160,6 +4186,7 @@ anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # workspace regardless of diff.
 
 # Run exhaustive mutation testing across the workspace.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -4174,11 +4201,11 @@ anvil-mutants-full: anvil-mutants-full-validate-prereqs
 #     cargo-hack and bench are dedicated tools) ---
 
 # Install prerequisites for the `anvil-mutants-full` recipe.
-[group("anvil-setup")]
+[private]
 anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer)
 
 # Validate prerequisites for the `anvil-mutants-full` recipe.
-[group("anvil-setup")]
+[private]
 anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 
 === justfiles/anvil/checks/pr-title.just ===
@@ -4204,6 +4231,7 @@ anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # the check loudly rather than silently passing.
 
 # Validate the pull request title.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
@@ -4257,11 +4285,11 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
 # pr-title is a pwsh script; no cargo tool to install.
 
 # Prepare the PowerShell prerequisite for pull request title validation.
-[group("anvil-setup")]
+[private]
 anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
 
 # Validate prerequisites for the `anvil-pr-title` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 
 === justfiles/anvil/checks/readme-check.just ===
@@ -4378,18 +4406,20 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
     if ($hadFailure) { exit 1 }
 
 # Check README files, or regenerate them with `--fix`.
+[group("anvil")]
 [arg("fix", long, value="true")]
 anvil-readme fix="false": (_anvil-readme if fix == "true" { "generate" } else { "check" })
 
 # Check that crate README files are up to date.
+[group("anvil")]
 anvil-readme-check: (_anvil-readme "check")
 
 # Install prerequisites for the `anvil-readme-check` recipe.
-[group("anvil-setup")]
+[private]
 anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-install installer)
 
 # Validate prerequisites for the `anvil-readme-check` recipe.
-[group("anvil-setup")]
+[private]
 anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs
 
 === justfiles/anvil/checks/semver-check.just ===
@@ -4441,6 +4471,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # ...") and bin->bin+lib transitions (reported as a missing lib target).
 
 # Check affected crates for semantic versioning violations.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -4634,11 +4665,11 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     exit 0
 
 # Install prerequisites for the `anvil-semver-check` recipe.
-[group("anvil-setup")]
+[private]
 anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
 
 # Validate prerequisites for the `anvil-semver-check` recipe.
-[group("anvil-setup")]
+[private]
 anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
 
 === justfiles/anvil/checks/spellcheck.just ===
@@ -4669,6 +4700,7 @@ anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-pre
 # leaving the path dangling.
 
 # Check spelling in source comments and documentation.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -4697,11 +4729,11 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # successful prebuilt installation does not require libclang.
 
 # Install prerequisites for the `anvil-spellcheck` recipe.
-[group("anvil-setup")]
+[private]
 anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install installer)
 
 # Validate prerequisites for the `anvil-spellcheck` recipe.
-[group("anvil-setup")]
+[private]
 anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 
 === justfiles/anvil/checks/udeps.just ===
@@ -4732,6 +4764,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 
 # Check required workspace packages for unused dependencies.
+[group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
@@ -4749,11 +4782,11 @@ anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-udeps` recipe.
-[group("anvil-setup")]
+[private]
 anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer)
 
 # Validate prerequisites for the `anvil-udeps` recipe.
-[group("anvil-setup")]
+[private]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs
 
 === justfiles/anvil/container.just ===
@@ -5911,6 +5944,7 @@ anvil-container-down:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
 # Build all targets and features for local development.
+[group("anvil")]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [script("pwsh", "-NoProfile")]
@@ -5920,11 +5954,11 @@ anvil-build package="" profile="": anvil-build-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-build` recipe.
-[group("anvil-setup")]
+[private]
 anvil-build-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-build` recipe.
-[group("anvil-setup")]
+[private]
 anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/groups/pr-fast.just ===
@@ -5963,7 +5997,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
 # validate-prereqs recipes take no parameters.
 
 # Install prerequisites for the `anvil-pr-fast` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
@@ -5984,7 +6018,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
@@ -6018,13 +6052,13 @@ anvil-pr-fast-validate-prereqs: \
 anvil-pr-msrv: anvil-pr-msrv-validate-prereqs anvil-msrv-test
 
 # Install prerequisites for the `anvil-pr-msrv` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-msrv-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-msrv-test-setup installer)
 
 # Validate prerequisites for the `anvil-pr-msrv` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-msrv-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-msrv-test-validate-prereqs
@@ -6043,13 +6077,13 @@ anvil-pr-msrv-validate-prereqs: \
 anvil-pr-mutants: anvil-pr-mutants-validate-prereqs anvil-mutants-diff
 
 # Install prerequisites for the `anvil-pr-mutants` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-mutants-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-diff-setup installer)
 
 # Validate prerequisites for the `anvil-pr-mutants` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-mutants-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-diff-validate-prereqs
@@ -6072,7 +6106,7 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-bolero
 
 # Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
@@ -6081,7 +6115,7 @@ anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-bolero-setup installer)
 
 # Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
@@ -6120,7 +6154,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
@@ -6128,7 +6162,7 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-mutants-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \
@@ -6152,7 +6186,7 @@ anvil-pr-test: anvil-pr-test-validate-prereqs \
     anvil-examples
 
 # Install prerequisites for the `anvil-pr-test` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-test-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
@@ -6160,7 +6194,7 @@ anvil-pr-test-setup installer="install": \
     (anvil-examples-setup installer)
 
 # Validate prerequisites for the `anvil-pr-test` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-test-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
@@ -6193,7 +6227,7 @@ _anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-clippy
 
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-advisories-setup installer="install": \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
@@ -6201,7 +6235,7 @@ anvil-scheduled-advisories-setup installer="install": \
     (anvil-clippy-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-advisories-validate-prereqs: \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
@@ -6233,14 +6267,14 @@ _anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
     anvil-bench
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-exhaustive-setup installer="install": \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-exhaustive-validate-prereqs: \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \
@@ -6278,7 +6312,7 @@ _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-pre
     anvil-miri-race-coverage
 
 # Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
     (anvil-miri-tree-borrows-setup installer) \
@@ -6286,7 +6320,7 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-race-coverage-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \
     anvil-miri-tree-borrows-validate-prereqs \
@@ -6322,14 +6356,14 @@ _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
     anvil-examples
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-test-setup installer="install": \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-test-validate-prereqs: \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
@@ -7411,19 +7445,19 @@ _anvil-full: anvil-full-validate-prereqs \
 # Local users who want "install everything" run `just anvil-setup`.
 
 # Install prerequisites for the `anvil-pr` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-setup installer="install": \
     (anvil-pr-fast-setup installer) \
     (anvil-pr-slow-setup installer)
 
 # Validate prerequisites for the `anvil-pr` recipe.
-[group("anvil-setup")]
+[private]
 anvil-pr-validate-prereqs: \
     anvil-pr-fast-validate-prereqs \
     anvil-pr-slow-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-setup installer="install": \
     (anvil-scheduled-test-setup installer) \
     (anvil-scheduled-advisories-setup installer) \
@@ -7431,7 +7465,7 @@ anvil-scheduled-setup installer="install": \
     (anvil-scheduled-exhaustive-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled` recipe.
-[group("anvil-setup")]
+[private]
 anvil-scheduled-validate-prereqs: \
     anvil-scheduled-test-validate-prereqs \
     anvil-scheduled-advisories-validate-prereqs \
@@ -7439,13 +7473,13 @@ anvil-scheduled-validate-prereqs: \
     anvil-scheduled-exhaustive-validate-prereqs
 
 # Install prerequisites for the `anvil-full` recipe.
-[group("anvil-setup")]
+[private]
 anvil-full-setup installer="install": \
     (anvil-pr-setup installer) \
     (anvil-scheduled-setup installer)
 
 # Validate prerequisites for the `anvil-full` recipe.
-[group("anvil-setup")]
+[private]
 anvil-full-validate-prereqs: \
     anvil-pr-validate-prereqs \
     anvil-scheduled-validate-prereqs
@@ -7484,7 +7518,7 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # System-level prerequisites (libclang, etc.)
 # ============================================================================
 
-# Public: probe for system-level prerequisites that catalog tools need
+# Internal: probe for system-level prerequisites that catalog tools need
 # to BUILD from source. The `binstall` install path downloads pre-built
 # binaries and does not need these. The installer invokes this check only
 # immediately before a source build, including fallback after binstall fails.
@@ -7510,7 +7544,7 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # package-manager choice stay with the user.
 
 # Check cargo-spellcheck source-build prerequisites.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-spellcheck-source-deps-check:
     $ErrorActionPreference = 'Stop'
@@ -7611,7 +7645,7 @@ anvil-tool-cargo-spellcheck-source-deps-check:
 # are read-only and only surface a friendly error if a prerequisite is absent.
 
 # Validate that rustc is available and workspace MSRVs are compatible.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs:
     if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
@@ -7624,7 +7658,7 @@ anvil-tool-rustc-validate-prereqs:
     }
 
 # Validate that PowerShell Core is available.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-pwsh-validate-prereqs:
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
@@ -7879,7 +7913,7 @@ _anvil-resolve-stable action="install":
 # dependency, which Just deduplicates within one setup invocation.
 
 # Ensure the selected stable toolchain is available while preserving native repository toolchain-file behavior.
-[group("anvil-setup")]
+[private]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 
 # _install-tool-core: install a cargo subcommand at the catalog version,
@@ -8256,19 +8290,19 @@ _check-component toolchain component:
 # ============================================================================
 
 # Install the pinned nightly Rust toolchain.
-[group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-install: (_install-toolchain rust_nightly)
 
 # Validate that the pinned nightly Rust toolchain is available.
-[group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-validate-prereqs: (_check-toolchain rust_nightly)
 
 # Install the pinned nightly Rust toolchain for external-type checks.
-[group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-external-types-install: (_install-toolchain rust_nightly_external_types)
 
 # Validate that the pinned nightly Rust toolchain for external-type checks is available.
-[group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_nightly_external_types)
 
 # ============================================================================
@@ -8280,43 +8314,43 @@ anvil-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_
 # relevant anvil-<toolchain>-install recipe) and then add the component.
 
 # Install the pinned `clippy` component for the default toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-default-clippy-install: anvil-toolchain-stable-install (_install-component "default" "clippy")
 
 # Validate that the pinned `clippy` component is available for the default toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-default-clippy-validate-prereqs: (_check-component "default" "clippy")
 
 # Install the pinned `rustfmt` component for the default toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-default-rustfmt-install: anvil-toolchain-stable-install (_install-component "default" "rustfmt")
 
 # Validate that the pinned `rustfmt` component is available for the default toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-default-rustfmt-validate-prereqs: (_check-component "default" "rustfmt")
 
 # Install the pinned `rustfmt` component for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
 
 # Validate that the pinned `rustfmt` component is available for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-rustfmt-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rustfmt")
 
 # Install the pinned `miri` component for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-miri-install: anvil-toolchain-nightly-install (_install-component rust_nightly "miri")
 
 # Validate that the pinned `miri` component is available for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-miri-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "miri")
 
 # Install the pinned `rust-src` component for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rust-src")
 
 # Validate that the pinned `rust-src` component is available for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
 
 # llvm-tools ships the llvm-profdata / llvm-cov binaries that
@@ -8330,11 +8364,11 @@ anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-valid
 # `rustup component add` install path.
 
 # Install the pinned `llvm-tools` component for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
 
 # Validate that the pinned `llvm-tools` component is available for the nightly toolchain.
-[group("anvil-setup")]
+[private]
 anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools")
 
 # ============================================================================
@@ -8347,19 +8381,19 @@ anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-val
 # parameter; the validate-prereqs recipes do not (they only read state).
 
 # Install the pinned `cargo-aprz` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
 
 # Validate that the pinned `cargo-aprz` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
 
 # Install the pinned `cargo-audit` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
 
 # Validate that the pinned `cargo-audit` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
 # cargo-bolero is Linux-only: its `bolero-afl` build dependency
@@ -8374,7 +8408,7 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 # treat bolero as a no-op rather than a setup failure.
 
 # Install the pinned `cargo-bolero` tool.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-bolero-install installer="install": anvil-toolchain-stable-install
     if (-not $IsLinux) {
@@ -8385,7 +8419,7 @@ anvil-tool-cargo-bolero-install installer="install": anvil-toolchain-stable-inst
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-bolero` tool is available.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-bolero-validate-prereqs:
     if (-not $IsLinux) {
@@ -8396,99 +8430,99 @@ anvil-tool-cargo-bolero-validate-prereqs:
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-careful` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 
 # Validate that the pinned `cargo-careful` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
 
 # Install the pinned `cargo-check-external-types` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
 
 # Validate that the pinned `cargo-check-external-types` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
 
 # Install the pinned `cargo-coverage-gate` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
 
 # Validate that the pinned `cargo-coverage-gate` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
 # Install the pinned `cargo-delta` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
 
 # Validate that the pinned `cargo-delta` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
 
 # Install the pinned `cargo-deny` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
 
 # Validate that the pinned `cargo-deny` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
 
 # Install the pinned `cargo-doc2readme` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
 
 # Validate that the pinned `cargo-doc2readme` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
 # Install the pinned `cargo-each` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
 
 # Validate that the pinned `cargo-each` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
 
 # Install the pinned `cargo-ensure-no-cyclic-deps` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
 
 # Validate that the pinned `cargo-ensure-no-cyclic-deps` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
 
 # Install the pinned `cargo-ensure-no-default-features` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
 
 # Validate that the pinned `cargo-ensure-no-default-features` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
 
 # Install the pinned `cargo-hack` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 
 # Validate that the pinned `cargo-hack` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
 
 # Install the pinned `cargo-heather` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
 
 # Validate that the pinned `cargo-heather` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
 
 # Install the pinned `cargo-llvm-cov` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
 
 # Validate that the pinned `cargo-llvm-cov` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
 
 # cargo-mutants doesn't build on aarch64-pc-windows-msvc (upstream
@@ -8499,7 +8533,7 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 # target, so the check is effectively a no-op end-to-end there.
 
 # Install the pinned `cargo-mutants` tool.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-install
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
@@ -8510,7 +8544,7 @@ anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-ins
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-mutants` tool is available.
-[group("anvil-setup")]
+[private]
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-mutants-validate-prereqs:
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
@@ -8521,43 +8555,43 @@ anvil-tool-cargo-mutants-validate-prereqs:
     exit $LASTEXITCODE
 
 # Install the pinned `cargo-nextest` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
 
 # Validate that the pinned `cargo-nextest` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
 # Install the pinned `cargo-semver-checks` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-semver-checks-install installer="install": (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
 
 # Validate that the pinned `cargo-semver-checks` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
 
 # Install the pinned `cargo-sort` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
 
 # Validate that the pinned `cargo-sort` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
 # Install the pinned `cargo-spellcheck` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-tool-cargo-spellcheck-source-deps-check")
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 
 # Install the pinned `cargo-udeps` tool.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
 
 # Validate that the pinned `cargo-udeps` tool is available.
-[group("anvil-setup")]
+[private]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
 
 === justfiles/anvil/versions.just ===

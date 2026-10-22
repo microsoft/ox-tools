@@ -1693,6 +1693,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn campaign_regression_array_preflight_propagates_selector_resolution_errors() {
+        let ordinary = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("ordinary"),
+                body: "setting = true\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        for catalog in [array_catalog(None, true), ordinary] {
+            let mut hosts = HostTextCache {
+                resolve: |root, host| {
+                    assert_eq!(root, Path::new("scripted-root"));
+                    assert_eq!(host, "config.toml");
+                    Err(ohno::app_err!("scripted selector resolution failure"))
+                },
+                ..HostTextCache::default()
+            };
+            let error = array_host_inputs(
+                Path::new("scripted-root"),
+                &Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+                &Manifest::default(),
+                &catalog,
+                &mut hosts,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "scripted selector resolution failure");
+            assert_eq!(hosts.texts, HashMap::new());
+        }
+    }
+
     fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache) {
         let HostSelector::Path(host) = &spec.host else {
             panic!("the managed-region test helper requires HostSelector::Path");

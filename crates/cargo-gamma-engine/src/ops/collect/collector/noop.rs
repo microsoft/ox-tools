@@ -203,6 +203,15 @@ impl LocalCalls {
         !self.opaque_scopes.iter().any(|opaque| scope.starts_with(opaque))
     }
 
+    pub(super) fn resource_scope_is_transparent(&self, scope: &ScopePath, modules_verified: bool) -> bool {
+        // Verified namespace closure supplies declarations hidden behind root/module opacity.
+        // It does not resolve block-local transformations or shadowing, so inner opacity still wins.
+        !self
+            .opaque_scopes
+            .iter()
+            .any(|opaque| scope.starts_with(opaque) && !(modules_verified && (opaque.is_empty() || self.module_scopes.contains(opaque))))
+    }
+
     pub(super) fn returns_unit(&self, callee: &Expr, scope: &ScopePath, visible_imports: &HashMap<String, Option<Vec<String>>>) -> bool {
         let Expr::Path(path) = callee else {
             return false;
@@ -253,7 +262,7 @@ impl LocalCalls {
 /// standard `Default` trait can write `T::default()` instead of `Default::default()`. Those are
 /// the same call, so the mutant is the original program under another name.
 pub(super) fn is_noop(replacement: &str, original: &str, shape: Shape, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
-    let original = if matches!(shape, Shape::Block | Shape::IterBlock) {
+    let original = if matches!(shape, Shape::Block | Shape::IterBlock | Shape::IterWrappedBlock { .. }) {
         let trimmed = original.trim();
 
         trimmed

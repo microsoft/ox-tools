@@ -9,7 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use super::cargo_options::BuildLimits;
 use super::events::Events;
-use super::test_binary::{TestBinary, linked_target_args, retain_linked_to_population, test_binaries_with_linkage};
+use super::test_binary::{TestBinary, retain_linked_to_population, test_binaries_with_linkage};
 use super::verdict::tail;
 use super::workspace::Workspace;
 use crate::discover::Plan;
@@ -22,7 +22,8 @@ mod blame;
 mod complaints;
 mod invoke;
 #[cfg(test)]
-pub(super) use invoke::with_compiler;
+#[doc(hidden)]
+pub(super) use native_test_util::with_compiler;
 mod isolation;
 pub(super) mod messages;
 mod splices;
@@ -43,11 +44,11 @@ use splices::Splices;
 /// Where each live mutant's guard landed, by ordinal, paired with the file it landed in.
 type Guards = HashMap<u32, (Utf8PathBuf, Guard)>;
 
-#[derive(Clone, Copy)]
-struct BuildScope<'a> {
-    roots: Option<&'a [String]>,
-    mutants: Option<&'a [String]>,
-    publish_progress: bool,
+#[derive(Debug, Clone, Copy)]
+pub struct BuildScope<'a> {
+    pub roots: Option<&'a [String]>,
+    pub mutants: Option<&'a [String]>,
+    pub publish_progress: bool,
 }
 
 fn compiles_test_harnesses(verb: &[&str]) -> bool {
@@ -89,18 +90,6 @@ fn retain_blamed(blamed: &mut HashMap<u32, CompilerReason>, plan: &Plan, package
         .collect();
 
     blamed.retain(|ordinal, _code| ordinals.contains(ordinal));
-}
-
-fn pending_packages(plan: &Plan) -> Vec<String> {
-    let mut packages = plan
-        .mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
-        .map(|mutant| mutant.package.to_string())
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages.dedup();
-    packages
 }
 
 #[cfg(test)]
@@ -153,30 +142,6 @@ mod final_survivor_tests {
     }
 
     #[test]
-    fn pending_packages_excludes_nonpending_and_zero_ordinals_then_sorts_and_deduplicates() {
-        let mut plan = plan();
-        let template = crate::fixtures::mutant();
-        plan.mutants = [
-            ("z", 1, Outcome::Pending),
-            ("a", 2, Outcome::Pending),
-            ("z", 3, Outcome::Pending),
-            ("zero", 0, Outcome::Pending),
-            ("settled", 4, Outcome::Survived),
-        ]
-        .into_iter()
-        .map(|(package, ordinal, outcome)| Mutant {
-            package: package.into(),
-            ordinal,
-            outcome,
-            ..template.clone()
-        })
-        .collect();
-        assert_eq!(pending_packages(&plan), ["a", "z"]);
-        plan.mutants.clear();
-        assert!(pending_packages(&plan).is_empty());
-    }
-
-    #[test]
     fn package_membership_is_existential_and_abandonment_has_sorted_unique_ordinals() {
         let mut plan = plan();
         plan.mutants = [(9, "z"), (3, "a"), (7, "z"), (0, "z")]
@@ -216,38 +181,18 @@ mod final_survivor_tests {
             [("a", 1), ("z", 2)]
         );
     }
-
-    #[test]
-    fn narrowed_verdict_rollback_restores_the_prior_compiled_artifact_set() {
-        let original = HashSet::from_iter([Utf8PathBuf::from("src/original.rs")]);
-        let mut converger = Converger {
-            compiled: Some(original.clone()),
-            ..Converger::default()
-        };
-        let saved = converger.verdict_state();
-        converger.compiled = Some(HashSet::from_iter(["src/narrowed.rs".into()]));
-        converger.restore_verdict_state(saved);
-        assert_eq!(converger.compiled, Some(original));
-    }
 }
 
 /// A test-only stand-in for one proof build: a verdict on the complete active schema.
 ///
 /// Mirrors [`Converger::subset_fails`]'s own return: `Some(true)` failed, `Some(false)` compiled,
 /// `None` could not be told (a timeout).
-#[cfg(test)]
+#[cfg(any(test, feature = "internals"))]
 type SubsetOracle = fn(&HashSet<u32>) -> Option<bool>;
 
-/// What the stale build-ordering hints actually did, counted rather than modelled.
+/// Historical build-ordering probe counts retained for report compatibility.
 ///
-/// Every figure here is something that happened. There is deliberately no "rounds saved", because
-/// that number does not exist: it is the length of a convergence that was never run, over a mutant
-/// population that was never offered to the compiler in that shape, and any figure printed for it
-/// would be a model of a counterfactual dressed up as a measurement. What *can* be measured is how
-/// many mutants the hints put in front of the compiler early and how many of those the compiler
-/// then refused, and those two together say whether the hints are worth their round: `offered`
-/// close to `confirmed` is a hint set that is paying, and `confirmed` near zero is one that is
-/// costing a build per stage and buying nothing.
+/// Current convergence does not probe stale hints and leaves these counters at zero.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OrderingHints {
     /// How many hinted mutants were put in front of the compiler in a probe round.
@@ -263,16 +208,6 @@ pub struct OrderingHints {
     /// How many probe rounds the run spent, which is the cost side of the trade.
     pub rounds: u32,
 }
-
-/// How many hinted mutants make a probe round worth the build it costs.
-///
-/// A probe round is one extra cargo invocation. It repays that by putting the mutants likeliest to
-/// fail in front of the compiler with nothing else to mask them, so they are blamed together
-/// instead of a few per wave. Below a handful there is nothing to unmask — the ordinary rounds
-/// would have found them just as fast — and the build would be spent for nothing, so the round is
-/// simply not taken. The number is a judgement rather than a measurement, which is exactly why the
-/// run reports what the probes offered and confirmed instead of claiming a saving.
-const PROBE_FLOOR: usize = 4;
 
 /// What one round of a build cost, and what it bought.
 ///
@@ -352,35 +287,35 @@ pub struct Withdrawal {
 
 /// What a build round produced.
 #[derive(Debug, Default)]
-pub(super) struct Build {
+pub struct Build {
     /// What each round of this run's builds cost, oldest first.
-    pub(super) history: Vec<Round>,
+    pub history: Vec<Round>,
 
-    pub(super) binaries: Vec<TestBinary>,
+    pub binaries: Vec<TestBinary>,
 
     /// Cargo's successful final build stream, retained until the test runtime environment has
     /// been reconstructed from its artifacts and build-script outputs.
-    pub(super) artifacts: String,
-    pub(super) withdrawn: usize,
+    pub artifacts: String,
+    pub withdrawn: usize,
 
     /// How many rollback rounds the whole run spent, summed over its builds.
-    pub(super) rounds: u32,
+    pub rounds: u32,
 
     /// Whether a narrowed build was abandoned and the whole workspace built instead.
-    pub(super) widened: bool,
+    pub widened: bool,
 
     /// Why the withdrawn mutants were withdrawn, densest pair first.
-    pub(super) census: Vec<Withdrawal>,
+    pub census: Vec<Withdrawal>,
 
     /// The population given up on when this build could not be made to compile at all.
     ///
     /// `None` for a build that converged, which is the ordinary case. When it is set the binaries
     /// are empty — there is nothing to run a mutant against — and the run reports what it knows
     /// rather than exiting with nothing at all.
-    pub(super) stuck: Option<Abandoned>,
+    pub stuck: Option<Abandoned>,
 
-    /// What the stale build-ordering hints put in front of the compiler, and what came of it.
-    pub(super) ordering: OrderingHints,
+    /// Historical probe counts; current convergence leaves them at zero.
+    pub ordering: OrderingHints,
 }
 
 /// What one build arrived at.
@@ -390,7 +325,7 @@ pub(super) struct Build {
 /// report and carry on from; the second is a fact about the machine, which nothing downstream can
 /// say anything useful about. Only the first is modelled here — everything else stays an `Err`.
 #[derive(Debug)]
-enum Convergence {
+pub enum Convergence {
     /// The build succeeded, carrying cargo's JSON stream from the round that succeeded.
     Built(String),
 
@@ -400,7 +335,7 @@ enum Convergence {
 
 /// What a proof build isolated after rustc's spans could not identify a cause.
 #[derive(Debug)]
-enum Isolation {
+pub enum Isolation {
     /// One or more mutants failed even without any other mutant from their item.
     Blamed(Vec<u32>),
 
@@ -418,12 +353,12 @@ enum Isolation {
 /// of what cargo said — because that text is the only thing that tells a reader whether the answer
 /// is to raise a limit, to fix a build script, or to look somewhere else entirely.
 #[derive(Debug)]
-pub(super) struct Abandoned {
+pub struct Abandoned {
     /// The diagnostic explaining why the build could not be converged.
-    pub(super) reason: String,
+    pub reason: String,
 
     /// The ordinals of the mutants that will never be run because of it, ascending.
-    pub(super) ordinals: Vec<u32>,
+    pub ordinals: Vec<u32>,
 }
 
 /// Drives the build, withdrawing mutants that cannot compile until what is asked for compiles.
@@ -432,8 +367,13 @@ pub(super) struct Abandoned {
 /// mutants its diagnostics can identify, then repeats the same Cargo command with those mutations
 /// restored to their original source. `--rollback-rounds` caps this one convergence loop.
 #[derive(Debug, Default)]
-pub(super) struct Converger {
-    withdrawn: HashSet<u32>,
+pub struct Converger {
+    pub fixed_roots: Option<Vec<String>>,
+    pub compiler_exclusions: Option<crate::discover::CompilerExclusions>,
+    pub historical_exclusions: usize,
+    pub proof_background: HashSet<u32>,
+    pub proof_active: HashSet<u32>,
+    pub withdrawn: HashSet<u32>,
 
     /// The subset of `withdrawn` that was given up on rather than blamed.
     ///
@@ -442,22 +382,22 @@ pub(super) struct Converger {
     /// not be made to compile, so its whole population was taken out of the tree to let the run
     /// carry on. Conflating the two would report a mutant the tool never judged as one the tool
     /// judged unbuildable, which is the exact confusion this run is trying to avoid.
-    abandoned: HashSet<u32>,
+    pub abandoned: HashSet<u32>,
 
     /// Minimal compiler-conflict groups whose excluded member was never individually unviable.
-    interactions: HashMap<u32, Vec<u32>>,
+    pub interactions: HashMap<u32, Vec<u32>>,
 
     /// Budget-exhausted compiler contexts whose pending mutants were not judged.
-    unresolved: HashMap<u32, String>,
+    pub unresolved: HashMap<u32, String>,
 
     /// Mutants discovered from a different source generation than the synchronized build tree.
-    unavailable: HashSet<u32>,
+    pub unavailable: HashSet<u32>,
 
     /// How many rounds the build currently converging has spent, reset at the start of each one.
-    rounds: u32,
+    pub rounds: u32,
 
     /// How many rounds the whole run has spent, which is what the run reports.
-    total_rounds: u32,
+    pub total_rounds: u32,
 
     /// How many mutants each failed round of the current build blamed, oldest first.
     ///
@@ -470,25 +410,25 @@ pub(super) struct Converger {
     /// is then stopped before it can withdraw them. Recording the withdrawal would leave that round
     /// out of its own diagnostic, and the trend the advice reads is a trend in what the rounds are
     /// finding.
-    per_round: Vec<usize>,
+    pub per_round: Vec<usize>,
 
     /// What every round of every build in this run cost, oldest first.
     ///
     /// Unlike `per_round`, this is never reset: it describes the whole run, because what a reader
     /// wants to know is where the run's build time went, not where one stage's did.
-    history: Vec<Round>,
+    pub history: Vec<Round>,
 
     /// How long the first ordinary round of the current build took.
     ///
     /// Reset before each convergence. Subsequent rollback and isolation rounds repeat that build's
     /// Cargo command and roots, so they are comparable.
-    first_round: Option<Duration>,
+    pub first_round: Option<Duration>,
 
     /// What the tree already holds, so a round rewrites only the files it changed.
-    splices: Splices,
+    pub splices: Splices,
 
     /// Source files named by the successful instrumented test-target build.
-    compiled: Option<HashSet<Utf8PathBuf>>,
+    pub compiled: Option<HashSet<Utf8PathBuf>>,
 
     /// The rustc error code that first named each withdrawn mutant.
     ///
@@ -497,27 +437,7 @@ pub(super) struct Converger {
     /// and could be taught not to, while one dominated by the borrow checker is a cost of the
     /// schema itself. Distinguishing them by hand meant patching this file every time, which is why
     /// it is kept rather than derived on demand.
-    census: HashMap<u32, CompilerReason>,
-
-    /// Mutants that failed to compile for some earlier run whose build context no longer matches.
-    ///
-    /// Held by content id rather than by ordinal because ordinals are handed out as dependency
-    /// groups are scanned, so most of them do not exist yet when this is set.
-    ///
-    /// This is evidence about *order* and nothing else. Not one mutant in here is withheld,
-    /// excluded, settled or scored on the strength of it: every one is spliced into the tree and
-    /// offered to the compiler, and the only thing the hint decides is that it is offered early,
-    /// on its own, where a mutant that really is unviable is blamed with nothing else masking it.
-    /// A hint that turns out to be wrong costs exactly the round it was probed in, and the mutant
-    /// goes on to be built and judged as if it had never been named. That is what makes the tier
-    /// safe under a context that no longer matches, which filtering would not be.
-    hinted: HashSet<crate::model::MutantId>,
-
-    /// Ordinals already put through a probe round, so no build pays for the same probe twice.
-    probed: HashSet<u32>,
-
-    /// What the probe rounds offered and what the compiler made of it.
-    ordering: OrderingHints,
+    pub census: HashMap<u32, CompilerReason>,
 
     /// Whether every build this run makes must compile the whole workspace.
     ///
@@ -525,16 +445,10 @@ pub(super) struct Converger {
     /// later build retains that root set so Cargo's feature unification stays constant. Narrowing
     /// after a wide-only success would reproduce a known failure; narrowing an initially wide
     /// build would compile dependency variants that the final workspace build cannot reuse.
-    whole_workspace: bool,
-
-    /// Cargo's successful preflight artifact stream, used only to narrow later test-target builds.
-    target_discovery: Option<String>,
-
-    /// Packages with a library target in Cargo's resolved workspace metadata.
-    library_packages: Option<HashSet<String>>,
+    pub whole_workspace: bool,
 
     /// Whether the verdict oracle is restricted to library unit-test harnesses.
-    test_lib: bool,
+    pub test_lib: bool,
 
     /// A test-only stand-in for the proof build in [`Self::subset_fails`].
     ///
@@ -542,52 +456,35 @@ pub(super) struct Converger {
     /// combination, which no cheap real mutation fixture produces. When set, each proof build asks
     /// this function — a pure verdict on which ordinals are spliced — instead of invoking cargo, so
     /// a test can drive isolation to any branch deterministically without a real interaction bug.
-    #[cfg(test)]
-    subset_oracle: Option<SubsetOracle>,
-    #[cfg(test)]
-    proof_roots: Vec<Option<Vec<String>>>,
+    #[cfg(any(test, feature = "internals"))]
+    pub subset_oracle: Option<SubsetOracle>,
+    #[cfg(any(test, feature = "internals"))]
+    pub proof_roots: Vec<Option<Vec<String>>>,
 
     /// Aggregate isolation work shared by every diagnostic context in one Cargo invocation.
-    isolation_budget: IsolationBudget,
-}
-
-#[derive(Clone)]
-struct VerdictState {
-    withdrawn: HashSet<u32>,
-    abandoned: HashSet<u32>,
-    interactions: HashMap<u32, Vec<u32>>,
-    unresolved: HashMap<u32, String>,
-    unavailable: HashSet<u32>,
-    census: HashMap<u32, CompilerReason>,
-    probed: HashSet<u32>,
-    ordering: OrderingHints,
-    compiled: Option<HashSet<Utf8PathBuf>>,
+    pub isolation_budget: IsolationBudget,
 }
 
 /// What a preflight check settled: the scope it needed, and what it cost to pass at all.
 #[derive(Debug)]
-pub(super) struct Preflight {
+pub struct Preflight {
     /// Whether only a whole-workspace build was shown to compile.
     ///
     /// Carried rather than discarded because a narrowed build after a wide-only success is a build
     /// already known to fail — and its failure would be blamed on mutants, settling valid ones as
     /// unbuildable and quietly shrinking the population the score is taken over.
-    pub(super) whole_workspace: bool,
+    pub whole_workspace: bool,
 
     /// The packages the check had to give up on, empty in the ordinary case.
-    pub(super) dropped: Vec<String>,
-
-    /// Artifact identities from the successful unmodified check.
-    pub(super) discovery: String,
+    pub dropped: Vec<String>,
 }
 
 impl Preflight {
     /// The result of a check that passed in the scope it was asked about.
-    fn narrow(dropped: Vec<String>, discovery: String) -> Self {
+    fn narrow(dropped: Vec<String>) -> Self {
         Self {
             whole_workspace: false,
             dropped,
-            discovery,
         }
     }
 }
@@ -599,16 +496,32 @@ fn isolation_candidate(mutant: &Mutant, withdrawn: &HashSet<u32>, packages: Opti
 }
 
 impl Converger {
-    /// A converger that front-loads the mutants an out-of-context record says would not compile.
-    ///
-    /// `hinted` holds mutant content ids. Passing ids that name nothing in this run is harmless:
-    /// they resolve to no ordinal and no probe round is taken for them.
-    pub(super) fn guided(hinted: HashSet<crate::model::MutantId>) -> Self {
-        Self { hinted, ..Self::default() }
+    pub fn freeze_context(&mut self, roots: Option<&[String]>) {
+        // Checks and final code generation retain the pristine validation's package/target,
+        // feature, profile, and compiler context so exclusions stay attributable to mutant edits.
+        self.fixed_roots = Some(roots.unwrap_or_default().to_vec());
+    }
+
+    #[must_use]
+    pub fn check_verb(&self) -> &'static [&'static str] {
+        if self.test_lib {
+            &["test", "--no-run", "--lib", "--no-fail-fast"]
+        } else {
+            &["check", "--tests", "--keep-going"]
+        }
+    }
+
+    fn persist_compiler_exclusions(&mut self, work: &Workspace, plan: &Plan, blamed: &HashMap<u32, CompilerReason>) -> Result<()> {
+        if let Some(inventory) = self.compiler_exclusions.as_mut()
+            && inventory.remember(&plan.mutants, &blamed.keys().copied().collect(), |ordinal| blamed[&ordinal].note())
+        {
+            inventory.store(work.base())?;
+        }
+        Ok(())
     }
 
     /// Restricts preflight and final test-target builds to library unit-test harnesses.
-    pub(super) fn select_test_lib(&mut self, selected: bool) {
+    pub fn select_test_lib(&mut self, selected: bool) {
         self.test_lib = selected;
     }
 
@@ -616,17 +529,8 @@ impl Converger {
     ///
     /// Called with the preflight's own answer, so that the scope which proved the tree sound is the
     /// scope every later build uses. See [`Self::whole_workspace`].
-    pub(super) const fn require_whole_workspace(&mut self) {
+    pub const fn require_whole_workspace(&mut self) {
         self.whole_workspace = true;
-    }
-
-    /// Supplies the successful unmodified artifact stream used for target-level narrowing.
-    pub(super) fn target_discovery(&mut self, discovery: String) {
-        self.target_discovery = Some(discovery);
-    }
-
-    pub(super) fn library_packages(&mut self, packages: HashSet<String>) {
-        self.library_packages = Some(packages);
     }
 
     /// Invalidates position-based splice indexes after the plan is sorted.
@@ -678,32 +582,6 @@ impl Converger {
         self.isolation_budget = IsolationBudget::default();
     }
 
-    fn verdict_state(&self) -> VerdictState {
-        VerdictState {
-            withdrawn: self.withdrawn.clone(),
-            abandoned: self.abandoned.clone(),
-            interactions: self.interactions.clone(),
-            unresolved: self.unresolved.clone(),
-            unavailable: self.unavailable.clone(),
-            census: self.census.clone(),
-            probed: self.probed.clone(),
-            ordering: self.ordering,
-            compiled: self.compiled.clone(),
-        }
-    }
-
-    fn restore_verdict_state(&mut self, state: VerdictState) {
-        self.withdrawn = state.withdrawn;
-        self.abandoned = state.abandoned;
-        self.interactions = state.interactions;
-        self.unresolved = state.unresolved;
-        self.unavailable = state.unavailable;
-        self.census = state.census;
-        self.probed = state.probed;
-        self.ordering = state.ordering;
-        self.compiled = state.compiled;
-    }
-
     fn admit_withdrawal_round(&mut self, blamed: usize, limits: BuildLimits) -> bool {
         self.per_round.push(blamed);
         self.rounds < limits.rounds()
@@ -725,7 +603,7 @@ impl Converger {
         clippy::too_many_lines,
         reason = "the convergence loop keeps one auditable state transition from Cargo outcome through verdict publication"
     )]
-    fn converge_scoped(
+    pub fn converge_scoped(
         &mut self,
         work: &Workspace,
         plan: &Plan,
@@ -741,11 +619,6 @@ impl Converger {
         self.begin_convergence();
         let may_compile_test_harnesses = compiles_test_harnesses(verb);
 
-        // Before the first ordinary round, and only ever before it. Whatever the probe withdraws is
-        // withdrawn by the compiler's own accusation in a real build, so the loop below starts from
-        // a tree the compiler has already ruled on rather than from a guess.
-        self.probe(work, plan, scope, verb, limits, events)?;
-
         loop {
             self.rounds = self.rounds.saturating_add(1);
             self.total_rounds = self.total_rounds.saturating_add(1);
@@ -753,6 +626,11 @@ impl Converger {
             let withdrawn = self.scoped_withdrawn(plan, scope.mutants);
             let (guards, written) = self.instrument_schema(work, plan, &withdrawn)?;
 
+            events.convergence_activity(
+                self.total_rounds,
+                self.historical_exclusions + self.census.len(),
+                self.isolation_budget.proof_count(),
+            );
             let started = Instant::now();
             let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
             let mut elapsed = started.elapsed();
@@ -824,18 +702,29 @@ impl Converger {
                     unresolved.retain(|(ordinals, _context)| !ordinals.is_empty());
                 }
 
-                if
-                // #[gamma::skip(cond.always_false, cond.negate, logical.or_remove_right, logical.or_to_and, tag = "timeout", reason = "skipping withdrawal of pending isolation contexts repeatedly compiles the same failing population")]
-                !interactions.is_empty()
-                        ||
-                        // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "ignoring unresolved contexts repeatedly compiles the same failing population")]
-                        !unresolved.is_empty()
-                {
+                if blamed.is_empty() && interactions.is_empty() && !unresolved.is_empty() {
+                    let mut contexts = unresolved
+                        .iter()
+                        .map(|(ordinals, context)| format!("{context} ({} unresolved candidates)", ordinals.len()))
+                        .collect::<Vec<_>>();
+                    contexts.sort_unstable();
+                    contexts.dedup();
+                    self.history.push(build_round(elapsed, plan, []));
+                    return Err(error!(
+                        "could not safely isolate compiler failures in {} within the bounded proof budget; \
+                         no unproven mutants were excluded. Re-run with `--show-build` to inspect the generated-code \
+                         errors, then fix the mutation encoding or narrow the campaign with `--file`. \
+                         Increasing the rollback limit does not increase the isolation proof budget",
+                        contexts.join(", ")
+                    ));
+                }
+
+                if !interactions.is_empty() {
                     let mut withdrawn = blamed.keys().copied().collect::<Vec<_>>();
                     withdrawn.extend(interactions.iter().map(|(excluded, _members)| *excluded));
-                    withdrawn.extend(unresolved.iter().flat_map(|(ordinals, _context)| ordinals.iter().copied()));
                     withdrawn.sort_unstable();
                     withdrawn.dedup();
+                    self.persist_compiler_exclusions(work, plan, &blamed)?;
                     if !self.admit_withdrawal_round(withdrawn.len(), limits) {
                         let error = Self::rollback_limit_error(self.rounds, limits.rounds(), &self.per_round, work, &stdout);
                         self.history.push(build_round(elapsed, plan, []));
@@ -854,17 +743,9 @@ impl Converger {
                         let _ = self.abandoned.insert(excluded);
                         let _ = self.interactions.insert(excluded, members);
                     }
-                    for (ordinals, context) in unresolved {
-                        for ordinal in ordinals {
-                            withdrawn.push(ordinal);
-                            let _ = self.withdrawn.insert(ordinal);
-                            let _ = self.abandoned.insert(ordinal);
-                            let _ = self.unresolved.insert(ordinal, context.clone());
-                        }
-                    }
                     self.history.push(build_round(elapsed, plan, withdrawn));
                     if scope.publish_progress && self.census.len() > census_before {
-                        events.convergence_progress(self.census.len());
+                        events.convergence_progress(self.historical_exclusions + self.census.len());
                     }
                     continue;
                 }
@@ -875,6 +756,7 @@ impl Converger {
             // chance to withdraw them. Reading the series without it leaves a one-round budget with
             // nothing to report and the advice saying the last round found nothing, which is the
             // opposite of what happened.
+            self.persist_compiler_exclusions(work, plan, &blamed)?;
             if !self.admit_withdrawal_round(blamed.len(), limits) {
                 let error = Self::rollback_limit_error(self.rounds, limits.rounds(), &self.per_round, work, &stdout);
 
@@ -893,13 +775,13 @@ impl Converger {
                 let _ = self.census.entry(ordinal).or_insert(reason);
             }
             if scope.publish_progress && self.census.len() > census_before {
-                events.convergence_progress(self.census.len());
+                events.convergence_progress(self.historical_exclusions + self.census.len());
             }
         }
     }
 
-    #[cfg(test)]
-    fn converge(
+    #[cfg(any(test, feature = "internals"))]
+    pub fn converge(
         &mut self,
         work: &Workspace,
         plan: &Plan,
@@ -920,148 +802,6 @@ impl Converger {
             limits,
             events,
         )
-    }
-
-    /// Builds only the mutants an out-of-context record expects to fail, before anything else.
-    ///
-    /// This is the whole of what a stale unviability tier is allowed to do. It does not withhold a
-    /// mutant, settle one, exclude one, or touch the population in any way — every live mutant in
-    /// the selection is still built and still judged. What it changes is the *order* the compiler
-    /// meets them in: the hinted ones go first, alone, so that a genuinely unviable mutant is
-    /// blamed with no other mutant's error masking it, and the ordinary convergence below starts
-    /// with them already out of the tree instead of discovering them a wave at a time.
-    ///
-    /// Everything it withdraws is withdrawn on the compiler's evidence, in a real build, exactly as
-    /// an ordinary round withdraws. A hint that was wrong simply produces a mutant that compiles:
-    /// it stays live, it is spliced back in by the next round, and it is judged as if it had never
-    /// been hinted at all. That is the property that makes the tier safe when the context no longer
-    /// matches, and it is why the probe is allowed to run without any envelope check.
-    ///
-    /// Best-effort throughout. A probe that times out, that cannot be attributed, or that fails for
-    /// reasons no mutant can be blamed for is abandoned without a word: the ordinary convergence
-    /// that follows asks the same question properly and is the one whose answer the run reports.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn probe(
-        &mut self,
-        work: &Workspace,
-        plan: &Plan,
-        scope: BuildScope<'_>,
-        verb: &[&str],
-        limits: BuildLimits,
-        events: &mut dyn Events,
-    ) -> Result<()> {
-        let (candidates, deferred) = self.probe_sets(plan, scope.mutants);
-
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-        if candidates.len() < PROBE_FLOOR {
-            return Ok(());
-        }
-
-        events.build_progress(&format!(
-            "probing {} that did not compile for an earlier run before building the rest",
-            crate::report::quantity(candidates.len(), "mutant")
-        ));
-
-        // Marked before the build rather than after it, so a probe that fails in any of the ways
-        // below is still never repeated: the cost of a wasted round is bounded at one per mutant
-        // for the whole run.
-        self.probed.extend(candidates.iter().copied());
-        self.ordering.offered = self.ordering.offered.saturating_add(candidates.len());
-        self.ordering.rounds = self.ordering.rounds.saturating_add(1);
-
-        let (guards, _written) = self.instrument_schema(work, plan, &deferred)?;
-
-        let started = Instant::now();
-        let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
-        let elapsed = started.elapsed();
-
-        // Counted as a round of this run's build time because that is what it is, and hiding it
-        // would make the reported build total disagree with the clock. It is deliberately not
-        // charged against `--rollback-rounds`, which caps how many times a build may withdraw
-        // before it is declared unconvergeable: the probe is an extra round the run chose to
-        // spend, and letting it eat that budget could turn a build that would have converged into
-        // an abandoned population.
-        self.total_rounds = self.total_rounds.saturating_add(1);
-
-        let Some(stdout) = outcome.stdout else {
-            self.history.push(build_round(elapsed, plan, []));
-
-            return Ok(());
-        };
-
-        // A probe compiles a fraction of the mutants and usually stops on the first errors, so it
-        // cannot calibrate the ordinary rounds that follow.
-
-        if outcome.succeeded {
-            // Every hint was wrong: nothing here is unviable now. Nothing is withdrawn and nothing
-            // is recorded against these mutants — the round bought only the knowledge that it did
-            // not need to be taken, which `offered` against `confirmed` is what reports.
-            self.history.push(build_round(elapsed, plan, []));
-
-            return Ok(());
-        }
-
-        let mut blamed = blame(&stdout, &work.root, &guards);
-        retain_blamed(&mut blamed, plan, scope.mutants);
-
-        let census_before = self.census.len();
-        for (ordinal, reason) in &blamed {
-            let _ = self.withdrawn.insert(*ordinal);
-            let _ = self.census.entry(*ordinal).or_insert_with(|| reason.clone());
-        }
-
-        // The probe is deliberately one speculative build. Diagnostics directly attributed by
-        // that build are useful ordering evidence; proving every remaining hint would turn this
-        // optimization into an unreported convergence campaign. Ordinary convergence below owns
-        // any proof-build isolation still needed for correctness.
-
-        self.history.push(build_round(elapsed, plan, blamed.keys().copied()));
-        self.ordering.confirmed = self.ordering.confirmed.saturating_add(blamed.len());
-
-        if scope.publish_progress && self.census.len() > census_before {
-            events.convergence_progress(self.census.len());
-        }
-
-        Ok(())
-    }
-
-    /// The mutants to probe, and the exclusion set that leaves only them in the tree.
-    ///
-    /// Restricted to the packages this probe may judge. Every other live mutant is deferred even
-    /// when Cargo's roots are wider, so an error from another stage cannot mask or be mistaken for
-    /// evidence about a hinted candidate.
-    fn probe_sets(&self, plan: &Plan, select: Option<&[String]>) -> (Vec<u32>, HashSet<u32>) {
-        // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
-        let mine = |mutant: &Mutant| select.is_none_or(|names| names.iter().any(|name| name.as_str() == &*mutant.package));
-
-        let mut candidates: Vec<u32> = Vec::new();
-        let mut deferred = self.withdrawn.clone();
-
-        for mutant in &plan.mutants {
-            if mutant.ordinal == 0 || self.withdrawn.contains(&mutant.ordinal) {
-                continue;
-            }
-
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-            if !mine(mutant) {
-                let _ = deferred.insert(mutant.ordinal);
-                continue;
-            }
-
-            if self.hinted.contains(&mutant.id) && !self.probed.contains(&mutant.ordinal) {
-                candidates.push(mutant.ordinal);
-            } else {
-                let _ = deferred.insert(mutant.ordinal);
-            }
-        }
-
-        // Sorted so that the probe a run takes depends only on the plan and the hints, never on the
-        // iteration order of a set. The build keys by ordinal, but the reported counts and any
-        // future tie-break would otherwise vary between two runs over an identical tree.
-        // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
-        candidates.sort_unstable();
-
-        (candidates, deferred)
     }
 
     fn build_timeout_error(stage: &str, budget: Duration) -> Error {
@@ -1134,7 +874,7 @@ impl Converger {
     /// between, its spans no longer describe the tree this run proved and will test. Those mutants
     /// are explicitly reported as not built rather than either spliced at the wrong offsets or
     /// allowed to reach the missing-guard invariant as an internal error.
-    fn instrument_schema(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<(Guards, Vec<Utf8PathBuf>)> {
+    pub fn instrument_schema(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<(Guards, Vec<Utf8PathBuf>)> {
         let instrumented = self.splices.instrument(work, plan, withdrawn)?;
 
         self.withdrawn.extend(instrumented.unavailable.iter().copied());
@@ -1144,7 +884,7 @@ impl Converger {
         Ok((instrumented.guards, instrumented.written))
     }
 
-    fn instrument_active_schema(&mut self, work: &Workspace, plan: &Plan, active: &HashSet<u32>) -> Result<Vec<Utf8PathBuf>> {
+    pub fn instrument_active_schema(&mut self, work: &Workspace, plan: &Plan, active: &HashSet<u32>) -> Result<Vec<Utf8PathBuf>> {
         let instrumented = self.splices.instrument_active(work, plan, active)?;
 
         self.withdrawn.extend(instrumented.unavailable.iter().copied());
@@ -1179,7 +919,7 @@ impl Converger {
     /// library-harness-only contract. Neither path proves link-time or post-monomorphization
     /// behavior, so later builds still report failures they cannot attribute to a mutant.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(super) fn preflight(
+    pub fn preflight(
         work: &Workspace,
         plan: &Plan,
         select: Option<&[String]>,
@@ -1188,7 +928,7 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<Preflight> {
-        Self::check(work, plan, select, mutating, test_lib, limits, events).map(|discovery| Preflight::narrow(Vec::new(), discovery))
+        Self::check(work, plan, select, mutating, test_lib, limits, events).map(|_| Preflight::narrow(Vec::new()))
     }
 
     /// Runs one preflight check over the packages named, or the whole workspace when none are.
@@ -1350,7 +1090,7 @@ impl Converger {
     ///
     /// Only mutants the compiler actually blamed are called unviable; what was abandoned wholesale
     /// already carries [`Outcome::NotBuilt`] from [`Self::abandon`] and keeps it.
-    pub(super) fn settle(&self, plan: &mut Plan) {
+    pub fn settle(&self, plan: &mut Plan) {
         for mutant in &mut plan.mutants {
             if self.unavailable.contains(&mutant.ordinal) {
                 mutant.outcome = Outcome::NotBuilt;
@@ -1382,154 +1122,12 @@ impl Converger {
         }
     }
 
-    /// Compiles the test targets of `select`, or of the whole workspace when it is `None`.
-    ///
-    /// Returns cargo's JSON stream, whose artifact messages name the test binaries.
-    fn converge_check(
-        &mut self,
-        work: &Workspace,
-        plan: &Plan,
-        select: Option<&[String]>,
-        limits: BuildLimits,
-        publish_progress: bool,
-        events: &mut dyn Events,
-    ) -> Result<Convergence> {
-        if self.test_lib {
-            return self.converge_scoped(
-                work,
-                plan,
-                BuildScope {
-                    roots: select,
-                    mutants: None,
-                    publish_progress,
-                },
-                &["check", "--keep-going", "--lib"],
-                limits,
-                events,
-            );
-        }
-
-        // Cargo rejects `--lib` only when every selected package lacks a library target. A mixed
-        // selection accepts the normal `--lib --bins --tests` selectors without changing manifests.
-        let only_binaries = self.library_packages.as_ref().is_some_and(|libraries| {
-            select.map_or_else(
-                || !plan.specs.is_empty() && plan.specs.keys().all(|package| !libraries.contains(package)),
-                |packages| !packages.is_empty() && packages.iter().all(|package| !libraries.contains(package)),
-            )
-        });
-        let verb: &[&str] = if only_binaries {
-            &["check", "--keep-going", "--bins", "--tests"]
-        } else {
-            &["check", "--keep-going", "--lib", "--bins", "--tests"]
-        };
-
-        self.converge_scoped(
-            work,
-            plan,
-            BuildScope {
-                roots: select,
-                mutants: None,
-                publish_progress,
-            },
-            verb,
-            limits,
-            events,
-        )
-    }
-
-    /// Compiles the test targets of `select`, or of the whole workspace when it is `None`.
-    ///
-    /// Returns cargo's JSON stream, whose artifact messages name the test binaries.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compile(
-        &mut self,
-        work: &Workspace,
-        plan: &Plan,
-        select: Option<&[String]>,
-        limits: BuildLimits,
-        publish_progress: bool,
-        events: &mut dyn Events,
-    ) -> Result<Convergence> {
-        if self.test_lib {
-            return self.converge_scoped(
-                work,
-                plan,
-                BuildScope {
-                    roots: select,
-                    mutants: None,
-                    publish_progress,
-                },
-                &["test", "--no-run", "--lib", "--no-fail-fast"],
-                limits,
-                events,
-            );
-        }
-
-        let target_args = self
-            .target_discovery
-            .as_deref()
-            .and_then(|stdout| linked_target_args(stdout, &work.root, work.rustc_captures().as_deref(), plan));
-        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-        let mut verb = vec!["build", "--keep-going"];
-
-        if let Some(target_args) = &target_args {
-            verb.extend(target_args.iter().map(String::as_str));
-        } else {
-            verb.push("--tests");
-        }
-
-        // The successful preflight can replace `--tests` with exact Cargo target selectors. Either
-        // form emits the compiler-artifact executable messages consumed by `test_binaries`, while
-        // `--keep-going` lets convergence collect diagnostics from siblings after one target fails.
-        // Reusing this stream avoids a second cache-hit Cargo invocation.
-        let before_narrow = self.verdict_state();
-        let narrowed = self.converge_scoped(
-            work,
-            plan,
-            BuildScope {
-                roots: select,
-                mutants: None,
-                publish_progress: publish_progress && target_args.is_none(),
-            },
-            &verb,
-            limits,
-            events,
-        )?;
-
-        match (target_args.is_some(), narrowed) {
-            (true, Convergence::Stuck(narrow)) => {
-                self.restore_verdict_state(before_narrow);
-                match self.converge_scoped(
-                    work,
-                    plan,
-                    BuildScope {
-                        roots: select,
-                        mutants: None,
-                        publish_progress,
-                    },
-                    &["build", "--tests", "--keep-going"],
-                    limits,
-                    events,
-                )? {
-                    Convergence::Built(stdout) => Ok(Convergence::Built(stdout)),
-                    Convergence::Stuck(_whole) => Ok(Convergence::Stuck(narrow)),
-                }
-            }
-            (_narrowed, convergence) => {
-                if publish_progress && target_args.is_some() && self.census.len() > before_narrow.census.len() {
-                    events.convergence_progress(self.census.len());
-                }
-                Ok(convergence)
-            }
-        }
-    }
-
     /// Converges the complete instrumented population and produces its test binaries.
     ///
     /// A build that cannot be made to compile leaves no test binary to judge anything with, so
     /// every mutant still live is abandoned and the returned [`Build`] says so. The run reports
     /// what it has rather than exiting with nothing.
-    pub(super) fn finish(
+    pub fn finish(
         mut self,
         work: &Workspace,
         plan: &mut Plan,
@@ -1537,102 +1135,51 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<Build> {
-        let select = self.scoped(select);
-        let check_packages = pending_packages(plan);
-        let check_select = (!self.whole_workspace && !check_packages.is_empty()).then_some(check_packages.as_slice());
-        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-        let mut widened = false;
-
-        let before_narrow_check = self.verdict_state();
-        let checked = match self.converge_check(work, plan, check_select, limits, check_select.is_none(), events)? {
-            Convergence::Built(stdout) => {
-                if check_select.is_some() && self.census.len() > before_narrow_check.census.len() {
-                    events.convergence_progress(self.census.len());
-                }
-                Convergence::Built(stdout)
-            }
-            Convergence::Stuck(narrow) if check_select.is_some() => {
-                widened = true;
-                self.restore_verdict_state(before_narrow_check);
-
-                match self.converge_check(work, plan, None, limits, true, events)? {
-                    Convergence::Built(stdout) => Convergence::Built(stdout),
-                    Convergence::Stuck(_whole) => Convergence::Stuck(narrow),
-                }
-            }
-            Convergence::Stuck(reason) => Convergence::Stuck(reason),
+        let roots = match &self.fixed_roots {
+            Some(roots) if roots.is_empty() => None,
+            Some(roots) => Some(roots.clone()),
+            None => self.scoped(select).map(<[String]>::to_vec),
         };
-
-        let checked_stdout = match checked {
-            Convergence::Built(stdout) => stdout,
-            Convergence::Stuck(reason) => {
-                let stuck = self.abandon_run(plan, &reason);
-
-                self.settle(plan);
-
-                return Ok(Build {
-                    history: self.history.clone(),
-                    census: self.tally(plan),
-                    binaries: Vec::new(),
-                    artifacts: String::new(),
-                    withdrawn: self.withdrawn.len().saturating_sub(self.abandoned.len()),
-                    rounds: self.total_rounds,
-                    widened,
-                    stuck: Some(stuck),
-                    ordering: self.ordering,
-                });
-            }
-        };
-        self.remember_compiled(&checked_stdout, &work.root);
-
-        let before_narrow_build = self.verdict_state();
-        let converged = match self.compile(work, plan, select, limits, select.is_none(), events)? {
-            Convergence::Built(stdout) => {
-                if select.is_some() && self.census.len() > before_narrow_build.census.len() {
-                    events.convergence_progress(self.census.len());
+        let mut stdout = String::new();
+        for codegen in [false, true] {
+            let verb = if !codegen || self.test_lib {
+                self.check_verb()
+            } else {
+                &["build", "--tests", "--keep-going"]
+            };
+            match self.converge_scoped(
+                work,
+                plan,
+                BuildScope {
+                    roots: roots.as_deref(),
+                    mutants: None,
+                    publish_progress: true,
+                },
+                verb,
+                limits,
+                events,
+            )? {
+                Convergence::Built(artifacts) => {
+                    self.remember_compiled(&artifacts, &work.root);
+                    stdout = artifacts;
                 }
-                Convergence::Built(stdout)
-            }
-
-            // A narrowed build is not merely a smaller version of the whole one: cargo unifies
-            // features over the packages it is told to build, so a test target that only compiles
-            // because a package left out of the selection switches a feature on will fail here and
-            // will fail in a way no mutant can be blamed for. That is a wrong answer to the
-            // question the run is asking, so the selection is abandoned rather than reported.
-            Convergence::Stuck(narrow) if select.is_some() => {
-                widened = true;
-                self.restore_verdict_state(before_narrow_build);
-
-                match self.compile(work, plan, None, limits, true, events)? {
-                    Convergence::Built(stdout) => Convergence::Built(stdout),
-                    Convergence::Stuck(_whole) => Convergence::Stuck(narrow),
+                Convergence::Stuck(reason) => {
+                    let stuck = self.abandon_run(plan, &reason);
+                    self.settle(plan);
+                    return Ok(Build {
+                        history: self.history.clone(),
+                        census: self.tally(plan),
+                        binaries: Vec::new(),
+                        artifacts: String::new(),
+                        withdrawn: self.historical_exclusions + self.withdrawn.len().saturating_sub(self.abandoned.len()),
+                        rounds: self.total_rounds,
+                        widened: false,
+                        stuck: Some(stuck),
+                        ordering: OrderingHints::default(),
+                    });
                 }
             }
-
-            Convergence::Stuck(reason) => Convergence::Stuck(reason),
-        };
-
-        let stdout = match converged {
-            Convergence::Built(stdout) => stdout,
-
-            Convergence::Stuck(reason) => {
-                let stuck = self.abandon_run(plan, &reason);
-
-                self.settle(plan);
-
-                return Ok(Build {
-                    history: self.history.clone(),
-                    census: self.tally(plan),
-                    binaries: Vec::new(),
-                    artifacts: String::new(),
-                    withdrawn: self.withdrawn.len().saturating_sub(self.abandoned.len()),
-                    rounds: self.total_rounds,
-                    widened,
-                    stuck: Some(stuck),
-                    ordering: self.ordering,
-                });
-            }
-        };
+        }
 
         self.settle(plan);
         // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -1656,11 +1203,11 @@ impl Converger {
             census: self.tally(plan),
             binaries,
             artifacts: stdout,
-            withdrawn: self.withdrawn.len().saturating_sub(self.abandoned.len()),
+            withdrawn: self.historical_exclusions + self.withdrawn.len().saturating_sub(self.abandoned.len()),
             rounds: self.total_rounds,
-            widened,
+            widened: false,
             stuck: None,
-            ordering: self.ordering,
+            ordering: OrderingHints::default(),
         })
     }
 
@@ -1696,6 +1243,18 @@ impl Converger {
             let (package, mutator) = identities.get(ordinal).copied().unwrap_or(("", ""));
 
             *counts.entry((reason, package, mutator)).or_default() += 1;
+        }
+
+        let historical = CompilerReason {
+            category: "historical compiler exclusion".into(),
+            ..CompilerReason::default()
+        };
+        for mutant in plan
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.ordinal == 0 && mutant.outcome == Outcome::CompileError)
+        {
+            *counts.entry((&historical, &mutant.package, &mutant.mutator)).or_default() += 1;
         }
 
         let mut census: Vec<Withdrawal> = counts
@@ -1758,3 +1317,8 @@ fn withdraw_uncompiled(plan: &mut Plan, compiled: &HashSet<Utf8PathBuf>) {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod mutation_outcome_tests;
+
+/// Native integration-test access to schema and compiler adapters.
+#[cfg(any(test, feature = "internals"))]
+#[doc(hidden)]
+pub mod native_test_util;

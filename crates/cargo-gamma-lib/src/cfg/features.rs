@@ -9,8 +9,8 @@
 //! which would make discovery fail on a tree that builds perfectly well offline.
 //!
 //! So the answer is computed here from the metadata this tool already loads, which lists every
-//! workspace member's own feature table and its declared dependencies. That is enough to be exact
-//! about workspace members, which are the only packages whose code gets mutated.
+//! workspace member's own feature table and its declared dependencies. Conditional or unselected
+//! dependency contributions are kept uncertain when that closure is used for cfg evaluation.
 //!
 //! # What is resolved
 //!
@@ -26,9 +26,9 @@
 //!
 //! # Erring toward keeping a mutant
 //!
-//! Anything ambiguous resolves toward the feature being *on*, which keeps the code mutable and the
-//! mutants in the population. An optional dependency is treated as enabled if anything could enable
-//! it, because being wrong in the other direction would silently drop mutants from live code.
+//! An optional dependency contributes features only after its activation is established. Uncertain
+//! activation must remain unknown in cfg evaluation: guessing "on" would strip live code under
+//! `not(feature = "...")` just as guessing "off" would strip its positive branch.
 
 use cargo_metadata::{DependencyKind, Metadata, Package};
 
@@ -124,66 +124,106 @@ fn seed(package: &Package, args: &FeatureArgs, named: &[(Option<String>, String)
 
 /// Runs worklist-driven propagation to a fixed point.
 ///
-/// Instead of full rescans, each newly enabled feature is pushed onto a queue. When a feature is
-/// popped, its entries (other features it activates) are processed. If any of those turn on a new
-/// feature, that new feature is pushed. Dependency edges are processed once per member. This is
-/// O(E) in the number of feature edges rather than O(V * passes).
+/// A changed package is queued again so newly activated optional dependencies and previously weak
+/// forwarding entries are reconsidered together.
 fn propagate_worklist(members: &[&Package], renames: &Renames, on: &mut HashMap<String, HashSet<String>>) {
     use std::collections::VecDeque;
 
     let packages: HashMap<&str, &Package> = members.iter().map(|package| (package.name.as_str(), *package)).collect();
-
-    // Seed the worklist with every feature that is already on.
-    let mut queue: VecDeque<(String, String)> = VecDeque::new();
-
-    for (package, features) in on.iter() {
-        for feature in features {
-            queue.push_back((package.clone(), feature.clone()));
-        }
-    }
-
-    // Also enqueue dependency-contributed features from the initial state.
-    for package in members {
-        for dependency in &package.dependencies {
-            let target = dependency.name.as_str();
-
-            // #[gamma::skip(cond.always_false, reason = "for nonmembers every subsequent turn_on returns false without inserting or enqueueing, so bypassing this fast path leaves the feature sets unchanged")]
-            if !on.contains_key(target) {
-                // #[gamma::skip(loop.delete_continue, reason = "for nonmembers every subsequent turn_on returns false without inserting or enqueueing, so falling through leaves the feature sets unchanged")]
-                continue;
-            }
-
-            if matches!(dependency.kind, DependencyKind::Unknown) {
-                continue;
-            }
-
-            for feature in &dependency.features {
-                if turn_on(target, feature, on) {
-                    queue.push_back((target.to_owned(), feature.clone()));
-                }
-            }
-
-            if dependency.uses_default_features && turn_on(target, "default", on) {
-                queue.push_back((target.to_owned(), "default".to_owned()));
-            }
-        }
-    }
-
-    while let Some((package_name, feature)) = queue.pop_front() {
+    let mut queue: VecDeque<String> = members.iter().map(|package| package.name.to_string()).collect();
+    let mut queued: HashSet<String> = queue.iter().cloned().collect();
+    while let Some(package_name) = queue.pop_front() {
+        let _removed = queued.remove(&package_name);
         let package = packages
             .get(package_name.as_str())
             .copied()
-            .expect("the worklist only receives features for workspace members");
-
-        // A feature's own entries: `foo = ["bar", "dep/baz"]`.
-        if let Some(entries) = package.features.get(&feature) {
+            .expect("the worklist only receives workspace package names");
+        let mine = on.get(&package_name).cloned().unwrap_or_default();
+        let mut changed = Vec::new();
+        for feature in &mine {
+            let Some(entries) = package.features.get(feature) else { continue };
             for entry in entries {
-                if let Some((pkg, feat)) = apply_worklist(entry, &package_name, renames, on) {
-                    queue.push_back((pkg, feat));
+                if !forwarding_is_active(package, entry, &mine) {
+                    continue;
+                }
+                if let Some((pkg, _feature)) = apply_worklist(entry, &package_name, renames, on) {
+                    changed.push(pkg);
                 }
             }
         }
+        for dependency in &package.dependencies {
+            if matches!(dependency.kind, DependencyKind::Unknown) || !dependency_is_active(package, dependency, &mine) {
+                continue;
+            }
+            let target = dependency.name.as_str();
+            for feature in dependency
+                .features
+                .iter()
+                .map(String::as_str)
+                .chain(dependency.uses_default_features.then_some("default"))
+            {
+                if turn_on(target, feature, on) {
+                    changed.push(target.to_owned());
+                }
+            }
+        }
+        for package in changed {
+            if queued.insert(package.clone()) {
+                queue.push_back(package);
+            }
+        }
     }
+}
+
+fn dependency_is_active(package: &Package, dependency: &cargo_metadata::Dependency, mine: &HashSet<String>) -> bool {
+    let alias = dependency.rename.as_deref().unwrap_or(dependency.name.as_str());
+    !dependency.optional
+        || mine.contains(alias)
+        || mine
+            .iter()
+            .filter_map(|feature| package.features.get(feature))
+            .flatten()
+            .any(|entry| entry.strip_prefix("dep:") == Some(alias) || entry.split_once('/').is_some_and(|(token, _feature)| token == alias))
+}
+
+fn forwarding_is_active(package: &Package, entry: &str, mine: &HashSet<String>) -> bool {
+    let Some((token, _feature)) = entry.split_once('/') else {
+        return true;
+    };
+    let Some(alias) = token.strip_suffix('?') else { return true };
+    package.dependencies.iter().any(|dependency| {
+        dependency.rename.as_deref().unwrap_or(dependency.name.as_str()) == alias && dependency_is_active(package, dependency, mine)
+    })
+}
+
+/// Finds packages whose dependency features remain uncertain.
+///
+/// Conditional, unknown-kind, and unselected workspace edges seed uncertainty.
+/// It propagates through outgoing workspace dependencies.
+pub(crate) fn uncertain_packages(metadata: &Metadata, selected: &HashSet<String>) -> HashSet<String> {
+    let members = metadata.workspace_packages();
+    let mut uncertain: HashSet<&str> = members
+        .iter()
+        .flat_map(|package| package.dependencies.iter().map(move |dependency| (*package, dependency)))
+        .filter(|(package, dependency)| {
+            dependency.target.is_some() || matches!(dependency.kind, DependencyKind::Unknown) || !selected.contains(package.name.as_str())
+        })
+        .map(|(_package, dependency)| dependency.name.as_str())
+        .collect();
+    let mut pending = uncertain.iter().copied().collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        for dependency in members
+            .iter()
+            .filter(|package| package.name.as_str() == name)
+            .flat_map(|package| &package.dependencies)
+        {
+            // #[gamma::skip(cond.always_true, cond.negate, reason = "only new names may be queued or dependency cycles repeat forever")]
+            if uncertain.insert(dependency.name.as_str()) {
+                pending.push(dependency.name.as_str());
+            }
+        }
+    }
+    uncertain.into_iter().map(str::to_owned).collect()
 }
 
 /// Applies one feature-table entry, returning the (package, feature) pair if something new was
@@ -227,7 +267,9 @@ fn propagate(members: &[&Package], renames: &Renames, on: &mut HashMap<String, H
             };
 
             for entry in entries {
-                changed |= apply(entry, name, renames, on);
+                if forwarding_is_active(package, entry, &mine) {
+                    changed |= apply(entry, name, renames, on);
+                }
             }
         }
 
@@ -238,7 +280,7 @@ fn propagate(members: &[&Package], renames: &Renames, on: &mut HashMap<String, H
                 continue;
             }
 
-            if matches!(dependency.kind, DependencyKind::Unknown) {
+            if matches!(dependency.kind, DependencyKind::Unknown) || !dependency_is_active(package, dependency, &mine) {
                 continue;
             }
 
@@ -290,8 +332,7 @@ fn renames(members: &[&Package]) -> Renames {
 /// Applies one entry from a feature table, which may name this package's feature or another's.
 ///
 /// The spellings are `plain`, `dep:some-crate`, `some-crate/feature` and `some-crate?/feature`.
-/// Only the ones that name a feature matter here; `dep:` merely activates an optional dependency,
-/// which this module already assumes.
+/// Dependency activation is checked separately before applying these feature edges.
 ///
 /// The token before the slash is whatever `owner`'s manifest calls the dependency, so it is
 /// resolved through that manifest's renames before anything is looked up.
@@ -386,6 +427,93 @@ mod tests {
 
     use super::*;
     use crate::discover::load_metadata;
+
+    fn optional_metadata() -> Metadata {
+        serde_json::from_str(include_str!("../../tests/fixtures/correctness/optional-features.json")).unwrap()
+    }
+
+    #[test]
+    fn inactive_optional_edges_do_not_enable_features_or_strip_negated_nested_cfg() {
+        let metadata = optional_metadata();
+        for active in [false, true] {
+            let args = FeatureArgs {
+                no_default_features: true,
+                features: if active { vec!["alpha/activate".into()] } else { Vec::new() },
+                ..FeatureArgs::default()
+            };
+            let enabled = enabled(&metadata, &args);
+            assert_eq!(enabled["beta"].contains(&"extra".into()), active);
+            assert_eq!(enabled["beta"].contains(&"default".into()), active);
+            assert_eq!(enabled["beta"].contains(&"from_default".into()), active);
+            assert_eq!(enabled, enabled_by_rescan(&metadata, &args));
+            let cfgs = crate::cfg::Cfgs::new(&crate::cfg::CfgSet::parse("unix\n"), &enabled);
+            let source = crate::parse::SourceFile::parse(
+                "beta.rs",
+                include_str!("../../tests/fixtures/correctness/optional-features.rs").to_owned(),
+            )
+            .unwrap();
+            let candidates = crate::ops::collect::collect_in(
+                &source,
+                &crate::ops::Selection::parse("literal.int_to_zero").unwrap(),
+                cfgs.for_package("beta"),
+            );
+            let originals: Vec<_> = candidates.iter().map(|candidate| source.slice(&candidate.span)).collect();
+            assert_eq!(originals, if active { vec!["22", "44"] } else { vec!["11", "33"] });
+        }
+    }
+
+    #[test]
+    fn uncertain_feature_activation_preserves_both_negations_and_nested_cfg_controls() {
+        let mut metadata = optional_metadata();
+        metadata.packages[0].dependencies[0].target = Some("cfg(unknown_target)".parse().unwrap());
+        let selected = HashSet::from_iter(["alpha".to_owned(), "beta".to_owned()]);
+        let enabled = enabled(&metadata, &FeatureArgs::default());
+        let cfgs = crate::cfg::Cfgs::new(&crate::cfg::CfgSet::parse("unix\n"), &enabled)
+            .feature_uncertainty(&uncertain_packages(&metadata, &selected));
+        let beta = cfgs.for_package("beta");
+        for expression in [
+            "feature = \"extra\"",
+            "not(feature = \"extra\")",
+            "all(unix, not(feature = \"extra\"))",
+            "not(all(unix, feature = \"extra\"))",
+        ] {
+            assert!(beta.holds_str(expression), "{expression}");
+        }
+        assert!(!beta.holds_str("all(windows, feature = \"extra\")"));
+        assert!(!beta.holds_str("not(any(unix, feature = \"extra\"))"));
+    }
+
+    #[test]
+    fn uncertainty_worklist_visits_cyclic_and_same_named_workspace_dependencies() {
+        let mut metadata = optional_metadata();
+        let mut dependency = metadata.packages[0].dependencies[0].clone();
+        dependency.name = "alpha".into();
+        dependency.rename = None;
+        metadata.packages[1].dependencies.push(dependency.clone());
+
+        let mut duplicate = metadata.packages[1].clone();
+        duplicate.id.repr.push_str("-duplicate");
+        dependency.name = "leaf".into();
+        duplicate.dependencies = vec![dependency];
+        metadata.workspace_members.push(duplicate.id.clone());
+        metadata.packages.push(duplicate);
+
+        let selected = HashSet::from_iter(["alpha".to_owned(), "beta".to_owned()]);
+        assert!(uncertain_packages(&metadata, &selected).is_empty());
+        let expected = HashSet::from_iter(["alpha".to_owned(), "beta".to_owned(), "leaf".to_owned()]);
+        for cause in 0..3 {
+            let mut metadata = metadata.clone();
+            let mut selected = selected.clone();
+            match cause {
+                0 => metadata.packages[0].dependencies[0].target = Some("cfg(unknown_target)".parse().unwrap()),
+                1 => metadata.packages[0].dependencies[0].kind = DependencyKind::Unknown,
+                _ => {
+                    selected.remove("alpha");
+                }
+            }
+            assert_eq!(uncertain_packages(&metadata, &selected), expected, "uncertainty cause {cause}");
+        }
+    }
 
     #[test]
     fn survivor_new_cross_package_features_return_the_work_item_that_drives_transitive_propagation() {
@@ -740,20 +868,17 @@ mod tests {
         assert_eq!(found, vec!["y".to_owned()], "{found:?}");
     }
 
-    /// The weak spelling forwards through an alias exactly as the plain one does; only the
-    /// question of whether the optional dependency is switched on differs, and this module already
-    /// assumes it is.
     #[test]
-    fn a_weak_reference_through_an_alias_resolves_too() {
-        let files = pair(
-            "[features]\ndefault = [\"bruce?/y\"]\n\n\
-             [dependencies]\nbruce = { package = \"beta\", path = \"../beta\", optional = true, default-features = false }\n",
-            "y = []\nz = []\n",
-        );
-
-        let found = features_of(&borrowed(&files), &FeatureArgs::default(), "beta");
-
-        assert_eq!(found, vec!["y".to_owned()], "{found:?}");
+    fn a_weak_reference_through_an_alias_requires_dependency_activation() {
+        let mut metadata = optional_metadata();
+        metadata.packages[0].features.insert("default".into(), vec!["bruce?/y".into()]);
+        metadata.packages[0].dependencies[0].uses_default_features = false;
+        metadata.packages[0].dependencies[0].features.clear();
+        metadata.packages[1].features.clear();
+        metadata.packages[1].features.insert("y".into(), Vec::new());
+        assert!(enabled(&metadata, &FeatureArgs::default())["beta"].is_empty());
+        metadata.packages[0].features.get_mut("default").unwrap().push("activate".into());
+        assert_eq!(enabled(&metadata, &FeatureArgs::default())["beta"], ["y"]);
     }
 
     /// An alias is local to the manifest that declares it, so a name another member happens to use

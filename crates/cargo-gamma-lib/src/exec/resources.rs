@@ -8,8 +8,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use camino::Utf8PathBuf;
 use cargo_gamma_process::MemoryRequest;
 
-use super::census;
 use super::test_binary::TestBinary;
+use super::test_listing;
 use super::verdict::Only;
 use super::workspace::Workspace;
 use crate::error::error;
@@ -152,8 +152,8 @@ impl Resources {
         Self::discover_with(
             binaries,
             limits,
-            |binary| census::list_resource_markers(work, binary, request),
-            |binary| census::list_selected_allow_empty(work, binary, request),
+            |binary| test_listing::list_resource_markers(work, binary, request),
+            |binary| test_listing::list_selected_allow_empty(work, binary, request),
         )
     }
 
@@ -291,19 +291,6 @@ impl Resources {
         let mut names = match only {
             Only::All => binary.all.clone(),
             Only::One(test) => binary.by_test.get(test).cloned().unwrap_or_default(),
-            Only::These(tests) => {
-                let mut names: Vec<Arc<str>> = tests
-                    .iter()
-                    .filter_map(|test| binary.by_test.get(*test))
-                    .flatten()
-                    .cloned()
-                    .collect();
-                // #[gamma::skip(iter.remove_sort, reason = "Only::These always enters the non-All branch below, which sorts the same names again after adding binary resources")]
-                names.sort_unstable();
-                // #[gamma::skip(iter.remove_dedup, reason = "Only::These always enters the non-All branch below, which deduplicates the same names again after adding binary resources")]
-                names.dedup();
-                names
-            }
         };
         if !matches!(only, Only::All) {
             names.extend(binary.binary.iter().cloned());
@@ -434,7 +421,7 @@ mod tests {
         let root = camino::Utf8Path::new(if cfg!(windows) { "C:/resource-policy" } else { "/resource-policy" });
         let work = Workspace::adopt(root.to_owned(), root.join("target"));
         let binary = test_binary("resource-listing");
-        let resources = census::with_listing_runner(
+        let resources = test_listing::with_listing_runner(
             |command, budget, request| {
                 assert_eq!(command.get_program(), "resource-listing");
                 assert!(request.meter);
@@ -497,7 +484,7 @@ mod tests {
         .unwrap();
         let expected = vec![Arc::<str>::from("db"), Arc::<str>::from("io")];
         assert_eq!(resources.required(&binary, Only::All), expected);
-        assert_eq!(resources.required(&binary, Only::These(&["one", "one"])), expected);
+        assert_eq!(resources.required(&binary, Only::One("one")), expected);
         assert_eq!(resources.required(&binary, Only::One("unknown")), [Arc::<str>::from("db")]);
         let only_test_resources = Resources::discover_with(
             core::slice::from_ref(&binary),
@@ -589,11 +576,7 @@ mod tests {
             (Only::All, vec!["alpha", "gamma", "zeta"]),
             (Only::One("suite::selected"), vec!["alpha", "gamma", "zeta"]),
             (Only::One("suite::ignored"), vec!["gamma"]),
-            (
-                Only::These(&["suite::selected", "suite::selected", "missing"]),
-                vec!["alpha", "gamma", "zeta"],
-            ),
-            (Only::These(&[]), vec!["gamma"]),
+            (Only::One("missing"), vec!["gamma"]),
         ] {
             assert_eq!(
                 resources.required(&mixed, only).iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
@@ -774,14 +757,14 @@ mod tests {
         let (_directory, work) = crate::testing::helper_workspace("resource-custom-harness", &[]);
         let mut binary = test_binary("missing-custom-harness");
         binary.libtest = Some(false);
-        census::reset_resource_listing_calls();
+        test_listing::reset_resource_listing_calls();
 
         let resources =
             Resources::discover(&work, &[binary], &[], MemoryRequest::default()).expect("custom harness has no libtest markers");
 
         assert!(resources.capacities.is_empty());
         assert!(resources.binaries.is_empty());
-        assert_eq!(census::resource_listing_calls(), 0);
+        assert_eq!(test_listing::resource_listing_calls(), 0);
     }
 
     #[test]
@@ -922,7 +905,7 @@ mod tests {
             assert_eq!(permit.names, vec![Arc::clone(&cargo), Arc::clone(&network)]);
         }
         {
-            let permit = resources.acquire(&binary, Only::These(&["first", "second"]));
+            let permit = resources.acquire(&binary, Only::One("second"));
             assert_eq!(permit.names, vec![Arc::clone(&cargo), Arc::clone(&network)]);
         }
         let unknown = test_binary("unknown");

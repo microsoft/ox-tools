@@ -431,7 +431,7 @@ mod tests {
                 ]
             }
         },
-        "config": { "startedAt": 100, "shard": { "index": 0, "count": 4 }, "tests": 7, "notBuilt": 1, "droppedTestPackages": ["helper"] }
+        "config": { "startedAt": 100, "shard": { "index": 0, "count": 4 }, "tests": 7, "notBuilt": 1, "droppedTestPackages": ["helper"], "populationComplete": false }
     }"#;
 
     fn written(text: &str) -> (tempfile::TempDir, Utf8PathBuf) {
@@ -718,6 +718,16 @@ mod tests {
         let original: Value = serde_json::from_str(COMPLETE).expect("json");
 
         assert_eq!(written, original);
+    }
+
+    #[test]
+    fn legacy_population_metadata_never_acquires_withdrawal_authority() {
+        let mut legacy: Value = serde_json::from_str(COMPLETE).unwrap();
+        legacy["config"].as_object_mut().unwrap().remove("populationComplete");
+        let report = read_text(&legacy.to_string()).unwrap();
+        let written: Value = serde_json::from_str(&crate::elements::to_json(&report).unwrap()).unwrap();
+        legacy["config"]["populationComplete"] = Value::Bool(false);
+        assert_eq!(written, legacy);
     }
 
     /// A count near `u32::MAX` asks the merge to account for four billion shards. It is refused

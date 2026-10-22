@@ -135,10 +135,21 @@ versions 1 and 2 are supported migration cases: decoding upgrades them to
 version 3. Version 1 preserves seed counts with a minimum of one and resets
 hit, miss, measured-time, and sample counters; version 2 preserves its
 observations.
-Each generalized tier atomically reserves from a campaign-wide eight-attempt
-budget immediately before launching a hinted subprocess. A first hit makes the
-tier productive and removes that bound; concurrent zero-hit workers cannot
-over-admit before their attempt counters are published.
+Every campaign drains exact hints first, then adjudicates each assigned mutant
+end-to-end through inferred named tests, inferred full binaries, and remaining
+full binaries. Fresh named killers prioritize queued siblings, and independent
+functions supply discovery work. A shared `NamedKills` tally ranks the combined
+eligible same-item and promoted reach-cluster named cases by global
+distinct-mutant kills, with stable binary/test identity ties, before the
+six-case cap. Per-mutant exact hints seed it; final named attributions from
+exact, inferred, discovery, and restored judgements update it without double
+counting an ordinal. Generalized seeds, transfer misses, and runtime do not
+rank named cases. Transfer history still ranks inferred whole binaries, and
+the separate `BinaryKills` tally still ranks fallback binaries. Neither binary
+ordering changes when named cases are reordered.
+There is no campaign-wide attempt gate or economic admission filter.
+Each phase uses the configured mutant concurrency, with sequential selections
+per mutant and no CPU-count cap or aggregate memory reservation.
 
 ## Process supervision
 

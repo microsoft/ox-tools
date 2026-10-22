@@ -102,18 +102,72 @@ pub(crate) fn write_if_unchanged_locked(path: &Utf8Path, expected: Option<&str>,
     create_parents(&destination)?;
     let scratch = scratch_path(&destination);
 
-    stage(&scratch, write_bytes(contents), Some(&destination)).map_err(|cause| discard(&scratch, path, cause))?;
-    before_publication(&scratch);
+    write_if_unchanged_with(path, &destination, &scratch, expected, contents, &mut NativeFilesystem)
+}
 
-    if !matches_contents(&destination, expected).map_err(|cause| error!("could not check `{path}` before replacing it").caused_by(cause))? {
-        remove_staging(&scratch, path)?;
+trait PublicationFilesystem {
+    fn stage(&mut self, scratch: &Utf8Path, contents: &str, destination: &Utf8Path) -> io::Result<()>;
+    fn matches_contents(&mut self, destination: &Utf8Path, expected: Option<&str>) -> io::Result<bool>;
+    fn remove_file(&mut self, path: &Utf8Path) -> io::Result<()>;
+    fn rename(&mut self, scratch: &Utf8Path, destination: &Utf8Path) -> io::Result<()>;
+    fn published(&mut self, destination: &Utf8Path) -> io::Result<()>;
+}
+
+struct NativeFilesystem;
+
+impl PublicationFilesystem for NativeFilesystem {
+    fn stage(&mut self, scratch: &Utf8Path, contents: &str, destination: &Utf8Path) -> io::Result<()> {
+        stage(scratch, write_bytes(contents), Some(destination))
+    }
+
+    fn matches_contents(&mut self, destination: &Utf8Path, expected: Option<&str>) -> io::Result<bool> {
+        matches_contents(destination, expected)
+    }
+
+    fn remove_file(&mut self, path: &Utf8Path) -> io::Result<()> {
+        fs::remove_file(path.as_std_path())
+    }
+
+    fn rename(&mut self, scratch: &Utf8Path, destination: &Utf8Path) -> io::Result<()> {
+        fs::rename(scratch.as_std_path(), destination.as_std_path())
+    }
+
+    fn published(&mut self, destination: &Utf8Path) -> io::Result<()> {
+        published(destination)
+    }
+}
+
+fn write_if_unchanged_with(
+    path: &Utf8Path,
+    destination: &Utf8Path,
+    scratch: &Utf8Path,
+    expected: Option<&str>,
+    contents: &str,
+    filesystem: &mut impl PublicationFilesystem,
+) -> Result<Publication> {
+    filesystem
+        .stage(scratch, contents, destination)
+        .map_err(|cause| discard_with(scratch, path, cause, || filesystem.remove_file(scratch)))?;
+    before_publication(scratch);
+
+    if !filesystem.matches_contents(destination, expected).map_err(|cause| {
+        discard_with(
+            scratch,
+            path,
+            error!("could not check `{path}` before replacing it").caused_by(cause),
+            || filesystem.remove_file(scratch),
+        )
+    })? {
+        remove_staging(scratch, path, filesystem)?;
         return Ok(Publication::Conflict);
     }
 
-    after_comparison(&destination);
-    fs::rename(scratch.as_std_path(), destination.as_std_path()).map_err(|cause| discard(&scratch, path, cause))?;
+    after_comparison(destination);
+    filesystem
+        .rename(scratch, destination)
+        .map_err(|cause| discard_with(scratch, path, cause, || filesystem.remove_file(scratch)))?;
 
-    match published(&destination) {
+    match filesystem.published(destination) {
         Ok(()) => Ok(Publication::Published),
         Err(cause) => Ok(Publication::PublishedUndurable(error!("could not write `{path}`").caused_by(cause))),
     }
@@ -268,8 +322,8 @@ fn matches_contents(path: &Utf8Path, expected: Option<&str>) -> io::Result<bool>
 }
 
 /// Removes an unpublishable staged file, preserving the conflict as the caller's result.
-fn remove_staging(scratch: &Utf8Path, path: &Utf8Path) -> Result<()> {
-    match fs::remove_file(scratch.as_std_path()) {
+fn remove_staging(scratch: &Utf8Path, path: &Utf8Path, filesystem: &mut impl PublicationFilesystem) -> Result<()> {
+    match filesystem.remove_file(scratch) {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(()),
         Err(cause) => Err(error!("`{path}` changed before it could be replaced, and `{scratch}` could not be removed").caused_by(cause)),
@@ -382,10 +436,19 @@ const fn published(_path: &Utf8Path) -> io::Result<()> {
 /// A failure to remove it is folded into the message rather than dropped. The leftover is beside
 /// the destination under a name nothing else mentions, so a caller told only about the first
 /// failure would never learn it is there.
-fn discard(scratch: &Utf8Path, path: &Utf8Path, cause: io::Error) -> crate::error::Error {
+fn discard(scratch: &Utf8Path, path: &Utf8Path, cause: impl std::error::Error + Send + Sync + 'static) -> crate::error::Error {
+    discard_with(scratch, path, cause, || fs::remove_file(scratch.as_std_path()))
+}
+
+fn discard_with(
+    scratch: &Utf8Path,
+    path: &Utf8Path,
+    cause: impl std::error::Error + Send + Sync + 'static,
+    remove: impl FnOnce() -> io::Result<()>,
+) -> crate::error::Error {
     let failed = error!("could not write `{path}`").caused_by(cause);
 
-    match fs::remove_file(scratch.as_std_path()) {
+    match remove() {
         Ok(()) => failed,
 
         Err(removal) if removal.kind() == ErrorKind::NotFound => failed,
@@ -504,6 +567,7 @@ const fn after_comparison(_path: &Utf8Path) {}
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::BTreeMap;
     use std::process::Command;
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
@@ -511,6 +575,130 @@ mod tests {
     use super::*;
 
     const EDITOR_PATH: &str = "CARGO_GAMMA_PUBLICATION_EDITOR_PATH";
+
+    struct MemoryFilesystem {
+        destination: Utf8PathBuf,
+        scratch: Utf8PathBuf,
+        files: BTreeMap<Utf8PathBuf, String>,
+        comparison_fails: bool,
+        calls: Vec<&'static str>,
+    }
+
+    impl MemoryFilesystem {
+        fn new(comparison_fails: bool) -> Self {
+            let destination = Utf8PathBuf::from("resolved").join("source.rs");
+            Self {
+                files: BTreeMap::from([
+                    (destination.clone(), "original".into()),
+                    (Utf8PathBuf::from("requested.rs"), "untouched".into()),
+                ]),
+                scratch: destination.with_file_name("staged"),
+                destination,
+                comparison_fails,
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl PublicationFilesystem for MemoryFilesystem {
+        fn stage(&mut self, scratch: &Utf8Path, contents: &str, destination: &Utf8Path) -> io::Result<()> {
+            assert!(self.calls.is_empty());
+            assert_eq!(scratch, self.scratch);
+            assert_eq!(destination, self.destination);
+            assert_eq!(contents, "replacement");
+            assert!(self.files.insert(scratch.to_owned(), contents.to_owned()).is_none());
+            self.calls.push("stage");
+            Ok(())
+        }
+
+        fn matches_contents(&mut self, destination: &Utf8Path, expected: Option<&str>) -> io::Result<bool> {
+            assert_eq!(self.calls, ["stage"]);
+            assert_eq!(destination, self.destination);
+            assert_eq!(expected, Some("original"));
+            assert_eq!(self.files[destination], "original");
+            assert_eq!(self.files[&self.scratch], "replacement");
+            self.calls.push("compare");
+            if self.comparison_fails {
+                Err(io::Error::new(ErrorKind::PermissionDenied, "injected comparison read failure"))
+            } else {
+                Ok(true)
+            }
+        }
+
+        fn remove_file(&mut self, path: &Utf8Path) -> io::Result<()> {
+            assert!(self.comparison_fails, "cleanup is scripted only for the comparison failure");
+            assert_eq!(self.calls, ["stage", "compare"]);
+            assert_eq!(path, self.scratch);
+            assert_eq!(self.files.remove(path), Some("replacement".into()));
+            self.calls.push("remove");
+            Ok(())
+        }
+
+        fn rename(&mut self, scratch: &Utf8Path, destination: &Utf8Path) -> io::Result<()> {
+            assert!(!self.comparison_fails, "a comparison error must prevent publication");
+            assert_eq!(self.calls, ["stage", "compare"]);
+            assert_eq!(scratch, self.scratch);
+            assert_eq!(destination, self.destination);
+            let contents = self.files.remove(scratch).expect("the scripted staging write preceded publication");
+            assert_eq!(self.files.insert(destination.to_owned(), contents), Some("original".into()));
+            self.calls.push("rename");
+            Ok(())
+        }
+
+        fn published(&mut self, destination: &Utf8Path) -> io::Result<()> {
+            assert_eq!(self.calls, ["stage", "compare", "rename"]);
+            assert_eq!(destination, self.destination);
+            assert_eq!(self.files[destination], "replacement");
+            self.calls.push("published");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn comparison_read_errors_discard_staging_and_preserve_destination_and_cause() {
+        use core::error::Error as _;
+
+        let mut filesystem = MemoryFilesystem::new(true);
+        let path = Utf8Path::new("requested.rs");
+        let destination = filesystem.destination.clone();
+        let scratch = filesystem.scratch.clone();
+        let cause = write_if_unchanged_with(path, &destination, &scratch, Some("original"), "replacement", &mut filesystem).unwrap_err();
+        assert_eq!(filesystem.calls, ["stage", "compare", "remove"]);
+        assert!(!filesystem.files.contains_key(&scratch));
+        assert_eq!(filesystem.files[&destination], "original");
+        assert_eq!(filesystem.files[path], "untouched");
+        assert_eq!(filesystem.files.len(), 2);
+        assert_eq!(
+            cause.to_string(),
+            "could not write `requested.rs`: could not check `requested.rs` before replacing it: injected comparison read failure"
+        );
+        assert_eq!(
+            cause
+                .source()
+                .unwrap()
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn conditional_publication_replaces_only_the_resolved_destination_in_memory() {
+        let mut filesystem = MemoryFilesystem::new(false);
+        let path = Utf8Path::new("requested.rs");
+        let destination = filesystem.destination.clone();
+        let scratch = filesystem.scratch.clone();
+        let result = write_if_unchanged_with(path, &destination, &scratch, Some("original"), "replacement", &mut filesystem).unwrap();
+        assert!(matches!(result, Publication::Published));
+        assert_eq!(filesystem.calls, ["stage", "compare", "rename", "published"]);
+        assert!(!filesystem.files.contains_key(&scratch));
+        assert_eq!(filesystem.files[&destination], "replacement");
+        assert_eq!(filesystem.files[path], "untouched");
+        assert_eq!(filesystem.files.len(), 2);
+    }
 
     #[test]
     fn survivor_publish_returns_parent_collisions_and_non_already_exists_link_errors_without_claiming_success() {
@@ -1136,14 +1324,14 @@ mod tests {
         let path = root.join("source.rs");
         let scratch = root.join(".source.stage");
 
-        remove_staging(&scratch, &path).expect("an already absent staging file is clean");
+        remove_staging(&scratch, &path, &mut NativeFilesystem).expect("an already absent staging file is clean");
 
         fs::write(scratch.as_std_path(), "staged").expect("staging file");
-        remove_staging(&scratch, &path).expect("staging file is removed");
+        remove_staging(&scratch, &path, &mut NativeFilesystem).expect("staging file is removed");
         assert!(!scratch.exists());
 
         fs::create_dir(scratch.as_std_path()).expect("unremovable staging directory");
-        let error = remove_staging(&scratch, &path).expect_err("a real cleanup error must surface");
+        let error = remove_staging(&scratch, &path, &mut NativeFilesystem).expect_err("a real cleanup error must surface");
         assert!(error.to_string().contains("could not be removed"), "{error}");
     }
 

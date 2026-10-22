@@ -37,6 +37,16 @@ impl Cfgs {
         Self::default()
     }
 
+    /// Keeps feature predicates unknown, including beneath negation, for uncertain packages.
+    pub(crate) fn feature_uncertainty(mut self, packages: &crate::HashSet<String>) -> Self {
+        for package in packages {
+            if let Some(set) = self.per_package.get_mut(package) {
+                *set = set.clone().with_undecided(["feature".to_owned()]);
+            }
+        }
+        self
+    }
+
     /// Returns the set for a package.
     ///
     /// A package that was never resolved gets the unconditional set, so an unexpected name leaves

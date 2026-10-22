@@ -65,33 +65,13 @@ fn guard_crate() -> &'static Path {
             // Always false, so the compiler sees both branches as live and type-checks the
             // replacement as well as the original. A `const true` would let it discard one.
             //
-            // `Either` mirrors the real runtime's, including the impls beyond `Iterator`. Those
-            // are not decoration: a signature saying `impl ExactSizeIterator` or
-            // `impl DoubleEndedIterator` only compiles once the wrapper carries the bound too, so
-            // a stub with `Iterator` alone would fail this test for a reason the real tool does
-            // not have.
+            // Use the real iterator adapter and type-preserving helpers so this stub cannot
+            // introduce compilation failures absent from the vendored runtime.
             let stub = concat!(
                 "#[inline] pub fn a(_ordinal: u32) -> bool { std::hint::black_box(false) }\n",
-                "pub enum Either<A, B> { L(A), R(B) }\n",
-                "impl<T, A: Iterator<Item = T>, B: Iterator<Item = T>> Iterator for Either<A, B> {\n",
-                "    type Item = T;\n",
-                "    fn next(&mut self) -> Option<T> {\n",
-                "        match self { Self::L(a) => a.next(), Self::R(b) => b.next() }\n",
-                "    }\n",
-                "    fn size_hint(&self) -> (usize, Option<usize>) {\n",
-                "        match self { Self::L(a) => a.size_hint(), Self::R(b) => b.size_hint() }\n",
-                "    }\n",
-                "}\n",
-                "impl<T, A: DoubleEndedIterator<Item = T>, B: DoubleEndedIterator<Item = T>>\n",
-                "    DoubleEndedIterator for Either<A, B> {\n",
-                "    fn next_back(&mut self) -> Option<T> {\n",
-                "        match self { Self::L(a) => a.next_back(), Self::R(b) => b.next_back() }\n",
-                "    }\n",
-                "}\n",
-                "impl<T, A: ExactSizeIterator<Item = T>, B: ExactSizeIterator<Item = T>>\n",
-                "    ExactSizeIterator for Either<A, B> {}\n",
-                "impl<T, A: std::iter::FusedIterator<Item = T>, B: std::iter::FusedIterator<Item = T>>\n",
-                "    std::iter::FusedIterator for Either<A, B> {}\n",
+                include_str!("../../cargo-gamma-rt/src/either.rs"),
+                "\n",
+                include_str!("../../cargo-gamma-rt/src/mutation.rs"),
             );
 
             std::fs::write(&source, stub).expect("the guard stub source must be writable");
