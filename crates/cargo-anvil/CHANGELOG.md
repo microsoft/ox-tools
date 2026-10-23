@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-23
+
+- ✨ Features
+
+  - cargo-anvil: consolidate generated infrastructure
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: remove portable recipe PowerShell
+
 ## [0.15.2] - 2026-10-23
 
 - ✨ Features
