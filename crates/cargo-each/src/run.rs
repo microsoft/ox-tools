@@ -74,7 +74,7 @@ fn run_workspace_with(
     let workspace = load_workspace(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
-    apply_filters(&mut members, args)?;
+    apply_package_filters(&mut members, args)?;
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.
@@ -187,7 +187,7 @@ fn build_selection(args: &EachArgs) -> Result<Selection, crate::error::EachError
 
 /// Narrow `members` by package filter expressions. Repeated expressions are
 /// AND-combined; exclusion is expressed with the Boolean `not` operator.
-fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
+fn apply_package_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
     let filters = parse_package_predicates(&args.filters)?;
     members.retain(|member| filters.iter().all(|filter| filter.matches(member)));
     Ok(())
