@@ -1261,6 +1261,35 @@ fn miri_profiles_set_expected_flags() {
 }
 
 #[test]
+fn miri_skips_an_explicitly_selected_opted_out_package() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("miri.just", MIRI)],
+        &[
+            "anvil-component-nightly-miri-validate-prereqs",
+            "anvil-component-nightly-rust-src-validate-prereqs",
+            "anvil-component-nightly-miri-install",
+            "anvil-component-nightly-rust-src-install",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["_anvil-miri-test", "standard", "fixture"],
+        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_MIRI_EXCLUDE", OsStr::new("1"))],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("all selected packages are excluded"));
+    assert!(
+        !fs::read_to_string(&log).unwrap_or_default().contains("miri test"),
+        "an explicitly selected opted-out package must not be compiled"
+    );
+}
+
+#[test]
 fn miri_runner_handles_no_work_and_aggregates_failures() {
     if !tools_available() {
         return;
@@ -1294,19 +1323,6 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
     );
     assert!(all_excluded.status.success());
     assert!(String::from_utf8_lossy(&all_excluded.stdout).contains("all selected packages are excluded"));
-
-    let explicit_log = tmp.path().join("explicit-excluded-cargo.log");
-    let explicit_excluded = run_just(
-        tmp.path(),
-        &["_anvil-miri-test", "standard", "fixture"],
-        &[("FAKE_CARGO_LOG", explicit_log.as_os_str()), ("FAKE_MIRI_EXCLUDE", OsStr::new("1"))],
-    );
-    assert!(explicit_excluded.status.success());
-    assert!(String::from_utf8_lossy(&explicit_excluded.stdout).contains("all selected packages are excluded"));
-    assert!(
-        !fs::read_to_string(&explicit_log).unwrap_or_default().contains("miri test"),
-        "an explicitly selected opted-out package must not be compiled"
-    );
 
     let workspace_cargo_log = tmp.path().join("all-excluded-workspace-cargo.log");
     let all_workspace_excluded = run_just(
