@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: address final review feedback
   - cargo-anvil: preserve legacy retirement scanning
   - cargo-anvil: verify generated JSON regions
   - cargo-anvil: validate scanner-only splices
@@ -47,7 +48,36 @@
 - 🧩 Miscellaneous
 
   - Merge origin/main into makolnek-microsoft-json-array-regions
+  - Merge origin/main into makolnek-microsoft-json-array-regions
   - Merge remote-tracking branch 'origin/main' into makolnek-microsoft-json-array-regions
+
+## [0.15.2] - 2026-10-23
+
+- ✨ Features
+
+  - cargo-anvil: roll out filtered coverage reports
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: clarify coverage adoption boundaries
+
+- 📚 Documentation
+
+  - cargo-anvil: explain Windows ARM coverage fallback
+  - align coverage topology and helper names
+
+- ✔️ Tasks
+
+  - cargo-anvil: prepare 0.15.2 release
+  - cargo-anvil: pin coverage gate 0.7.1
+
+- 🧩 Miscellaneous
+
+  - Merge cargo-anvil 0.15.1 from main
+  - Merge cargo-deny cleanup from main
+  - Merge current main into coverage rollout
+  - Merge main into coverage rollout
+  - Merge origin/main into anvil coverage rollout
 
 ## [0.15.1] - 2026-10-22
 
