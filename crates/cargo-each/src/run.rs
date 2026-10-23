@@ -22,7 +22,7 @@ use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
 use crate::error::{EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
-use crate::filter::{Predicate, TargetPredicate};
+use crate::filter::{PackagePredicate, TargetPredicate};
 use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
@@ -188,15 +188,15 @@ fn build_selection(args: &EachArgs) -> Result<Selection, crate::error::EachError
 /// Narrow `members` by package filter expressions. Repeated expressions are
 /// AND-combined; exclusion is expressed with the Boolean `not` operator.
 fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
-    let filters = parse_predicates(&args.filters)?;
+    let filters = parse_package_predicates(&args.filters)?;
     members.retain(|member| filters.iter().all(|filter| filter.matches(member)));
     Ok(())
 }
 
-fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
+fn parse_package_predicates(specs: &[String]) -> Result<Vec<PackagePredicate>, AppError> {
     specs
         .iter()
-        .map(|s| Predicate::parse(s).into_app_err("invalid filter expression"))
+        .map(|s| PackagePredicate::parse(s).into_app_err("invalid filter expression"))
         .collect()
 }
 
@@ -1054,11 +1054,11 @@ mod tests {
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
         add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
         effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
-        failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_predicates, parse_target_kinds,
-        parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_cargo_with, run_streamed,
-        run_streamed_group_control_with, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker,
-        spawn_worker_with, terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker,
-        wait_for_worker_with, with_cleanup_failure,
+        failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_package_predicates,
+        parse_target_kinds, parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_cargo_with,
+        run_streamed, run_streamed_group_control_with, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group,
+        spawn_worker, spawn_worker_with, terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with,
+        wait_for_worker, wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
     use crate::workspace::{Member, MemberTarget, Workspace};
@@ -2543,7 +2543,7 @@ mod tests {
 
     #[test]
     fn predicate_parse_error_has_run_context_and_exact_cause() {
-        let error = parse_predicates(&["feature:".to_owned()]).expect_err("invalid predicate");
+        let error = parse_package_predicates(&["feature:".to_owned()]).expect_err("invalid predicate");
         let rendered = error.to_string();
         assert!(rendered.starts_with("invalid filter expression"), "{rendered}");
         assert!(

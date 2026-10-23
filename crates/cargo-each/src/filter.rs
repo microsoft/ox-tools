@@ -217,7 +217,7 @@ pub(crate) enum TargetAtom {
     NameInMetadata(String),
 }
 
-pub(crate) type Predicate = Expression<PackageAtom>;
+pub(crate) type PackagePredicate = Expression<PackageAtom>;
 pub(crate) type TargetPredicate = Expression<TargetAtom>;
 
 /// Parse the portion of a `metadata:` predicate after the prefix.
@@ -576,31 +576,34 @@ mod tests {
         }
     }
 
-    fn package_atom(atom: PackageAtom) -> Predicate {
-        Predicate::Atom(atom)
+    fn package_atom(atom: PackageAtom) -> PackagePredicate {
+        PackagePredicate::Atom(atom)
     }
 
     #[test]
     fn parses_kind_predicates() {
         assert_eq!(
-            Predicate::parse("lib").expect("lib"),
+            PackagePredicate::parse("lib").expect("lib"),
             package_atom(PackageAtom::HasTargetKind(TargetKind::Lib))
         );
         assert_eq!(
-            Predicate::parse("bin").expect("bin"),
+            PackagePredicate::parse("bin").expect("bin"),
             package_atom(PackageAtom::HasTargetKind(TargetKind::Bin))
         );
         assert_eq!(
-            Predicate::parse("target-kind:proc-macro").expect("target kind"),
+            PackagePredicate::parse("target-kind:proc-macro").expect("target kind"),
             package_atom(PackageAtom::HasTargetKind(TargetKind::ProcMacro))
         );
-        assert_eq!(Predicate::parse("doctest").expect("doctest"), package_atom(PackageAtom::Doctest));
         assert_eq!(
-            Predicate::parse("publishable").expect("publishable"),
+            PackagePredicate::parse("doctest").expect("doctest"),
+            package_atom(PackageAtom::Doctest)
+        );
+        assert_eq!(
+            PackagePredicate::parse("publishable").expect("publishable"),
             package_atom(PackageAtom::Publishable)
         );
         assert_eq!(
-            Predicate::parse("feature:loom").expect("feature"),
+            PackagePredicate::parse("feature:loom").expect("feature"),
             package_atom(PackageAtom::HasFeature("loom".to_owned()))
         );
     }
@@ -608,7 +611,7 @@ mod tests {
     #[test]
     fn parses_dep_predicate() {
         assert_eq!(
-            Predicate::parse("dep:loom").expect("dep"),
+            PackagePredicate::parse("dep:loom").expect("dep"),
             package_atom(PackageAtom::DependsOn("loom".to_owned()))
         );
     }
@@ -616,12 +619,12 @@ mod tests {
     #[test]
     fn parses_metadata_predicates() {
         assert_eq!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent").expect("present"),
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent").expect("present"),
             package_atom(PackageAtom::MetadataPresent("coverage-gate.min-lines-percent".to_owned()))
         );
         assert_eq!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent=0").expect("equals"),
-            Predicate::Atom(PackageAtom::MetadataEquals {
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=0").expect("equals"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "coverage-gate.min-lines-percent".to_owned(),
                 value: "0".to_owned()
             })
@@ -631,12 +634,12 @@ mod tests {
     #[test]
     fn parses_boolean_operators_with_conventional_precedence() {
         assert_eq!(
-            Predicate::parse("lib or bin and not publishable").expect("expression"),
-            Predicate::Or(vec![
+            PackagePredicate::parse("lib or bin and not publishable").expect("expression"),
+            PackagePredicate::Or(vec![
                 package_atom(PackageAtom::HasTargetKind(TargetKind::Lib)),
-                Predicate::And(vec![
+                PackagePredicate::And(vec![
                     package_atom(PackageAtom::HasTargetKind(TargetKind::Bin)),
-                    Predicate::Not(Box::new(package_atom(PackageAtom::Publishable))),
+                    PackagePredicate::Not(Box::new(package_atom(PackageAtom::Publishable))),
                 ]),
             ])
         );
@@ -787,9 +790,9 @@ mod tests {
     #[test]
     fn parentheses_override_boolean_precedence() {
         assert_eq!(
-            Predicate::parse("(lib or bin) and publishable").expect("expression"),
-            Predicate::And(vec![
-                Predicate::Or(vec![
+            PackagePredicate::parse("(lib or bin) and publishable").expect("expression"),
+            PackagePredicate::And(vec![
+                PackagePredicate::Or(vec![
                     package_atom(PackageAtom::HasTargetKind(TargetKind::Lib)),
                     package_atom(PackageAtom::HasTargetKind(TargetKind::Bin)),
                 ]),
@@ -801,8 +804,8 @@ mod tests {
     #[test]
     fn atomic_metadata_value_may_contain_spaces() {
         assert_eq!(
-            Predicate::parse("metadata:role=script only").expect("atomic predicate"),
-            Predicate::Atom(PackageAtom::MetadataEquals {
+            PackagePredicate::parse("metadata:role=script only").expect("atomic predicate"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "role".to_owned(),
                 value: "script only".to_owned(),
             })
@@ -812,9 +815,9 @@ mod tests {
     #[test]
     fn quoted_metadata_value_may_contain_boolean_syntax() {
         assert_eq!(
-            Predicate::parse(r#"metadata:role="research and (development)" and lib"#).expect("expression"),
-            Predicate::And(vec![
-                Predicate::Atom(PackageAtom::MetadataEquals {
+            PackagePredicate::parse(r#"metadata:role="research and (development)" and lib"#).expect("expression"),
+            PackagePredicate::And(vec![
+                PackagePredicate::Atom(PackageAtom::MetadataEquals {
                     key: "role".to_owned(),
                     value: "research and (development)".to_owned(),
                 }),
@@ -822,8 +825,8 @@ mod tests {
             ])
         );
         assert_eq!(
-            Predicate::parse(r#"metadata:role="quoted \"value\" and \\ path""#).expect("quoted atom"),
-            Predicate::Atom(PackageAtom::MetadataEquals {
+            PackagePredicate::parse(r#"metadata:role="quoted \"value\" and \\ path""#).expect("quoted atom"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "role".to_owned(),
                 value: "quoted \"value\" and \\ path".to_owned(),
             })
@@ -848,10 +851,10 @@ mod tests {
             r#"metadata:role="unclosed"#,
             r#"metadata:role="unsupported\q""#,
         ] {
-            Predicate::parse(expression).expect_err(expression);
+            PackagePredicate::parse(expression).expect_err(expression);
         }
 
-        let unexpected = Predicate::parse("lib or )").expect_err("unexpected closing parenthesis");
+        let unexpected = PackagePredicate::parse("lib or )").expect_err("unexpected closing parenthesis");
         assert!(
             unexpected
                 .to_string()
@@ -859,7 +862,7 @@ mod tests {
             "diagnostic must identify the unexpected token: {unexpected}"
         );
 
-        let trailing = Predicate::parse("lib not bin").expect_err("unexpected trailing operator");
+        let trailing = PackagePredicate::parse("lib not bin").expect_err("unexpected trailing operator");
         assert!(
             trailing
                 .to_string()
@@ -894,7 +897,7 @@ mod tests {
             ("(lib", "unclosed `(`"),
         ];
         for (expression, reason) in cases {
-            let error = Predicate::parse(expression).expect_err(expression);
+            let error = PackagePredicate::parse(expression).expect_err(expression);
             assert_eq!(error.to_string(), format!("invalid filter expression `{expression}`: {reason}"));
         }
     }
@@ -902,8 +905,8 @@ mod tests {
     #[test]
     fn metadata_quote_boundaries_and_escapes_are_exact() {
         assert_eq!(
-            Predicate::parse(r#"metadata:role="a \"quoted\" \\ path""#).expect("quoted value"),
-            Predicate::Atom(PackageAtom::MetadataEquals {
+            PackagePredicate::parse(r#"metadata:role="a \"quoted\" \\ path""#).expect("quoted value"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "role".to_owned(),
                 value: "a \"quoted\" \\ path".to_owned(),
             })
@@ -932,32 +935,32 @@ mod tests {
     fn expression_nesting_accepts_64_levels_but_rejects_65() {
         let maximum = format!("{}lib{}", "(".repeat(64), ")".repeat(64));
         assert_eq!(
-            Predicate::parse(&maximum).expect("64 levels are supported"),
+            PackagePredicate::parse(&maximum).expect("64 levels are supported"),
             package_atom(PackageAtom::HasTargetKind(TargetKind::Lib))
         );
 
         let too_deep = format!("{}lib{}", "(".repeat(65), ")".repeat(65));
-        let error = Predicate::parse(&too_deep).expect_err("65 levels exceed the limit");
+        let error = PackagePredicate::parse(&too_deep).expect_err("65 levels exceed the limit");
         assert!(
             error.to_string().contains("expression nesting exceeds 64 levels"),
             "diagnostic must identify the nesting limit: {error}"
         );
 
         let maximum_negation = format!("{}lib", "not ".repeat(64));
-        Predicate::parse(&maximum_negation).expect("64 negations are supported");
+        PackagePredicate::parse(&maximum_negation).expect("64 negations are supported");
 
         let too_many_negations = format!("{}lib", "not ".repeat(65));
-        Predicate::parse(&too_many_negations).expect_err("65 negations exceed the limit");
+        PackagePredicate::parse(&too_many_negations).expect_err("65 negations exceed the limit");
     }
 
     #[test]
     fn mixed_parenthesis_and_negation_depth_uses_one_level_per_operator() {
         let accepted = format!("{}{}lib{}", "(".repeat(32), "not ".repeat(32), ")".repeat(32));
-        Predicate::parse(&accepted).expect("32 parentheses plus 32 negations are within the limit");
+        PackagePredicate::parse(&accepted).expect("32 parentheses plus 32 negations are within the limit");
 
         let rejected = format!("{}{}lib{}", "(".repeat(33), "not ".repeat(32), ")".repeat(33));
         assert_eq!(
-            Predicate::parse(&rejected)
+            PackagePredicate::parse(&rejected)
                 .expect_err("65 total nesting levels must fail")
                 .to_string(),
             format!("invalid filter expression `{rejected}`: expression nesting exceeds 64 levels")
@@ -970,10 +973,10 @@ mod tests {
             "(".repeat(64),
             ")".repeat(64)
         );
-        Predicate::parse(&sequential).expect("nesting from one operand must not leak into the next");
+        PackagePredicate::parse(&sequential).expect("nesting from one operand must not leak into the next");
 
         let sequential_negations = format!("{}lib and {}bin", "not ".repeat(64), "not ".repeat(64));
-        Predicate::parse(&sequential_negations).expect("negation nesting from one operand must not leak into the next");
+        PackagePredicate::parse(&sequential_negations).expect("negation nesting from one operand must not leak into the next");
     }
 
     #[test]
@@ -1009,22 +1012,22 @@ mod tests {
 
     #[test]
     fn rejects_unknown_and_empty() {
-        Predicate::parse("nonsense").expect_err("unknown predicate must error");
-        Predicate::parse("dep:").expect_err("empty dependency name must error");
-        Predicate::parse("feature:").expect_err("empty feature name must error");
-        Predicate::parse("target-kind:no-such-kind").expect_err("unknown target kind must error");
-        Predicate::parse("metadata:").expect_err("empty metadata key must error");
+        PackagePredicate::parse("nonsense").expect_err("unknown predicate must error");
+        PackagePredicate::parse("dep:").expect_err("empty dependency name must error");
+        PackagePredicate::parse("feature:").expect_err("empty feature name must error");
+        PackagePredicate::parse("target-kind:no-such-kind").expect_err("unknown target kind must error");
+        PackagePredicate::parse("metadata:").expect_err("empty metadata key must error");
     }
 
     #[test]
     fn rejects_metadata_keys_with_empty_segments() {
         // Keys with empty path segments parse but can never match, so they are
         // a loud usage error rather than a silent empty result.
-        Predicate::parse("metadata:a..b").expect_err("double dot must error");
-        Predicate::parse("metadata:.role").expect_err("leading dot must error");
-        Predicate::parse("metadata:role.").expect_err("trailing dot must error");
-        Predicate::parse("metadata:a..b=1").expect_err("double dot with value must error");
-        Predicate::parse("metadata:.role=1").expect_err("leading dot with value must error");
+        PackagePredicate::parse("metadata:a..b").expect_err("double dot must error");
+        PackagePredicate::parse("metadata:.role").expect_err("leading dot must error");
+        PackagePredicate::parse("metadata:role.").expect_err("trailing dot must error");
+        PackagePredicate::parse("metadata:a..b=1").expect_err("double dot with value must error");
+        PackagePredicate::parse("metadata:.role=1").expect_err("leading dot with value must error");
     }
 
     #[test]
@@ -1058,12 +1061,12 @@ mod tests {
         let mut m = member_with(&[], Value::Null, true, false);
         m.features.insert("loom".to_owned());
         assert!(
-            Predicate::parse("doctest and publishable and (bin or feature:loom)")
+            PackagePredicate::parse("doctest and publishable and (bin or feature:loom)")
                 .expect("expression")
                 .matches(&m)
         );
         assert!(
-            !Predicate::parse("not lib or metadata:role=script-only")
+            !PackagePredicate::parse("not lib or metadata:role=script-only")
                 .expect("expression")
                 .matches(&m)
         );
@@ -1079,31 +1082,35 @@ mod tests {
     #[test]
     fn metadata_present_and_equals() {
         let m = member_with(&[], json!({ "coverage-gate": { "min-lines-percent": 0 } }), true, false);
-        assert!(Predicate::parse("metadata:coverage-gate.min-lines-percent").expect("p").matches(&m));
+        assert!(
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent")
+                .expect("p")
+                .matches(&m)
+        );
         // numeric-aware: `0` matches the JSON number `0`.
         assert!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent=0")
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=0")
                 .expect("p")
                 .matches(&m)
         );
         assert!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent=0.0")
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=0.0")
                 .expect("p")
                 .matches(&m)
         );
         assert!(
-            !Predicate::parse("metadata:coverage-gate.min-lines-percent=50")
+            !PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=50")
                 .expect("p")
                 .matches(&m)
         );
-        assert!(!Predicate::parse("metadata:missing.key").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:missing.key").expect("p").matches(&m));
     }
 
     #[test]
     fn metadata_string_equals() {
         let m = member_with(&[], json!({ "role": "script-only" }), true, false);
-        assert!(Predicate::parse("metadata:role=script-only").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:role=library").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:role=script-only").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:role=library").expect("p").matches(&m));
     }
 
     #[test]
@@ -1111,15 +1118,15 @@ mod tests {
         // Both sides parse as `f64::NAN`, and `NaN == NaN` is false; the string
         // fallback must still match a literal `"NaN"` metadata value.
         let m = member_with(&[], json!({ "marker": "NaN" }), true, false);
-        assert!(Predicate::parse("metadata:marker=NaN").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:marker=nan").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:marker=NaN").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:marker=nan").expect("p").matches(&m));
     }
 
     #[test]
     fn metadata_bool_equals() {
         let m = member_with(&[], json!({ "flag": true }), true, false);
-        assert!(Predicate::parse("metadata:flag=true").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:flag=false").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:flag=true").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:flag=false").expect("p").matches(&m));
     }
 
     #[test]
@@ -1127,13 +1134,13 @@ mod tests {
         // Object / array metadata values can be *present* but never compare
         // equal to a scalar expected string.
         let m = member_with(&[], json!({ "obj": { "a": 1 }, "arr": [1, 2] }), true, false);
-        assert!(Predicate::parse("metadata:obj").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:obj=x").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:arr=x").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:obj").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:obj=x").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:arr=x").expect("p").matches(&m));
     }
 
     #[test]
     fn rejects_empty_metadata_key_before_equals() {
-        Predicate::parse("metadata:=value").expect_err("empty key with value must error");
+        PackagePredicate::parse("metadata:=value").expect_err("empty key with value must error");
     }
 }
