@@ -85,9 +85,18 @@ pub(crate) struct EachArgs {
     #[arg(long = "each-target", value_name = "KIND", conflicts_with = "once")]
     pub(crate) each_targets: Vec<String>,
 
-    /// Retain targets requiring this feature. Repeatable; AND-combined.
-    #[arg(long, value_name = "FEATURE", requires = "each_targets")]
-    pub(crate) target_required_feature: Vec<String>,
+    /// Keep only targets matching this Boolean expression.
+    ///
+    /// Repeatable; expressions are AND-combined. Supports `not`, `and`, `or`, and
+    /// parentheses over `name:<glob>`, `required-feature:<name>`, and
+    /// `name-in-metadata:<dotted.key>`.
+    #[arg(long = "target-filter", value_name = "EXPR", requires = "each_targets")]
+    pub(crate) target_filters: Vec<String>,
+
+    /// Require every selected package to retain at least one target after
+    /// target-kind and target-expression filtering.
+    #[arg(long, requires = "each_targets")]
+    pub(crate) require_target_per_package: bool,
 
     /// Run each per-package command from that member's crate root (the
     /// directory containing its Cargo.toml) instead of the current directory.
@@ -201,6 +210,37 @@ mod tests {
         let error = CargoCli::try_parse_from(["cargo", "each", "--exclude-filter", "bin", "--", "echo"])
             .expect_err("the redundant exclusion-specific option must stay removed");
         assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn target_filter_exclusion_and_legacy_options_are_not_cli_options() {
+        for option in ["--exclude-target-filter", "--target-required-feature"] {
+            let error = CargoCli::try_parse_from(["cargo", "each", "--each-target", "test", option, "loom", "--", "echo"])
+                .expect_err("target filtering has one Boolean-expression option");
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
+    fn target_requirement_requires_target_mode() {
+        let error = CargoCli::try_parse_from(["cargo", "each", "--require-target-per-package", "--", "echo"])
+            .expect_err("the per-package target invariant only applies in target mode");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            error.to_string(),
+            "error: the following required arguments were not provided:\n  --each-target <KIND>\n\nUsage: cargo each --each-target <KIND> --require-target-per-package -- <COMMAND>...\n\nFor more information, try '--help'.\n"
+        );
+    }
+
+    #[test]
+    fn target_filter_requires_target_mode() {
+        let error = CargoCli::try_parse_from(["cargo", "each", "--target-filter", "name:unit", "--", "echo"])
+            .expect_err("target filtering requires per-target mode");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            error.to_string(),
+            "error: the following required arguments were not provided:\n  --each-target <KIND>\n\nUsage: cargo each --each-target <KIND> --target-filter <EXPR> -- <COMMAND>...\n\nFor more information, try '--help'.\n"
+        );
     }
 
     #[test]

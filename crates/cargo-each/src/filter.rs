@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The `--filter` Boolean expression language.
+//! The shared `--filter` / `--target-filter` Boolean expression language.
 //!
 //! Expressions combine a small, fixed set of predicates over cargo metadata
 //! with `not`, `and`, `or`, and parentheses. This is enough to express every
@@ -20,18 +20,171 @@
 use cargo_metadata::TargetKind;
 use serde_json::Value;
 
-use crate::error::{EachError, InvalidFilterExpressionError};
+use crate::error::{EachError, InvalidFilterExpressionError, InvalidTargetMetadataError};
 use crate::workspace::{Member, parse_target_kind};
 
-/// A parsed filter predicate.
+/// A parsed Boolean expression over a scope-specific atom set.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Predicate {
+pub(crate) enum Expression<Atom> {
     /// `left and right`: both operands match.
     And(Vec<Self>),
     /// `left or right`: at least one operand matches.
     Or(Vec<Self>),
     /// `not operand`: the operand does not match.
     Not(Box<Self>),
+    /// A scope-specific atomic predicate.
+    Atom(Atom),
+}
+
+impl Expression<PackageAtom> {
+    /// Parse a Boolean filter expression.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EachError`] if the Boolean syntax is malformed, an atom is not
+    /// a recognized predicate, or a predicate argument is invalid.
+    pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
+        ExpressionParser::new(spec, Self::parse_atom, true)?.parse()
+    }
+
+    /// Parse one atomic predicate from its command-line spelling.
+    fn parse_atom(spec: &str) -> Result<PackageAtom, EachError> {
+        match spec {
+            "lib" => Ok(PackageAtom::HasTargetKind(TargetKind::Lib)),
+            "bin" => Ok(PackageAtom::HasTargetKind(TargetKind::Bin)),
+            "doctest" => Ok(PackageAtom::Doctest),
+            "publishable" => Ok(PackageAtom::Publishable),
+            _ => {
+                if let Some(kind) = spec.strip_prefix("target-kind:") {
+                    let Some(kind) = parse_target_kind(kind) else {
+                        return Err(invalid(
+                            spec,
+                            "unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build",
+                        ));
+                    };
+                    Ok(PackageAtom::HasTargetKind(kind))
+                } else if let Some(name) = spec.strip_prefix("feature:") {
+                    if name.is_empty() {
+                        return Err(invalid(spec, "empty feature name"));
+                    }
+                    Ok(PackageAtom::HasFeature(name.to_owned()))
+                } else if let Some(name) = spec.strip_prefix("dep:") {
+                    if name.is_empty() {
+                        return Err(invalid(spec, "empty dependency name"));
+                    }
+                    Ok(PackageAtom::DependsOn(name.to_owned()))
+                } else if let Some(rest) = spec.strip_prefix("metadata:") {
+                    parse_metadata(spec, rest)
+                } else {
+                    Err(invalid(
+                        spec,
+                        "expected one of: lib, bin, doctest, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Evaluate this predicate against a workspace member.
+    #[must_use]
+    pub(crate) fn matches(&self, member: &Member) -> bool {
+        match self {
+            Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(member)),
+            Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member)),
+            Self::Not(predicate) => !predicate.matches(member),
+            Self::Atom(atom) => match atom {
+                PackageAtom::HasTargetKind(kind) => member.targets.iter().any(|target| target.kinds.contains(kind)),
+                PackageAtom::Doctest => member.doctest,
+                PackageAtom::Publishable => member.publishable,
+                PackageAtom::HasFeature(name) => member.features.contains(name),
+                PackageAtom::DependsOn(name) => member.dependencies.contains(name),
+                PackageAtom::MetadataPresent(key) => lookup(&member.metadata, key).is_some(),
+                PackageAtom::MetadataEquals { key, value } => lookup(&member.metadata, key).is_some_and(|node| value_equals(node, value)),
+            },
+        }
+    }
+}
+
+impl Expression<TargetAtom> {
+    /// Parse a target Boolean filter expression with the shared grammar.
+    pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
+        ExpressionParser::new(spec, Self::parse_atom, false)?.parse()
+    }
+
+    fn parse_atom(spec: &str) -> Result<TargetAtom, EachError> {
+        if let Some(pattern) = spec.strip_prefix("name:") {
+            if pattern.is_empty() {
+                return Err(invalid(spec, "empty target name glob"));
+            }
+            Ok(TargetAtom::Name(pattern.to_owned()))
+        } else if let Some(name) = spec.strip_prefix("required-feature:") {
+            if name.is_empty() {
+                return Err(invalid(spec, "empty required feature name"));
+            }
+            Ok(TargetAtom::RequiredFeature(name.to_owned()))
+        } else if let Some(key) = spec.strip_prefix("name-in-metadata:") {
+            validate_key(spec, key)?;
+            Ok(TargetAtom::NameInMetadata(key.to_owned()))
+        } else {
+            Err(invalid(
+                spec,
+                "expected one of: name:<glob>, required-feature:<name>, name-in-metadata:<dotted.key>",
+            ))
+        }
+    }
+
+    /// Preflight metadata values referenced by this expression for one member.
+    ///
+    /// This deliberately visits every Boolean operand independently of match
+    /// results. Matching short-circuits `and` and `or`, but configuration
+    /// errors must not depend on operand order or an earlier match.
+    pub(crate) fn validate(&self, member: &Member) -> Result<(), EachError> {
+        match self {
+            Self::And(predicates) | Self::Or(predicates) => {
+                for predicate in predicates {
+                    predicate.validate(member)?;
+                }
+                Ok(())
+            }
+            Self::Not(predicate) => predicate.validate(member),
+            Self::Atom(TargetAtom::NameInMetadata(key)) => match lookup(&member.metadata, key) {
+                None => Ok(()),
+                Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(()),
+                Some(_) => Err(InvalidTargetMetadataError::new(member.name.clone(), key.clone()).into()),
+            },
+            Self::Atom(TargetAtom::Name(_) | TargetAtom::RequiredFeature(_)) => Ok(()),
+        }
+    }
+
+    /// Evaluate this expression against one target and its owning member.
+    #[must_use]
+    pub(crate) fn matches(&self, member: &Member, target: &crate::workspace::MemberTarget) -> bool {
+        match self {
+            Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(member, target)),
+            Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member, target)),
+            Self::Not(predicate) => !predicate.matches(member, target),
+            Self::Atom(atom) => match atom {
+                TargetAtom::Name(pattern) => {
+                    if pattern.contains(['*', '?']) {
+                        glob_matches(pattern, &target.name)
+                    } else {
+                        pattern == &target.name
+                    }
+                }
+                TargetAtom::RequiredFeature(name) => target.required_features.contains(name),
+                TargetAtom::NameInMetadata(key) => lookup(&member.metadata, key).is_some_and(|value| {
+                    value
+                        .as_array()
+                        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(target.name.as_str())))
+                }),
+            },
+        }
+    }
+}
+
+/// An atomic package predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PackageAtom {
     /// `target-kind:<kind>`: member has a target of that Cargo kind.
     HasTargetKind(TargetKind),
     /// `doctest`: Cargo reports at least one target with doctests enabled.
@@ -53,84 +206,31 @@ pub(crate) enum Predicate {
     },
 }
 
-impl Predicate {
-    /// Parse a Boolean filter expression.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EachError`] if the Boolean syntax is malformed, an atom is not
-    /// a recognized predicate, or a predicate argument is invalid.
-    pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
-        ExpressionParser::new(spec)?.parse()
-    }
-
-    /// Parse one atomic predicate from its command-line spelling.
-    fn parse_atom(spec: &str) -> Result<Self, EachError> {
-        match spec {
-            "lib" => Ok(Self::HasTargetKind(TargetKind::Lib)),
-            "bin" => Ok(Self::HasTargetKind(TargetKind::Bin)),
-            "doctest" => Ok(Self::Doctest),
-            "publishable" => Ok(Self::Publishable),
-            _ => {
-                if let Some(kind) = spec.strip_prefix("target-kind:") {
-                    let Some(kind) = parse_target_kind(kind) else {
-                        return Err(invalid(
-                            spec,
-                            "unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build",
-                        ));
-                    };
-                    Ok(Self::HasTargetKind(kind))
-                } else if let Some(name) = spec.strip_prefix("feature:") {
-                    if name.is_empty() {
-                        return Err(invalid(spec, "empty feature name"));
-                    }
-                    Ok(Self::HasFeature(name.to_owned()))
-                } else if let Some(name) = spec.strip_prefix("dep:") {
-                    if name.is_empty() {
-                        return Err(invalid(spec, "empty dependency name"));
-                    }
-                    Ok(Self::DependsOn(name.to_owned()))
-                } else if let Some(rest) = spec.strip_prefix("metadata:") {
-                    parse_metadata(spec, rest)
-                } else {
-                    Err(invalid(
-                        spec,
-                        "expected one of: lib, bin, doctest, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
-                    ))
-                }
-            }
-        }
-    }
-
-    /// Evaluate this predicate against a workspace member.
-    #[must_use]
-    pub(crate) fn matches(&self, member: &Member) -> bool {
-        match self {
-            Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(member)),
-            Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member)),
-            Self::Not(predicate) => !predicate.matches(member),
-            Self::HasTargetKind(kind) => member.targets.iter().any(|target| target.kinds.contains(kind)),
-            Self::Doctest => member.doctest,
-            Self::Publishable => member.publishable,
-            Self::HasFeature(name) => member.features.contains(name),
-            Self::DependsOn(name) => member.dependencies.contains(name),
-            Self::MetadataPresent(key) => lookup(&member.metadata, key).is_some(),
-            Self::MetadataEquals { key, value } => lookup(&member.metadata, key).is_some_and(|v| value_equals(v, value)),
-        }
-    }
+/// An atomic target predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetAtom {
+    /// `name:<glob>`: target name matches a Unix-style glob.
+    Name(String),
+    /// `required-feature:<name>`: target declares the named required feature.
+    RequiredFeature(String),
+    /// `name-in-metadata:<dotted.key>`: target name occurs in the metadata list.
+    NameInMetadata(String),
 }
 
+pub(crate) type PackagePredicate = Expression<PackageAtom>;
+pub(crate) type TargetPredicate = Expression<TargetAtom>;
+
 /// Parse the portion of a `metadata:` predicate after the prefix.
-fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
+fn parse_metadata(spec: &str, rest: &str) -> Result<PackageAtom, EachError> {
     if let Some((key, value)) = rest.split_once('=') {
         validate_key(spec, key)?;
-        Ok(Predicate::MetadataEquals {
+        Ok(PackageAtom::MetadataEquals {
             key: key.to_owned(),
             value: parse_metadata_value(spec, value)?,
         })
     } else {
         validate_key(spec, rest)?;
-        Ok(Predicate::MetadataPresent(rest.to_owned()))
+        Ok(PackageAtom::MetadataPresent(rest.to_owned()))
     }
 }
 
@@ -206,31 +306,35 @@ impl Token<'_> {
     }
 }
 
-struct ExpressionParser<'a> {
+struct ExpressionParser<'a, Atom> {
     spec: &'a str,
     tokens: Vec<Token<'a>>,
     position: usize,
     nesting: usize,
+    parse_atom: fn(&str) -> Result<Atom, EachError>,
+    allow_whitespace_in_atom: bool,
 }
 
-impl<'a> ExpressionParser<'a> {
+impl<'a, Atom> ExpressionParser<'a, Atom> {
     const MAX_NESTING: usize = 64;
 
-    fn new(spec: &'a str) -> Result<Self, EachError> {
+    fn new(spec: &'a str, parse_atom: fn(&str) -> Result<Atom, EachError>, allow_whitespace_in_atom: bool) -> Result<Self, EachError> {
         Ok(Self {
             spec,
             tokens: tokenize(spec)?,
             position: 0,
             nesting: 0,
+            parse_atom,
+            allow_whitespace_in_atom,
         })
     }
 
-    fn parse(mut self) -> Result<Predicate, EachError> {
+    fn parse(mut self) -> Result<Expression<Atom>, EachError> {
         if self.tokens.is_empty() {
             return Err(invalid(self.spec, "empty expression"));
         }
-        if self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
-            return Predicate::parse_atom(self.spec.trim());
+        if self.allow_whitespace_in_atom && self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
+            return (self.parse_atom)(self.spec.trim()).map(Expression::Atom);
         }
         let expression = self.parse_or()?;
         if let Some(token) = self.peek() {
@@ -242,7 +346,7 @@ impl<'a> ExpressionParser<'a> {
         Ok(expression)
     }
 
-    fn parse_or(&mut self) -> Result<Predicate, EachError> {
+    fn parse_or(&mut self) -> Result<Expression<Atom>, EachError> {
         let mut operands = vec![self.parse_and()?];
         while self.peek() == Some(Token::Or) {
             self.advance();
@@ -251,11 +355,11 @@ impl<'a> ExpressionParser<'a> {
         Ok(if operands.len() == 1 {
             operands.pop().expect("length checked above to contain exactly one operand")
         } else {
-            Predicate::Or(operands)
+            Expression::Or(operands)
         })
     }
 
-    fn parse_and(&mut self) -> Result<Predicate, EachError> {
+    fn parse_and(&mut self) -> Result<Expression<Atom>, EachError> {
         let mut operands = vec![self.parse_unary()?];
         while self.peek() == Some(Token::And) {
             self.advance();
@@ -264,22 +368,22 @@ impl<'a> ExpressionParser<'a> {
         Ok(if operands.len() == 1 {
             operands.pop().expect("length checked above to contain exactly one operand")
         } else {
-            Predicate::And(operands)
+            Expression::And(operands)
         })
     }
 
-    fn parse_unary(&mut self) -> Result<Predicate, EachError> {
+    fn parse_unary(&mut self) -> Result<Expression<Atom>, EachError> {
         match self.peek() {
             Some(Token::Atom(atom)) => {
                 self.advance();
-                Predicate::parse_atom(atom)
+                (self.parse_atom)(atom).map(Expression::Atom)
             }
             Some(Token::Not) => {
                 self.advance();
                 self.enter_nesting()?;
                 let operand = self.parse_unary();
                 self.nesting -= 1;
-                Ok(Predicate::Not(Box::new(operand?)))
+                Ok(Expression::Not(Box::new(operand?)))
             }
             Some(Token::LeftParen) => {
                 self.advance();
@@ -319,6 +423,35 @@ impl<'a> ExpressionParser<'a> {
         self.nesting += 1;
         Ok(())
     }
+}
+
+/// Tiny Unix-style glob matcher: `*` matches any run of characters
+/// (including empty), `?` matches exactly one character. Everything else
+/// matches literally.
+///
+/// Uses dynamic programming, so ambiguous `*` backtracking remains bounded by
+/// `O(len(pattern) * len(name))`.
+pub(crate) fn glob_matches(pattern: &str, name: &str) -> bool {
+    let name: Vec<char> = name.chars().collect();
+    let mut previous = vec![false; name.len() + 1];
+    previous[0] = true;
+
+    for pattern_char in pattern.chars() {
+        let mut current = vec![false; name.len() + 1];
+        if pattern_char == '*' {
+            current[0] = previous[0];
+        }
+        for (index, name_char) in name.iter().enumerate() {
+            current[index + 1] = if pattern_char == '*' {
+                previous[index + 1] || current[index]
+            } else {
+                previous[index] && (pattern_char == '?' || pattern_char == *name_char)
+            };
+        }
+        previous = current;
+    }
+
+    previous[name.len()]
 }
 
 fn tokenize(spec: &str) -> Result<Vec<Token<'_>>, EachError> {
@@ -443,66 +576,227 @@ mod tests {
         }
     }
 
+    fn package_atom(atom: PackageAtom) -> PackagePredicate {
+        PackagePredicate::Atom(atom)
+    }
+
     #[test]
     fn parses_kind_predicates() {
-        assert_eq!(Predicate::parse("lib").expect("lib"), Predicate::HasTargetKind(TargetKind::Lib));
-        assert_eq!(Predicate::parse("bin").expect("bin"), Predicate::HasTargetKind(TargetKind::Bin));
         assert_eq!(
-            Predicate::parse("target-kind:proc-macro").expect("target kind"),
-            Predicate::HasTargetKind(TargetKind::ProcMacro)
+            PackagePredicate::parse("lib").expect("lib"),
+            package_atom(PackageAtom::HasTargetKind(TargetKind::Lib))
         );
-        assert_eq!(Predicate::parse("doctest").expect("doctest"), Predicate::Doctest);
-        assert_eq!(Predicate::parse("publishable").expect("publishable"), Predicate::Publishable);
         assert_eq!(
-            Predicate::parse("feature:loom").expect("feature"),
-            Predicate::HasFeature("loom".to_owned())
+            PackagePredicate::parse("bin").expect("bin"),
+            package_atom(PackageAtom::HasTargetKind(TargetKind::Bin))
+        );
+        assert_eq!(
+            PackagePredicate::parse("target-kind:proc-macro").expect("target kind"),
+            package_atom(PackageAtom::HasTargetKind(TargetKind::ProcMacro))
+        );
+        assert_eq!(
+            PackagePredicate::parse("doctest").expect("doctest"),
+            package_atom(PackageAtom::Doctest)
+        );
+        assert_eq!(
+            PackagePredicate::parse("publishable").expect("publishable"),
+            package_atom(PackageAtom::Publishable)
+        );
+        assert_eq!(
+            PackagePredicate::parse("feature:loom").expect("feature"),
+            package_atom(PackageAtom::HasFeature("loom".to_owned()))
         );
     }
 
     #[test]
     fn parses_dep_predicate() {
-        assert_eq!(Predicate::parse("dep:loom").expect("dep"), Predicate::DependsOn("loom".to_owned()));
+        assert_eq!(
+            PackagePredicate::parse("dep:loom").expect("dep"),
+            package_atom(PackageAtom::DependsOn("loom".to_owned()))
+        );
     }
 
     #[test]
     fn parses_metadata_predicates() {
         assert_eq!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent").expect("present"),
-            Predicate::MetadataPresent("coverage-gate.min-lines-percent".to_owned())
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent").expect("present"),
+            package_atom(PackageAtom::MetadataPresent("coverage-gate.min-lines-percent".to_owned()))
         );
         assert_eq!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent=0").expect("equals"),
-            Predicate::MetadataEquals {
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=0").expect("equals"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "coverage-gate.min-lines-percent".to_owned(),
                 value: "0".to_owned()
-            }
+            })
         );
     }
 
     #[test]
     fn parses_boolean_operators_with_conventional_precedence() {
         assert_eq!(
-            Predicate::parse("lib or bin and not publishable").expect("expression"),
-            Predicate::Or(vec![
-                Predicate::HasTargetKind(TargetKind::Lib),
-                Predicate::And(vec![
-                    Predicate::HasTargetKind(TargetKind::Bin),
-                    Predicate::Not(Box::new(Predicate::Publishable)),
+            PackagePredicate::parse("lib or bin and not publishable").expect("expression"),
+            PackagePredicate::Or(vec![
+                package_atom(PackageAtom::HasTargetKind(TargetKind::Lib)),
+                PackagePredicate::And(vec![
+                    package_atom(PackageAtom::HasTargetKind(TargetKind::Bin)),
+                    PackagePredicate::Not(Box::new(package_atom(PackageAtom::Publishable))),
                 ]),
             ])
         );
     }
 
     #[test]
+    fn target_filters_reuse_boolean_parser_shape() {
+        assert_eq!(
+            TargetPredicate::parse("name:unit-* or required-feature:loom and not name-in-metadata:checks.skip").expect("target expression"),
+            TargetPredicate::Or(vec![
+                TargetPredicate::Atom(TargetAtom::Name("unit-*".to_owned())),
+                TargetPredicate::And(vec![
+                    TargetPredicate::Atom(TargetAtom::RequiredFeature("loom".to_owned())),
+                    TargetPredicate::Not(Box::new(TargetPredicate::Atom(TargetAtom::NameInMetadata(
+                        "checks.skip".to_owned(),
+                    )))),
+                ]),
+            ])
+        );
+    }
+
+    fn target_filter_fixture() -> (Member, MemberTarget) {
+        let mut member = member_with(&[], json!({"checks": {"skip": ["loom-test"]}}), true, false);
+        member.name = "alpha".to_owned();
+        let target = MemberTarget {
+            name: "loom-test".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: std::iter::once("loom".to_owned()).collect(),
+        };
+        (member, target)
+    }
+
+    #[test]
+    fn target_filter_name_glob_matches() {
+        let (member, target) = target_filter_fixture();
+        assert!(
+            TargetPredicate::parse("name:loom-*")
+                .expect("name filter")
+                .matches(&member, &target)
+        );
+        assert!(
+            !TargetPredicate::parse("name:unit-*")
+                .expect("name filter")
+                .matches(&member, &target)
+        );
+    }
+
+    #[test]
+    fn target_filter_literal_name_matches() {
+        let (member, target) = target_filter_fixture();
+        assert!(
+            TargetPredicate::parse("name:loom-test")
+                .expect("literal name filter")
+                .matches(&member, &target)
+        );
+        assert!(
+            !TargetPredicate::parse("name:ordinary-test")
+                .expect("literal name filter")
+                .matches(&member, &target)
+        );
+    }
+
+    #[test]
+    fn target_filter_required_feature_matches() {
+        let (member, target) = target_filter_fixture();
+        assert!(
+            TargetPredicate::parse("required-feature:loom")
+                .expect("required feature filter")
+                .matches(&member, &target)
+        );
+        assert!(
+            !TargetPredicate::parse("required-feature:tokio")
+                .expect("required feature filter")
+                .matches(&member, &target)
+        );
+    }
+
+    #[test]
+    fn target_filter_name_in_metadata_matches_and_validates() {
+        let (member, target) = target_filter_fixture();
+        let predicate = TargetPredicate::parse("name-in-metadata:checks.skip").expect("metadata filter");
+        predicate.validate(&member).expect("valid metadata");
+        assert!(predicate.matches(&member, &target));
+    }
+
+    #[test]
+    fn target_filter_missing_metadata_does_not_match() {
+        let member = member_with(&[], json!({}), true, false);
+        let target = MemberTarget {
+            name: "unit".to_owned(),
+            kinds: std::iter::once(TargetKind::Test).collect(),
+            required_features: BTreeSet::new(),
+        };
+        let predicate = TargetPredicate::parse("name-in-metadata:checks.skip").expect("metadata filter");
+        predicate.validate(&member).expect("missing metadata is valid");
+        assert!(!predicate.matches(&member, &target));
+    }
+
+    #[test]
+    fn target_filter_rejects_malformed_metadata_values() {
+        for metadata in [
+            json!({"checks": {"skip": "unit"}}),
+            json!({"checks": {"skip": ["unit", 7]}}),
+            json!({"checks": {"skip": {"unit": true}}}),
+        ] {
+            let member = member_with(&[], metadata, true, false);
+            let error = TargetPredicate::parse("name-in-metadata:checks.skip")
+                .expect("metadata filter")
+                .validate(&member)
+                .expect_err("metadata must be a string array");
+            assert_eq!(
+                error.to_string(),
+                "package `m` metadata `checks.skip` must be an array of strings when used by `name-in-metadata:checks.skip`"
+            );
+        }
+    }
+
+    #[test]
+    fn target_filter_atom_errors_are_exact() {
+        let cases = [
+            ("name:", "empty target name glob"),
+            ("required-feature:", "empty required feature name"),
+            ("name-in-metadata:", "empty metadata key"),
+            (
+                "name-in-metadata:checks..skip",
+                "metadata key must be a dotted path with non-empty segments",
+            ),
+            (
+                "unknown",
+                "expected one of: name:<glob>, required-feature:<name>, name-in-metadata:<dotted.key>",
+            ),
+        ];
+        for (expression, reason) in cases {
+            let error = TargetPredicate::parse(expression).expect_err(expression);
+            assert_eq!(error.to_string(), format!("invalid filter expression `{expression}`: {reason}"));
+        }
+    }
+
+    #[test]
+    fn target_filter_rejects_adjacent_atoms_without_boolean_operator() {
+        let error = TargetPredicate::parse("name:loom-* required-feature:loom").expect_err("adjacent atoms require `and`");
+        assert_eq!(
+            error.to_string(),
+            "invalid filter expression `name:loom-* required-feature:loom`: unexpected predicate; expected `and`, `or`, or end of expression"
+        );
+    }
+
+    #[test]
     fn parentheses_override_boolean_precedence() {
         assert_eq!(
-            Predicate::parse("(lib or bin) and publishable").expect("expression"),
-            Predicate::And(vec![
-                Predicate::Or(vec![
-                    Predicate::HasTargetKind(TargetKind::Lib),
-                    Predicate::HasTargetKind(TargetKind::Bin),
+            PackagePredicate::parse("(lib or bin) and publishable").expect("expression"),
+            PackagePredicate::And(vec![
+                PackagePredicate::Or(vec![
+                    package_atom(PackageAtom::HasTargetKind(TargetKind::Lib)),
+                    package_atom(PackageAtom::HasTargetKind(TargetKind::Bin)),
                 ]),
-                Predicate::Publishable,
+                package_atom(PackageAtom::Publishable),
             ])
         );
     }
@@ -510,32 +804,32 @@ mod tests {
     #[test]
     fn atomic_metadata_value_may_contain_spaces() {
         assert_eq!(
-            Predicate::parse("metadata:role=script only").expect("atomic predicate"),
-            Predicate::MetadataEquals {
+            PackagePredicate::parse("metadata:role=script only").expect("atomic predicate"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "role".to_owned(),
                 value: "script only".to_owned(),
-            }
+            })
         );
     }
 
     #[test]
     fn quoted_metadata_value_may_contain_boolean_syntax() {
         assert_eq!(
-            Predicate::parse(r#"metadata:role="research and (development)" and lib"#).expect("expression"),
-            Predicate::And(vec![
-                Predicate::MetadataEquals {
+            PackagePredicate::parse(r#"metadata:role="research and (development)" and lib"#).expect("expression"),
+            PackagePredicate::And(vec![
+                PackagePredicate::Atom(PackageAtom::MetadataEquals {
                     key: "role".to_owned(),
                     value: "research and (development)".to_owned(),
-                },
-                Predicate::HasTargetKind(TargetKind::Lib),
+                }),
+                package_atom(PackageAtom::HasTargetKind(TargetKind::Lib)),
             ])
         );
         assert_eq!(
-            Predicate::parse(r#"metadata:role="quoted \"value\" and \\ path""#).expect("quoted atom"),
-            Predicate::MetadataEquals {
+            PackagePredicate::parse(r#"metadata:role="quoted \"value\" and \\ path""#).expect("quoted atom"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "role".to_owned(),
                 value: "quoted \"value\" and \\ path".to_owned(),
-            }
+            })
         );
     }
 
@@ -557,10 +851,10 @@ mod tests {
             r#"metadata:role="unclosed"#,
             r#"metadata:role="unsupported\q""#,
         ] {
-            Predicate::parse(expression).expect_err(expression);
+            PackagePredicate::parse(expression).expect_err(expression);
         }
 
-        let unexpected = Predicate::parse("lib or )").expect_err("unexpected closing parenthesis");
+        let unexpected = PackagePredicate::parse("lib or )").expect_err("unexpected closing parenthesis");
         assert!(
             unexpected
                 .to_string()
@@ -568,7 +862,7 @@ mod tests {
             "diagnostic must identify the unexpected token: {unexpected}"
         );
 
-        let trailing = Predicate::parse("lib not bin").expect_err("unexpected trailing operator");
+        let trailing = PackagePredicate::parse("lib not bin").expect_err("unexpected trailing operator");
         assert!(
             trailing
                 .to_string()
@@ -603,7 +897,7 @@ mod tests {
             ("(lib", "unclosed `(`"),
         ];
         for (expression, reason) in cases {
-            let error = Predicate::parse(expression).expect_err(expression);
+            let error = PackagePredicate::parse(expression).expect_err(expression);
             assert_eq!(error.to_string(), format!("invalid filter expression `{expression}`: {reason}"));
         }
     }
@@ -611,11 +905,11 @@ mod tests {
     #[test]
     fn metadata_quote_boundaries_and_escapes_are_exact() {
         assert_eq!(
-            Predicate::parse(r#"metadata:role="a \"quoted\" \\ path""#).expect("quoted value"),
-            Predicate::MetadataEquals {
+            PackagePredicate::parse(r#"metadata:role="a \"quoted\" \\ path""#).expect("quoted value"),
+            PackagePredicate::Atom(PackageAtom::MetadataEquals {
                 key: "role".to_owned(),
                 value: "a \"quoted\" \\ path".to_owned(),
-            }
+            })
         );
 
         let trailing_quote = parse_metadata_value("metadata:role=value\"", r#"value""#).expect_err("quote only at the end is invalid");
@@ -641,32 +935,32 @@ mod tests {
     fn expression_nesting_accepts_64_levels_but_rejects_65() {
         let maximum = format!("{}lib{}", "(".repeat(64), ")".repeat(64));
         assert_eq!(
-            Predicate::parse(&maximum).expect("64 levels are supported"),
-            Predicate::HasTargetKind(TargetKind::Lib)
+            PackagePredicate::parse(&maximum).expect("64 levels are supported"),
+            package_atom(PackageAtom::HasTargetKind(TargetKind::Lib))
         );
 
         let too_deep = format!("{}lib{}", "(".repeat(65), ")".repeat(65));
-        let error = Predicate::parse(&too_deep).expect_err("65 levels exceed the limit");
+        let error = PackagePredicate::parse(&too_deep).expect_err("65 levels exceed the limit");
         assert!(
             error.to_string().contains("expression nesting exceeds 64 levels"),
             "diagnostic must identify the nesting limit: {error}"
         );
 
         let maximum_negation = format!("{}lib", "not ".repeat(64));
-        Predicate::parse(&maximum_negation).expect("64 negations are supported");
+        PackagePredicate::parse(&maximum_negation).expect("64 negations are supported");
 
         let too_many_negations = format!("{}lib", "not ".repeat(65));
-        Predicate::parse(&too_many_negations).expect_err("65 negations exceed the limit");
+        PackagePredicate::parse(&too_many_negations).expect_err("65 negations exceed the limit");
     }
 
     #[test]
     fn mixed_parenthesis_and_negation_depth_uses_one_level_per_operator() {
         let accepted = format!("{}{}lib{}", "(".repeat(32), "not ".repeat(32), ")".repeat(32));
-        Predicate::parse(&accepted).expect("32 parentheses plus 32 negations are within the limit");
+        PackagePredicate::parse(&accepted).expect("32 parentheses plus 32 negations are within the limit");
 
         let rejected = format!("{}{}lib{}", "(".repeat(33), "not ".repeat(32), ")".repeat(33));
         assert_eq!(
-            Predicate::parse(&rejected)
+            PackagePredicate::parse(&rejected)
                 .expect_err("65 total nesting levels must fail")
                 .to_string(),
             format!("invalid filter expression `{rejected}`: expression nesting exceeds 64 levels")
@@ -679,10 +973,10 @@ mod tests {
             "(".repeat(64),
             ")".repeat(64)
         );
-        Predicate::parse(&sequential).expect("nesting from one operand must not leak into the next");
+        PackagePredicate::parse(&sequential).expect("nesting from one operand must not leak into the next");
 
         let sequential_negations = format!("{}lib and {}bin", "not ".repeat(64), "not ".repeat(64));
-        Predicate::parse(&sequential_negations).expect("negation nesting from one operand must not leak into the next");
+        PackagePredicate::parse(&sequential_negations).expect("negation nesting from one operand must not leak into the next");
     }
 
     #[test]
@@ -718,22 +1012,22 @@ mod tests {
 
     #[test]
     fn rejects_unknown_and_empty() {
-        Predicate::parse("nonsense").expect_err("unknown predicate must error");
-        Predicate::parse("dep:").expect_err("empty dependency name must error");
-        Predicate::parse("feature:").expect_err("empty feature name must error");
-        Predicate::parse("target-kind:no-such-kind").expect_err("unknown target kind must error");
-        Predicate::parse("metadata:").expect_err("empty metadata key must error");
+        PackagePredicate::parse("nonsense").expect_err("unknown predicate must error");
+        PackagePredicate::parse("dep:").expect_err("empty dependency name must error");
+        PackagePredicate::parse("feature:").expect_err("empty feature name must error");
+        PackagePredicate::parse("target-kind:no-such-kind").expect_err("unknown target kind must error");
+        PackagePredicate::parse("metadata:").expect_err("empty metadata key must error");
     }
 
     #[test]
     fn rejects_metadata_keys_with_empty_segments() {
         // Keys with empty path segments parse but can never match, so they are
         // a loud usage error rather than a silent empty result.
-        Predicate::parse("metadata:a..b").expect_err("double dot must error");
-        Predicate::parse("metadata:.role").expect_err("leading dot must error");
-        Predicate::parse("metadata:role.").expect_err("trailing dot must error");
-        Predicate::parse("metadata:a..b=1").expect_err("double dot with value must error");
-        Predicate::parse("metadata:.role=1").expect_err("leading dot with value must error");
+        PackagePredicate::parse("metadata:a..b").expect_err("double dot must error");
+        PackagePredicate::parse("metadata:.role").expect_err("leading dot must error");
+        PackagePredicate::parse("metadata:role.").expect_err("trailing dot must error");
+        PackagePredicate::parse("metadata:a..b=1").expect_err("double dot with value must error");
+        PackagePredicate::parse("metadata:.role=1").expect_err("leading dot with value must error");
     }
 
     #[test]
@@ -744,10 +1038,10 @@ mod tests {
             kinds: std::iter::once(TargetKind::ProcMacro).collect(),
             required_features: BTreeSet::new(),
         });
-        assert!(Predicate::HasTargetKind(TargetKind::Lib).matches(&m));
-        assert!(!Predicate::HasTargetKind(TargetKind::Bin).matches(&m));
-        assert!(Predicate::HasTargetKind(TargetKind::ProcMacro).matches(&m));
-        assert!(!Predicate::HasTargetKind(TargetKind::Test).matches(&m));
+        assert!(package_atom(PackageAtom::HasTargetKind(TargetKind::Lib)).matches(&m));
+        assert!(!package_atom(PackageAtom::HasTargetKind(TargetKind::Bin)).matches(&m));
+        assert!(package_atom(PackageAtom::HasTargetKind(TargetKind::ProcMacro)).matches(&m));
+        assert!(!package_atom(PackageAtom::HasTargetKind(TargetKind::Test)).matches(&m));
     }
 
     #[test]
@@ -756,10 +1050,10 @@ mod tests {
         m.publishable = false;
         m.doctest = true;
         m.features.insert("loom".to_owned());
-        assert!(!Predicate::Publishable.matches(&m));
-        assert!(Predicate::Doctest.matches(&m));
-        assert!(Predicate::HasFeature("loom".to_owned()).matches(&m));
-        assert!(!Predicate::HasFeature("serde".to_owned()).matches(&m));
+        assert!(!package_atom(PackageAtom::Publishable).matches(&m));
+        assert!(package_atom(PackageAtom::Doctest).matches(&m));
+        assert!(package_atom(PackageAtom::HasFeature("loom".to_owned())).matches(&m));
+        assert!(!package_atom(PackageAtom::HasFeature("serde".to_owned())).matches(&m));
     }
 
     #[test]
@@ -767,12 +1061,12 @@ mod tests {
         let mut m = member_with(&[], Value::Null, true, false);
         m.features.insert("loom".to_owned());
         assert!(
-            Predicate::parse("doctest and publishable and (bin or feature:loom)")
+            PackagePredicate::parse("doctest and publishable and (bin or feature:loom)")
                 .expect("expression")
                 .matches(&m)
         );
         assert!(
-            !Predicate::parse("not lib or metadata:role=script-only")
+            !PackagePredicate::parse("not lib or metadata:role=script-only")
                 .expect("expression")
                 .matches(&m)
         );
@@ -781,38 +1075,42 @@ mod tests {
     #[test]
     fn dep_predicate_matches() {
         let m = member_with(&["loom", "serde"], Value::Null, true, false);
-        assert!(Predicate::DependsOn("loom".to_owned()).matches(&m));
-        assert!(!Predicate::DependsOn("tokio".to_owned()).matches(&m));
+        assert!(package_atom(PackageAtom::DependsOn("loom".to_owned())).matches(&m));
+        assert!(!package_atom(PackageAtom::DependsOn("tokio".to_owned())).matches(&m));
     }
 
     #[test]
     fn metadata_present_and_equals() {
         let m = member_with(&[], json!({ "coverage-gate": { "min-lines-percent": 0 } }), true, false);
-        assert!(Predicate::parse("metadata:coverage-gate.min-lines-percent").expect("p").matches(&m));
+        assert!(
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent")
+                .expect("p")
+                .matches(&m)
+        );
         // numeric-aware: `0` matches the JSON number `0`.
         assert!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent=0")
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=0")
                 .expect("p")
                 .matches(&m)
         );
         assert!(
-            Predicate::parse("metadata:coverage-gate.min-lines-percent=0.0")
+            PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=0.0")
                 .expect("p")
                 .matches(&m)
         );
         assert!(
-            !Predicate::parse("metadata:coverage-gate.min-lines-percent=50")
+            !PackagePredicate::parse("metadata:coverage-gate.min-lines-percent=50")
                 .expect("p")
                 .matches(&m)
         );
-        assert!(!Predicate::parse("metadata:missing.key").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:missing.key").expect("p").matches(&m));
     }
 
     #[test]
     fn metadata_string_equals() {
         let m = member_with(&[], json!({ "role": "script-only" }), true, false);
-        assert!(Predicate::parse("metadata:role=script-only").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:role=library").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:role=script-only").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:role=library").expect("p").matches(&m));
     }
 
     #[test]
@@ -820,15 +1118,15 @@ mod tests {
         // Both sides parse as `f64::NAN`, and `NaN == NaN` is false; the string
         // fallback must still match a literal `"NaN"` metadata value.
         let m = member_with(&[], json!({ "marker": "NaN" }), true, false);
-        assert!(Predicate::parse("metadata:marker=NaN").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:marker=nan").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:marker=NaN").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:marker=nan").expect("p").matches(&m));
     }
 
     #[test]
     fn metadata_bool_equals() {
         let m = member_with(&[], json!({ "flag": true }), true, false);
-        assert!(Predicate::parse("metadata:flag=true").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:flag=false").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:flag=true").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:flag=false").expect("p").matches(&m));
     }
 
     #[test]
@@ -836,13 +1134,13 @@ mod tests {
         // Object / array metadata values can be *present* but never compare
         // equal to a scalar expected string.
         let m = member_with(&[], json!({ "obj": { "a": 1 }, "arr": [1, 2] }), true, false);
-        assert!(Predicate::parse("metadata:obj").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:obj=x").expect("p").matches(&m));
-        assert!(!Predicate::parse("metadata:arr=x").expect("p").matches(&m));
+        assert!(PackagePredicate::parse("metadata:obj").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:obj=x").expect("p").matches(&m));
+        assert!(!PackagePredicate::parse("metadata:arr=x").expect("p").matches(&m));
     }
 
     #[test]
     fn rejects_empty_metadata_key_before_equals() {
-        Predicate::parse("metadata:=value").expect_err("empty key with value must error");
+        PackagePredicate::parse("metadata:=value").expect_err("empty key with value must error");
     }
 }

@@ -951,8 +951,8 @@ fn per_target_mode_filters_required_features_and_substitutes_target() {
             "--workspace",
             "--each-target",
             "test",
-            "--target-required-feature",
-            "loom",
+            "--target-filter",
+            "required-feature:loom",
             "--dry-run",
             "--",
             "echo",
@@ -1005,26 +1005,6 @@ fn per_target_and_once_are_mutually_exclusive() {
         .assert()
         .failure()
         .code(2);
-}
-
-#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
-#[test]
-fn target_required_feature_requires_target_mode() {
-    let (_tmp, manifest) = fixture();
-    each(&manifest)
-        .args([
-            "--workspace",
-            "--target-required-feature",
-            "loom",
-            "--dry-run",
-            "--",
-            "echo",
-            "{name}",
-        ])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("--each-target"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

@@ -102,7 +102,15 @@ atoms:
   `{json:key}`.
 * `--each-target <KIND>`: run once per matching Cargo target, using
   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
-  `--target-required-feature` further narrows targets.
+  repeated `--target-filter` expressions are AND-combined after kind
+  selection. Target-filter atoms are `name:<glob>`,
+  `required-feature:<name>`, and
+  `name-in-metadata:<dotted.key>`.
+* `--require-target-per-package`: in per-target mode, reject the complete
+  selection before execution unless every selected package retains at
+  least one target after kind and target-expression filtering. All missing
+  packages are reported as `name@version`; an empty package selection
+  remains a successful no-op.
 
 `--keep-going` runs every invocation and exits non-zero if any failed
 (default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package,
@@ -160,6 +168,10 @@ every member’s resolved minimum must be present and no newer than that
 floor; malformed or inconsistent declarations remain errors. Substitution
 is textual, so an empty value does not remove its surrounding argv element.
 Placeholder mode validation still runs before an empty-plan no-op.
+With `--require-target-per-package`, target selection is validated for every
+selected package before any child command is spawned. A failure lists every
+package without a matching target in deterministic package order and exits
+2, regardless of `--jobs`, `--keep-going`, `--timeout`, or `--chdir`.
 
 JSON-record mode requires one JSON object per nonempty input line and does
 not load Cargo metadata. Referenced `{json:key}` fields must exist and be
@@ -238,7 +250,8 @@ cargo each -p crate-a -p crate-b --once -- \
 Run every Cargo test target that requires the `loom` feature:
 
 ```text
-cargo each --workspace --each-target test --target-required-feature loom -- \
+cargo each --workspace --filter feature:loom --each-target test \
+    --target-filter required-feature:loom --require-target-per-package -- \
     cargo test -p {name} --test {target} --features loom
 ```
 
