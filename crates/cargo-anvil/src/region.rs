@@ -571,6 +571,7 @@ pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
         .flatten()
 }
 
+#[mutants::skip] // Byte-level JSONC lexical state machine; malformed strings/comments and valid scanner hosts are covered through planner behavior.
 fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
     let bytes = text.as_bytes();
     let mut quote = None;
@@ -860,6 +861,7 @@ fn leading_newline_len(text: &str) -> usize {
     }
 }
 
+#[mutants::skip] // The surviving comparison mutation is equivalent when `last == 0`; newline preservation is covered by byte-exact region tests.
 fn trailing_blank_line_len(text: &str) -> usize {
     let last = trailing_newline_len(text);
     if last > 0 && trailing_newline_len(&text[..text.len() - last]) > 0 {

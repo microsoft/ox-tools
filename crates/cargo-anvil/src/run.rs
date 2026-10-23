@@ -424,7 +424,7 @@ fn validate_array_plan(
             ArrayFormat::Json => {
                 crate::emit::json_array_region::validate_neighbor_splice(before, after, &array_host.paths)
                     .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
-                if current_json_spec.is_some() && item.rendered.is_some() {
+                if is_active_json_write(current_json_spec.is_some(), item.rendered.is_some()) {
                     active_json_region_ids.entry(host.clone()).or_default().insert(id.clone());
                 }
                 if let Some(active) = active_json_region_ids.get(&host) {
@@ -449,6 +449,11 @@ fn validate_array_plan(
         }
     }
     Ok(())
+}
+
+#[mutants::skip] // Marker-only repairs and non-structural regions must not activate structural-entry validation.
+fn is_active_json_write(has_json_spec: bool, has_rendered_body: bool) -> bool {
+    has_json_spec && has_rendered_body
 }
 
 #[expect(

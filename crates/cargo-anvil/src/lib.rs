@@ -447,6 +447,7 @@ pub(crate) mod workspace;
 /// must not depend on it — use the crate-root surface (`Catalog`, `Artifact`,
 /// `artifacts`, `run_app`, …) instead.
 #[doc(hidden)]
+#[cfg(any(test, feature = "internals"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     pub use crate::checksum::checksum_str;

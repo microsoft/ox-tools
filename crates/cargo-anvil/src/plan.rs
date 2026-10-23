@@ -710,6 +710,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn checksum_update_requires_a_matching_region_with_a_rendered_checksum() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::repair_region("config.json", "settings", "{}".to_owned()));
+        plan.push(PlanItem::insync(
+            Target::Region {
+                host: "config.json".to_owned(),
+                id: "other".to_owned(),
+            },
+            "checksum".to_owned(),
+        ));
+
+        assert!(!plan.region_has_checksum_update("config.json", "settings"));
+        assert!(plan.region_has_checksum_update("config.json", "other"));
+    }
+
     /// Only owned files propose: a managed region's proposal would be a sidecar
     /// nobody can apply, because moving it over the host would replace the
     /// repository's own content around the region as well. The arm that says so

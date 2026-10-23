@@ -30,6 +30,12 @@ allowed_external_types = ["ohno::app::error::AppError"]
 [package.metadata.coverage-gate]
 min-lines-percent = 99.86445
 
+[features]
+# Exposes engine internals only to this crate's integration tests. The targets
+# below opt in explicitly; downstream consumers should use the supported
+# crate-root API.
+internals = []
+
 [[bin]]
 name = "cargo-anvil"
 path = "src/main.rs"
@@ -54,6 +60,42 @@ predicates = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
+
+[[test]]
+name = "container_upgrade"
+required-features = ["internals"]
+
+[[test]]
+name = "extensibility"
+required-features = ["internals"]
+
+[[test]]
+name = "fixtures"
+required-features = ["internals"]
+
+[[test]]
+name = "impact"
+required-features = ["internals"]
+
+[[test]]
+name = "pr_title"
+required-features = ["internals"]
+
+[[test]]
+name = "recipe_contracts"
+required-features = ["internals"]
+
+[[test]]
+name = "schemas"
+required-features = ["internals"]
+
+[[test]]
+name = "snapshots"
+required-features = ["internals"]
+
+[[test]]
+name = "toml_adoption"
+required-features = ["internals"]
 
 # >>> anvil-managed: anvil-lints
 [lints]

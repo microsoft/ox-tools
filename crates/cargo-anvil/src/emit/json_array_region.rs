@@ -1743,6 +1743,36 @@ mod tests {
             validate_recorded_placement(split, "entries", &path).unwrap_err().remedy,
             RefusalRemedy::MisplacedArrayMarkers
         );
+
+        let starts_inside = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    {\"key\":\n",
+            "    // >>> anvil-managed: entries\n",
+            "    true},\n",
+            "    // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(starts_inside, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::MisplacedArrayMarkers
+        );
+
+        let ends_inside = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "    {\"key\": true,\n",
+            "    // <<< anvil-managed: entries\n",
+            "    \"tail\": false},\n",
+            "  ]\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(ends_inside, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::MisplacedArrayMarkers
+        );
     }
 
     #[test]

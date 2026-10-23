@@ -332,7 +332,10 @@ impl CatalogBuilder {
     /// `without_artifact` call violated its add/override/remove invariant, or
     /// if an owned file under `justfiles/` is not a `.just` recipe. TOML array
     /// regions also fail validation for invalid selectors, syntax, generated
-    /// entry bodies, sentinel comments, or a missing final comma.
+    /// entry bodies, sentinel comments, or a missing final comma. JSON array
+    /// regions likewise fail validation for invalid selectors, generated entry
+    /// bodies, sentinel comments, missing final commas, or region syntax that
+    /// is incompatible with the JSON host.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
