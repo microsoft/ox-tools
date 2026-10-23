@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-23
+
+- ✨ Features
+
+  - cargo-anvil: adopt cargo-each 0.6 package selection
+  - cargo-anvil: roll out released-surface coverage
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: avoid ambiguous package specs in remaining recipes
+
 ## [0.15.2] - 2026-10-23
 
 - ✨ Features

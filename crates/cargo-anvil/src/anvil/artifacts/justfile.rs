@@ -378,7 +378,7 @@ mod tests {
             assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --profile release --package $packageName"),
+            checks.contains("bolero list --profile release --package '{cargo-spec}'"),
             "bolero discovery must use the execution profile once per affected package"
         );
         assert!(
@@ -390,6 +390,62 @@ mod tests {
             "bolero discovery must not pass repeated --package arguments"
         );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
+        // Each discovered target runs under the member that reported it, and
+        // one failing target does not stop the remaining targets.
+        for needle in [
+            "$target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec",
+            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
+            "if ($LASTEXITCODE -ne 0) { $failed = $true }",
+            "if ($failed) { exit 1 }",
+        ] {
+            assert!(checks.contains(needle), "bolero dispatch contract missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn examples_select_and_run_members_by_exact_identity() {
+        let examples = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/examples.just").then_some(*body))
+            .expect("examples.just is registered in CHECK_FILES");
+        // Package names that differ only by case are distinct members, so
+        // selection must compare ordinally rather than with `-in`/`-notin`.
+        for needle in [
+            "$excluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)",
+            "$selectedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)",
+            "[string]::Equals($package, $p.name, [System.StringComparison]::Ordinal)",
+        ] {
+            assert!(examples.contains(needle), "examples selection must be ordinal: missing '{needle}'");
+        }
+        assert!(!examples.contains("-notin $excluded"));
+        // The metadata package ID is a source-qualified package spec on every
+        // supported Cargo; a manifest path would follow `default-members`.
+        assert!(examples.contains("'run', '--package', $target.id, '--example', $target.example"));
+        assert!(examples.contains("$start.WorkingDirectory = [string]$meta.workspace_root"));
+        assert!(!examples.contains("'--manifest-path', $target"));
+    }
+
+    #[test]
+    fn miri_opt_out_reads_the_callers_package_selection() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+        // An explicitly selected opted-out package must skip before
+        // compilation, so the metadata loop must not shadow `$package`.
+        assert!(!miri.contains("foreach ($package in"));
+        assert!(miri.contains("} elseif ($excludedPackages.Contains(($package -split '@', 2)[0])) {"));
+    }
+
+    #[test]
+    fn tool_version_probe_accepts_source_installs() {
+        // `cargo install --list` prints `name vX.Y.Z (source):` for path and
+        // git installs; the probe must not treat those as missing.
+        assert_eq!(
+            TOOLS_JUST.matches(r"' v(\S+?)(?: \(.*\))?:$'").count(),
+            2,
+            "install and check probes must both accept source-qualified install lines"
+        );
     }
 
     #[test]
@@ -437,7 +493,7 @@ mod tests {
     )]
     #[test]
     fn impact_scoped_checks_propagate_scope_resolution_failures() {
-        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
+        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-";
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
             let lines: Vec<&str> = body.lines().collect();
@@ -508,7 +564,13 @@ mod tests {
     #[test]
     fn impact_recipe_is_defined_and_reuses_shared_helpers() {
         // The single impact building block: snapshot + compute + resolve.
-        for needle in ["anvil-impact:", "_anvil-impact-snapshot:", "_anvil-impact-include tier:"] {
+        for needle in [
+            "anvil-impact:",
+            "_anvil-impact-snapshot:",
+            "_anvil-impact-include tier:",
+            "_anvil-impact-exclude tier:",
+            "_anvil-workspace-exclude +specs:",
+        ] {
             assert!(IMPACT_JUST.contains(needle), "impact.just missing recipe '{needle}'");
         }
         // It orchestrates around the shared helpers rather than duplicating
@@ -563,7 +625,11 @@ mod tests {
             // word. A recipe must resolve exactly one category, never two.
             let calls: Vec<&str> = ["modified", "affected", "required"]
                 .into_iter()
-                .filter(|cat| execution_body.contains(&format!("_anvil-impact-include {cat}")))
+                .filter(|cat| {
+                    ["include", "exclude"]
+                        .iter()
+                        .any(|resolver| execution_body.contains(&format!("_anvil-impact-{resolver} {cat}")))
+                })
                 .collect();
             assert!(
                 calls.len() <= 1,
@@ -579,7 +645,7 @@ mod tests {
                 None => {
                     // Unscoped: no cache dependency, no include call.
                     assert!(
-                        !execution_body.contains("_anvil-impact-include"),
+                        !execution_body.contains("_anvil-impact-include") && !execution_body.contains("_anvil-impact-exclude"),
                         "{path} is declared Unscoped but calls _anvil-impact-include"
                     );
                     assert!(!depends_on_impact, "{path} is declared Unscoped but depends on anvil-impact");
@@ -598,8 +664,8 @@ mod tests {
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
-                        "{path} must capture _anvil-impact-include into a local $include variable"
+                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-"),
+                        "{path} must capture its impact resolver into a local $include variable"
                     );
                 }
             }

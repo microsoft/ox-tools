@@ -26,7 +26,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
@@ -45,32 +45,35 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error "anvil-examples: could not parse cargo metadata output: $_"
         exit 1
     }
-    $selectedPackages = if ($package) {
-        @($package)
-    } elseif ($include -and $include -ne '--workspace') {
-        $names = [System.Collections.Generic.List[string]]::new()
-        $parts = @(-split $include)
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
-                $names.Add(($parts[$i] -split '@', 2)[0])
-            }
+    $workspaceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($id in $meta.workspace_members) { [void]$workspaceIds.Add("$id") }
+    $members = @($meta.packages | Where-Object { $workspaceIds.Contains("$($_.id)") })
+    $excluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
+        if ($pkgArgs[$i] -eq '--exclude' -and ++$i -lt $pkgArgs.Count) { [void]$excluded.Add($pkgArgs[$i]) }
+    }
+    $selectedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($p in $members) {
+        $selected = if ($package) {
+            [string]::Equals($package, $p.name, [System.StringComparison]::Ordinal) -or
+                [string]::Equals($package, "$($p.name)@$($p.version)", [System.StringComparison]::Ordinal)
+        } else {
+            -not $excluded.Contains($p.name)
         }
-        @($names)
-    } else {
-        @($meta.packages | Where-Object { $meta.workspace_members -contains $_.id } | ForEach-Object { $_.name })
+        if ($selected) { [void]$selectedIds.Add("$($p.id)") }
     }
     $targets = @(
-        foreach ($p in $meta.packages) {
-            if ($p.name -notin $selectedPackages) { continue }
+        foreach ($p in $members) {
+            if (-not $selectedIds.Contains("$($p.id)")) { continue }
             $noRun = @($p.metadata.anvil.examples.'no-run')
             foreach ($target in $p.targets) {
                 if ($target.kind -notcontains 'example') { continue }
-                if ($example -and $target.name -ne $example) { continue }
-                if (-not $example -and $target.name -in $noRun) {
+                if ($example -and $target.name -cne $example) { continue }
+                if (-not $example -and $target.name -cin $noRun) {
                     Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
                     continue
                 }
-                [pscustomobject]@{ package = $p.name; example = $target.name }
+                [pscustomobject]@{ package = $p.name; id = "$($p.id)"; example = $target.name }
             }
         }
     )
@@ -93,8 +96,14 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.Environment['ANVIL_EXAMPLE'] = '1'
+        # Package IDs carry Cargo's canonical workspace path. Start from that
+        # path so a short (8.3) Windows working directory still matches it.
+        $start.WorkingDirectory = [string]$meta.workspace_root
+        # The metadata package ID is a source-qualified package spec: it
+        # selects exactly this member even when a registry dependency shares
+        # its name and version, or the root is outside `default-members`.
         foreach ($arg in @($stableArgs) + @(
-            'run', '--package', $target.package, '--example', $target.example,
+            'run', '--package', $target.id, '--example', $target.example,
             '--all-features', '--locked'
         )) {
             $start.ArgumentList.Add($arg)

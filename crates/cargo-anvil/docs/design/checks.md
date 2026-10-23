@@ -180,7 +180,7 @@ while paired prerequisite validation remains read-only.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
-| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --package '{spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; an unscoped run selects every workspace member. | none |
+| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --package '{cargo-spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; `{cargo-spec}` (cargo-each 0.6.0+) is a source-qualified selector, so a member that shares its name and version with a registry dependency stays unambiguous. An unscoped run selects every workspace member. | none |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
@@ -193,7 +193,7 @@ while paired prerequisite validation remains read-only.
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
-| `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+| `external-types`               | `cargo each <affected packages> --filter lib --keep-going -- cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path {manifest}` (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are filtered out). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
 #### Package-isolated all-target compilation
 
@@ -462,7 +462,13 @@ version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the w
 member even when a like-named crate is also pulled in as a different-versioned transitive
 dependency. The same locked workspace metadata read also projects the ordinally sorted
 `doctest_packages.txt` capability list, allowing `doc-test` to intersect its affected
-scope without another Cargo child process.
+scope without rereading capabilities. A spec stays ambiguous when a registry dependency
+shares a member's name and version, so recipes do not pass these specs to Cargo:
+`_anvil-impact-exclude` converts them to `--workspace --exclude <name> ...`, and
+per-package tools run through cargo-each's source-qualified `{cargo-spec}` or
+`{manifest}`. `llvm-cov` is the exception: cargo-coverage-gate still receives the
+`name@version` specs, so coverage stays ambiguous in that case until
+cargo-coverage-gate selects packages unambiguously.
 
 Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
 category's scope by calling `_anvil-impact-include <category>` into a local `$include`
