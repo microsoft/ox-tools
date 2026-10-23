@@ -245,8 +245,9 @@ fn build_plan_with_hosts(
         ..ComposedHosts::default()
     };
     repair_structural_json_markers(repo_root, workspace, manifest, catalog, hosts, &mut plan)?;
+    let recorded_json_scanner_hosts = recorded_json_scanner_hosts(repo_root, manifest, hosts)?;
     let (array_hosts, mut original_hosts) = array_host_inputs(repo_root, workspace, manifest, catalog, hosts)?;
-    let json_scanner_hosts = json_scanner_hosts(repo_root, manifest, hosts, &array_hosts)?;
+    let json_scanner_hosts = json_scanner_hosts(&recorded_json_scanner_hosts, &array_hosts);
     for (host, array_host) in &array_hosts {
         for other in composed
             .live
@@ -271,7 +272,7 @@ fn build_plan_with_hosts(
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
-            let scanner = if manifest.json_array_paths.contains_key(key) || json_scanner_hosts.contains(&host) {
+            let scanner = if manifest.json_array_paths.contains_key(key) || recorded_json_scanner_hosts.contains(&host) {
                 HostScanner::Json
             } else {
                 HostScanner::for_path(&host)
@@ -307,7 +308,7 @@ fn build_plan_with_hosts(
         )?;
     }
 
-    plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &json_scanner_hosts)?;
+    plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &recorded_json_scanner_hosts)?;
 
     let mut retained_scanner_hosts: BTreeSet<String> = composed
         .live
@@ -678,23 +679,27 @@ fn add_historical_array_inputs(
     Ok(())
 }
 
-fn json_scanner_hosts(
-    repo_root: &Path,
-    manifest: &Manifest,
-    hosts: &HostTextCache,
-    array_hosts: &ArrayHosts,
-) -> Result<BTreeSet<String>, AppError> {
-    let mut scanner_hosts: BTreeSet<_> = array_hosts
-        .iter()
-        .filter(|(_, array_host)| array_host.format == ArrayFormat::Json)
-        .map(|(host, _)| host.clone())
-        .collect();
+fn recorded_json_scanner_hosts(repo_root: &Path, manifest: &Manifest, hosts: &HostTextCache) -> Result<BTreeSet<String>, AppError> {
+    let mut scanner_hosts = BTreeSet::new();
     for host in &manifest.json_scanner_hosts {
         if crate::emit::json_array_region::is_json_host(host) {
             scanner_hosts.insert((hosts.resolve)(repo_root, host)?);
         }
     }
     Ok(scanner_hosts)
+}
+
+fn json_scanner_hosts(recorded: &BTreeSet<String>, array_hosts: &ArrayHosts) -> BTreeSet<String> {
+    recorded
+        .iter()
+        .cloned()
+        .chain(
+            array_hosts
+                .iter()
+                .filter(|(_, array_host)| array_host.format == ArrayFormat::Json)
+                .map(|(host, _)| host.clone()),
+        )
+        .collect()
 }
 
 fn validate_array_host_overlaps(
@@ -2211,13 +2216,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.json_scanner_hosts.insert("settings.txt".to_owned());
 
-        let scanner_hosts = json_scanner_hosts(
-            Path::new("in-memory-json-array-tests"),
-            &manifest,
-            &memory_hosts(),
-            &ArrayHosts::new(),
-        )
-        .unwrap();
+        let scanner_hosts = recorded_json_scanner_hosts(Path::new("in-memory-json-array-tests"), &manifest, &memory_hosts()).unwrap();
 
         assert!(scanner_hosts.is_empty());
     }
@@ -2418,8 +2417,76 @@ mod tests {
             assert!(!stripped.contains('\r') && !stripped.contains('\n'), "{output:?}");
             let retired_manifest = retired.projected_manifest(&updated_manifest);
             assert_eq!(retired_manifest.regions.len(), 0);
+            assert!(retired_manifest.json_scanner_hosts.is_empty());
             assert_eq!(json_array_plan(output, &retired_manifest, &empty).unwrap().dry_run_exit_code(), 0);
         }
+    }
+
+    #[test]
+    fn introducing_json_array_retires_legacy_ordinary_region_with_recorded_scanner() {
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli()).with_json_array_region(array).build().unwrap();
+        let source = concat!(
+            "{\n",
+            "  /*\n",
+            "  // >>> anvil-managed: legacy\n",
+            "  */\n",
+            "  \"legacy\": true,\n",
+            "  /*\n",
+            "  // <<< anvil-managed: legacy\n",
+            "  */\n",
+            "  \"entries\": []\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "legacy", checksum_str("  */\n  \"legacy\": true,\n  /*\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let output = hosts.cached("config.json").unwrap();
+        let projected = plan.projected_manifest(&manifest);
+
+        assert!(!output.contains("\"legacy\": true"));
+        assert!(!output.contains("anvil-managed: legacy"));
+        assert!(output.contains("\"managed\","));
+        assert_eq!(projected.region_checksum("config.json", "legacy"), None);
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", output);
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+        let rerun = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &projected,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(rerun.dry_run_exit_code(), 0);
     }
 
     #[test]
@@ -3073,6 +3140,7 @@ mod tests {
             },
             vec!["entries".to_owned()],
         );
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
         let mut hosts = memory_hosts();
         hosts.set("config.json", source.to_owned());
         hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
@@ -3366,6 +3434,7 @@ mod tests {
             },
             vec!["entries".to_owned()],
         );
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
         let mut hosts = memory_hosts();
         hosts.set("config.json", source.to_owned());
         hosts.newlines.insert("config.json".to_owned(), crate::region::text_newline(source));
