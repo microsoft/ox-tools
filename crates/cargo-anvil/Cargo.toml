@@ -30,15 +30,15 @@ allowed_external_types = ["ohno::app::error::AppError"]
 [package.metadata.coverage-gate]
 min-lines-percent = 99.86445
 
+[[bin]]
+name = "cargo-anvil"
+path = "src/main.rs"
+
 [features]
 # Exposes engine internals only to this crate's integration tests. The targets
 # below opt in explicitly; downstream consumers should use the supported
 # crate-root API.
 internals = []
-
-[[bin]]
-name = "cargo-anvil"
-path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
