@@ -6,10 +6,12 @@
 
 - ✨ Features
 
+  - cargo-anvil: release v0.16.0
   - cargo-anvil: consolidate generated infrastructure
 
 - ♻️ Code Refactoring
 
+  - cargo-anvil: make Miri recipes shell-free
   - cargo-anvil: remove portable recipe PowerShell
 
 ## [0.15.2] - 2026-10-23
