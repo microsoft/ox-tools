@@ -8,16 +8,14 @@
 
 # Affected tier.
 
-# Build examples, or run selected examples locally with `--run`.
+# Build and run selected examples.
 [group("anvil")]
-[arg("run", long, value="true")]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("timeout", long, pattern='[1-9][0-9]{0,3}')]
 [script("pwsh", "-NoProfile")]
-anvil-examples run="false" package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
+anvil-examples package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $run = [bool]::Parse('{{run}}')
     $package = '{{package}}'
     $example = '{{example}}'
     $timeout = [int]'{{timeout}}'
@@ -35,8 +33,6 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
     $stableArgs = {{_anvil_stable_toolchain_args}}
     & cargo @stableArgs build @pkgArgs @exampleArgs --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if (-not $run) { exit 0 }
-
     $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-examples: cargo metadata failed'; exit $LASTEXITCODE }
     try {
@@ -90,8 +86,6 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $start = [System.Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $cargo
         $start.UseShellExecute = $false
-        $start.RedirectStandardOutput = $true
-        $start.RedirectStandardError = $true
         $start.Environment['ANVIL_EXAMPLE'] = '1'
         foreach ($arg in @($stableArgs) + @(
             'run', '--package', $target.package, '--example', $target.example,
@@ -105,8 +99,6 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
             Write-Error "anvil-examples: failed to start $($target.package)::$($target.example)"
             exit 1
         }
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
         $timedOut = $false
         if (-not $process.WaitForExit($timeout * 1000)) {
             $process.Kill($true)
@@ -115,10 +107,6 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
             $failed = $true
             $timedOut = $true
         }
-        $out = $stdout.GetAwaiter().GetResult()
-        $err = $stderr.GetAwaiter().GetResult()
-        if ($out) { Write-Host $out.TrimEnd() }
-        if ($err) { [Console]::Error.WriteLine($err.TrimEnd()) }
         if (-not $timedOut -and $process.ExitCode -ne 0) {
             [Console]::Error.WriteLine("anvil-examples: $($target.package)::$($target.example) exited with code $($process.ExitCode)")
             $failed = $true

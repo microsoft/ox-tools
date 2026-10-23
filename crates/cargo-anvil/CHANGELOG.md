@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-23
+
+- ✨ Features
+
+  - cargo-anvil: execute examples during verification ([#286](https://github.com/microsoft/ox-tools/pull/286))
+
 ## [0.15.2] - 2026-10-23
 
 - ✨ Features

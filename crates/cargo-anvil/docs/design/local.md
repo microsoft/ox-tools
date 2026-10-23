@@ -776,8 +776,8 @@ repository wrappers for common Cargo operations:
 just anvil-build
 just anvil-build --package my-crate
 just anvil-doc-build --open
-just anvil-examples --run
-just anvil-examples --run --package my-crate --example basic
+just anvil-examples
+just anvil-examples --package my-crate --example basic
 just anvil-fmt --fix
 just anvil-miri --package my-crate --test test_name
 just anvil-miri --package my-crate --example basic
@@ -790,17 +790,36 @@ The other options extend existing checks without changing their no-option cloud
 behavior. Every recipe accepts only its documented options and rejects unknown,
 duplicate, incomplete, or conflicting input.
 
-An unfiltered `anvil-examples --run` skips examples listed by their package:
+`anvil-examples` builds selected example targets and then executes them.
+Standalone commands invoke this recipe directly; PR and scheduled test groups
+depend on it.
+Standalone and PR invocations use the affected-package scope described in §4;
+scheduled and full tiers cover the entire workspace. Explicit `--package`
+selection overrides impact scope, and `--example` selects one target and
+requires `--package`.
+
+When no `--example` is specified, execution skips examples listed by their
+package:
 
 ```toml
 [package.metadata.anvil.examples]
 no-run = ["interactive-demo", "needs-production-credentials"]
 ```
 
-The metadata affects execution only: `anvil-examples` still compiles every
-example. Explicitly selecting an excluded example with `--example` runs it,
-because the user has supplied the missing intent. Runs default to a 30-second
-per-example timeout, configurable with `--timeout <seconds>`.
+The metadata affects execution only: excluded examples still compile when
+selected for the build. Explicitly selecting an excluded example with
+`--package` and `--example` runs it.
+
+Examples run sequentially with all features enabled, `ANVIL_EXAMPLE=1`,
+and no application arguments. The default per-example timeout is 30 seconds;
+`--timeout <seconds>` accepts 1 through 3600 seconds. A nonzero exit or timeout
+marks the check as failed, but the remaining selected examples still run.
+Examples inherit the recipe's stdout and stderr, so output streams live without
+recipe-level buffering. Failures are identified by package and example name.
+
+Examples requiring arguments, services, credentials, or interaction must support
+this smoke-test invocation or declare a `no-run` exclusion. Anvil does not
+provision example-specific services.
 
 `anvil-miri` continues to run affected test targets by default. `--test`
 adds a libtest name filter, while `--example` switches the invocation to one

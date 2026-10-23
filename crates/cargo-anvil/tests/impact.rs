@@ -1150,7 +1150,7 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     // checks all use: a scoped check resolves its tier from the downloaded
     // target/anvil/impact cache, splits the `--package name@version` list, and
     // passes it to its cargo tool -- and short-circuits (never invoking the
-    // tool) on the `--skip` sentinel. `anvil-examples` stands in for the
+    // tool) on the `--skip` sentinel. `anvil-bench` stands in for the
     // family; a fake `cargo` on PATH captures the argv the recipe builds. This
     // guards the PowerShell capture/splitting/short-circuit path that static
     // text-presence assertions on the emitted recipe cannot.
@@ -1173,25 +1173,25 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     let path = path_with_prefix(&bin);
 
     // consume mode: anvil-impact no-ops (no snapshot / cargo-delta), so the
-    // ONLY cargo invocation is the recipe's own `cargo build` -- captured by
+    // ONLY cargo invocation is the recipe's own `cargo bench` -- captured by
     // the shim.
-    let out = just_cmd(root, &["anvil-examples"])
+    let out = just_cmd(root, &["anvil-bench"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
+    assert!(out.status.success(), "scoped anvil-bench run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("build") && argv.contains(&affected) && argv.contains("--examples"),
-        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: build ... {affected} ... --examples"
+        argv.contains("bench") && argv.contains(&affected) && argv.contains("--no-run"),
+        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: bench ... {affected} ... --no-run"
     );
 
     // The `--skip` sentinel must short-circuit: the tool is never invoked.
     fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
     fs::write(&log, "").unwrap();
-    let skipped = just_cmd(root, &["anvil-examples"])
+    let skipped = just_cmd(root, &["anvil-bench"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
         .output()
@@ -1201,11 +1201,11 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
         String::from_utf8_lossy(&skipped.stdout),
         String::from_utf8_lossy(&skipped.stderr)
     );
-    assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
+    assert!(skipped.status.success(), "skipped anvil-bench run failed:\n{skip_combined}");
     let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        !argv_skip.contains("build"),
-        "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
+        argv_skip.trim().is_empty(),
+        "the --skip sentinel must short-circuit the tool; captured argv:\n{argv_skip}"
     );
 }
 
@@ -1324,7 +1324,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     // Regression guard for the loom `--workspace` path: `anvil-loom` parses its
     // own package set from `cargo metadata`, and a prior bug turned the
     // unscoped `--workspace` value into an empty affected set that silently
-    // skipped every loom target. The representative anvil-examples/`--skip`
+    // skipped every loom target. The representative anvil-bench/`--skip`
     // test can't catch this bespoke parsing. Here a fake `cargo metadata`
     // reports a crate with a `required-features = ["loom"]` test target; run
     // under ANVIL_IMPACT=off (so the tier resolves to --workspace), loom must

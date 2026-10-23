@@ -27,7 +27,7 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     # `--tests` = lib/bin unit tests + integration tests. NOT `--all-targets`,
     # which adds `--benches`: `cargo test` EXECUTES bench harnesses, and a
     # `harness = false` bench needs a driver binary this group never installs.
-    # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
+    # Bench compilation and example execution belong to `anvil-bench` and `anvil-examples`.
     # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
     & cargo "+$toolchain" test @pkg --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
