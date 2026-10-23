@@ -5,8 +5,6 @@
 //! root workflows, each an owned file gated on [`Backend::GitHub`].
 //!
 //! Holds the embedded templates and registry functions.
-//!
-//! See [`github.md`](../../../docs/design/github.md).
 
 use crate::backend::Backend;
 use crate::catalog::Artifact;

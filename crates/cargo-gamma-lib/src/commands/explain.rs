@@ -145,9 +145,8 @@ fn explain_mutant_with<H: Host>(
     } else {
         report
             .as_ref()
-            .and_then(|report| report.config.as_ref())
-            .and_then(|config| config.mutant_id_version)
-            .unwrap_or(MUTANT_ID_VERSION)
+            .expect("a historical mutant was found in the loaded report")
+            .identity_version()
     };
     let mut stream = host.results();
     writeln!(stream, "mutant {}", args.subject)?;
@@ -469,6 +468,28 @@ mod tests {
             assert!(host.out().contains("  reported replacement: replacement text\n"));
             assert!(!host.out().contains("  reason:"));
             assert!(!host.out().contains("  killed by:"));
+        }
+
+        #[test]
+        fn review_unstamped_historical_explanations_keep_scheme_five() {
+            let directory = crate::testing::workdir("explain-unstamped-");
+            let root = Utf8Path::from_path(directory.path()).unwrap();
+            let path = root.join("history.json");
+            for with_metadata in [false, true] {
+                let mut report =
+                    crate::fixtures::report_with(None, 0, vec![crate::fixtures::mutant_result_at("deadbeefcafe", 1, "Survived")]);
+                report.config.as_mut().unwrap().mutant_id_version = None;
+                if !with_metadata {
+                    report.config = None;
+                }
+                crate::elements::write_json(&report, &path).unwrap();
+                let mut selected = args("deadbeefcafe", root.to_owned());
+                selected.report = Some(path.clone());
+                let mut host = Sink::default();
+                explain_mutant_with(&mut host, &selected, |_, _, _| Err(error!("the current tree cannot be discovered"))).unwrap();
+                assert!(host.out().contains("  identity version: 5\n"), "{}", host.out());
+                assert!(host.out().contains("  current: no ("), "{}", host.out());
+            }
         }
 
         #[test]

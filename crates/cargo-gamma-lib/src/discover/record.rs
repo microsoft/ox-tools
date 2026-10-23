@@ -38,6 +38,9 @@ use crate::{HashMap, HashSet};
 /// already there, which no reader could detect for itself.
 const VERSION: u32 = 12;
 
+/// Increment when compiler attribution or isolation changes which exclusions can be trusted.
+const COMPILER_EVIDENCE_POLICY_EPOCH: u32 = 3;
+
 /// The file name under the gamma scratch base.
 const FILE: &str = "last-gamma-run.json";
 const INCOMPLETE_FILE: &str = "incomplete-gamma-learning.json";
@@ -281,7 +284,7 @@ pub struct ContextDigest {
     /// The compiler's version string.
     toolchain: String,
 
-    /// This tool's own version.
+    /// This tool's version, mutant identity version, and compiler-evidence policy epoch.
     tool: String,
 
     /// The test filtering and execution arguments.
@@ -515,7 +518,7 @@ pub struct GeneralizedHints {
     /// Interned test sets used by `reach`.
     pub test_sets: Vec<Vec<Killer>>,
 
-    /// Stable mutation sites mapped to an interned census reach set.
+    /// Stable mutation sites mapped to an interned set of reaching tests.
     pub reach: Vec<ReachCluster>,
 }
 
@@ -1084,7 +1087,9 @@ impl Display for UpdateLoadError {
             Self::UnsupportedVersion { path, version } => {
                 write!(
                     f,
-                    "`{path}` has unsupported version {version}; expected {VERSION}; remove it or use a compatible cargo-gamma version"
+                    "`{path}` has unsupported version {version}; expected {VERSION}; move this file to a separate archive path \
+                     to preserve its evidence, then retry (use `--resume-testing` if testing already finished), \
+                     or use a compatible cargo-gamma version"
                 )
             }
             Self::Read { path, cause } => write!(f, "`{path}` could not be read: {cause}"),
@@ -1172,6 +1177,13 @@ fn normalize_compilation_roots(roots: &mut Vec<Utf8PathBuf>) {
 }
 
 impl RunRecord {
+    /// Refuses an update that would discard readable evidence from a different record format.
+    pub(crate) fn validate_update(base: &Utf8Path) -> crate::Result<()> {
+        Self::load_for_update(base, FILE)
+            .map(|_| ())
+            .map_err(|failure| crate::error::error!("refusing to overwrite campaign state `{}`", base.join(FILE)).caused_by(failure))
+    }
+
     /// Captures the workspace before it is copied or executed.
     #[cfg(test)]
     #[must_use]
@@ -1372,13 +1384,12 @@ impl RunRecord {
             .any(|entry| entry.outcome == Outcome::CompileError)
     }
 
-    /// The mutants this record saw fail to compile, offered as an order to build in.
+    /// The exact mutant identities this record saw fail to compile.
     ///
     /// [`Tier::Ordering`] requires no term of the context and no source digest, which is what
-    /// separates it from [`Self::settled`]: this is not a claim that these mutants are unviable
-    /// now, only that they are the ones worth compiling first. Nothing downstream may withhold,
-    /// settle or exclude a mutant on the strength of it — every one of them is built, and the
-    /// compiler decides, exactly as it would have without the hint.
+    /// separates it from [`Self::settled`]. Campaigns import these identities once when
+    /// initializing their explicit compiler-exclusion inventory; that inventory, rather than
+    /// a speculative compiler probe, decides whether a historical failure is excluded.
     #[must_use]
     // #[gamma::skip(all, reason = "ordering is normalized and deduplicated for deterministic cache output, which is asserted by record round-trip tests")]
     pub fn ordering(&self) -> Vec<&str> {
@@ -1430,7 +1441,7 @@ impl RunRecord {
     /// The incomplete record is deliberately narrower than a completed campaign record: pending,
     /// ignored, and test-derived outcomes carry no evidence that a later run may consume. Existing
     /// score-neutral probe learning is retained because the sweep may have written it independently.
-    pub(crate) fn store_incomplete_convergence(&self, base: &Utf8Path) -> crate::Result<Self> {
+    pub fn store_incomplete_convergence(&self, base: &Utf8Path) -> crate::Result<Self> {
         let earlier = Self::load_for_update(base, INCOMPLETE_FILE)
             .map_err(|failure| {
                 crate::error::error!(
@@ -1603,7 +1614,8 @@ impl RunRecord {
     /// The run command uses [`Self::from_snapshot`] instead, with the snapshot captured before the
     /// workspace was copied. This constructor serves operations that create synthetic records in
     /// one uninterrupted step.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internals"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[must_use]
     pub fn from_run(root: &Utf8Path, mutants: &[Mutant], context: &ContextDigest, _source_dirs: &[Utf8PathBuf]) -> Self {
         let inputs = WorkspaceSnapshot::capture(root, &[root.join(FILE)]);
@@ -1618,7 +1630,8 @@ impl RunRecord {
     /// changed after that snapshot, there is no safe attribution and the caller receives `None`.
     /// This costs the next run work rather than letting an old execution verdict acquire new
     /// provenance.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internals"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[must_use]
     fn from_snapshot(
         root: &Utf8Path,
@@ -1652,11 +1665,26 @@ impl RunRecord {
         inputs: WorkspaceSnapshot,
         killers: &Killers,
     ) -> Option<Self> {
-        if !inputs.contains_plan_sources(plan) {
+        if !Self::contains_captured_sources(plan, &inputs) {
             return None;
         }
 
         Self::from_plan_snapshot_checked(plan, context, inputs, killers, false)
+    }
+
+    pub(crate) fn contains_captured_sources(plan: &Plan, inputs: &WorkspaceSnapshot) -> bool {
+        inputs.contains_plan_sources(plan)
+            && plan.files.iter().all(|file| {
+                file.source.as_deref().is_none_or(|source| {
+                    inputs
+                        .file(&file.path)
+                        .is_some_and(|input| input.digest == digest(source.as_bytes()))
+                        && plan
+                            .digests
+                            .get(&file.path)
+                            .is_some_and(|expected| *expected == digest(source.strip_prefix('\u{feff}').unwrap_or(source).as_bytes()))
+                })
+            })
     }
 
     fn paths_are_workspace_relative(&self) -> bool {
@@ -1856,7 +1884,7 @@ impl RunRecord {
     /// source bytes and verdicts this campaign already observed. Post-campaign commands validate
     /// their affected source sites when they consume this ledger.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(crate) fn store_completed(&self, base: &Utf8Path) -> crate::Result<Self> {
+    pub fn store_completed(&self, base: &Utf8Path) -> crate::Result<Self> {
         let earlier = Self::load_for_update(base, FILE)
             .map_err(|failure| crate::error::error!("refusing to overwrite campaign state `{}`", base.join(FILE)).caused_by(failure))?
             .unwrap_or_default();
@@ -2189,9 +2217,6 @@ pub struct Context<'a> {
     /// Whether to test the whole workspace.
     pub test_workspace: bool,
 
-    /// Whether to collect case-level reachability before testing mutants.
-    pub optimize_test_execution: bool,
-
     /// Whether to run reachable test binaries whole instead of selecting individual test cases.
     pub whole_test_binaries: bool,
 
@@ -2317,19 +2342,17 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
     for exc in of.exclude_tests {
         test_parts.push(exc.as_bytes());
     }
-    // The tag differs from the bit spelling that preceded it so that records written under the
-    // opposite default are invalidated rather than believed.
-    test_parts.push(b":case-reachability-default:");
+    test_parts.push(b":active-reach-only:");
     let test_flags = [
         u8::from(of.test_workspace),
         u8::from(of.test_lib),
-        u8::from(of.optimize_test_execution),
         u8::from(of.whole_test_binaries),
         u8::from(of.nextest),
     ];
     test_parts.push(&test_flags);
 
     let mut policy_parts: Vec<&[u8]> = Vec::new();
+    policy_parts.push(b":exact-first-adaptive-sweep-v2:");
     policy_parts.push(b":cargo-test:");
     policy_parts.extend(of.cargo_test_args.iter().map(String::as_bytes));
     policy_parts.push(b":post--:");
@@ -2366,6 +2389,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
     policy_parts.push(policy.as_bytes());
 
     let identity_version = MUTANT_ID_VERSION.to_le_bytes();
+    let compiler_policy = COMPILER_EVIDENCE_POLICY_EPOCH.to_le_bytes();
 
     Some(ContextDigest {
         features: term(Term::Features, &features),
@@ -2375,7 +2399,15 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         config: None,
         extra: term(Term::Extra, &of.extra.iter().map(String::as_bytes).collect::<Vec<&[u8]>>()),
         toolchain: term(Term::Toolchain, &[toolchain.as_bytes()]),
-        tool: term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version]),
+        tool: term(
+            Term::Tool,
+            &[
+                env!("CARGO_PKG_VERSION").as_bytes(),
+                &identity_version,
+                b"compiler-evidence-policy",
+                &compiler_policy,
+            ],
+        ),
         tests: term(Term::Tests, &test_parts),
         policy: term(Term::Policy, &policy_parts),
         environment: Some(environment_digest(environment)),
@@ -2456,6 +2488,10 @@ fn term(name: Term, parts: &[&[u8]]) -> String {
 
     hasher.finalize().to_hex().to_string()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod source_generation_tests;
 
 #[cfg(test)]
 #[cfg(not(miri))]
@@ -2552,7 +2588,11 @@ mod tests {
         };
         assert_eq!(
             unsupported.to_string(),
-            format!("`state.json` has unsupported version 99; expected {VERSION}; remove it or use a compatible cargo-gamma version")
+            format!(
+                "`state.json` has unsupported version 99; expected {VERSION}; move this file to a separate archive path \
+                     to preserve its evidence, then retry (use `--resume-testing` if testing already finished), \
+                     or use a compatible cargo-gamma version"
+            )
         );
         assert!(unsupported.source().is_none());
         let large = UpdateLoadError::TooLarge { path: path.clone() };
@@ -3700,6 +3740,19 @@ mod tests {
     }
 
     #[test]
+    fn compiler_policy_epoch_distinguishes_same_version_compiler_evidence() {
+        let current = context_in(&plain(), None, &[]).expect("the controlled context supplies a compiler identity");
+        let legacy = ContextDigest {
+            tool: term(
+                Term::Tool,
+                &[env!("CARGO_PKG_VERSION").as_bytes(), &MUTANT_ID_VERSION.to_le_bytes()],
+            ),
+            ..current.clone()
+        };
+        assert_eq!(legacy.differences(&current), [Term::Tool]);
+    }
+
+    #[test]
     fn a_cached_mutant_is_settled_when_its_file_is_unchanged() {
         let (_dir, root) = workspace("record-hit-", "fn add() {}");
         let cache = from_run(&root, &[mutant("abc", "src/lib.rs", Outcome::CompileError)], &envelope());
@@ -4541,7 +4594,6 @@ mod tests {
             include_tests: _it,
             exclude_tests: _et,
             test_workspace: _tw,
-            optimize_test_execution: _ote,
             whole_test_binaries: _wtb,
             nextest: _nx,
             cargo_test_args: _cta,
@@ -4642,13 +4694,6 @@ mod tests {
                 },
             ),
             ("library-only testing", Context { test_lib: true, ..plain() }),
-            (
-                "test execution optimization",
-                Context {
-                    optimize_test_execution: true,
-                    ..plain()
-                },
-            ),
             (
                 "whole test binaries",
                 Context {
@@ -4817,7 +4862,15 @@ mod tests {
         );
         assert_eq!(
             current.term(Term::Tool),
-            term(Term::Tool, &[env!("CARGO_PKG_VERSION").as_bytes(), &identity_version])
+            term(
+                Term::Tool,
+                &[
+                    env!("CARGO_PKG_VERSION").as_bytes(),
+                    &identity_version,
+                    b"compiler-evidence-policy",
+                    &COMPILER_EVIDENCE_POLICY_EPOCH.to_le_bytes(),
+                ]
+            )
         );
     }
 

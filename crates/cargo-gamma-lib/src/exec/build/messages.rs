@@ -136,7 +136,7 @@ impl CargoTarget<'_> {
     }
 }
 
-/// A compiler diagnostic, and the children that carry the rest of what it knows.
+/// A compiler diagnostic.
 #[derive(Deserialize)]
 pub(super) struct CompilerMessage<'line> {
     /// `error`, `warning`, and the rest of rustc's levels.
@@ -158,10 +158,6 @@ pub(super) struct CompilerMessage<'line> {
     /// Where in the source the diagnostic points.
     #[serde(borrow, default)]
     pub(super) spans: Vec<Span<'line>>,
-
-    /// The notes and helps hung off this diagnostic, which carry spans of their own.
-    #[serde(borrow, default)]
-    pub(super) children: Vec<Self>,
 }
 
 /// The `E0382`-style code of a diagnostic, which arrives wrapped in an object of its own.

@@ -392,8 +392,8 @@ cargo gamma run --leak-dirs                   # keep incomplete scratch trees fo
 cargo gamma run --cache-dir /fast/disk        # put reusable workspace and build state here
 cargo gamma run --artifact-dir reports        # put all five user-facing artifacts here
 cargo gamma clean                             # delete this workspace's reusable cache
-cargo gamma run --incremental build           # default: reuse unviability and checked hints
-cargo gamma run --incremental no              # cold run: build and test everything from scratch
+cargo gamma run --incremental build           # default: reuse ordinary compiler outcomes and checked hints
+cargo gamma run --incremental no              # no incremental reuse; compiler exclusions still apply
 ```
 
 A run computes each mutant’s budget from the unmutated suite, so a fast suite gets a tight one.
@@ -458,12 +458,16 @@ ledger untouched and writes only its best-effort scheduling knowledge to
 `incomplete-gamma-learning.json`; the next completed campaign consumes and clears that separate
 cache. Dry runs write neither file, and `--incremental no` does not read or write incomplete
 learning. A repeated incremental run reads the completed record and incomplete learning, so it
-avoids rediscovering compiler unviability and tries the previous killer when canonical iteration
-reaches its binary. Killer tests are hints, not cached verdicts: every mutant is executed again
-before it contributes to the score. Reusing unviability requires the same compiler, Cargo configuration, and
-build policy plus unchanged compilation inputs. See
-[What a run remembers](#what-a-run-remembers) for the details; `--incremental no` performs a cold
-run. `cargo gamma hints` promotes the parts that cannot move a score directly from that record,
+avoids rediscovering compiler unviability and tries the previous killer before inferred tests.
+Killer tests are hints, not cached verdicts: every score-bearing mutant is executed again.
+Ordinary cached unviability requires the same compiler, Cargo configuration, build policy,
+and unchanged compilation inputs. Independently, `compiler-exclusions.json` in the campaign
+cache excludes exact mutant IDs across context changes and even with `--incremental no`.
+To reconsider a repaired mutant, remove its inventory entry and use `--incremental no`;
+deleting the whole inventory can import old compiler failures again. See
+[Compiler exclusions][__link10] and
+[What a run remembers](#what-a-run-remembers). `cargo gamma hints` promotes
+the parts that cannot move a score directly from that record,
 after using Cargo metadata to validate the current workspace identity but without source
 discovery, into `gamma-hints.yaml`, which you can commit so a fresh CI container starts warm.
 
@@ -493,7 +497,7 @@ they control the harness: `--skip`, `--test-threads`, `--nocapture`. The last tw
 destination and are concatenated in the order written, so pick whichever reads better — `--` is
 shorter and needs no escaping, while `--cargo-test-arg` can be interleaved with other flags,
 survives being appended to by a wrapper script, and is the form the
-[`cargo-test-args`][__link10] configuration key takes, which a file cannot write as a trailing
+[`cargo-test-args`][__link11] configuration key takes, which a file cannot write as a trailing
 `--`.
 
 A mutant is usually caught by one test, so a binary is stopped at the first test that announces a
@@ -575,7 +579,7 @@ mutant, and that shows up as a red baseline before a single mutant runs.
 Be aware of what stepping aside costs. A test that returns early on `CARGO_GAMMA` is not deciding
 anything, so every mutant only that test could have caught is reported as a survivor rather than as
 uncovered — the score falls, and the reason is invisible. Prefer moving cargo-driving tests into a
-test target of their own and naming it to [`--exclude-test`][__link11]: the run
+test target of their own and naming it to [`--exclude-test`][__link12]: the run
 then knows those tests were withheld and says so in the oracle note, instead of silently crediting
 their absence to your code.
 
@@ -589,9 +593,9 @@ flowchart TD
     Filter -->|Suppressed or out of shard| Ignored["Ignored / not built<br/>(excluded)"]
     Filter -->|Yes| Compiles{"Compiles?"}
     Compiles -->|No| Unviable["Unviable<br/>(excluded)"]
-    Compiles -->|Yes| Census{"Reached by tests?"}
-    Census -->|No| Uncovered["Uncovered<br/>(undetected)"]
-    Census -->|Yes| TestRun["Execute test suite"]
+    Compiles -->|Yes| Reach{"Known unreachable?"}
+    Reach -->|Yes| Uncovered["Uncovered<br/>(undetected)"]
+    Reach -->|No| TestRun["Execute test suite"]
     TestRun --> Outcome{"Test outcome"}
     Outcome -->|Test fails| Killed["Killed<br/>(detected)"]
     Outcome -->|Hangs or stalls| Timeout["Timed out<br/>(undetected)"]
@@ -642,7 +646,7 @@ test reaches this code” is a different problem from “the tests that ran it d
 report never merges them. But *how much* of the code is defended is one number, and code no test
 reaches is undefended.
 
-The [mutation-testing-elements][__link12]
+The [mutation-testing-elements][__link13]
 schema treats its `Timeout` status as detected. Gamma exports timeout and out-of-memory
 verdicts as schema `Survived` with a reason that preserves the actual outcome, so the standard
 report UI computes this same fail-closed score.
@@ -660,7 +664,7 @@ Other legitimate mismatches have the same shape:
 * a coverage service may combine operating systems, feature sets or test targets that are absent
   from this gamma run;
 * cfg-disabled code and proc-macro or build-time code may compile without executing during gamma’s
-  runtime census;
+  runtime test execution;
 * line coverage can mark a line even though a particular expression or branch on that line did not
   execute; and
 * doctests are not part of gamma’s runtime oracle.
@@ -1107,7 +1111,7 @@ exclude-trait-impls = ["Debug", "Display"]
 count = 30
 ```
 
-**[docs/CONFIG.md][__link13] documents every key.** [docs/gamma.toml][__link14] is a
+**[docs/CONFIG.md][__link14] documents every key.** [docs/gamma.toml][__link15] is a
 file listing all of them with their defaults, commented out — copy it and delete what you do not
 need:
 
@@ -1174,7 +1178,7 @@ Every run writes all three reports without being asked. Normally they are
 original workspace. [`--artifact-dir`](#controlling-a-run) moves the complete set to another
 directory and creates it when necessary. `--cache-dir` only relocates internal reusable state.
 
-The JSON is the [`mutation-testing-elements`][__link15]
+The JSON is the [`mutation-testing-elements`][__link16]
 interchange format, which is what the Azure DevOps and GitHub mutation report extensions consume, so
 no translation step is needed.
 
@@ -1188,8 +1192,8 @@ read and disclose the source and results embedded in the report.
 Mutation testing with schemas is orders of magnitude faster than rebuilding per mutant because the
 build is paid once for the entire population. Even so, running thousands of mutants against a large
 test suite takes time. Improving performance means knowing where time is spent and applying the
-right combination of levers: checking in hints for warm CI runs, optional case-level test
-selection with `--optimize-test-execution`, incremental runs with `--incremental`, and tuning
+right combination of levers: checking in hints for warm CI runs,
+incremental runs with `--incremental`, and tuning
 timeouts and harness options.
 
 #### Where the time goes
@@ -1295,8 +1299,8 @@ once per mutant. It remains opt-in because it is not a universal win: a build-he
 may spend more compiling than it saves, and an I/O-bound suite has little CPU time to recover.
 Compare a representative shard before adopting it for a long campaign.
 
-The active Cargo profile is part of a run’s build context. Changing it invalidates
-unviability reuse, and the changed code generation can change which mutants tests catch even
+The active Cargo profile is part of a run’s build context. Changing it invalidates ordinary
+unviability reuse, but not the compiler-exclusion inventory. Changed code generation can change which mutants tests catch even
 when development checks remain enabled. Scores produced under different profiles are therefore
 not directly comparable. Choose the profile before a long campaign and keep it fixed across every
 run or shard whose scores will be compared or merged.
@@ -1320,8 +1324,8 @@ identifies the previous killer for the same mutant. Three kinds of information a
 the hints file, and none can change an answer:
 
 * **Killer hints** — which test caught each mutant. The named test is tried before inferred tests,
-  regardless of its binary’s position. A confirmed later-binary kill skips inferred probes but
-  waits for earlier canonical outcomes. It is run rather than believed, so a stale hint falls
+  regardless of its binary’s position. A confirmed kill settles immediately without running
+  earlier binaries. It is run rather than believed, so a stale hint falls
   back to inferred selection and the standard whole-binary sweep. Duplicate targeted attempts
   are skipped without removing confirmations or necessary whole-binary fallback.
 * **Test-selection hints** — ranked candidate tests for an item, candidate binaries for
@@ -1349,55 +1353,34 @@ cannot be round-tripped by today’s serializer. YAML changed by another writer 
 left intact and reported as a conflict. Malformed, foreign, and unsupported artifacts remain
 safe to ignore.
 
-#### Running only the tests that reach the mutant
+#### Learning reachability while testing
 
-By default gamma skips the reachability census and runs complete reachable test binaries after
-exact hints and inferred tests have been tried. Pass `--optimize-test-execution` to
-experimentally narrow mutants to the test cases observed executing their sites:
+Every campaign drains exact killer hints first. Each worker then finishes one unresolved mutant
+through inferred named tests, inferred full binaries, and remaining reachable full binaries
+before claiming another. New killers supply hints for queued siblings. Full-binary results are
+reused across the last two stages. Both passes honor `--jobs`, without an additional
+CPU-count cap or aggregate memory reservation. Reduce `--jobs` if concurrent runs exhaust system
+memory; per-process memory limits and named-resource constraints remain enforced.
 
-```bash
-cargo gamma run --optimize-test-execution
-```
+Remaining full binaries run own-package first, then by descending distinct-mutant kill count
+within each package tier. Known exact hints seed the counts and confirmed kills update them
+live without counting reconfirmations twice. Baseline runtime and stable identity break ties.
 
-It needs no coverage instrumentation and no second build, because the instrumented tree is already
-carrying the probe. Every mutation site is a call into the gamma runtime, so running the suite once
-with that runtime in *census* mode records exactly which sites each test reached — a finer
-measurement than a coverage region, and keyed by the very thing a mutant is named by.
+Each ordinary mutant launch records whether its active guard was reached,
+without a separate build or sampling subprocess. Positive observations improve later test ordering.
 
-The relation it measures is exact rather than conservative, which is unusual for something built on
-coverage. A mutant sits at one site and changes nothing whatsoever before that site executes, so a
-test that reaches the site without a mutant reaches it with one too; and a test that never reaches
-the site never fires the mutant at all, so its run is identical to the baseline’s and it still does
-not reach the site. There is no third case.
+A complete, sealed, passing whole-binary observation that did not reach the active guard may
+exclude that binary for another replacement at the exact same stable source site. If no
+reachable binary remains, gamma reports **uncovered** rather than a survivor. Filtered, failed,
+missing, or incomplete observations never prove absence.
 
-Two things follow. Mutants whose site no test reaches are reported as **uncovered** rather than as
-survivors — a real correction, because blaming your assertions for code nothing calls sends you to
-strengthen tests that were never the problem. And a survivor stops being the expensive case: instead
-of running every reachable test to completion, it runs the handful that could have caught it.
-
-Gamma does not pay that cost blindly. It considers only binaries that can reach selected pending
-mutants, and only those mutants’ sites. It measures each binary’s listing launch as a startup-cost
-proxy and skips case discovery when the projected launches cannot repay even the maximum work they
-could save during the sweep. When discovery proceeds, that same maximum saving is its time budget.
-It also stops sampling a binary once every relevant site is reached by more than half its tests,
-because those sites will use the whole binary anyway.
-
-Reachability can vary in a suite whose control flow depends on threads, the clock, randomness or
-hash iteration order. `--whole-test-binaries` explicitly suppresses case-level selection and
-conflicts with `--optimize-test-execution`:
+This transfer assumes deterministic reachability. For suites whose control flow depends on
+threads, the clock, randomness, or hash iteration order, `--whole-test-binaries` suppresses
+case-level selection and deterministic reach narrowing:
 
 ```bash
 cargo gamma run --whole-test-binaries
 ```
-
-The optimization assumes a test reaches the same code every time it runs. A suite whose control flow
-turns on threads, the clock, the network or hash iteration order can be censused on a run where some
-test did not reach a site it usually does. Only a complete census may exclude tests or establish that a site is
-uncovered. A test positively observed before the economic budget expires is retained only as a
-checked hint: gamma tries it when filtering cannot replace another outcome, accepts an actual
-failure as a kill, and otherwise falls back to the whole binary. A failure from a complete census
-selection is checked by rerunning the whole binary before its outcome is assigned. A binary that
-cannot be listed or whose sample fails is not narrowed at all.
 
 #### Incremental runs
 
@@ -1405,14 +1388,17 @@ During development, a previous run can avoid repeated compiler work without carr
 verdicts into a new score:
 
 ```bash
-cargo gamma run --incremental build         # default: reuses unviability and checked hints
-cargo gamma run --incremental no            # cold run: build and test everything from scratch
+cargo gamma run --incremental build         # default: reuses ordinary compiler outcomes and checked hints
+cargo gamma run --incremental no            # no incremental reuse; compiler exclusions still apply
 ```
 
-In `build` mode (the default), compiler-unviable mutants are skipped only when the compilation
-context and inputs match. Every killed, survived, timed-out, out-of-memory, flaky, ignored, or
-uncovered mutant is evaluated again. A previous killer is tried first, but its result is checked
-and the ordinary suite follows when it no longer kills the mutant.
+In `build` mode (the default), ordinary cached compiler outcomes require matching compilation
+context and inputs. The separate compiler-exclusion inventory remains authoritative in both
+modes, until its exact mutant entry is removed. Every other killed, survived, timed-out,
+out-of-memory, flaky, ignored, or uncovered mutant is evaluated again. A previous killer is
+tried first, but its result is checked and the ordinary suite follows when it no longer kills
+the mutant. See [Compiler exclusions][__link17] before retrying a
+repaired identity.
 
 #### Resuming interrupted testing
 
@@ -1556,9 +1542,8 @@ The file carries its own `schemaVersion`, independent of the mutation-testing-el
 JSON report follows, so a diagnostic tool can tell what it is reading.
 Its aggregate telemetry is intended to answer whether the algorithms paid off without making the
 bundle scale one row per mutant. Build rounds show package-attributed withdrawals against the real
-workspace-wide round duration. Census fields show admission size, listing success, estimated walk
-cost and admission, sampling work, and evidence completeness. Sweep fields show whole versus narrowed decisions, selected versus available
-tests, candidate/probe/hit funnels by hint tier, launches saved, and overlapping package wall spans.
+workspace-wide round duration. Sweep fields show whole-binary and uncovered decisions,
+candidate/probe/hit funnels by hint tier, launches saved, and overlapping package wall spans.
 Package CPU totals and wall spans are deliberately separate: concurrent packages can occupy the same
 wall-clock interval, and Cargo does not expose a truthful per-package share of a workspace build round.
 
@@ -1730,12 +1715,14 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
 
  [__link0]: docs/CMDLINE.md
  [__link1]: docs/CONFIG.md
- [__link10]: docs/CONFIG.md
- [__link11]: docs/CMDLINE.md#full-option-reference
- [__link12]: https://github.com/stryker-mutator/mutation-testing-elements
- [__link13]: docs/CONFIG.md
- [__link14]: docs/gamma.toml
- [__link15]: https://github.com/stryker-mutator/mutation-testing-elements
+ [__link10]: docs/CMDLINE.md#compiler-exclusions
+ [__link11]: docs/CONFIG.md
+ [__link12]: docs/CMDLINE.md#full-option-reference
+ [__link13]: https://github.com/stryker-mutator/mutation-testing-elements
+ [__link14]: docs/CONFIG.md
+ [__link15]: docs/gamma.toml
+ [__link16]: https://github.com/stryker-mutator/mutation-testing-elements
+ [__link17]: docs/CMDLINE.md#compiler-exclusions
  [__link2]: docs/MIGRATION.md
  [__link3]: docs/MUTATORS.md
  [__link4]: docs/DESIGN.md

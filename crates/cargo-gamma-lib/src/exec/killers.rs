@@ -78,6 +78,10 @@ impl Killers {
         self.entries.get(id)
     }
 
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&MutantId, &Killer)> {
+        self.entries.iter()
+    }
+
     /// Records what caught a mutant this run.
     pub(crate) fn record(&mut self, id: MutantId, killer: Killer) {
         let _previous = self.entries.insert(id, killer);

@@ -682,7 +682,6 @@ impl ChannelReader {
         Self {
             rx,
             current_chunk: None,
-            // #[gamma::skip(assign_value.default, reason = "usize::default() is exactly zero, so the replacement is behavior-identical")]
             position: 0,
         }
     }
@@ -694,7 +693,6 @@ impl BufRead for ChannelReader {
             match self.rx.blocking_recv() {
                 Some(Ok(chunk)) => {
                     self.current_chunk = Some(chunk);
-                    // #[gamma::skip(assign_value.default, reason = "usize::default() is exactly zero, so the replacement is behavior-identical")]
                     self.position = 0;
                 }
                 Some(Err(e)) => return Err(IoError::other(e.to_string())),

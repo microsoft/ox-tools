@@ -171,7 +171,7 @@ fn metric_key(name: &str, suffix: &str) -> Arc<String> {
     METRIC_KEYS.get(name).map_or_else(|| Arc::new(suffix.to_string()), Arc::clone)
 }
 
-fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: DateTime<Local>) -> Context<'static> {
+fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: DateTime<Local>) -> Context<'static, 'static> {
     use core::borrow::Borrow;
 
     let mut context = Context::default();
@@ -539,6 +539,27 @@ mod tests {
         let metrics = vec![Metric::with_value(&METADATA_NAME_DEF, MetricValue::String("tokio".into()))];
         let result = eval_expr("metadata.name", &metrics);
         let _ = result.unwrap_err();
+    }
+
+    #[test]
+    fn test_string_size_counts_unicode_scalar_values() {
+        let description_def = METRIC_DEFINITIONS
+            .iter()
+            .find(|def| def.name == "crate.description")
+            .expect("crate.description must be registered as a built-in metric");
+
+        for (description, size) in [("", 0), ("rust", 4), ("\u{00e9}", 1), ("\u{1f980}", 1), ("e\u{0301}", 2)] {
+            let metrics = [Metric::with_value(description_def, MetricValue::String(description.into()))];
+
+            for expression in [
+                format!("size(crate.description) == {size}"),
+                format!("crate.description.size() == {size}"),
+            ] {
+                let result = eval_expr(&expression, &metrics)
+                    .unwrap_or_else(|error| panic!("could not evaluate {expression} for {description:?}: {error}"));
+                assert!(result, "{expression} for {description:?}");
+            }
+        }
     }
 
     #[test]

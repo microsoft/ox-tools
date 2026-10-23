@@ -251,6 +251,14 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    run_with(args, check, |message| println!("{message}"), |message| eprintln!("{message}"))
+}
+
+fn run_with<I, T>(args: I, check: impl FnOnce(Option<&Path>) -> Outcome, stdout: impl FnOnce(&str), stderr: impl FnOnce(&str)) -> Outcome
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let outcome = match Cli::try_parse_from(args) {
         Ok(cli) => {
             let Commands::UniqueTargetNames(arguments) = cli.command;
@@ -268,9 +276,9 @@ where
         }
     };
     if outcome.is_informational() {
-        println!("{}", outcome.render());
+        stdout(&outcome.render());
     } else {
-        eprintln!("{}", outcome.render());
+        stderr(&outcome.render());
     }
     outcome
 }
@@ -279,6 +287,95 @@ where
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod campaign_tests {
     use super::*;
+
+    #[test]
+    fn campaign_regression_clean_verdict_is_written_only_to_stdout() {
+        let mut output = Vec::new();
+        let outcome = run_with(
+            ["cargo", "unique-target-names", "--manifest-path", "selected.toml"],
+            |path| {
+                assert_eq!(path, Some(Path::new("selected.toml")));
+                Outcome::Clean
+            },
+            |message| output.push(message.to_owned()),
+            |_| panic!("a clean verdict must not be written to stderr"),
+        );
+        assert!(matches!(outcome, Outcome::Clean));
+        assert_eq!(outcome.exit_code(), 0);
+        assert_eq!(output, ["All workspace targets uplift to their own path"]);
+    }
+
+    #[test]
+    fn campaign_regression_findings_and_metadata_failures_are_written_only_to_stderr() {
+        for (verdict, code, expected) in [
+            (
+                Outcome::Contended(vec![Collision {
+                    owners: vec!["alpha".to_owned(), "beta".to_owned()],
+                    files: vec!["shared.rlib".to_owned()],
+                }]),
+                1,
+                "cargo-unique-target-names: 2 targets uplift to the same file: shared.rlib\n  declared by alpha, beta\n\nRename the reported targets so each one uplifts to its own path.",
+            ),
+            (
+                Outcome::Unreadable("scripted metadata failure".to_owned()),
+                2,
+                "cargo-unique-target-names: failed to read workspace metadata from cargo: scripted metadata failure",
+            ),
+        ] {
+            let mut output = Vec::new();
+            let outcome = run_with(
+                ["cargo", "unique-target-names"],
+                |path| {
+                    assert_eq!(path, None);
+                    verdict
+                },
+                |_| panic!("a failed verdict must not be written to stdout"),
+                |message| output.push(message.to_owned()),
+            );
+            assert_eq!(outcome.exit_code(), code);
+            assert_eq!(outcome.render(), expected);
+            assert_eq!(output, [expected]);
+        }
+    }
+
+    #[test]
+    fn campaign_regression_version_bypasses_metadata_and_is_written_only_to_stdout() {
+        let mut output = Vec::new();
+        let outcome = run_with(
+            ["cargo", "unique-target-names", "--version"],
+            |_| panic!("a version request must not load metadata"),
+            |message| output.push(message.to_owned()),
+            |_| panic!("a version request must not be written to stderr"),
+        );
+        let Outcome::Help(message) = outcome else {
+            panic!("a version request must return an informational outcome");
+        };
+        assert_eq!(message, concat!("cargo-unique-target-names ", env!("CARGO_PKG_VERSION")));
+        assert_eq!(output, [message]);
+    }
+
+    #[test]
+    fn campaign_regression_usage_error_bypasses_metadata_and_is_written_only_to_stderr() {
+        let mut output = Vec::new();
+        let outcome = run_with(
+            ["cargo", "unique-target-names", "--manifest-path"],
+            |_| panic!("an invalid invocation must not load metadata"),
+            |_| panic!("a usage error must not be written to stdout"),
+            |message| output.push(message.to_owned()),
+        );
+        let Outcome::Usage(message) = outcome else {
+            panic!("a missing option value must return a usage outcome");
+        };
+        assert_eq!(
+            message,
+            concat!(
+                "\x1b[1m\x1b[31merror:\x1b[0m a value is required for ",
+                "'\x1b[33m--manifest-path <PATH>\x1b[0m' but none was supplied\n\n",
+                "For more information, try '\x1b[1m\x1b[36m--help\x1b[0m'.",
+            )
+        );
+        assert_eq!(output, [message]);
+    }
 
     #[test]
     fn metadata_command_requests_only_workspace_targets_and_exact_manifest() {

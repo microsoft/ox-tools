@@ -81,3 +81,10 @@ impl core::error::Error for InvalidMutantId {}
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub use run::recovery_test_util;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub use suppress::native_test_util as suppression_test_util;

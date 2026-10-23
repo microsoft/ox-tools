@@ -7,7 +7,7 @@
 //! expression language:
 //!
 //! - Package tokens (valid in per-package and per-target modes): `{name}`,
-//!   `{spec}`, `{version}`, `{manifest}`. Replaced textually inside each
+//!   `{spec}`, `{cargo-spec}`, `{version}`, `{manifest}`. Replaced textually inside each
 //!   argument.
 //! - The per-target token `{target}`.
 //! - The once token (valid only in `--once` mode): `{packages}`. Must stand
@@ -30,7 +30,7 @@ use crate::error::{EachError, JsonRecordFieldError, PlaceholderMisuseError};
 use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
-const PER_PACKAGE_TOKENS: [&str; 4] = ["{name}", "{spec}", "{version}", "{manifest}"];
+const PER_PACKAGE_TOKENS: [&str; 5] = ["{name}", "{spec}", "{cargo-spec}", "{version}", "{manifest}"];
 /// The per-target placeholder token.
 const TARGET_TOKEN: &str = "{target}";
 /// The once-mode placeholder token.
@@ -49,6 +49,8 @@ pub(crate) enum Placeholders {
         name: String,
         /// `{spec}` — `name@version`.
         spec: String,
+        /// `{cargo-spec}` — source-qualified Cargo selector.
+        cargo_spec: String,
         /// `{version}` — package version.
         version: String,
         /// `{manifest}` — absolute path to the member's `Cargo.toml`.
@@ -60,6 +62,7 @@ pub(crate) enum Placeholders {
     Target {
         name: String,
         spec: String,
+        cargo_spec: String,
         version: String,
         manifest: String,
         target: String,
@@ -154,6 +157,10 @@ fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: 
         let version = placeholders.workspace_rust_version().unwrap_or_default();
         replacements.push((WORKSPACE_RUST_VERSION_TOKEN, version));
     }
+    assert!(
+        replacements.iter().all(|(token, _)| !token.is_empty()),
+        "substitution tokens must not be empty"
+    );
 
     let mut rest = arg;
     let mut replaced = String::with_capacity(arg.len());
@@ -276,19 +283,18 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
             Placeholders::Package {
                 name,
                 spec,
+                cargo_spec,
                 version,
                 manifest,
                 ..
             } => {
                 // #[gamma::skip(collection.reverse_vec, reason = "these distinct braced tokens cannot match at the same offset, so min_by_key selects the same earliest token in every insertion order")]
                 let replacements = vec![
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package name token was emptied")]
                     ("{name}", name.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package spec token was emptied")]
                     ("{spec}", spec.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package version token was emptied")]
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "an empty search token consumes no input, so replacement loops without advancing and grows output without bound")]
+                    ("{cargo-spec}", cargo_spec.as_str()),
                     ("{version}", version.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package manifest token was emptied")]
                     ("{manifest}", manifest.as_str()),
                 ];
                 let replaced = replace_arg(arg, placeholders, replacements);
@@ -297,6 +303,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
             Placeholders::Target {
                 name,
                 spec,
+                cargo_spec,
                 version,
                 manifest,
                 target,
@@ -304,13 +311,11 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
             } => {
                 // #[gamma::skip(collection.reverse_vec, reason = "these distinct braced tokens cannot match at the same offset, so min_by_key selects the same earliest token in every insertion order")]
                 let replacements = vec![
-                    // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode name token was emptied")]
                     ("{name}", name.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the target-mode spec token was emptied")]
                     ("{spec}", spec.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode version token was emptied")]
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "an empty search token consumes no input, so replacement loops without advancing and grows output without bound")]
+                    ("{cargo-spec}", cargo_spec.as_str()),
                     ("{version}", version.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the target-mode manifest token was emptied")]
                     ("{manifest}", manifest.as_str()),
                     (TARGET_TOKEN, target.as_str()),
                 ];
@@ -336,6 +341,12 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "substitution tokens must not be empty")]
+    fn empty_substitution_tokens_are_rejected_before_scanning() {
+        let _replaced = replace_arg("", &pkg(), vec![("", "replacement")]);
+    }
 
     #[test]
     fn json_field_errors_preserve_the_original_nondefault_line() {
@@ -368,6 +379,7 @@ mod tests {
         let target = Placeholders::Target {
             name: "n".to_owned(),
             spec: "n@1".to_owned(),
+            cargo_spec: "file:///ws/n#n@1".to_owned(),
             version: "1".to_owned(),
             manifest: "Cargo.toml".to_owned(),
             target: "binary".to_owned(),
@@ -380,6 +392,7 @@ mod tests {
         Placeholders::Package {
             name: "cargo-anvil".to_owned(),
             spec: "cargo-anvil@0.4.0".to_owned(),
+            cargo_spec: "file:///ws/cargo-anvil#cargo-anvil@0.4.0".to_owned(),
             version: "0.4.0".to_owned(),
             manifest: "/ws/cargo-anvil/Cargo.toml".to_owned(),
             workspace_rust_version: None,
@@ -413,6 +426,31 @@ mod tests {
     fn spec_and_name_distinct() {
         let out = substitute(&args(&["--package", "{name}", "note={spec}"]), &pkg()).expect("substitute");
         assert_eq!(out, ["--package", "cargo-anvil", "note=cargo-anvil@0.4.0"]);
+    }
+
+    #[test]
+    fn cargo_spec_expands_and_is_rejected_outside_package_modes() {
+        let out = substitute(&args(&["{spec}", "selector={cargo-spec}:{cargo-spec}"]), &pkg()).expect("substitute");
+        assert_eq!(
+            out,
+            [
+                "cargo-anvil@0.4.0",
+                "selector=file:///ws/cargo-anvil#cargo-anvil@0.4.0:file:///ws/cargo-anvil#cargo-anvil@0.4.0",
+            ]
+        );
+        for mode in [Mode::PerPackage, Mode::PerTarget] {
+            validate_placeholders(&args(&["{cargo-spec}"]), mode).expect("package placeholder");
+        }
+        let err = validate_placeholders(&args(&["{cargo-spec}"]), Mode::Once).expect_err("package token is unavailable in once mode");
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{cargo-spec}` cannot be used here: per-package token is not valid in --once mode"
+        );
+        let err = validate_json_placeholders(&args(&["{cargo-spec}"])).expect_err("package token is unavailable in JSON mode");
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{cargo-spec}` cannot be used here: not valid in JSON-record mode"
+        );
     }
 
     #[test]
@@ -478,6 +516,7 @@ mod tests {
         let ph = Placeholders::Target {
             name: "cargo-anvil".to_owned(),
             spec: "cargo-anvil@0.4.0".to_owned(),
+            cargo_spec: "file:///ws/cargo-anvil#cargo-anvil@0.4.0".to_owned(),
             version: "0.4.0".to_owned(),
             manifest: "/ws/cargo-anvil/Cargo.toml".to_owned(),
             target: "loom".to_owned(),
@@ -554,6 +593,7 @@ mod tests {
         let target = Placeholders::Target {
             name: "crate".to_owned(),
             spec: "crate@1.0.0".to_owned(),
+            cargo_spec: "file:///ws/crate#crate@1.0.0".to_owned(),
             version: "1.0.0".to_owned(),
             manifest: "/ws/crate/Cargo.toml".to_owned(),
             target: "example".to_owned(),
@@ -573,6 +613,7 @@ mod tests {
         let placeholders = Placeholders::Package {
             name: "crate".to_owned(),
             spec: "crate@1.0.0".to_owned(),
+            cargo_spec: "file:///ws/crate#crate@1.0.0".to_owned(),
             version: "1.0.0".to_owned(),
             manifest: "/ws/{workspace-rust-version}/crate/Cargo.toml".to_owned(),
             workspace_rust_version: Some("1.80".to_owned()),
@@ -588,6 +629,7 @@ mod tests {
         let placeholders = Placeholders::Target {
             name: "crate".to_owned(),
             spec: "crate@1.0.0".to_owned(),
+            cargo_spec: "file:///ws/crate#crate@1.0.0".to_owned(),
             version: "1.0.0".to_owned(),
             manifest: "/ws/{workspace-rust-version}/crate/Cargo.toml".to_owned(),
             target: "example".to_owned(),
@@ -605,6 +647,7 @@ mod tests {
         let placeholders = Placeholders::Target {
             name: "crate".to_owned(),
             spec: "crate@1.0.0".to_owned(),
+            cargo_spec: "file:///ws/crate#crate@1.0.0".to_owned(),
             version: "1.0.0".to_owned(),
             manifest: "/ws/{target}/crate/Cargo.toml".to_owned(),
             target: "example".to_owned(),

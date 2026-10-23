@@ -308,7 +308,6 @@ impl Debug for ProgressReporter {
 // Not covered: installing this target renders to the real stderr, which tests must not do.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn stderr_draw_target() -> ProgressDrawTarget {
-    // #[gamma::skip(call.replace_with_default, call_result.default, tag = "trivial", reason = "constructing the production draw target writes to real stderr; refresh frequency is tested independently and tests inject non-stderr targets")]
     draw_target_with_rate(ProgressDrawTarget::stderr_with_hz)
 }
 

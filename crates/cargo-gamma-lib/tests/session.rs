@@ -637,18 +637,6 @@ fn session(dir: &TempDir, args: &[&str]) -> (i32, String) {
     (code, format!("{out}{err}"))
 }
 
-/// Runs a session with the experimental case-level reachability optimization enabled.
-///
-/// Kept separate because most tests in this file exercise unrelated behavior and run concurrently;
-/// making all fifty of them census at once creates a process storm no real invocation produces.
-fn censused_session(dir: &TempDir, args: &[&str]) -> (i32, String) {
-    let mut args = args.to_vec();
-    args.push("--optimize-test-execution");
-    let (code, out, err) = session_on_with(Sink::default(), dir.path(), &args, false);
-
-    (code, format!("{out}{err}"))
-}
-
 /// Runs a session on a given host, keeping the two streams apart.
 fn session_on(host: Sink, dir: &TempDir, args: &[&str]) -> (i32, String, String) {
     session_on_with(host, dir.path(), args, true)
@@ -671,6 +659,25 @@ fn session_on_with(mut host: Sink, root: &Path, args: &[&str], whole_test_binari
     let code = run(&mut host, command);
 
     (code, host.out(), host.err())
+}
+
+fn assert_island_not_built(dir: &TempDir) {
+    let text = fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).expect("the fixture report was written");
+    let report: serde_json::Value = serde_json::from_str(&text).expect("the fixture report is valid JSON");
+    let mutants = report["files"]["island/src/lib.rs"]["mutants"]
+        .as_array()
+        .expect("the unbuilt island remains represented in the report");
+    assert_eq!(mutants.len(), 2);
+    assert_eq!(report["config"]["notBuilt"], 2);
+    for mutant in mutants {
+        assert_eq!(mutant["status"], "Ignored");
+        assert!(
+            mutant["statusReason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("not built: ")),
+            "uncompiled source must not be confused with uncovered or deliberately suppressed code: {mutant}"
+        );
+    }
 }
 
 #[test]
@@ -765,9 +772,10 @@ fn a_mixed_workspace_checks_libraries_under_the_test_feature_graph() {
 
     assert_eq!(code, EXIT_OK, "{output}");
     assert!(
-        output.contains("6 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 4 uncovered => 33.3%)"),
+        output.contains("4 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 2 uncovered => 50.0%)"),
         "the untested libraries were not compiled under the same feature graph: {output}"
     );
+    assert_island_not_built(&dir);
 
     // Selecting only the binary member of the same workspace must omit `--lib`, even though
     // other, unselected members do have library targets.
@@ -1052,7 +1060,7 @@ fn a_red_baseline_is_reported_rather_than_measured() {
 
     assert!(!stale.exists(), "the new build retained an old failure record");
     assert!(failure.contains("nope"), "{failure}");
-    assert!(diagnostics.contains("\"schemaVersion\": \"5\""), "{diagnostics}");
+    assert!(diagnostics.contains("\"schemaVersion\": \"7\""), "{diagnostics}");
     for document in [&parsed, &failure_diagnostics] {
         assert!(
             document["population"]["mutants"].as_u64().is_some_and(|count| count > 1),
@@ -1862,30 +1870,24 @@ fn stall_detection_can_be_turned_off() {
 }
 
 #[test]
-fn a_mutant_no_test_can_reach_is_reported_uncovered() {
+fn a_library_omitted_from_all_test_builds_is_reported_not_built() {
     step_aside_if_nested!();
     let dir = archipelago();
     let (code, output) = session(&dir, &["--workspace", "--mutators", "relational"]);
 
     assert_eq!(code, EXIT_OK, "{output}");
 
-    // The same mutant exists in both packages. The one the mainland's tests compile is caught; the
-    // island's cannot be reached by any binary the build produced, which is a stronger statement
-    // than "survived" and must not be reported as one.
     assert!(
         output.contains("0 survived,"),
         "the mainland's own tests must still kill its mutants: {output}"
     );
 
-    // An uncovered mutant costs score without being a survivor, so it is counted on its own rather
-    // than folded into the missed total a reader would go looking for an assertion for.
+    // Unlike a compiled but unlinked library, the island is absent from the compiler's inputs.
     assert!(
-        output.contains("4 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 2 uncovered => 50.0%)"),
+        output.contains("2 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 0 uncovered => 100.0%)"),
         "{output}"
     );
-
-    // Uncovered is a stronger statement than survived, so the island's mutants must not be listed
-    // among the ones a test ran and failed to notice.
+    assert_island_not_built(&dir);
     assert!(!output.contains("SURVIVED"), "{output}");
 }
 
@@ -2096,170 +2098,4 @@ fn turning_the_feature_on_brings_the_same_code_back_into_the_run() {
         output.contains("src/extra.rs"),
         "the enabled module produced no reported mutant: {output}"
     );
-}
-
-/// A crate whose two functions are reached by one test each, plus a third that reaches neither.
-///
-/// The shape is what makes a census observable end to end: without one, every mutant runs all three
-/// tests, and there is no way to tell a narrowed run from a full one by its verdicts. With one, the
-/// mutant in `orphan` is reached by nothing at all, and a run that reports it as *uncovered* rather
-/// than *surviving* can only have measured that.
-const CENSUSED: &str = "
-pub fn is_adult(age: u32) -> bool {
-    age >= 18
-}
-
-pub fn orphan(age: u32) -> bool {
-    age >= 21
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_boundary_is_pinned() {
-        // Make sampling economical under coverage without slowing samples or mutant runs.
-        if std::env::var_os(\"GAMMA_ACTIVE\").is_none() && std::env::var_os(\"GAMMA_CENSUS\").is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        assert!(!is_adult(17));
-        assert!(is_adult(18));
-    }
-
-    #[test]
-    fn something_unrelated() {
-        assert_eq!(1 + 1, 2);
-    }
-}
-";
-
-#[test]
-fn a_census_still_catches_every_mutant_the_full_sweep_caught() {
-    step_aside_if_nested!();
-    // The property that matters most: narrowing may only remove tests that cannot convict. A kill
-    // lost here would be a survivor invented out of nothing, which is the one direction this must
-    // never be wrong in.
-    let dir = workspace(CENSUSED);
-    let (code, output) = censused_session(&dir, &["--mutators", "relational", "--incremental", "no"]);
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(!output.contains("SURVIVED src/lib.rs:3:5"), "{output}");
-}
-
-#[test]
-fn a_site_reached_by_most_tests_runs_the_whole_binary_instead_of_becoming_uncovered() {
-    step_aside_if_nested!();
-    // Past half the tests, the census deliberately declines to name them because running the
-    // binary whole is cheaper. That "run whole" answer must not be collapsed into the distinct
-    // "no test reaches this site" answer.
-    let dir = workspace(
-        "
-pub fn answer() -> Result<u32, ()> {
-    Ok(42)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn checks_the_answer() {
-        assert_eq!(super::answer(), Ok(42));
-    }
-}
-",
-    );
-    let (code, output) = censused_session(&dir, &["--mutators", "fn_value.ok", "--incremental", "no"]);
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(output.contains("0 uncovered"), "{output}");
-    assert!(output.contains("2 killed"), "{output}");
-}
-
-#[test]
-fn a_census_reports_code_no_test_reaches_as_uncovered_rather_than_surviving() {
-    step_aside_if_nested!();
-    // `orphan` is linked by the test binary, so the run has no way to excuse it and calls its
-    // mutants survivors — which sends the reader to strengthen assertions that do not exist. A
-    // census establishes that no test executes the line, so they are reported as uncovered, and
-    // they are never run at all.
-    let dir = workspace(CENSUSED);
-    let (censused, output) = censused_session(&dir, &["--mutators", "relational", "--incremental", "no"]);
-
-    assert_eq!(censused, EXIT_OK, "{output}");
-    assert!(output.contains("2 uncovered"), "{output}");
-    assert!(!output.contains("2 survived"), "{output}");
-
-    // The same crate with case-level selection disabled, to prove the difference is the census and
-    // not the crate.
-    let plain = workspace(CENSUSED);
-    let (code, output) = session(
-        &plain,
-        &["--mutators", "relational", "--incremental", "no", "--whole-test-binaries"],
-    );
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(output.contains("2 survived"), "{output}");
-    assert!(!output.contains("2 uncovered"), "{output}");
-}
-
-/// A crate with a test that convicts every mutant while reaching none of them.
-///
-/// `objects_to_any_mutant` executes no instrumented code, so a census puts it in no mutant's list
-/// and it never runs during the sweep. Run anyway, it fails whenever a mutant is active and credits
-/// the suite with catching one it never looked at — which makes it a precise oracle for whether the
-/// narrowing happened, rather than a timing measurement that would be flaky by construction.
-///
-/// `shout`'s value is reached by `the_boundary_is_pinned` but asserted by nothing, so it is a
-/// genuine survivor that only the poison test can hide.
-const POISONED: &str = "
-pub fn is_adult(age: u32) -> bool {
-    age >= 18
-}
-
-pub fn shout(name: &str) -> String {
-    format!(\"{name}!\")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_boundary_is_pinned() {
-        // Keep the baseline long enough that case-level sampling repays its launch cost even under
-        // coverage instrumentation, without slowing either the census samples or mutant runs.
-        if std::env::var_os(\"GAMMA_ACTIVE\").is_none() && std::env::var_os(\"GAMMA_CENSUS\").is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        assert!(!is_adult(17));
-        assert!(is_adult(18));
-
-        let _unasserted = shout(\"quiet\");
-    }
-
-    #[test]
-    fn objects_to_any_mutant() {
-        assert!(std::env::var(\"GAMMA_ACTIVE\").is_err(), \"a mutant was active\");
-    }
-}
-";
-
-#[test]
-fn a_census_leaves_out_the_tests_that_reach_none_of_a_mutant_s_code() {
-    step_aside_if_nested!();
-    // Without a census every mutant runs the whole binary, so the test that objects to any mutant
-    // at all convicts the survivor in `shout` and the run reports a clean sweep it never made.
-    let plain = workspace(POISONED);
-    let (code, output) = session(&plain, &["--mutators", "fn_value", "--incremental", "no", "--whole-test-binaries"]);
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(output.contains("0 survived,"), "{output}");
-
-    // With one, only the tests that reach `shout` run, the objector never does, and the survivor it
-    // was hiding is reported.
-    let dir = workspace(POISONED);
-    let (code, output) = censused_session(&dir, &["--mutators", "fn_value", "--incremental", "no"]);
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(output.contains("SURVIVED src/lib.rs"), "{output}");
 }

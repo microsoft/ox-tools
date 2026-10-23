@@ -54,16 +54,33 @@ the complete user-facing set.
 
 ## Compiler convergence
 
-The library checks the complete pending schema before generating test binaries.
-Unattributed failures enter target-scoped isolation with exact active subsets:
-all unrelated pending mutants are restored while one subset is proved. Local
-limits are 4,096 candidates and 32 proofs per context. Each Cargo invocation
+The library filters historical compiler exclusions during discovery, before
+assigning ordinals or writing guards. The cumulative `compiler-exclusions.json`
+inventory is independent of incremental reuse and is atomically extended as new
+individual failures are proved. Interaction-only removals are never added.
+
+Pristine validation fixes the package roots, targets, features, and compiler
+options once. Every exclusion and proof check repeats `cargo check --tests
+--keep-going`; the final `cargo build --tests --keep-going` retains that scope.
+Library-only campaigns preserve their `cargo test --no-run --lib --no-fail-fast`
+invocation instead. Unattributed failures enter diagnostic-scoped isolation with
+exact active subsets in the failed dependency-connected components. Other
+mutations in those components are restored; disconnected successful components
+remain instrumented. Identical source selections and bytes are not rewritten. Local
+limits are 4,096 candidates per search and 32 proofs per context. Diagnostic-local
+searches precede deterministically partitioned oversized tiers; passing partitions
+do not disprove cross-partition interactions. After the complete diagnostic-local
+tier group yields proven progress, the next ordinary convergence check replaces
+broader clean-tier proof builds. All local partitions are still considered;
+contexts without diagnostic locality retain the broader search. Each Cargo invocation
 admits 64 contexts and therefore at most 2,048 proofs, preserving a complete
 local proof allowance for every admitted context. Larger dependency cones run
-first. Exhausted contexts publish their pending mutants as `notbuilt`.
-
-Narrow checks and builds are transactional. Every verdict-bearing convergence
-field is snapshotted before narrowing and restored before a wider retry.
+first. Exhausted contexts preserve unjudged candidates. Confirmed causes permit
+another convergence round; no-progress exhaustion stops the campaign with an
+actionable error instead of abandoning a package or dependency population.
+The initial validation is the pristine control: isolation launches no additional
+controls, historical probes, target reductions, or scope-widening retries.
+Confirmed singleton counts are published during isolation, before subsequent proofs.
 Isolation and interaction minimization live in
 `cargo-gamma-lib/src/exec/build/isolation.rs`; splice deltas and the incremental
 guard index remain in `build/splices.rs`. Ordinary reporters do not request
@@ -81,12 +98,14 @@ construction. Startup acquisition failures use a fixed marker and reserved exit
 status so the coordinator cannot mistake an unselected mutant for a baseline
 run.
 
-The same guard protocol records sealed reach observations. The opt-in census
-groups and subdivides test scopes under an economic deadline; incomplete
-observations are positive checked hints only. During the sweep, workers claim
+The same guard protocol records sealed active-mutant reach observations through
+`GAMMA_REACH`, without separate sampling launches. Incomplete observations never
+establish absence. During the sweep, workers claim
 mutants from an assignment-time scheduler that tracks active files and items.
-Cold same-item siblings wait for their scout to publish exact-test, file, and
-safe same-site negative reach learning before they become eligible.
+The four execution phases share the configured mutant concurrency; same-item
+siblings remain runnable while related work is active. Completed mutants publish
+exact-test, file, and safe same-site negative reach learning before releasing
+their assignments.
 
 Checked-in hints use version-4 YAML grouped by source file, with repeated killer
 identities interned per file and generalized schema-v3 identities interned

@@ -60,6 +60,20 @@ matches no member is an error, so typos fail loudly. Package files contain
 package specs only: comments, command-line tokens, malformed input, and
 missing, unreadable, or non-UTF-8 files are errors.
 
+#### Source-qualified package selection
+
+Selection remains workspace-only, even when a registry dependency has the
+same name and version. Existing `-p name@version` and `--package-file`
+inputs resolve in the current checkout; no cargo-delta record format is
+required. Use `{cargo-spec}` for child Cargo commands that must distinguish
+the local package from a registry copy. Selectors are checkout-local and
+are reconstructed from metadata in each checkout.
+
+Ordinary aggregate `cargo build` and `cargo test` commands do not need
+cargo-each. Cargo’s `--workspace` with `--exclude` flags scopes selection
+to workspace members without ambiguous package specs or checkout-local paths.
+Callers must skip explicitly empty selections rather than exclude every member.
+
 ### Filters
 
 `--filter` accepts Boolean expressions using `not`, `and`, `or`, and
@@ -117,6 +131,10 @@ Substituted inside each command argument:
 
 * `{name}` — bare package name (per-package and per-target).
 * `{spec}` — `name@version` (per-package and per-target).
+* `{cargo-spec}` — source-qualified `file:///...#name@version` Cargo
+  selector (per-package and per-target). Paths are URL-encoded, so spaces
+  remain part of one argv element. Built from the manifest directory,
+  package name, and version.
 * `{version}` — package version (per-package and per-target).
 * `{manifest}` — absolute member `Cargo.toml` path (per-package and
   per-target).
@@ -124,6 +142,7 @@ Substituted inside each command argument:
 * `{packages}` — the cargo selection flags for the resolved set
   (`--workspace` for the whole workspace, else `--package name@version …`);
   valid only in `--once` mode and only as a standalone argument.
+  Like `{spec}`, this expansion is not source-qualified.
 * `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
   or root `[package].rust-version` in a single-package repository; valid in
   Cargo-backed per-package, per-target, and `--once` modes. Expands to an
@@ -206,6 +225,13 @@ configuration, spawn, or post-spawn infrastructure failures return `2`.
 Under `--keep-going`, any failure maps the aggregate result to `1`.
 
 ## Examples
+
+Select a local package even when a registry dependency shares its identity:
+
+```text
+cargo each -p crate-a@1.0.0 -- cargo check --package {cargo-spec}
+cargo each --package-file selected.txt -- cargo check --package {cargo-spec}
+```
 
 Run a per-manifest tool over every library crate:
 

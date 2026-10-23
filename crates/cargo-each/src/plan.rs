@@ -154,6 +154,8 @@ impl Plan {
             ..
         } = options;
 
+        let uses_cargo_spec = command.iter().any(|arg| arg.contains("{cargo-spec}"));
+
         // #[gamma::skip(try.propagate_to_unwrap, reason = "is_empty already ran validate_build on this same immutable command and mode; every substitute repeats only that validated placeholder check, so all collected results and direct substitutions are Ok")]
         let invocations = match mode {
             Mode::PerPackage => members
@@ -162,6 +164,7 @@ impl Plan {
                     let placeholders = Placeholders::Package {
                         name: m.name.clone(),
                         spec: m.spec(),
+                        cargo_spec: if uses_cargo_spec { m.cargo_spec() } else { String::new() },
                         version: m.version.clone(),
                         manifest: m.manifest_path.display().to_string(),
                         workspace_rust_version: workspace_rust_version.map(str::to_owned),
@@ -176,14 +179,18 @@ impl Plan {
             Mode::PerTarget => members
                 .iter()
                 .flat_map(|member| {
+                    let mut cargo_spec = None;
                     member
                         .targets
                         .iter()
                         .filter(|target| target_matches(member, target, target_kinds, target_filters))
-                        .map(|target| {
+                        .map(move |target| {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
                                 spec: member.spec(),
+                                cargo_spec: cargo_spec
+                                    .get_or_insert_with(|| if uses_cargo_spec { member.cargo_spec() } else { String::new() })
+                                    .clone(),
                                 version: member.version.clone(),
                                 manifest: member.manifest_path.display().to_string(),
                                 target: target.name.clone(),
@@ -298,7 +305,9 @@ mod tests {
             name: name.to_owned(),
             version: "1.2.3".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),
-            manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
+            manifest_path: PathBuf::from(if cfg!(windows) { r"C:\ws" } else { "/ws" })
+                .join(name)
+                .join("Cargo.toml"),
             publishable: true,
             doctest: true,
             features: BTreeSet::new(),
@@ -381,6 +390,39 @@ mod tests {
     }
 
     #[test]
+    fn unused_cargo_spec_does_not_require_a_source_url() {
+        let mut member = member("alpha");
+        // A relative sentinel cannot become a file URL, exposing eager selector construction.
+        member.manifest_path = PathBuf::from("alpha").join("Cargo.toml");
+        member.targets.push(MemberTarget {
+            name: "custom_library".to_owned(),
+            kinds: BTreeSet::from([TargetKind::Lib]),
+            required_features: BTreeSet::new(),
+        });
+        for mode in [Mode::PerPackage, Mode::PerTarget] {
+            let plan = Plan::build(
+                &[&member],
+                &cmd(&["cargo", "fmt", "--manifest-path", "{manifest}"]),
+                BuildOptions {
+                    mode,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &BTreeSet::from([TargetKind::Lib]),
+                    target_filters: &[],
+                    require_target_per_package: false,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("a template without cargo-spec does not need a source URL");
+            assert_eq!(plan.invocations.len(), 1);
+            assert_eq!(
+                plan.invocations[0].argv,
+                ["cargo", "fmt", "--manifest-path", &member.manifest_path.display().to_string()]
+            );
+        }
+    }
+
+    #[test]
     fn per_package_builds_one_invocation_each() {
         let a = member("alpha");
         let b = member("beta");
@@ -396,17 +438,22 @@ mod tests {
         assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha"));
         assert_eq!(
             plan.invocations[0].argv,
-            ["cargo", "check-external-types", "--manifest-path", "/ws/alpha/Cargo.toml"]
+            [
+                "cargo",
+                "check-external-types",
+                "--manifest-path",
+                &a.manifest_path.display().to_string()
+            ]
         );
         assert!(plan.invocations[0].work_dir.is_none());
-        assert_eq!(plan.invocations[1].argv[3], "/ws/beta/Cargo.toml");
+        assert_eq!(plan.invocations[1].argv[3], b.manifest_path.display().to_string());
     }
 
     #[test]
     fn chdir_sets_work_dir_to_crate_root() {
         let a = member("alpha");
         let plan = build(&[&a], Mode::PerPackage, true, PackagesExpansion::Explicit, &cmd(&["cargo", "fmt"])).expect("build");
-        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
+        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(a.manifest_dir()));
     }
 
     #[test]
@@ -652,6 +699,58 @@ mod tests {
             )
             .expect("members outside kind selection are outside metadata preflight")
         );
+    }
+
+    #[test]
+    fn per_target_reuses_member_selectors_without_resolving_unmatched_members() {
+        let mut a = member("alpha");
+        a.targets = ["first", "second"]
+            .into_iter()
+            .map(|name| MemberTarget {
+                name: name.to_owned(),
+                kinds: BTreeSet::from([TargetKind::Example]),
+                required_features: BTreeSet::new(),
+            })
+            .collect();
+        let mut b = a.clone();
+        b.name = "beta".to_owned();
+        b.manifest_path = member("beta").manifest_path;
+        let mut unmatched = member("unmatched");
+        // This sentinel cannot become a file URL and must remain unresolved.
+        unmatched.manifest_path = PathBuf::from("unmatched").join("Cargo.toml");
+        unmatched.targets.push(MemberTarget {
+            name: "library".to_owned(),
+            kinds: BTreeSet::from([TargetKind::Lib]),
+            required_features: BTreeSet::new(),
+        });
+
+        let plan = Plan::build(
+            &[&unmatched, &a, &b],
+            &cmd(&["cargo", "run", "-p", "{cargo-spec}", "--example", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &BTreeSet::from([TargetKind::Example]),
+                target_filters: &[],
+                require_target_per_package: false,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("unmatched members do not need a source URL");
+
+        let root = if cfg!(windows) { "file:///C:/ws" } else { "file:///ws" };
+        let expected = ["alpha", "beta"]
+            .into_iter()
+            .flat_map(|name| {
+                ["first", "second"].map(|target| Invocation {
+                    label: Some(format!("{name}::{target}")),
+                    argv: cmd(&["cargo", "run", "-p", &format!("{root}/{name}#{name}@1.2.3"), "--example", target]),
+                    work_dir: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(plan.invocations, expected);
     }
 
     #[test]
@@ -902,7 +1001,7 @@ mod tests {
             },
         )
         .expect("build target plan");
-        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
+        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(a.manifest_dir()));
     }
 
     #[test]

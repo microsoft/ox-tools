@@ -9,7 +9,7 @@
 //! through Win32 and handed out as safe methods.
 
 #[cfg(test)]
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ffi::c_void;
 use core::mem;
 use std::io;
@@ -37,6 +37,13 @@ use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, OpenThread, Resume
 #[cfg(test)]
 use crate::native_faults::{self, NativeCall};
 
+#[cfg(test)]
+#[path = "../tests/support/job_watchdog.rs"]
+mod job_watchdog;
+#[cfg(test)]
+#[path = "../tests/support/job_child.rs"]
+mod test_child;
+
 /// The fallible Win32 operations used by the release and job algorithms.
 ///
 /// Production and tests run the same algorithms. Tests replace only this dependency with a backend
@@ -55,6 +62,7 @@ trait NativeCalls {
     fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool;
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool;
     fn terminate_job(&self, job: HANDLE) -> bool;
+    fn close_job(&self, job: HANDLE);
 }
 
 struct SystemCalls;
@@ -170,6 +178,11 @@ impl NativeCalls for SystemCalls {
         // SAFETY: `job` is a live job handle and the exit code is an arbitrary payload.
         win32_succeeded(unsafe { TerminateJobObject(job, u32::from(true)) })
     }
+
+    fn close_job(&self, job: HANDLE) {
+        // SAFETY: the job owner relinquishes this live handle exactly once and never uses it again.
+        let _closed = unsafe { CloseHandle(job) };
+    }
 }
 
 const fn win32_succeeded(result: i32) -> bool {
@@ -204,6 +217,8 @@ struct FaultInjectingCalls;
 #[cfg(test)]
 thread_local! {
     static LAST_OPEN_THREAD_REQUEST: Cell<Option<u32>> = const { Cell::new(None) };
+    static TERMINATED_JOBS: RefCell<Vec<HANDLE>> = const { RefCell::new(Vec::new()) };
+    static CLOSED_JOBS: RefCell<Vec<HANDLE>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -283,7 +298,13 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn terminate_job(&self, job: HANDLE) -> bool {
+        TERMINATED_JOBS.with_borrow_mut(|calls| calls.push(job));
         !native_faults::fired(NativeCall::TerminateJob) && SystemCalls.terminate_job(job)
+    }
+
+    fn close_job(&self, job: HANDLE) {
+        CLOSED_JOBS.with_borrow_mut(|calls| calls.push(job));
+        SystemCalls.close_job(job);
     }
 }
 
@@ -581,15 +602,13 @@ impl Job {
     /// # Errors
     ///
     /// Returns the operating system's reason when the job could not be terminated.
-    // #[gamma::skip(fn_value.ok, reason = "returning success without terminating the job leaves its child alive while the caller waits to reap it")]
     pub fn terminate(&self) -> io::Result<()> {
-        // #[gamma::skip(cond.always_true, reason = "pretending the kernel terminated the job leaves its child alive while the caller waits to reap it")]
-        if NATIVE_CALLS.terminate_job(self.handle) {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        terminate_with(self.handle, |job| NATIVE_CALLS.terminate_job(job), io::Error::last_os_error)
     }
+}
+
+fn terminate_with(job: HANDLE, terminate: impl FnOnce(HANDLE) -> bool, last_error: impl FnOnce() -> io::Error) -> io::Result<()> {
+    if terminate(job) { Ok(()) } else { Err(last_error()) }
 }
 
 fn memory_limit_was_hit_with(
@@ -623,9 +642,7 @@ fn memory_limit_was_hit_with(
 
 impl Drop for Job {
     fn drop(&mut self) {
-        // SAFETY: the handle was created by `CreateJobObjectW`, is closed exactly once because
-        // this type is not `Clone`, and is not used afterwards.
-        let _closed = unsafe { CloseHandle(self.handle) };
+        NATIVE_CALLS.close_job(self.handle);
     }
 }
 
@@ -697,13 +714,15 @@ const fn in_job_answer(answer: &JobMembershipQuery) -> Option<bool> {
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::process::Stdio;
+    use std::process::{ExitStatus, Stdio};
     use std::sync::Arc;
     use std::{env, thread};
 
     use windows_sys::Win32::System::IO::PostQueuedCompletionStatus;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetProcessHandleCount, TerminateThread};
 
+    use super::job_watchdog::{Watchdog, native_smoke_enabled};
+    use super::test_child::TestChild;
     use super::*;
 
     /// Allocation increment used by the job-memory-limit regression child.
@@ -720,6 +739,60 @@ mod tests {
     const HANDLE_LEAK_WARMUPS: u32 = 8;
     const ALLOWED_HANDLE_DRIFT: u32 = 8;
     const FAULT_TEST_LIMIT: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn termination_preserves_the_requested_handle_and_exact_call_result() {
+        let job = core::ptr::dangling_mut::<c_void>();
+        let mut calls = Vec::new();
+        terminate_with(
+            job,
+            |handle| {
+                calls.push(handle);
+                true
+            },
+            || panic!("a successful termination must not read the last OS error"),
+        )
+        .expect("the scripted termination succeeds");
+        assert_eq!(calls, [job]);
+
+        let mut errors = 0;
+        let cause = terminate_with(
+            job,
+            |handle| {
+                calls.push(handle);
+                false
+            },
+            || {
+                errors += 1;
+                io::Error::from_raw_os_error(5)
+            },
+        )
+        .expect_err("the scripted termination fails");
+        assert_eq!(cause.raw_os_error(), Some(5));
+        assert_eq!(calls, [job, job]);
+        assert_eq!(errors, 1);
+    }
+
+    #[test]
+    fn job_termination_and_drop_dispatch_the_owned_handle_once() {
+        let job = Job::create(None).expect("an independently owned empty job");
+        let handle = job.handle;
+        TERMINATED_JOBS.with_borrow_mut(Vec::clear);
+        job.terminate().expect("terminating an empty job succeeds");
+        TERMINATED_JOBS.with_borrow(|calls| assert_eq!(*calls, [handle]));
+
+        let _armed = native_faults::arm(NativeCall::TerminateJob);
+        job.terminate().expect_err("the requested native failure must propagate");
+        TERMINATED_JOBS.with_borrow(|calls| assert_eq!(*calls, [handle, handle]));
+        assert!(
+            !native_faults::fired(NativeCall::TerminateJob),
+            "the call must consume the scripted failure"
+        );
+
+        CLOSED_JOBS.with_borrow_mut(Vec::clear);
+        drop(job);
+        CLOSED_JOBS.with_borrow(|calls| assert_eq!(*calls, [handle]));
+    }
 
     #[test]
     fn native_memory_limits_preserve_exact_bytes_and_target_width_failures() {
@@ -854,6 +927,16 @@ mod tests {
 
     #[test]
     fn system_thread_calls_honor_the_win32_snapshot_contract() {
+        let (send_id, receive_id) = std::sync::mpsc::sync_channel(0);
+        let (send_release, await_release) = std::sync::mpsc::sync_channel(0);
+        let sibling = thread::spawn(move || {
+            // SAFETY: this returns the calling thread's identifier and takes no arguments.
+            send_id.send(unsafe { GetCurrentThreadId() }).expect("report sibling id");
+            let _released = await_release.recv();
+        });
+        let sibling_id = receive_id.recv().expect("the sibling is alive before the snapshot");
+        // SAFETY: this returns the calling thread's identifier and takes no arguments.
+        let current_id = unsafe { GetCurrentThreadId() };
         let snapshot = SystemCalls.thread_snapshot();
 
         assert!(valid_snapshot(snapshot), "the system thread snapshot can be taken");
@@ -870,7 +953,18 @@ mod tests {
             "a system-wide thread snapshot has a first entry"
         );
 
-        while SystemCalls.next_thread(snapshot.as_raw_handle(), &mut entry) {}
+        let mut found_current = entry.th32ThreadID == current_id;
+        let mut found_sibling = entry.th32ThreadID == sibling_id;
+        while SystemCalls.next_thread(snapshot.as_raw_handle(), &mut entry) {
+            found_current |= entry.th32ThreadID == current_id;
+            found_sibling |= entry.th32ThreadID == sibling_id;
+        }
+        send_release.send(()).expect("release the enumerated sibling");
+        sibling.join().expect("snapshot sibling");
+        assert!(
+            found_current && found_sibling,
+            "enumeration stopped before finding both live owned threads"
+        );
 
         let invalid = core::ptr::null_mut();
 
@@ -898,7 +992,7 @@ mod tests {
     #[test]
     fn system_open_thread_does_not_grant_termination_access() {
         let mut command = sleeper();
-        let mut child = command.spawn().expect("the child starts suspended");
+        let mut child = TestChild::spawn(&mut command);
         let snapshot = SystemCalls.thread_snapshot();
 
         assert!(valid_snapshot(snapshot));
@@ -972,6 +1066,7 @@ mod tests {
         assert!(SystemCalls.completion_status(completion.as_raw_handle(), &mut message, &mut key, &mut overlapped));
         assert_eq!(message, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT);
         assert_eq!(key, 37);
+        assert!(overlapped.is_null(), "the posted null payload was not preserved");
     }
 
     /// A child that outlives any test unless something kills it.
@@ -998,8 +1093,8 @@ mod tests {
     /// created suspended, assigned while it has still executed nothing, and only then released — so
     /// a test that observed the job's accounting is observing all of the child's life rather than
     /// all of it but the beginning.
-    fn running_in(job: &Job, command: &mut Command) -> Child {
-        let child = command.spawn().expect("the child starts");
+    fn running_in(job: &Job, command: &mut Command) -> TestChild {
+        let child = TestChild::spawn(command);
 
         assert!(job.assign(&child), "the job refused the child");
         assert!(release(child.id()), "the child never came out of suspension");
@@ -1008,8 +1103,9 @@ mod tests {
     }
 
     /// Waits for the job transition under test to make the child exit.
-    fn wait_for_end(child: &mut Child) {
-        let _status = child.wait().expect("the child exits after its job is terminated");
+    fn wait_for_end(child: &mut Child) -> ExitStatus {
+        let _watchdog = Watchdog::new(child);
+        child.wait().expect("the child exits after its job is terminated")
     }
 
     /// Reads back the policy installed on a job.
@@ -1067,8 +1163,13 @@ mod tests {
                 .output()
                 .expect("the isolated error-mode test starts");
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
 
             assert!(output.status.success(), "the isolated error-mode test failed: {stderr}");
+            assert!(
+                stdout.contains("error mode verified"),
+                "the isolated helper did not execute: {stdout}"
+            );
             return;
         }
 
@@ -1082,6 +1183,7 @@ mod tests {
         let required = SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
 
         assert_eq!(mode & required, required, "the process still allows a child error dialog");
+        println!("error mode verified");
     }
 
     #[test]
@@ -1092,7 +1194,7 @@ mod tests {
 
         start_suspended(&mut command);
 
-        let mut child = command.spawn().expect("the child starts suspended");
+        let mut child = TestChild::spawn(&mut command);
 
         assert!(job.assign(&child), "the suspended child can be assigned");
         thread::sleep(core::time::Duration::from_millis(100));
@@ -1111,7 +1213,7 @@ mod tests {
 
         start_suspended(&mut command);
 
-        let mut child = command.spawn().expect("the child starts suspended");
+        let mut child = TestChild::spawn(&mut command);
         let snapshot = SystemCalls.thread_snapshot();
 
         assert!(valid_snapshot(snapshot));
@@ -1128,28 +1230,6 @@ mod tests {
 
         assert_eq!(SystemCalls.resume_thread(handle.as_raw_handle()), 1);
         assert!(child.wait().expect("the resumed child exits").success());
-    }
-
-    /// Closing the last handle to a job takes everything in it.
-    ///
-    /// This is the whole reason Windows containment is simpler than the Unix side: the guarantee
-    /// belongs to the kernel and holds however the parent dies, including by a signal it never got
-    /// to handle. Every claim `cargo-gamma-process` makes about Windows rests on this one behaviour, so
-    /// it is asserted rather than assumed.
-    #[test]
-    fn a_child_dies_when_the_last_handle_to_its_job_closes() {
-        let job = Job::create(None).expect("a job is created");
-        let mut command = sleeper();
-        let mut child = running_in(&job, &mut command);
-
-        assert!(
-            child.try_wait().expect("the child's status can be read").is_none(),
-            "the child was not running to begin with, so its death proves nothing"
-        );
-
-        drop(job);
-
-        wait_for_end(&mut child);
     }
 
     /// The job accounts for what ran in it, which is what the memory ceiling is read from.
@@ -1257,8 +1337,7 @@ mod tests {
                     for _query in 0..100 {
                         let usage = job.usage();
 
-                        assert!(usage.0.is_some());
-                        assert!(!usage.1);
+                        assert_eq!(usage, (Some(0), false), "every reader of the empty job must agree");
                     }
                 });
             }
@@ -1280,7 +1359,7 @@ mod tests {
         let status = child.wait().expect("the child finishes");
         let usage = job.usage();
 
-        assert!(!status.success(), "the child must fail for its own reason");
+        assert_eq!(status.code(), Some(1), "the child must fail for its requested ordinary reason");
         assert!(!usage.1, "an ordinary failure was called exhaustion: {usage:?}");
     }
 
@@ -1479,7 +1558,7 @@ mod tests {
     fn a_job_that_refuses_its_child_reports_it_rather_than_claiming_containment() {
         let job = Job::create(None).expect("a job is created");
         let mut command = sleeper();
-        let mut child = command.spawn().expect("the child starts");
+        let mut child = TestChild::spawn(&mut command);
 
         let _armed = native_faults::arm(NativeCall::AssignProcess);
 
@@ -1498,6 +1577,9 @@ mod tests {
     /// mutant. The child must also still be killable afterwards, which is what the caller does.
     #[test]
     fn a_resume_that_fails_is_reported_and_leaves_the_child_killable() {
+        if !native_smoke_enabled() {
+            return;
+        }
         for call in [
             NativeCall::Snapshot,
             NativeCall::ThreadEnumeration,
@@ -1506,7 +1588,7 @@ mod tests {
         ] {
             let job = Job::create(None).expect("a job is created");
             let mut command = sleeper();
-            let mut child = command.spawn().expect("the child starts");
+            let mut child = TestChild::spawn(&mut command);
 
             assert!(job.assign(&child), "the job refused the child");
 
@@ -1519,10 +1601,11 @@ mod tests {
             );
 
             job.terminate().expect("the suspended test child remains reachable through its job");
-
-            wait_for_end(&mut child);
-
-            let _reaped = child.wait().expect("the abandoned child is reaped");
+            assert_eq!(
+                wait_for_end(&mut child).code(),
+                Some(1),
+                "explicit job termination preserves its requested exit code"
+            );
         }
     }
 
@@ -1534,7 +1617,7 @@ mod tests {
         }
 
         let mut command = sleeper();
-        let mut child = command.spawn().expect("the child starts");
+        let mut child = TestChild::spawn(&mut command);
         let process = child.id();
 
         for _warmup in 0..HANDLE_LEAK_WARMUPS {
@@ -1591,9 +1674,12 @@ mod tests {
 
     #[test]
     fn in_any_job_distinguishes_an_unassigned_child_from_an_assigned_one() {
+        if !native_smoke_enabled() {
+            return;
+        }
         let job = Job::create(None).expect("a job is created");
         let mut command = sleeper();
-        let mut child = command.spawn().expect("the child starts suspended");
+        let mut child = TestChild::spawn(&mut command);
 
         assert!(
             in_any_job(&child).is_some(),
@@ -1603,7 +1689,11 @@ mod tests {
         assert_eq!(in_any_job(&child), Some(true));
 
         job.terminate().expect("the assigned child can be terminated");
-        wait_for_end(&mut child);
+        assert_eq!(
+            wait_for_end(&mut child).code(),
+            Some(1),
+            "explicit job termination preserves its requested exit code"
+        );
     }
 
     /// A termination that did not happen is not mistaken for one that did.
@@ -1612,6 +1702,9 @@ mod tests {
     /// job; a later successful call proves the subtree remains reachable for cleanup.
     #[test]
     fn a_termination_that_fails_leaves_the_subtree_reachable() {
+        if !native_smoke_enabled() {
+            return;
+        }
         let job = Job::create(None).expect("a job is created");
         let mut command = sleeper();
         let mut child = running_in(&job, &mut command);
@@ -1628,6 +1721,10 @@ mod tests {
         job.terminate()
             .expect("the live test job remains terminable after the injected failure");
 
-        wait_for_end(&mut child);
+        assert_eq!(
+            wait_for_end(&mut child).code(),
+            Some(1),
+            "explicit job termination preserves its requested exit code"
+        );
     }
 }

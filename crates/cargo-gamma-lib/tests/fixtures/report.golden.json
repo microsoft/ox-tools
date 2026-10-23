@@ -61,8 +61,9 @@
     }
   },
   "config": {
+    "populationComplete": false,
     "startedAt": 1700000000,
-    "mutantIdVersion": 6,
+    "mutantIdVersion": 7,
     "shard": {
       "index": 1,
       "count": 4

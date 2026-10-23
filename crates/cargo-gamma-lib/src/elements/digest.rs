@@ -129,11 +129,7 @@ pub(crate) fn surviving_mutants(report: &Report) -> Result<HashSet<MutantId>, St
         ));
     }
 
-    let identity_version = report
-        .config
-        .as_ref()
-        .and_then(|config| config.mutant_id_version)
-        .unwrap_or(MUTANT_ID_VERSION);
+    let identity_version = report.identity_version();
 
     if identity_version != MUTANT_ID_VERSION {
         return Err(format!(

@@ -27,6 +27,13 @@ metadata.
   and `else` arms are bounded before input reaches `syn`. The chain categories
   share one budget, matching the engine guard rather than allowing mixed syntax
   to evade each independent limit.
+  The budget is cumulative along a token path across nested groups: each
+  delimiter level costs four links and children inherit the enclosing path.
+  Completed children retain their peak for subsequent postfix links, including
+  when an enclosing frame ends immediately after its final child group. Statement
+  and argument separators reset to the inherited budget, not to zero. This
+  guard runs before recursive parsing or destruction of a parsed expression,
+  for both stated-value arguments and resource-annotated items.
 - A stated value is rejected on any function the tool would never mutate: a
   declaration with no body, a `const fn`, or a function whose body is empty.
   Accepting one there would leave a hint that reads as working and generates

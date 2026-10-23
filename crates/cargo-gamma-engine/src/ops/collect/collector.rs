@@ -3,6 +3,7 @@
 
 use core::fmt::Display;
 use core::mem::{replace, take};
+use core::num::NonZeroU8;
 use core::ops::Range;
 use std::sync::Arc;
 
@@ -15,9 +16,9 @@ use syn::token::Comma;
 use syn::visit::{self, Visit};
 use syn::{
     Arm, Attribute, BinOp, Block, Expr, ExprArray, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprCast, ExprClosure, ExprContinue,
-    ExprForLoop, ExprIf, ExprIndex, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn,
-    ExprStruct, ExprTry, ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
-    ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt,
+    ExprForLoop, ExprIf, ExprIndex, ExprLet, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat,
+    ExprReturn, ExprStruct, ExprTry, ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, Item,
+    ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt,
     TraitItemConst, TraitItemFn, Type, UnOp, Variant,
 };
 
@@ -29,18 +30,27 @@ use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
 use crate::{HashMap, HashSet};
 
+mod api_identity;
+mod calls;
 mod indexes;
+mod lexical;
 mod noop;
+mod operators;
 pub(super) mod phase_one;
 mod predicates;
 mod resource;
 mod tables;
+mod temporaries;
 mod types;
 mod values;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod survivor_tests;
 
 use indexes::{ABSOLUTE_ROOT, Indexes, NumericUses, ScopePath, block_id, indexes_in, module_id};
 use noop::is_noop;
@@ -96,6 +106,7 @@ enum Undo {
     Binding(String, Option<bool>),
     BindingType(String, Option<Box<BindingType>>),
     InferredUnsigned(String, bool),
+    InferredFloating(String, bool),
     ResourceIterator(String, bool),
 
     /// Restores whether `deferred` contained `name` before the block changed it.
@@ -138,8 +149,11 @@ pub(super) struct Collector<'a> {
     trait_impl: Option<Arc<str>>,
 
     candidates: Vec<Candidate>,
+    expression_contents: HashMap<Range<usize>, Range<usize>>,
+    consuming_sites: HashMap<Range<usize>, Range<usize>>,
+    ownership_lifts: HashMap<Range<usize>, Range<usize>>,
     identity_sites: HashMap<(u128, Range<usize>), u32>,
-    candidate_identity_keys: Vec<u128>,
+    candidate_identity_sites: Vec<(u128, Range<usize>)>,
 
     /// Depth of nesting inside a context where mutation is not possible or not useful.
     ///
@@ -229,9 +243,11 @@ pub(super) struct Collector<'a> {
 
     /// Source-written types of in-scope parameters and locals.
     binding_types: HashMap<String, BindingType>,
+    closure_inputs: HashMap<Range<usize>, Type>,
     /// Bindings known to be unsigned from their initializer or use, without inventing an exact
     /// source type for them.
     inferred_unsigned: HashSet<String>,
+    inferred_floating: HashSet<String>,
     parameter_types: HashMap<String, Type>,
 
     /// Whether each field name declared anywhere in this file holds a number.
@@ -246,6 +262,7 @@ pub(super) struct Collector<'a> {
     ///
     /// Read as evidence of last resort, after annotations and initialisers have had their say.
     numeric_uses: NumericUses,
+    numeric_evidence: lexical::Evidence,
 
     /// Whether each constant and static declared anywhere in this file holds a number.
     ///
@@ -260,8 +277,7 @@ pub(super) struct Collector<'a> {
     declared_types: HashMap<String, Option<Type>>,
 
     /// Locally visible function return types and aliases.
-    returns: HashMap<String, Option<Type>>,
-    parameters: HashMap<String, Option<Vec<Type>>>,
+    calls: calls::Calls,
     local_calls: noop::LocalCalls,
     implicit_prelude: bool,
     aliases: HashMap<String, Option<types::Alias>>,
@@ -308,7 +324,8 @@ pub(super) struct Collector<'a> {
 
     /// Type parameters in scope that are known to implement a standard iterator trait.
     iterator_bounded: Vec<String>,
-    function_iterator_depth: Option<usize>,
+    reader_bounded: Vec<String>,
+    function_bound_depth: Option<(usize, usize)>,
 
     /// The configuration predicates that hold for the build this file will be part of.
     ///
@@ -373,9 +390,17 @@ impl<'a> Collector<'a> {
         errors: &'a [String],
         cfg: &'a CfgSet,
         defaults: &'a Defaults,
-        indexes: Indexes,
+        mut indexes: Indexes,
     ) -> Self {
         let default_paths = DefaultPaths::of_in(&file.ast, cfg);
+        let calls = calls::Calls::of(&file.ast, cfg, &indexes);
+        calls.annotate_imports(&mut indexes.scope_imports);
+        let _old = indexes
+            .root_imports
+            .insert(types::SOURCE_FILE.to_owned(), Some(vec![file.path.as_str().to_owned()]));
+        for imports in indexes.scope_imports.values_mut() {
+            let _old = imports.insert(types::SOURCE_FILE.to_owned(), Some(vec![file.path.as_str().to_owned()]));
+        }
 
         Self {
             file,
@@ -384,8 +409,11 @@ impl<'a> Collector<'a> {
             outermost: Arc::from(""),
             trait_impl: None,
             candidates: Vec::new(),
+            expression_contents: expression_contents(&file.ast),
+            consuming_sites: temporaries::consuming_sites(&file.ast),
             identity_sites: HashMap::default(),
-            candidate_identity_keys: Vec::new(),
+            candidate_identity_sites: Vec::new(),
+            ownership_lifts: HashMap::default(),
             inert_depth: 0,
             in_default_impl: false,
             impl_self_type: None,
@@ -403,7 +431,9 @@ impl<'a> Collector<'a> {
             foreign_error_return: false,
             bindings: HashMap::default(),
             binding_types: HashMap::default(),
+            closure_inputs: HashMap::default(),
             inferred_unsigned: HashSet::default(),
+            inferred_floating: HashSet::default(),
             parameter_types: HashMap::default(),
             fields: indexes.fields,
             root_imports: indexes.root_imports,
@@ -411,17 +441,17 @@ impl<'a> Collector<'a> {
             scope_path: Vec::new(),
             defaults,
             numeric_uses: indexes.numeric_uses,
+            numeric_evidence: lexical::evidence(&file.ast, cfg),
             constants: indexes.constants,
             declared_types: indexes.declared_types,
-            returns: indexes.returns,
-            parameters: indexes.parameters,
+            calls,
             local_calls: indexes.local_calls,
             implicit_prelude: !file
                 .ast
                 .attrs
                 .iter()
                 .any(|attribute| attribute.path().is_ident("no_implicit_prelude")),
-            aliases: indexes.aliases,
+            aliases: indexes.scope_aliases.get(&Vec::new()).cloned().unwrap_or_default(),
             scope_aliases: indexes.scope_aliases,
             block_scopes: indexes.block_scopes,
             deferred: HashSet::default(),
@@ -429,12 +459,13 @@ impl<'a> Collector<'a> {
             generics: Vec::new(),
             defaulted: Vec::new(),
             iterator_bounded: Vec::new(),
-            function_iterator_depth: None,
+            reader_bounded: Vec::new(),
+            function_bound_depth: None,
             errors,
             cfg,
             seen: HashMap::default(),
             loops: Vec::new(),
-            resource_transparent: noop::LocalCalls::nontransforming_attributes(&file.ast.attrs),
+            resource_transparent: super::resource_namespaces::declaration_attributes(&file.ast.attrs),
             resource_iterators: HashSet::default(),
         }
     }
@@ -456,8 +487,8 @@ impl<'a> Collector<'a> {
             *occurrence = occurrence.saturating_add(1);
             let _previous = reserved.insert((key, span), index);
         }
-        for (candidate, key) in self.candidates.iter_mut().zip(self.candidate_identity_keys) {
-            candidate.identity_occurrence = reserved.get(&(key, candidate.span.clone())).copied();
+        for (candidate, site) in self.candidates.iter_mut().zip(self.candidate_identity_sites) {
+            candidate.identity_occurrence = reserved.get(&site).copied();
         }
         self.candidates
     }
@@ -558,7 +589,41 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let replacement = replacement.into();
+        let mut replacement = replacement.into();
+        let ownership = self.ownership_lifts.get(&range).cloned();
+        let consuming = self.consuming_sites.get(&range).cloned();
+        // Leave attributes on the outer construct, outside the replacement's guard branches.
+        let range = if let Some(content) = self.expression_contents.get(&range) {
+            let prefix = self.file.slice(&(range.start..content.start));
+            if replacement.starts_with(prefix) {
+                replacement = CompactString::from(&replacement[prefix.len()..]);
+            }
+            content.clone()
+        } else {
+            range
+        };
+        let identity_span = range.clone();
+        // Ownership alternatives must share their enclosing control-flow region, so that lift
+        // takes precedence. Otherwise lift borrowed temporaries into their consumer to prevent
+        // a branch-local temporary from supplying a borrow that escapes the guard.
+        let (range, shape) = if let Some(region) = ownership {
+            let region = self.expression_contents.get(&region).unwrap_or(&region).clone();
+            replacement = format_compact!(
+                "{}{}{}",
+                self.file.slice(&(region.start..range.start)),
+                replacement,
+                self.file.slice(&(range.end..region.end))
+            );
+            (region, Shape::Block)
+        } else if let Some(consuming) = consuming.filter(|_| matches!(shape, Shape::Expr | Shape::IterExpr)) {
+            let consuming = self.expression_contents.get(&consuming).unwrap_or(&consuming).clone();
+            let before = self.file.slice(&(consuming.start..range.start));
+            let after = self.file.slice(&(range.end..consuming.end));
+            replacement = format_compact!("{before}{replacement}{after}");
+            (consuming, Shape::Expr)
+        } else {
+            (range, shape)
+        };
 
         // A mutant that reproduces the code it replaces cannot be caught by any test, because
         // there is nothing to catch. Reporting it would accuse the suite of a gap that does not
@@ -573,7 +638,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let identity_key = self.reserve_identity_occurrence(mutator, range.clone());
+        let identity_key = self.reserve_identity_occurrence(mutator, &range, identity_span.clone());
         if !included
             || self
                 .loops
@@ -611,16 +676,17 @@ impl<'a> Collector<'a> {
             shape,
             confidence,
         });
-        self.candidate_identity_keys.push(identity_key);
+        self.candidate_identity_sites.push((identity_key, identity_span));
 
         self.seen.entry(span_key).or_default().push(at);
     }
 
-    fn reserve_identity_occurrence(&mut self, mutator: &'static str, range: Range<usize>) -> u128 {
+    fn reserve_identity_occurrence(&mut self, mutator: &'static str, range: &Range<usize>, identity_span: Range<usize>) -> u128 {
         let item_path = self.scope.last().map_or_else(|| self.outermost.as_ref(), AsRef::as_ref);
-        let normalized = normalize_site_text(self.file.slice(&range));
+        let normalized = normalize_site_text(self.file.slice(range));
         let key = site_key(item_path, mutator, &normalized);
-        let site = (key, range);
+        // Distinct borrowed sites can lift into one consumer without becoming one logical mutation site.
+        let site = (key, identity_span);
 
         // #[gamma::skip(literal.int_increment, reason = "finish consumes only identity_sites keys; the stored placeholder value is never read")]
         let _reserved = self.identity_sites.entry(site).or_insert(0);
@@ -643,8 +709,20 @@ impl<'a> Collector<'a> {
         self.inert_depth == 0 && self.selection.contains(mutator)
     }
 
+    /// The source cutoff is a conservative per-loop cloning/work default shared with `LoopProof`.
+    /// It is neither a Rust limit nor a measured cost threshold; larger loops retain candidates.
     fn resource_proof(&self, expression: &Expr) -> Option<resource::LoopProof> {
-        if !self.resource_transparent || !self.implicit_prelude || !self.local_calls.scope_is_transparent(&self.scope_path) {
+        let imports = self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports);
+        let inline = imports
+            .get(types::LOCAL_MODULE)
+            .and_then(Option::as_ref)
+            .map_or(&[][..], Vec::as_slice);
+        let modules_verified = self.defaults.resource_namespace_transparent(self.file.path.as_ref(), inline);
+        if !self.resource_transparent
+            || !self.implicit_prelude
+            || !self.local_calls.resource_scope_is_transparent(&self.scope_path, modules_verified)
+            || expression.span().byte_range().len() > 4096
+        {
             return None;
         }
         let mut bindings = self
@@ -656,15 +734,67 @@ impl<'a> Collector<'a> {
             if !binding.resource_trusted {
                 continue;
             }
-            let Some(kind) = self.resource_binding(&binding.ty, &binding.scope, &mut HashSet::default()) else {
+            let Some(mut kind) = self.resource_binding(&binding.ty, &binding.scope, &mut HashSet::default()) else {
                 continue;
             };
-            if kind == resource::Binding::StrReference {
-                continue;
+            if kind == resource::Binding::Integer {
+                kind = self
+                    .types_with(&binding.imports)
+                    .standard_type_name(&binding.ty)
+                    .as_deref()
+                    .and_then(resource::Primitive::named)
+                    .map_or(kind, resource::Binding::Primitive);
             }
             let _prior = bindings.insert(name.clone(), kind);
         }
-        resource::LoopProof::new(expression, bindings, self.types().supports_char_api())
+        for (name, site) in resource::projection_sites(expression) {
+            let root = name.split('.').next()?;
+            let Some(binding) = self.binding_types.get(root).filter(|binding| binding.resource_trusted) else {
+                continue;
+            };
+            let Expr::Field(field) = site else { continue };
+            if !matches!(&*field.base, Expr::Path(path) if path.path.is_ident(root)) {
+                continue;
+            }
+            let Some(ty) = self.calls.field(&binding.ty, &field.member, &binding.scope, &binding.imports) else {
+                continue;
+            };
+            let Some(kind) = self.resource_binding(&ty, &self.scope_path, &mut HashSet::default()) else {
+                continue;
+            };
+            if matches!(kind, resource::Binding::Bool | resource::Binding::Integer)
+                || matches!(
+                    kind,
+                    resource::Binding::Vec | resource::Binding::VecChar | resource::Binding::VecString
+                ) && matches!(&binding.ty, Type::Reference(reference) if reference.mutability.is_none())
+            {
+                let _prior = bindings.insert(name, kind);
+            }
+        }
+        self.resource_source_bindings(expression, &mut bindings);
+        for name in resource::enclosing_pattern_shadows(&self.file.ast, &expression.span().byte_range())? {
+            let _shadowed = bindings.remove(&name);
+        }
+        if bindings.values().any(|binding| {
+            matches!(
+                binding,
+                resource::Binding::Vec
+                    | resource::Binding::VecChar
+                    | resource::Binding::VecString
+                    | resource::Binding::String
+                    | resource::Binding::StrReference
+                    | resource::Binding::PeekableChars
+            )
+        }) && !self.defaults.resource_sources().closed_methods_for(self.file.path.as_ref(), inline)
+        {
+            return None;
+        }
+        resource::LoopProof::new(expression, bindings, self.types().supports_char_api()).map(|proof| {
+            proof
+                .initializers(&self.file.ast)
+                .stable_calls(self.resource_stable_calls(expression))
+                .grouping(&self.file.ast, self.defaults.resource_sources(), self.file.path.as_ref(), inline)
+        })
     }
 
     fn resource_binding(&self, ty: &Type, scope: &ScopePath, visited: &mut HashSet<(ScopePath, String)>) -> Option<resource::Binding> {
@@ -675,9 +805,12 @@ impl<'a> Collector<'a> {
             return Some(resource::Binding::StrReference);
         }
         if let Type::Reference(reference) = ty {
-            return (reference.mutability.is_some()
-                && self.resource_binding(&reference.elem, scope, visited) == Some(resource::Binding::PeekableChars))
-            .then_some(resource::Binding::PeekableChars);
+            let kind = self.resource_binding(&reference.elem, scope, visited)?;
+            return match kind {
+                resource::Binding::Vec | resource::Binding::VecChar | resource::Binding::VecString => Some(kind),
+                resource::Binding::PeekableChars if reference.mutability.is_some() => Some(kind),
+                _ => None,
+            };
         }
         let Type::Path(path) = ty else { return None };
         let first = path.path.segments.first()?.ident.to_string();
@@ -719,6 +852,33 @@ impl<'a> Collector<'a> {
             Some(resource::Binding::Bool)
         } else if types.supports_primitive_kind(ty, Kind::Signed) || types.supports_primitive_kind(ty, Kind::Unsigned) {
             Some(resource::Binding::Integer)
+        } else if types.supports_primitive_kind(ty, Kind::Float) {
+            Some(
+                types
+                    .standard_type_name(ty)
+                    .as_deref()
+                    .and_then(resource::Primitive::named)
+                    .map_or(resource::Binding::Integer, resource::Binding::Primitive),
+            )
+        } else if types.supports_collection_api(ty) && types.standard_type_name(ty).as_deref() == Some("Vec") {
+            let characters = matches!(ty, Type::Path(path)
+                if path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments,
+                    syn::PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
+                        Some(syn::GenericArgument::Type(Type::Path(element))) if element.path.is_ident("char")))))
+                && types.supports_char_api();
+            let strings = matches!(ty, Type::Path(path)
+                if path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments,
+                    syn::PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
+                        Some(syn::GenericArgument::Type(element)) if types.supports_string_api(element)))));
+            Some(if characters {
+                resource::Binding::VecChar
+            } else if strings {
+                resource::Binding::VecString
+            } else {
+                resource::Binding::Vec
+            })
+        } else if types.supports_collection_api(ty) && resource::bool_cache_type(ty) {
+            Some(resource::Binding::BoolCache)
         } else if types.supports_empty_default_constructor(ty) && types.supports_string_api(ty) {
             Some(resource::Binding::String)
         } else {
@@ -769,7 +929,9 @@ impl<'a> Collector<'a> {
     /// `a == b` without them yields `!a == b`, which is a different expression and usually does
     /// not even type-check.
     fn negation_of(&self, span: Span) -> CompactString {
-        format_compact!("!({})", self.text_of(span))
+        let whole = span.byte_range();
+        let range = self.expression_contents.get(&whole).unwrap_or(&whole);
+        format_compact!("!({})", self.file.slice(range))
     }
 
     /// Runs a closure with a name pushed onto the scope stack.
@@ -864,7 +1026,7 @@ impl<'a> Collector<'a> {
             defaulted: &self.defaulted,
             imports: self.current_imports(),
             defaults: self.defaults,
-            aliases: Some(&self.aliases),
+            aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         };
@@ -878,10 +1040,7 @@ impl<'a> Collector<'a> {
 
         // An `impl Iterator` return needs both arms of the guard wrapped so they share a type,
         // which is a different splice from every other return. See `Shape::IterBlock`.
-        let shape = match &sig.output {
-            ReturnType::Type(_, ty) if resolve_type(ty) == Kind::Iterator => Shape::IterBlock,
-            _ => Shape::Block,
-        };
+        let shape = iterator_body_shape(return_type(&sig.output), &types).unwrap_or(Shape::Block);
 
         // The value a function ends on is the one its caller reasons about, so it is one of the
         // positions where being wrong by one is a real fault rather than a compile error — but
@@ -912,7 +1071,12 @@ impl<'a> Collector<'a> {
                 continue;
             }
 
-            self.emit_shaped_with_confidence(mutator, span, value, index, shape, confidence);
+            let value_shape = if matches!(shape, Shape::IterWrappedBlock { .. }) && absent_iterator_value(&value) {
+                Shape::Block
+            } else {
+                shape
+            };
+            self.emit_shaped_with_confidence(mutator, span, value, index, value_shape, confidence);
         }
 
         // Emitted at its own mutator name rather than under whichever guess it displaced, so that
@@ -921,7 +1085,6 @@ impl<'a> Collector<'a> {
         // attribute was reached for.
         if let Some(range) = stated {
             let expression = self.file.text.get(range).unwrap_or_default();
-
             self.emit_shaped_with_confidence("fn_value.stated", span, expression, 0, shape, Confidence::Explicit);
         }
 
@@ -949,6 +1112,9 @@ impl<'a> Collector<'a> {
         };
 
         if self.undeletable_statements.contains(&statement.span().byte_range()) {
+            return;
+        }
+        if !self.admit_ownership_edit(statement.span().byte_range(), &expression.span().byte_range(), false) {
             return;
         }
 
@@ -984,6 +1150,119 @@ impl<'a> Collector<'a> {
         path.path
             .get_ident()
             .is_some_and(|ident| self.deferred.contains(&ident.to_string()))
+    }
+
+    /// Finds positive move-sensitive evidence for a place; unknown types are not classified.
+    ///
+    /// Source field types take precedence over expression inference. Mutable references require
+    /// separate treatment because a known reborrow need not move the reference itself.
+    /// The shallow recursion allowance is a conservative traversal default, not a `Copy` depth rule
+    /// or a measured stack limit; deeper fields simply supply no move-sensitive evidence.
+    fn noncopy_place(&self, place: &Expr) -> bool {
+        self.ownership_type(place)
+            .cloned()
+            .or_else(|| self.inferred_expression_type(place))
+            .is_some_and(|ty| {
+                if let Type::Reference(reference) = values::strip(self.types().resolve_alias(&ty)) {
+                    return reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&place.span().byte_range());
+                }
+                self.noncopy_type(&ty, 8)
+            })
+    }
+
+    /// Recognizes move-sensitive library types and source fields within a bounded traversal.
+    ///
+    /// This is not a complete `Copy` classifier: false also means unsupported or exhausted evidence.
+    fn noncopy_type(&self, ty: &Type, remaining: usize) -> bool {
+        if remaining == 0 {
+            return false;
+        }
+        let types = self.types();
+        let ty = types.resolve_alias(ty);
+        match values::strip(ty) {
+            Type::Reference(reference) => return reference.mutability.is_some(),
+            Type::Tuple(tuple) => return tuple.elems.iter().any(|ty| self.noncopy_type(ty, remaining - 1)),
+            Type::Array(array) => return self.noncopy_type(&array.elem, remaining - 1),
+            _ => {}
+        }
+        types.supports_string_api(ty)
+            || types.supports_collection_api(ty)
+            || types.supports_wrapper_api(ty)
+            || types.unshadowed_type_path(ty).is_some_and(|path| {
+                matches!(
+                    path.as_slice(),
+                    [root, module, name] if root == "std" && matches!(
+                        (module.as_str(), name.as_str()),
+                        ("fs", "File") | ("path", "PathBuf") | ("ffi", "OsString")
+                            | ("process", "Child" | "Command" | "Stdio" | "Output")
+                            | ("thread", "JoinHandle")
+                            | ("sync", "Mutex" | "RwLock" | "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard")
+                    )
+                )
+            })
+            || self.calls.has_noncopy_field(ty, &self.scope_path, self.current_imports(), |field| {
+                self.noncopy_type(field, remaining - 1)
+            })
+    }
+
+    /// Recovers declared place and field types without trusting shadowed nominal field layouts.
+    fn ownership_type(&self, expression: &Expr) -> Option<&Type> {
+        match expression {
+            Expr::Paren(paren) => self.ownership_type(&paren.expr),
+            Expr::Group(group) => self.ownership_type(&group.expr),
+            Expr::Field(field) => {
+                let ty = self.ownership_type(&field.base)?;
+                match (values::strip(ty), &field.member) {
+                    (Type::Tuple(tuple), Member::Unnamed(index)) => tuple.elems.iter().nth(index.index as usize),
+                    (Type::Path(path), member) => {
+                        let name = path.path.get_ident()?.to_string();
+                        if self.generics.contains(&name)
+                            || self.current_imports().contains_key(&name)
+                            || self.current_imports().contains_key("*")
+                        {
+                            return None;
+                        }
+                        let member = match member {
+                            Member::Named(name) => name.to_string(),
+                            Member::Unnamed(index) => index.index.to_string(),
+                        };
+                        self.numeric_evidence.structures.get(&name)?.as_ref()?.get(&member)
+                    }
+                    _ => None,
+                }
+            }
+            _ => self.type_of_place(expression),
+        }
+    }
+
+    /// Rejects edits known to invalidate moves, or records a shared region for legal alternatives.
+    ///
+    /// Restored bindings and exits need region lifting so the selected alternative, rather than
+    /// an inner guard branch, owns the surrounding control flow. Unknown types do not reject edits.
+    fn admit_ownership_edit(&mut self, edit: Range<usize>, span: &Range<usize>, transition: bool) -> bool {
+        let invalid = if transition {
+            &self.numeric_evidence.invalid_transitions
+        } else {
+            &self.numeric_evidence.invalid_ownership
+        };
+        if invalid
+            .get(span)
+            .is_some_and(|places| places.iter().any(|place| self.noncopy_place(place)))
+        {
+            return false;
+        }
+        let owning = self
+            .numeric_evidence
+            .reinitializations
+            .get(span)
+            .into_iter()
+            .chain(self.numeric_evidence.exits.get(span))
+            .flatten()
+            .any(|place| self.noncopy_place(place));
+        if owning && let Some(region) = self.numeric_evidence.ownership_regions.get(span) {
+            let _prior = self.ownership_lifts.insert(edit, region.clone());
+        }
+        true
     }
 
     /// Emits the guard mutants for one boolean condition.
@@ -1260,7 +1539,39 @@ impl<'a> Collector<'a> {
                 continue;
             }
 
-            self.emit(mutator, node.span(), format_compact!("{before}{replacement}{after}"), index);
+            let shape = if matches!(method, "to_lowercase" | "to_uppercase")
+                && (matches!(&*node.receiver, Expr::Lit(ExprLit { lit: Lit::Char(_), .. })) || self.character_receiver(&node.receiver))
+            {
+                Shape::IterExpr
+            } else {
+                Shape::Expr
+            };
+            self.emit_shaped(mutator, node.span(), format_compact!("{before}{replacement}{after}"), index, shape);
+        }
+    }
+
+    fn character_receiver(&self, receiver: &Expr) -> bool {
+        let Some(ty) = self.inferred_expression_type(receiver) else {
+            return false;
+        };
+        let mut ty = &ty;
+        let types = self.types();
+        let mut visited = HashSet::default();
+        loop {
+            ty = types.resolve_alias(ty);
+            if !visited.insert(core::ptr::from_ref(ty)) {
+                return false;
+            }
+            match values::strip(ty) {
+                Type::Reference(reference) => ty = &reference.elem,
+                Type::Path(path) => {
+                    return types.supports_char_api()
+                        && (path.path.is_ident("char")
+                            || path_matches(&path.path, &["core", "primitive", "char"])
+                            || path_matches(&path.path, &["std", "primitive", "char"]));
+                }
+                _ => return false,
+            }
         }
     }
 
@@ -1351,7 +1662,9 @@ impl<'a> Collector<'a> {
                     self.emit_shaped_with_confidence("iter.remove_filter", node.span(), receiver, 0, Shape::IterExpr, confidence);
                 }
             }
-            ("take", 1) => self.rename_method_as(node, "iter.take_to_skip", "skip", Shape::IterExpr),
+            ("take", 1) if !self.is_read_receiver(&node.receiver) => {
+                self.rename_method_as(node, "iter.take_to_skip", "skip", Shape::IterExpr);
+            }
             ("skip", 1) => self.rename_method_as(node, "iter.skip_to_take", "take", Shape::IterExpr),
             _ => {}
         }
@@ -1361,13 +1674,17 @@ impl<'a> Collector<'a> {
         self.types_with(self.current_imports())
     }
 
+    fn current_aliases(&self) -> &HashMap<String, Option<types::Alias>> {
+        self.scope_aliases.get(&self.scope_path).unwrap_or(&self.aliases)
+    }
+
     fn types_with<'b>(&'b self, imports: &'b HashMap<String, Option<Vec<String>>>) -> Types<'b> {
         Types {
             abstracts: &self.generics,
             defaulted: &self.defaulted,
             imports,
             defaults: self.defaults,
-            aliases: Some(&self.aliases),
+            aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         }
@@ -1604,14 +1921,16 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let text = self.text_of(expression.span()).to_owned();
+        let whole = expression.span().byte_range();
+        let range = self.expression_contents.get(&whole).unwrap_or(&whole);
+        let text = self.file.slice(range).to_owned();
         self.emit("bool_expr.negate", expression.span(), format_compact!("!({text})"), 0);
     }
 
     fn parameter_shadows(&mut self, sig: &Signature, body: &Block) {
         if !self.wants("parameter.default_shadow")
             || sig.constness.is_some()
-            || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(_)))
+            || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(_)) && resolve_type(ty) != Kind::Iterator)
         {
             return;
         }
@@ -1642,12 +1961,13 @@ impl<'a> Collector<'a> {
                 &body_text[..=open],
                 &body_text[open + 1..]
             );
+            let shape = iterator_body_shape(return_type(&sig.output), &self.types()).unwrap_or(Shape::Block);
             self.emit_shaped(
                 "parameter.default_shadow",
                 body.span(),
                 replacement,
                 saturating_ordinal(index),
-                Shape::Block,
+                shape,
             );
         }
     }
@@ -1667,17 +1987,30 @@ impl<'a> Collector<'a> {
             .get_ident()
             .expect("guarded above to be a single-segment path")
             .to_string();
+        if self.bindings.contains_key(&name) {
+            return;
+        }
         if matches!(name.as_str(), "Some" | "Ok" | "Err" | "drop" | "default") {
             return;
         }
-        let Some(ty) = self.returns.get(&name).and_then(Option::as_ref) else {
+        let Some(signature) = self.call_signature(&node.func) else {
             return;
         };
+        if signature.asyncness.is_some() {
+            return;
+        }
+        let unit = syn::parse_quote!(());
+        let ty = return_type(&signature.output).unwrap_or(&unit);
         if !self.can_directly_default(ty) {
             return;
         }
+        let confidence = if self.types().has_proven_default(ty) {
+            Confidence::Proven
+        } else {
+            Confidence::Optimistic
+        };
         if self.wants("call.replace_with_default") {
-            self.emit("call.replace_with_default", node.span(), "Default::default()", 0);
+            self.emit_confident("call.replace_with_default", node.span(), "Default::default()", 0, confidence);
         }
         if self.wants("call_result.default") {
             let call = self.text_of(node.span());
@@ -1686,10 +2019,10 @@ impl<'a> Collector<'a> {
             self.emit_at_conditionally(
                 "call_result.default",
                 node.span().byte_range(),
-                format_compact!("{{ let _ = {call}; Default::default() }}"),
+                format_compact!("::gamma_rt::default_after({call})"),
                 0,
                 Shape::Expr,
-                Confidence::Proven,
+                confidence,
                 included,
             );
         }
@@ -1742,9 +2075,7 @@ impl<'a> Collector<'a> {
         // wrong in a way that costs a rollback round: nothing in the allowlist proves an expression
         // is a number so firmly that a `format!` beside it should be ignored.
         if self.is_known_numeric(expression) && !is_textual(expression) && !self.is_known_textual_or_temporal(expression) {
-            let floating = self
-                .type_of_expression(expression)
-                .is_some_and(|ty| self.types().primitive_kind(ty) == Kind::Float)
+            let floating = self.is_known_float(expression)
                 || matches!(
                     expression,
                     Expr::MethodCall(call) if ident_returns_float(&call.method) && self.is_known_temporal(&call.receiver)
@@ -1758,6 +2089,37 @@ impl<'a> Collector<'a> {
                             && primitive_numeric_method(&call.method.to_string(), Kind::Float)
                 );
             self.perturb_with_confidence(expression, floating, self.numeric_confidence(expression));
+        }
+    }
+
+    fn is_known_float(&self, expression: &Expr) -> bool {
+        if self
+            .type_of_expression(expression)
+            .is_some_and(|ty| self.types().primitive_kind(ty) == Kind::Float)
+        {
+            return true;
+        }
+        match expression {
+            Expr::Lit(ExprLit { lit: Lit::Float(_), .. }) => true,
+            Expr::Path(path) => path
+                .path
+                .get_ident()
+                .is_some_and(|name| self.inferred_floating.contains(&name.to_string())),
+            Expr::Call(call) => {
+                numeric_associated_call(call) && callee_type(&call.func).is_some_and(|name| matches!(name.as_str(), "f32" | "f64"))
+            }
+            Expr::Paren(paren) => self.is_known_float(&paren.expr),
+            Expr::Group(group) => self.is_known_float(&group.expr),
+            Expr::Unary(unary) if matches!(unary.op, UnOp::Neg(_)) => self.is_known_float(&unary.expr),
+            Expr::Binary(binary)
+                if matches!(
+                    binary.op,
+                    BinOp::Add(_) | BinOp::Sub(_) | BinOp::Mul(_) | BinOp::Div(_) | BinOp::Rem(_)
+                ) =>
+            {
+                self.is_known_float(&binary.left) || self.is_known_float(&binary.right)
+            }
+            _ => false,
         }
     }
 
@@ -1775,7 +2137,12 @@ impl<'a> Collector<'a> {
                 }),
             Expr::Paren(paren) => self.type_of_place(&paren.expr),
             Expr::Group(group) => self.type_of_place(&group.expr),
-            Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => self.type_of_place(&unary.expr),
+            Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => {
+                let Type::Reference(reference) = self.type_of_place(&unary.expr)? else {
+                    return None;
+                };
+                Some(&reference.elem)
+            }
             _ => None,
         }
     }
@@ -1795,10 +2162,14 @@ impl<'a> Collector<'a> {
     }
 
     fn reusable_payload(&self, span: &Range<usize>) -> Option<&str> {
-        self.reusable_payloads
-            .iter()
-            .rev()
-            .find_map(|(site, value)| (site == span).then_some(value.as_str()))
+        self.reusable_payloads.iter().rev().find_map(|(site, value)| {
+            (site == span
+                && self
+                    .binding_types
+                    .get(value.as_str())
+                    .is_some_and(|binding| self.parameter_types.get(value.as_str()) == Some(&binding.ty)))
+            .then_some(value.as_str())
+        })
     }
 
     fn type_of_expression<'b>(&'b self, expression: &'b Expr) -> Option<&'b Type> {
@@ -1824,32 +2195,245 @@ impl<'a> Collector<'a> {
                     _ => None,
                 }
             }
-            Expr::Call(call) => match &*call.func {
-                Expr::Path(path) => path
-                    .path
-                    .get_ident()
-                    .and_then(|ident| self.returns.get(ident.to_string().as_str()))
-                    .and_then(Option::as_ref),
-                _ => None,
-            },
+            Expr::Call(call) => self
+                .call_signature(&call.func)
+                .filter(|signature| signature.asyncness.is_none())
+                .and_then(|signature| return_type(&signature.output)),
             Expr::Paren(paren) => self.type_of_expression(&paren.expr),
             Expr::Group(group) => self.type_of_expression(&group.expr),
             other => self.type_of_place(other),
         }
     }
 
+    fn call_signature(&self, callee: &Expr) -> Option<&Signature> {
+        self.calls.signature(
+            callee,
+            &self.scope_path,
+            self.current_imports(),
+            self.impl_self_type.as_ref(),
+            |name| self.bindings.contains_key(name),
+        )
+    }
+
     fn inferred_expression_type(&self, expression: &Expr) -> Option<Type> {
         if let Some(ty) = self.type_of_expression(expression) {
-            return Some(ty.clone());
+            return Some(self.types_with(self.imports_of_expression(expression)).source_type(ty));
+        }
+        match expression {
+            Expr::MethodCall(call) => return self.inferred_method_type(call),
+            Expr::Binary(binary) => return self.binary_expression_type(binary),
+            Expr::Block(block) => {
+                return block.block.stmts.last().and_then(|statement| match statement {
+                    Stmt::Expr(tail, None) => self.inferred_expression_type(tail),
+                    _ => None,
+                });
+            }
+            Expr::Match(matched) => {
+                return self.inferred_branch_type(matched.arms.iter().map(|arm| &*arm.body));
+            }
+            Expr::Struct(structure) if structure.qself.is_none() => {
+                let path = &structure.path;
+                return Some(syn::parse_quote!(#path));
+            }
+            Expr::Path(path)
+                if path.qself.is_none()
+                    && self.calls.structure(&path.path, &self.scope_path, self.current_imports())
+                    && !path
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|first| self.bindings.contains_key(&first.ident.to_string())) =>
+            {
+                let path = &path.path;
+                return Some(syn::parse_quote!(#path));
+            }
+            Expr::Field(field) => {
+                let base = self.inferred_expression_type(&field.base)?;
+                let base = self.types().resolve_alias(&base).clone();
+                return self
+                    .calls
+                    .field(&base, &field.member, &self.scope_path, self.imports_of_expression(&field.base));
+            }
+            Expr::Try(expression) => {
+                let ty = self.inferred_expression_type(&expression.expr)?;
+                let types = self.types();
+                return (types.supports_result_api(&ty) || types.supports_option_api(&ty))
+                    .then(|| types.payload(&ty, 0).map(std::borrow::Cow::into_owned))
+                    .flatten();
+            }
+            Expr::Paren(paren) => return self.inferred_expression_type(&paren.expr),
+            Expr::Group(group) => return self.inferred_expression_type(&group.expr),
+            Expr::Lit(ExprLit { lit: Lit::Bool(_), .. }) => return Some(syn::parse_quote!(bool)),
+            Expr::Lit(ExprLit { lit: Lit::Char(_), .. }) => return Some(syn::parse_quote!(char)),
+            Expr::Lit(ExprLit { lit: Lit::Str(_), .. }) => return Some(syn::parse_quote!(&'static str)),
+            Expr::Reference(reference) => {
+                let ty = self.inferred_expression_type(&reference.expr)?;
+                return syn::parse2(if reference.mutability.is_some() {
+                    quote::quote!(&mut (#ty))
+                } else {
+                    quote::quote!(&(#ty))
+                })
+                .ok();
+            }
+            Expr::Tuple(tuple) => {
+                let types = tuple
+                    .elems
+                    .iter()
+                    .map(|element| self.inferred_expression_type(element).unwrap_or_else(|| syn::parse_quote!(_)))
+                    .collect::<Vec<_>>();
+                return Some(syn::parse_quote!((#(#types,)*)));
+            }
+            _ => {}
         }
 
+        self.inferred_call_type(expression)
+    }
+
+    fn inferred_branch_type<'b>(&self, branches: impl Iterator<Item = &'b Expr>) -> Option<Type> {
+        let branches = branches.map(|branch| self.inferred_expression_type(branch)).collect::<Vec<_>>();
+        let first = branches.iter().flatten().next()?;
+        if branches.iter().all(|branch| branch.as_ref() == Some(first)) {
+            return Some(first.clone());
+        }
+        branches
+            .iter()
+            .flatten()
+            .any(|branch| self.types().supports_result_api(branch))
+            .then(|| syn::parse_quote!(std::result::Result<_, _>))
+    }
+
+    fn inferred_iterator_item(&self, ty: &Type) -> Option<Type> {
+        let types = self.types();
+        let ty = types.resolve_alias(ty);
+        let path = types.unshadowed_type_path(ty)?;
+        match path.as_slice() {
+            [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "str" && name == "Chars" => {
+                Some(syn::parse_quote!(char))
+            }
+            [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "slice" && name == "Iter" => {
+                let item = types.payload(ty, 0)?.into_owned();
+                Some(syn::parse_quote!(&#item))
+            }
+            _ => None,
+        }
+    }
+
+    fn inferred_method_type(&self, call: &ExprMethodCall) -> Option<Type> {
+        let receiver = self.inferred_expression_type(&call.receiver)?;
+        if let Some(signature) = self
+            .calls
+            .method_signature(&receiver, &call.method.to_string(), &self.scope_path, self.current_imports())
+        {
+            return signature
+                .asyncness
+                .is_none()
+                .then(|| {
+                    let output = return_type(&signature.output)?;
+                    let mut owner = &receiver;
+                    while let Type::Reference(reference) = values::strip(owner) {
+                        owner = &reference.elem;
+                    }
+                    Some(types::substitute_type(
+                        output,
+                        &HashMap::from_iter([("Self".into(), owner.clone())]),
+                    ))
+                })
+                .flatten();
+        }
+        let types = self.types();
+        let mut receiver_type = types.resolve_alias(&receiver);
+        while let Type::Reference(reference) = values::strip(receiver_type) {
+            receiver_type = types.resolve_alias(&reference.elem);
+        }
+        if call.method == "iter" && call.args.is_empty() {
+            let element = match values::strip(receiver_type) {
+                Type::Slice(slice) => Some((*slice.elem).clone()),
+                Type::Array(array) => Some((*array.elem).clone()),
+                _ if types.supports_collection_api(receiver_type) && types.standard_type_name(receiver_type).as_deref() == Some("Vec") => {
+                    types.payload(receiver_type, 0).map(std::borrow::Cow::into_owned)
+                }
+                _ => None,
+            };
+            if let Some(element) = element {
+                return Some(syn::parse_quote!(std::slice::Iter<'_, #element>));
+            }
+        }
+        if types
+            .unshadowed_type_path(receiver_type)
+            .is_some_and(|path| path.iter().map(String::as_str).eq(["std", "fs", "OpenOptions"]))
+            && call.args.len() == 1
+        {
+            match call.method.to_string().as_str() {
+                "open" => return Some(syn::parse_quote!(std::result::Result<std::fs::File, std::io::Error>)),
+                "read" | "write" | "append" | "truncate" | "create" | "create_new" => {
+                    return Some(syn::parse_quote!(&mut std::fs::OpenOptions));
+                }
+                _ => {}
+            }
+        }
+        if call.method == "chars"
+            && call.args.is_empty()
+            && (types.supports_str_reference(&receiver) || types.supports_string_api(&receiver))
+        {
+            return Some(syn::parse_quote!(std::str::Chars<'_>));
+        }
+        if call.method == "next"
+            && call.args.is_empty()
+            && let Some(item) = self.inferred_iterator_item(&receiver)
+        {
+            return Some(syn::parse_quote!(std::option::Option<#item>));
+        }
+        if types.unshadowed_type_path(&receiver).is_some_and(|path| {
+            matches!(path.as_slice(),
+                [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Instant")
+        }) && matches!(
+            call.method.to_string().as_str(),
+            "elapsed" | "duration_since" | "saturating_duration_since"
+        ) {
+            return Some(syn::parse_quote!(std::time::Duration));
+        }
+        if types.supports_result_api(&receiver)
+            && matches!(call.method.to_string().as_str(), "map" | "map_err" | "and_then" | "or_else")
+            && call.args.len() == 1
+        {
+            return Some(syn::parse_quote!(std::result::Result<_, _>));
+        }
+        if matches!(
+            call.method.to_string().as_str(),
+            "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else"
+        ) && (types.supports_option_api(&receiver) || types.supports_result_api(&receiver))
+        {
+            return types.payload(&receiver, 0).map(std::borrow::Cow::into_owned);
+        }
+        if matches!(call.method.to_string().as_str(), "to_owned" | "to_string")
+            && call.args.is_empty()
+            && (types.supports_str_reference(&receiver) || types.supports_string_api(&receiver))
+        {
+            return Some(syn::parse_quote!(std::string::String));
+        }
+        None
+    }
+
+    fn inferred_call_type(&self, expression: &Expr) -> Option<Type> {
         let Expr::Call(call) = expression else {
             return None;
         };
+        if let Some(ty) = self.standard_constructor_type(call) {
+            return Some(ty);
+        }
+        if let Expr::Path(path) = &*call.func
+            && self.calls.structure(&path.path, &self.scope_path, self.current_imports())
+        {
+            let path = &path.path;
+            return Some(syn::parse_quote!(#path));
+        }
         let path = called_path(&call.func)?;
         let mut segments = path.segments.iter().rev();
         let method = &segments.next()?.ident;
         let qualifier = &segments.next()?.ident;
+        if qualifier == "String" && method == "new" && !self.current_imports().contains_key("String") && !self.defaults.defines("String") {
+            return Some(syn::parse_quote!(String));
+        }
         let imported_from = imported_path(self.current_imports(), qualifier);
         let chrono = imported_from.is_some_and(|path| path.first().is_some_and(|root| root == "chrono"));
         let standard_time = imported_from
@@ -1879,18 +2463,8 @@ impl<'a> Collector<'a> {
     }
 
     fn is_known_textual_or_temporal(&self, expression: &Expr) -> bool {
-        if let Expr::Field(field) = expression
-            && let Member::Named(name) = &field.member
-            && let Some(Some(ty)) = self.declared_types.get(&name.to_string())
-        {
-            return self.is_known_textual_or_temporal_type(ty);
-        }
-        let Some(ty) = self.type_of_expression(expression) else {
-            return self
-                .inferred_expression_type(expression)
-                .is_some_and(|ty| self.is_known_textual_or_temporal_type(&ty));
-        };
-        self.is_known_textual_or_temporal_type(ty)
+        self.inferred_expression_type(expression)
+            .is_some_and(|ty| self.is_known_textual_or_temporal_type(&ty))
     }
 
     fn is_known_textual_or_temporal_type(&self, ty: &Type) -> bool {
@@ -1899,7 +2473,7 @@ impl<'a> Collector<'a> {
             defaulted: &self.defaulted,
             imports: self.current_imports(),
             defaults: self.defaults,
-            aliases: Some(&self.aliases),
+            aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         };
@@ -1933,12 +2507,7 @@ impl<'a> Collector<'a> {
 
     fn is_known_temporal(&self, expression: &Expr) -> bool {
         let inferred;
-        let ty = if let Expr::Field(field) = expression
-            && let Member::Named(name) = &field.member
-            && let Some(Some(ty)) = self.declared_types.get(&name.to_string())
-        {
-            ty
-        } else if let Some(ty) = self.type_of_expression(expression) {
+        let ty = if let Some(ty) = self.type_of_expression(expression) {
             ty
         } else if let Some(ty) = self.inferred_expression_type(expression) {
             inferred = ty;
@@ -1951,7 +2520,7 @@ impl<'a> Collector<'a> {
             defaulted: &self.defaulted,
             imports: self.current_imports(),
             defaults: self.defaults,
-            aliases: Some(&self.aliases),
+            aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         };
@@ -1988,10 +2557,7 @@ impl<'a> Collector<'a> {
             Expr::Cast(cast) => is_unsigned_binding(&cast.ty),
             Expr::Call(call) => {
                 callee_type(&call.func).is_some_and(|name| is_unsigned_type_name(&name))
-                    || callee_name(&call.func)
-                        .and_then(|name| self.returns.get(&name))
-                        .and_then(Option::as_ref)
-                        .is_some_and(is_unsigned_binding)
+                    || self.type_of_expression(expression).is_some_and(is_unsigned_binding)
             }
             Expr::Paren(paren) => self.is_known_unsigned(&paren.expr),
             Expr::Group(group) => self.is_known_unsigned(&group.expr),
@@ -2019,7 +2585,7 @@ impl<'a> Collector<'a> {
             defaulted: &self.defaulted,
             imports: self.current_imports(),
             defaults: self.defaults,
-            aliases: Some(&self.aliases),
+            aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         };
@@ -2051,6 +2617,15 @@ impl<'a> Collector<'a> {
         if !self.wants("expr.increment") && !self.wants("expr.decrement") {
             return;
         }
+        if self.type_of_expression(expression).is_some_and(|ty| {
+            let types = self.types_with(self.imports_of_expression(expression));
+            matches!(types.resolve_alias(ty), Type::Reference(reference)
+                if reference.mutability.is_some()
+                    && matches!(types.primitive_kind(&reference.elem), Kind::Signed | Kind::Unsigned | Kind::Float)
+                    && types.supports_primitive_kind(&reference.elem, types.primitive_kind(&reference.elem)))
+        }) {
+            return;
+        }
 
         // A divergent expression -- `return`, a never-returning macro, a breakless `loop`, an
         // all-diverging `if` or `match` -- has type `!` and so passes the signature-only numeric
@@ -2075,8 +2650,17 @@ impl<'a> Collector<'a> {
         // Parenthesised because the expression may bind more loosely than the addition, and
         // because the result is spliced into whatever position the original held.
         let unit = if floating { "1.0" } else { "1" };
-        let incremented = format_compact!("({text}) + {unit}");
-        let decremented = format_compact!("({text}) - {unit}");
+        let inferred_reduction = needs_expected_numeric_type(expression);
+        let incremented = if inferred_reduction {
+            format_compact!("::gamma_rt::increment({text})")
+        } else {
+            format_compact!("({text}) + {unit}")
+        };
+        let decremented = if inferred_reduction {
+            format_compact!("::gamma_rt::decrement({text})")
+        } else {
+            format_compact!("({text}) - {unit}")
+        };
 
         self.emit_confident("expr.increment", span, incremented, 0, confidence);
         self.emit_confident("expr.decrement", span, decremented, 1, confidence);
@@ -2255,7 +2839,7 @@ impl<'a> Collector<'a> {
                         let name = ident.to_string();
 
                         self.bindings.get(&name).copied().unwrap_or_else(|| {
-                            self.numeric_uses.names.contains(&name)
+                            self.numeric_evidence.numeric.contains(&path.span().byte_range())
                                 || path.path.get_ident().is_some_and(|_| self.is_primitive_constant(&path.path))
                         })
                     })
@@ -2277,10 +2861,7 @@ impl<'a> Collector<'a> {
             Expr::Call(call) => {
                 numeric_associated_call(call)
                     || callee_type(&call.func).is_some_and(|name| supports_unit_arithmetic_type(&name) || name.starts_with("NonZero"))
-                    || callee_name(&call.func)
-                        .and_then(|name| self.returns.get(&name))
-                        .and_then(Option::as_ref)
-                        .is_some_and(is_numeric_binding)
+                    || self.type_of_expression(expression).is_some_and(is_numeric_binding)
             }
 
             // A field's type is written in the `struct` that declares it, which the pre-pass read.
@@ -2342,30 +2923,36 @@ impl<'a> Collector<'a> {
     fn with_defaulted_parameters<T>(&mut self, generics: &Generics, body: impl FnOnce(&mut Self) -> T) -> T {
         let depth = self.defaulted.len();
         let iterator_depth = self.iterator_bounded.len();
+        let reader_depth = self.reader_bounded.len();
         let names = standard_defaulted_parameters(generics, &self.default_paths);
         let iterators = Types::standard_iterator_bounded_parameters(generics, self.current_imports());
 
         self.defaulted.extend(names);
         self.iterator_bounded.extend(iterators);
+        self.reader_bounded
+            .extend(Types::standard_reader_bounded_parameters(generics, self.current_imports()));
 
         let result = body(self);
 
         self.defaulted.truncate(depth);
         self.iterator_bounded.truncate(iterator_depth);
+        self.reader_bounded.truncate(reader_depth);
         result
     }
 
     /// Runs `body` with function-local generic evidence isolated from an enclosing function.
     fn with_function_parameters<T>(&mut self, generics: &Generics, body: impl FnOnce(&mut Self) -> T) -> T {
-        let outer_boundary = self.function_iterator_depth;
-        let inherited_depth = outer_boundary.unwrap_or(self.iterator_bounded.len());
+        let outer_boundary = self.function_bound_depth;
+        let (inherited_depth, reader_depth) = outer_boundary.unwrap_or((self.iterator_bounded.len(), self.reader_bounded.len()));
         let hidden = self.iterator_bounded.split_off(inherited_depth);
-        self.function_iterator_depth = Some(inherited_depth);
+        let hidden_readers = self.reader_bounded.split_off(reader_depth);
+        self.function_bound_depth = Some((inherited_depth, reader_depth));
 
         let result = self.with_defaulted_parameters(generics, body);
 
         self.iterator_bounded.extend(hidden);
-        self.function_iterator_depth = outer_boundary;
+        self.reader_bounded.extend(hidden_readers);
+        self.function_bound_depth = outer_boundary;
         result
     }
 
@@ -2395,7 +2982,7 @@ impl<'a> Collector<'a> {
                 defaulted: &self.defaulted,
                 imports: self.current_imports(),
                 defaults: self.defaults,
-                aliases: Some(&self.aliases),
+                aliases: Some(self.current_aliases()),
                 self_type: self.impl_self_type.as_ref(),
                 self_associated: Some(&self.impl_self_associated),
             },
@@ -2409,11 +2996,32 @@ impl<'a> Collector<'a> {
         let outer_bindings = take(&mut self.bindings);
         let outer_binding_types = take(&mut self.binding_types);
         let outer_inferred_unsigned = take(&mut self.inferred_unsigned);
+        let outer_inferred_floating = take(&mut self.inferred_floating);
         let outer_parameter_types = take(&mut self.parameter_types);
         let outer_deferred = take(&mut self.deferred);
         let outer_resource_iterators = take(&mut self.resource_iterators);
 
         for input in &sig.inputs {
+            if let FnArg::Receiver(receiver) = input {
+                if let Some(ty) = self.impl_self_type.clone() {
+                    let ty = match &receiver.kind {
+                        syn::ReceiverKind::Reference(_, _, mutability) => {
+                            if mutability.is_some() {
+                                syn::parse_quote!(&mut #ty)
+                            } else {
+                                syn::parse_quote!(&#ty)
+                            }
+                        }
+                        syn::ReceiverKind::Value => ty,
+                        syn::ReceiverKind::Typed(_, annotated) => {
+                            types::substitute_type(annotated, &HashMap::from_iter([("Self".into(), ty)]))
+                        }
+                        _ => continue,
+                    };
+                    self.bind_type_with_trust("self".into(), ty, true);
+                }
+                continue;
+            }
             let FnArg::Typed(typed) = input else {
                 continue;
             };
@@ -2426,6 +3034,8 @@ impl<'a> Collector<'a> {
                     ident.by_ref.is_none() && ident.subpat.is_none(),
                 );
                 let _previous = self.parameter_types.insert(ident.ident.to_string(), (*typed.ty).clone());
+            } else {
+                self.bind_pattern(&typed.pat, Some(&typed.ty));
             }
         }
 
@@ -2434,6 +3044,7 @@ impl<'a> Collector<'a> {
         self.bindings = outer_bindings;
         self.binding_types = outer_binding_types;
         self.inferred_unsigned = outer_inferred_unsigned;
+        self.inferred_floating = outer_inferred_floating;
         self.parameter_types = outer_parameter_types;
         self.deferred = outer_deferred;
         self.resource_iterators = outer_resource_iterators;
@@ -2470,7 +3081,7 @@ impl<'a> Collector<'a> {
                     defaulted: &self.defaulted,
                     imports: self.current_imports(),
                     defaults: self.defaults,
-                    aliases: Some(&self.aliases),
+                    aliases: Some(self.current_aliases()),
                     self_type: self.impl_self_type.as_ref(),
                     self_associated: Some(&self.impl_self_associated),
                 },
@@ -2507,6 +3118,11 @@ impl<'a> Collector<'a> {
 
     /// Visits an expression with replacement validity read from its explicit expected type.
     fn in_typed_expression<T>(&mut self, expression: &Expr, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
+        if self.types().supports_primitive_kind(expected, Kind::Unsigned) {
+            return self.in_unsigned_expression(expression, |collector| {
+                collector.in_typed_expression_inner(expression, expected, body)
+            });
+        }
         if self.types().supports_primitive_kind(expected, Kind::Signed) {
             return self.in_signed_expression(expression, |collector| {
                 collector.in_typed_expression_inner(expression, expected, body)
@@ -2520,15 +3136,18 @@ impl<'a> Collector<'a> {
 
         let outer = self.admissible_defaults.len();
         let reusable_outer = self.reusable_payloads.len();
+        let statements_outer = self.undeletable_statements.len();
         let loops_outer = self.value_required_loops.len();
         if !matches!(resolve_type(expected), Kind::Unit) {
             value_position_loop_spans(expression, &mut self.value_required_loops);
+            mandatory_tail_statements(expression, &mut self.undeletable_statements);
         }
         let imports = if self.scope_path.is_empty() {
             &self.root_imports
         } else {
             self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports)
         };
+        let aliases = self.scope_aliases.get(&self.scope_path).unwrap_or(&self.aliases);
         admissible_default_spans(
             expression,
             expected,
@@ -2537,7 +3156,7 @@ impl<'a> Collector<'a> {
                 defaulted: &self.defaulted,
                 imports,
                 defaults: self.defaults,
-                aliases: Some(&self.aliases),
+                aliases: Some(aliases),
                 self_type: self.impl_self_type.as_ref(),
                 self_associated: Some(&self.impl_self_associated),
             },
@@ -2551,7 +3170,7 @@ impl<'a> Collector<'a> {
                 defaulted: &self.defaulted,
                 imports,
                 defaults: self.defaults,
-                aliases: Some(&self.aliases),
+                aliases: Some(aliases),
                 self_type: self.impl_self_type.as_ref(),
                 self_associated: Some(&self.impl_self_associated),
             },
@@ -2561,6 +3180,7 @@ impl<'a> Collector<'a> {
         let result = body(self);
         self.admissible_defaults.truncate(outer);
         self.reusable_payloads.truncate(reusable_outer);
+        self.undeletable_statements.truncate(statements_outer);
         self.value_required_loops.truncate(loops_outer);
         result
     }
@@ -2603,8 +3223,100 @@ impl<'a> Collector<'a> {
     /// to be recorded to be reversible.
     fn bind(&mut self, name: String, numeric: bool) {
         let prior = self.bindings.insert(name.clone(), numeric);
-
+        let floating = self.inferred_floating.remove(&name);
+        self.undo.push(Undo::InferredFloating(name.clone(), floating));
         self.undo.push(Undo::Binding(name, prior));
+    }
+
+    fn bind_pattern(&mut self, pattern: &Pat, expected: Option<&Type>) {
+        match pattern {
+            Pat::Ident(ident) => {
+                let name = ident.ident.to_string();
+                self.bind(
+                    name.clone(),
+                    expected.map_or_else(
+                        || self.numeric_evidence.numeric.contains(&ident.ident.span().byte_range()),
+                        is_numeric_binding,
+                    ),
+                );
+                if let Some(ty) = expected {
+                    let ty = if ident.by_ref.is_some() {
+                        syn::parse_quote!(&#ty)
+                    } else {
+                        ty.clone()
+                    };
+                    self.bind_type_with_trust(name, ty, false);
+                } else if self.numeric_evidence.unsigned.contains(&ident.ident.span().byte_range()) {
+                    self.bind_inferred_unsigned(name);
+                } else {
+                    self.bind_unknown_type(name);
+                }
+                if let Some((_, subpattern)) = &ident.subpat {
+                    self.bind_pattern(subpattern, expected);
+                }
+            }
+            Pat::Type(typed) => self.bind_pattern(&typed.pat, Some(&typed.ty)),
+            Pat::TupleStruct(tuple) => {
+                let payload = expected.and_then(|ty| self.standard_pattern_payload(&tuple.path, ty));
+                for element in &tuple.elems {
+                    self.bind_pattern(element, payload.as_ref().filter(|_| tuple.elems.len() == 1));
+                }
+            }
+            Pat::Tuple(tuple) => {
+                let (tuple_type, reference) = match expected {
+                    Some(Type::Tuple(tuple)) => (Some(tuple), None),
+                    Some(Type::Reference(reference)) => match &*reference.elem {
+                        Type::Tuple(tuple) => (Some(tuple), Some(reference)),
+                        _ => (None, None),
+                    },
+                    _ => (None, None),
+                };
+                let rest = tuple.elems.iter().position(|element| matches!(element, Pat::Rest(_)));
+                for (index, element) in tuple.elems.iter().enumerate() {
+                    let ty = tuple_type
+                        .and_then(|types| {
+                            let index = if rest.is_some_and(|rest| index > rest) {
+                                types.elems.len().checked_sub(tuple.elems.len() - index)?
+                            } else {
+                                index
+                            };
+                            types.elems.get(index)
+                        })
+                        .map(|ty| {
+                            if let Some(reference) = reference {
+                                let mut reference = reference.clone();
+                                reference.elem = Box::new(ty.clone());
+                                Type::Reference(reference)
+                            } else {
+                                ty.clone()
+                            }
+                        });
+                    self.bind_pattern(element, ty.as_ref());
+                }
+            }
+            Pat::Reference(reference) => {
+                let expected = expected.and_then(|ty| match ty {
+                    Type::Reference(reference) => Some(&*reference.elem),
+                    _ => None,
+                });
+                self.bind_pattern(&reference.pat, expected);
+            }
+            _ => {
+                struct Names(Vec<syn::Ident>);
+                impl<'ast> Visit<'ast> for Names {
+                    fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
+                        self.0.push(i.ident.clone());
+                        visit::visit_pat_ident(self, i);
+                    }
+                }
+                let mut names = Names(Vec::new());
+                names.visit_pat(pattern);
+                for name in names.0 {
+                    self.bind(name.to_string(), false);
+                    self.bind_unknown_type(name.to_string());
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2692,6 +3404,12 @@ impl<'a> Collector<'a> {
                 }
                 Undo::InferredUnsigned(name, false) => {
                     let _dropped = self.inferred_unsigned.remove(&name);
+                }
+                Undo::InferredFloating(name, true) => {
+                    let _restored = self.inferred_floating.insert(name);
+                }
+                Undo::InferredFloating(name, false) => {
+                    let _dropped = self.inferred_floating.remove(&name);
                 }
                 Undo::ResourceIterator(name, true) => {
                     let _restored = self.resource_iterators.insert(name);
@@ -3098,9 +3816,12 @@ fn reusable_payload_spans(
     if let Some(index) = payload_index
         && let Some(payload) = types.payload(expected, index)
         && !types.has_default(&payload)
-        && let Some(name) = parameters.iter().find_map(|(name, ty)| {
-            (types.resolve_alias(ty) == types.resolve_alias(&payload) && copy_safe_payload(&payload)).then_some(name)
-        })
+        && let Some(name) = parameters
+            .iter()
+            .filter_map(|(name, ty)| {
+                (types.canonical_type(ty) == types.canonical_type(&payload) && copy_safe_payload(&payload)).then_some(name)
+            })
+            .min()
     {
         spans.push((expression.span().byte_range(), CompactString::from(name)));
     }
@@ -3131,7 +3852,85 @@ fn reusable_payload_spans(
 }
 
 fn copy_safe_payload(ty: &Type) -> bool {
-    matches!(resolve_type(ty), Kind::NonZero) || matches!(values::strip(ty), Type::Reference(reference) if reference.mutability.is_none())
+    matches!(resolve_type(ty), Kind::NonZero)
+        || matches!(values::strip(ty), Type::Reference(reference)
+            if reference.mutability.is_none() && reference.lifetime.is_some())
+}
+
+/// Indexes attribute-free expression ranges so guard insertion leaves outer attributes in place.
+fn expression_contents(file: &syn::File) -> HashMap<Range<usize>, Range<usize>> {
+    #[derive(Default)]
+    struct Contents(HashMap<Range<usize>, Range<usize>>);
+    #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
+    impl<'ast> Visit<'ast> for Contents {
+        fn visit_expr(&mut self, expression: &'ast Expr) {
+            if let Some(last) = expr_attrs(expression).last() {
+                let whole = expression.span().byte_range();
+                let _prior = self.0.insert(whole.clone(), last.span().byte_range().end..whole.end);
+            }
+            visit::visit_expr(self, expression);
+        }
+    }
+    let mut contents = Contents::default();
+    contents.visit_file(file);
+    contents.0
+}
+
+/// Recognizes stated wrapper values with no iterator payload, which need no iterator adapter.
+fn absent_iterator_value(value: &str) -> bool {
+    fn absent(expression: &Expr) -> bool {
+        match expression {
+            Expr::Path(path) => path.path.is_ident("None"),
+            Expr::Call(call) => match callee_name(&call.func).as_deref() {
+                Some("Err") => true,
+                Some("Ok" | "Some") => call.args.first().is_some_and(absent),
+                _ => false,
+            },
+            Expr::Paren(paren) => absent(&paren.expr),
+            Expr::Group(group) => absent(&group.expr),
+            _ => false,
+        }
+    }
+    syn::parse_str::<Expr>(value).is_ok_and(|expression| absent(&expression))
+}
+
+/// Finds reduction results that need the original return type to keep numeric inference intact.
+fn needs_expected_numeric_type(expression: &Expr) -> bool {
+    match expression {
+        Expr::MethodCall(call) => matches!(call.method.to_string().as_str(), "sum" | "product"),
+        Expr::Paren(paren) => needs_expected_numeric_type(&paren.expr),
+        Expr::Group(group) => needs_expected_numeric_type(&group.expr),
+        Expr::Block(block) => matches!(block.block.stmts.last(), Some(Stmt::Expr(tail, None)) if needs_expected_numeric_type(tail)),
+        Expr::If(branch) => {
+            matches!(branch.then_branch.stmts.last(), Some(Stmt::Expr(tail, None)) if needs_expected_numeric_type(tail))
+                || branch
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, otherwise)| needs_expected_numeric_type(otherwise))
+        }
+        Expr::Match(matched) => matched.arms.iter().any(|arm| needs_expected_numeric_type(&arm.body)),
+        _ => false,
+    }
+}
+
+/// Counts known result/option wrappers so instrumentation can adapt the enclosed iterator.
+///
+/// Unknown outputs or excessive wrapper depth withhold the specialized shape.
+fn iterator_body_shape(output: Option<&Type>, types: &Types<'_>) -> Option<Shape> {
+    let mut ty = output?.clone();
+    let mut depth = 0_u8;
+    loop {
+        match resolve_type(types.resolve_alias(&ty)) {
+            Kind::Iterator => {
+                return Some(NonZeroU8::new(depth).map_or(Shape::IterBlock, |depth| Shape::IterWrappedBlock { depth }));
+            }
+            Kind::Result | Kind::Option => {
+                ty = types.payload(&ty, 0)?.into_owned();
+                depth = depth.checked_add(1)?;
+            }
+            _ => return None,
+        }
+    }
 }
 
 const fn return_type(output: &ReturnType) -> Option<&Type> {
@@ -3146,6 +3945,34 @@ fn trailing_continue(block: &Block) -> Option<Range<usize>> {
     match block.stmts.last() {
         Some(statement @ Stmt::Expr(Expr::Continue(_), Some(_))) => Some(statement.span().byte_range()),
         _ => None,
+    }
+}
+
+fn mandatory_tail_statements(expression: &Expr, spans: &mut Vec<Range<usize>>) {
+    match expression {
+        Expr::Block(block) => match block.block.stmts.last() {
+            Some(statement @ Stmt::Expr(_, Some(_))) => spans.push(statement.span().byte_range()),
+            Some(Stmt::Expr(tail, None)) => mandatory_tail_statements(tail, spans),
+            _ => {}
+        },
+        Expr::If(branch) => {
+            if let Some(statement @ Stmt::Expr(_, Some(_))) = branch.then_branch.stmts.last() {
+                spans.push(statement.span().byte_range());
+            } else if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                mandatory_tail_statements(tail, spans);
+            }
+            if let Some((_, otherwise)) = &branch.else_branch {
+                mandatory_tail_statements(otherwise, spans);
+            }
+        }
+        Expr::Match(matched) => {
+            for arm in &matched.arms {
+                mandatory_tail_statements(&arm.body, spans);
+            }
+        }
+        Expr::Paren(paren) => mandatory_tail_statements(&paren.expr, spans),
+        Expr::Group(group) => mandatory_tail_statements(&group.expr, spans),
+        _ => {}
     }
 }
 
@@ -3246,21 +4073,21 @@ fn regex_mutations(pattern: &str) -> Vec<(&'static str, String)> {
 impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item(&mut self, node: &'ast Item) {
         let transparent = self.resource_transparent;
-        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(item_attrs(node));
+        self.resource_transparent &= super::resource_namespaces::declaration_attributes(item_attrs(node));
         visit::visit_item(self, node);
         self.resource_transparent = transparent;
     }
 
     fn visit_impl_item(&mut self, node: &'ast ImplItem) {
         let transparent = self.resource_transparent;
-        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(impl_item_attrs(node));
+        self.resource_transparent &= super::resource_namespaces::declaration_attributes(impl_item_attrs(node));
         visit::visit_impl_item(self, node);
         self.resource_transparent = transparent;
     }
 
     fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
         let transparent = self.resource_transparent;
-        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(trait_item_attrs(node));
+        self.resource_transparent &= super::resource_namespaces::declaration_attributes(trait_item_attrs(node));
         visit::visit_trait_item(self, node);
         self.resource_transparent = transparent;
     }
@@ -3275,6 +4102,28 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // recording it would shadow the one that is.
         if self.skipped(&node.attrs) {
             return;
+        }
+
+        self.visit_pat(&node.pat);
+        if let Some(init) = &node.init {
+            if let Pat::Type(typed) = &node.pat {
+                self.in_typed_expression(&init.expr, &typed.ty, |collector| {
+                    if unsigned_context(&typed.ty) {
+                        collector.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
+                    } else {
+                        collector.visit_expr(&init.expr);
+                    }
+                });
+            } else if self.is_known_unsigned(&init.expr)
+                || matches!(&node.pat, Pat::Ident(ident) if self.numeric_evidence.unsigned.contains(&ident.ident.span().byte_range()))
+            {
+                self.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
+            } else {
+                self.visit_expr(&init.expr);
+            }
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_let_else_diverge(diverge);
+            }
         }
 
         if let Some(name) = declared_name(&node.pat) {
@@ -3299,6 +4148,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                         (*typed.ty).clone(),
                         ident.by_ref.is_none() && ident.subpat.is_none(),
                     );
+                } else {
+                    self.bind_pattern(&typed.pat, Some(&typed.ty));
                 }
             }
 
@@ -3310,13 +4161,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 let name = ident.ident.to_string();
                 if let Some(init) = node.init.as_ref().filter(|init| init.diverge.is_none()) {
                     let inferred_type = self.inferred_expression_type(&init.expr);
+                    let inferred_floating = self.is_known_float(&init.expr);
                     let inferred_unsigned = inferred_type.as_ref().is_some_and(is_unsigned_binding)
                         || self.is_known_unsigned(&init.expr)
-                        || self.numeric_uses.unsigned_names.contains(&name);
+                        || self.numeric_evidence.unsigned.contains(&ident.ident.span().byte_range());
                     self.bind(
                         name.clone(),
-                        self.is_known_numeric(&init.expr) || self.numeric_uses.names.contains(&name),
+                        self.is_known_numeric(&init.expr) || self.numeric_evidence.numeric.contains(&ident.ident.span().byte_range()),
                     );
+                    if inferred_floating {
+                        let prior = !self.inferred_floating.insert(name.clone());
+                        self.undo.push(Undo::InferredFloating(name.clone(), prior));
+                    }
 
                     if let Some(ty) = inferred_type {
                         self.bind_type_with_trust(name, ty, false);
@@ -3327,36 +4183,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     }
                 } else {
                     self.bind_unknown_type(name.clone());
-                    self.bind(name, self.numeric_uses.names.contains(&ident.ident.to_string()));
+                    self.bind(name, self.numeric_evidence.numeric.contains(&ident.ident.span().byte_range()));
                 }
             }
 
-            _ => {}
-        }
-
-        self.visit_pat(&node.pat);
-        if let Pat::Type(typed) = &node.pat
-            && let Some(init) = &node.init
-        {
-            self.in_typed_expression(&init.expr, &typed.ty, |collector| {
-                if unsigned_context(&typed.ty) {
-                    collector.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
-                } else {
-                    collector.visit_expr(&init.expr);
-                }
-            });
-            if let Some((_, diverge)) = &init.diverge {
-                self.visit_let_else_diverge(diverge);
-            }
-        } else if let Some(init) = &node.init {
-            let inferred_unsigned = declared_name(&node.pat).is_some_and(|name| self.inferred_unsigned.contains(&name));
-            if inferred_unsigned {
-                self.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
-            } else {
-                self.visit_expr(&init.expr);
-            }
-            if let Some((_, diverge)) = &init.diverge {
-                self.visit_let_else_diverge(diverge);
+            _ => {
+                let expected = node.init.as_ref().and_then(|init| self.inferred_expression_type(&init.expr));
+                self.bind_pattern(&node.pat, expected.as_ref());
             }
         }
     }
@@ -3434,6 +4267,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let depth = self.generics.len();
         let defaulted_depth = self.defaulted.len();
         let iterator_depth = self.iterator_bounded.len();
+        let reader_depth = self.reader_bounded.len();
         let outer = self.in_default_impl;
         let outer_trait_impl = replace(
             &mut self.trait_impl,
@@ -3464,12 +4298,15 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             .extend(standard_defaulted_parameters(&node.generics, &self.default_paths));
         self.iterator_bounded
             .extend(Types::standard_iterator_bounded_parameters(&node.generics, self.current_imports()));
+        self.reader_bounded
+            .extend(Types::standard_reader_bounded_parameters(&node.generics, self.current_imports()));
         let scope = self.impl_scope(node);
 
         self.scoped(scope, |collector| visit::visit_item_impl(collector, node));
         self.generics.truncate(depth);
         self.defaulted.truncate(defaulted_depth);
         self.iterator_bounded.truncate(iterator_depth);
+        self.reader_bounded.truncate(reader_depth);
         self.in_default_impl = outer;
         self.trait_impl = outer_trait_impl;
         self.impl_self_type = outer_self_type;
@@ -3554,15 +4391,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 continue;
             }
 
-            if mutator.starts_with("arith.") {
-                let left_temporal = self.is_known_temporal(&node.left);
-                let right_temporal = self.is_known_temporal(&node.right);
-                let left_textual = is_textual(&node.left) || self.is_known_textual_or_temporal(&node.left) && !left_temporal;
-                let right_textual = is_textual(&node.right) || self.is_known_textual_or_temporal(&node.right) && !right_temporal;
-
-                if left_textual || right_textual || (left_temporal || right_temporal) && *operator != "-" {
-                    continue;
-                }
+            if mutator.starts_with("arith.") && self.unsupported_operator(node, operator) {
+                continue;
             }
 
             let (left, right) = *operands.get_or_insert_with(|| (self.text_of(node.left.span()), self.text_of(node.right.span())));
@@ -3718,7 +4548,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
         self.scope_path.push(block_id(node));
         self.in_scope(|collector| {
-            for statement in &node.stmts {
+            for (index, statement) in node.stmts.iter().enumerate() {
                 // A statement behind a predicate that does not hold is discarded after parsing, so
                 // it is not in the build being measured. Mutating it emits changes to text the
                 // compiler throws away: the crate builds, every test passes, and the mutant is
@@ -3736,14 +4566,6 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 // had already been accepted as a candidate.
                 if let Stmt::Local(local) = statement {
                     collector.record_declaration(local);
-                }
-            }
-
-            // Descended into statement by statement rather than through `visit_block`, so that the
-            // configured-out ones are not entered either.
-            for (index, statement) in node.stmts.iter().enumerate() {
-                if collector.skipped(stmt_attrs(statement)) {
-                    continue;
                 }
 
                 if unsigned_tail
@@ -3771,8 +4593,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         let transparent = self.resource_transparent;
-        self.resource_transparent &= noop::LocalCalls::nontransforming_attributes(expr_attrs(node))
-            && !matches!(node, Expr::Closure(_) | Expr::Async(_) | Expr::Match(_) | Expr::ForLoop(_))
+        self.resource_transparent &= super::resource_namespaces::declaration_attributes(expr_attrs(node))
+            && !matches!(node, Expr::Closure(_) | Expr::Async(_) | Expr::ForLoop(_))
+            && !matches!(node, Expr::Match(node) if !resource::supported_match(node))
             && !matches!(node, Expr::If(node) if binds_a_pattern(&node.cond))
             && !matches!(node, Expr::While(node) if binds_a_pattern(&node.cond));
         visit::visit_expr(self, node);
@@ -3780,12 +4603,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_closure(&mut self, node: &'ast ExprClosure) {
-        self.in_nested_return_context(Some(&node.output), |collector| {
-            if let Some(expected) = return_type(&node.output) {
-                collector.in_typed_expression(&node.body, expected, |collector| visit::visit_expr_closure(collector, node));
-            } else {
-                visit::visit_expr_closure(collector, node);
+        let expected = self.closure_inputs.get(&node.span().byte_range()).cloned();
+        self.in_scope(|collector| {
+            for input in &node.inputs {
+                collector.bind_pattern(input, expected.as_ref().filter(|_| node.inputs.len() == 1));
             }
+            collector.in_nested_return_context(Some(&node.output), |collector| {
+                if let Some(expected) = return_type(&node.output) {
+                    collector.in_typed_expression(&node.body, expected, |collector| visit::visit_expr_closure(collector, node));
+                } else {
+                    visit::visit_expr_closure(collector, node);
+                }
+            });
         });
     }
 
@@ -3802,12 +4631,15 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             UnOp::Neg(_) => self.emit("unary.remove_neg", node.span(), self.text_of(node.expr.span()), 0),
             UnOp::Not(_) => {
                 let operand = self.text_of(node.expr.span());
-                let replacement = if self.type_of_expression(&node.expr).is_some_and(is_borrowed_bool) {
-                    format_compact!("*({operand})")
-                } else {
-                    CompactString::from(operand)
-                };
-                self.emit("unary.remove_not", node.span(), replacement, 0);
+                match self.inferred_expression_type(&node.expr) {
+                    Some(ty) if is_borrowed_bool(self.types().resolve_alias(&ty)) => {
+                        self.emit("unary.remove_not", node.span(), format_compact!("*({operand})"), 1);
+                    }
+                    Some(_) => self.emit("unary.remove_not", node.span(), operand, 0),
+                    None => {
+                        self.emit_confident("unary.remove_not", node.span(), operand, 0, Confidence::Optimistic);
+                    }
+                }
             }
             _ => {}
         }
@@ -3838,8 +4670,20 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             }
         }
 
-        visit::visit_expr_if(self, node);
+        self.in_scope(|collector| {
+            collector.visit_expr(&node.cond);
+            collector.visit_block(&node.then_branch);
+        });
+        if let Some((_, otherwise)) = &node.else_branch {
+            self.visit_expr(otherwise);
+        }
         self.undeletable_statements.truncate(outer);
+    }
+
+    fn visit_expr_let(&mut self, node: &'ast ExprLet) {
+        self.visit_expr(&node.expr);
+        self.bind_pattern(&node.pat, None);
+        self.visit_pat(&node.pat);
     }
 
     fn visit_expr_cast(&mut self, node: &'ast ExprCast) {
@@ -3867,7 +4711,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             self.emit("cond.negate", span, negated, 0);
         }
 
-        visit::visit_expr_while(self, node);
+        self.in_scope(|collector| {
+            collector.visit_expr(&node.cond);
+            collector.visit_block(&node.body);
+        });
         let _ = self.loops.pop();
     }
 
@@ -3877,7 +4724,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             produces_value: false,
             proof: None,
         });
-        visit::visit_expr_for_loop(self, node);
+        self.visit_expr(&node.expr);
+        let item = self
+            .inferred_expression_type(&node.expr)
+            .and_then(|ty| self.inferred_iterator_item(&ty));
+        self.in_scope(|collector| {
+            collector.bind_pattern(&node.pat, item.as_ref());
+            collector.visit_block(&node.body);
+        });
         let _ = self.loops.pop();
     }
 
@@ -3893,14 +4747,37 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_arm(&mut self, node: &'ast Arm) {
         if !self.skipped(&node.attrs) {
-            visit::visit_arm(self, node);
+            self.in_scope(|collector| {
+                collector.bind_pattern(&node.pat, None);
+                visit::visit_arm(collector, node);
+            });
         }
     }
 
     fn visit_expr_match(&mut self, node: &'ast ExprMatch) {
         self.match_arms(node);
-
-        visit::visit_expr_match(self, node);
+        let outer = self.undeletable_statements.len();
+        if node.arms.iter().any(|arm| {
+            explicitly_nonunit(&arm.body)
+                || self
+                    .type_of_expression(&arm.body)
+                    .is_some_and(|ty| !matches!(resolve_type(ty), Kind::Unit | Kind::Unknown))
+        }) {
+            for arm in &node.arms {
+                mandatory_tail_statements(&arm.body, &mut self.undeletable_statements);
+            }
+        }
+        self.visit_expr(&node.expr);
+        let expected = self.inferred_expression_type(&node.expr);
+        for arm in &node.arms {
+            if !self.skipped(&arm.attrs) {
+                self.in_scope(|collector| {
+                    collector.bind_pattern(&arm.pat, expected.as_ref());
+                    visit::visit_arm(collector, arm);
+                });
+            }
+        }
+        self.undeletable_statements.truncate(outer);
     }
 
     fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
@@ -3939,6 +4816,15 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // A range with no end has no boundary to move, and one with no start is still a boundary
         // worth moving, so only the end is required.
         if let Some(end) = node.end.as_ref() {
+            let operator = if matches!(node.limits, RangeLimits::HalfOpen(_)) {
+                "+"
+            } else {
+                "-"
+            };
+            if self.unsupported_range_unit(end, operator) {
+                visit::visit_expr_range(self, node);
+                return;
+            }
             let start = node.start.as_ref().map_or_else(CompactString::default, |start| {
                 let text = self.text_of(start.span());
 
@@ -3946,27 +4832,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             });
 
             let end_text = self.text_of(end.span());
+            let floating = self.is_known_float(end) || node.start.as_ref().is_some_and(|start| self.is_known_float(start));
+            let unit = if floating { "1.0" } else { "1" };
 
-            // The change is expressed by moving the endpoint rather than by swapping `..` for
-            // `..=`, even though swapping is what the mutation means. Every mutant here is run by
-            // wrapping the site as `if guard { mutant } else { original }`, and the two arms of an
-            // `if` must have the same type. `Range` and `RangeInclusive` are different types, so a
-            // literal swap cannot compile — not occasionally, but every single time, which would
-            // make the whole family a guaranteed build round spent to withdraw itself.
-            //
-            // `a..b + 1` covers exactly what `a..=b` covers and `a..=b - 1` covers exactly what
-            // `a..b` covers, so the question put to the suite is unchanged. On an unsigned
-            // endpoint that is already zero the subtraction overflows and the mutant is caught by
-            // the panic, which is the right answer for the wrong reason but still the right answer.
-            //
-            // Parenthesised for the same reason every other replacement here is: the operands are
-            // spliced back into an expression whose precedence we do not control.
+            // Moving the endpoint keeps Range and RangeInclusive guard branches type-compatible.
+            // Integer shifts cover or omit one endpoint; floating shifts are arithmetic unit
+            // shifts, not adjacent-float steps or equivalent inclusivity swaps.
             match node.limits {
                 RangeLimits::HalfOpen(_) => {
                     self.emit(
                         "range.exclusive_to_inclusive",
                         node.span(),
-                        format_compact!("{start}..(({end_text}) + 1)"),
+                        format_compact!("{start}..(({end_text}) + {unit})"),
                         0,
                     );
                 }
@@ -3974,7 +4851,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     self.emit(
                         "range.inclusive_to_exclusive",
                         node.span(),
-                        format_compact!("{start}..=(({end_text}) - 1)"),
+                        format_compact!("{start}..=(({end_text}) - {unit})"),
                         0,
                     );
                 }
@@ -3994,10 +4871,17 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // A labelled `break` may be leaving a labelled block rather than a loop, and `continue`
         // cannot leave a block. A `break` carrying a value decides the type of its loop, which
         // `continue` cannot supply.
-        if node.expr.is_none() && node.label.is_none() {
+        if node.expr.is_none()
+            && node.label.is_none()
+            && self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true)
+        {
             self.emit_shaped("loop.break_to_continue", node.span(), "continue", 0, Shape::Break);
         }
-        if let Some(value) = node.expr.as_ref() {
+        if let Some(value) = node.expr.as_ref()
+            && !self
+                .inferred_expression_type(value)
+                .is_some_and(|ty| self.types().lacks_default(&ty))
+        {
             self.emit("loop.break_value_default", value.span(), "Default::default()", 0);
         }
 
@@ -4005,6 +4889,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_continue(&mut self, node: &'ast ExprContinue) {
+        if !self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true) {
+            visit::visit_expr_continue(self, node);
+            return;
+        }
         let target = node.label.as_ref().map(|label| label.ident.to_string());
         let requires_value = target.as_ref().map_or_else(
             || self.loops.last().is_some_and(|context| context.produces_value),
@@ -4046,7 +4934,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // question a function at a time; this asks it at the site.
         if node.args.len() == 1 {
             match callee_name(&node.func).as_deref() {
-                Some("Some") => self.emit("option.some_to_none", node.span(), "None", 0),
+                _ if self.some_constructor(&node.func) => self.emit("option.some_to_none", node.span(), "None", 0),
                 Some("Ok") if !self.foreign_error_return && self.admissible_defaults.contains(&node.span().byte_range()) => {
                     self.emit("result.ok_to_err", node.span(), "Err(Default::default())", 0);
                 }
@@ -4066,10 +4954,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         self.visit_expr(&node.func);
-        let parameter_types = callee_name(&node.func)
-            .and_then(|name| self.parameters.get(&name))
-            .and_then(Option::as_ref)
-            .cloned();
+        let parameter_types = self
+            .call_signature(&node.func)
+            .map(|signature| calls::Calls::parameters(signature, self.cfg));
         for (index, argument) in node.args.iter().enumerate() {
             if let Some(expected) = parameter_types.as_ref().and_then(|parameters| parameters.get(index)) {
                 self.in_typed_expression(argument, expected, |collector| {
@@ -4109,7 +4996,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             defaulted: &self.defaulted,
             imports: self.current_imports(),
             defaults: self.defaults,
-            aliases: Some(&self.aliases),
+            aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         };
@@ -4156,7 +5043,42 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
 
+        let receiver = self.inferred_expression_type(&node.receiver);
+        let inferred = receiver.as_ref().and_then(|receiver| {
+            if matches!(method.as_str(), "any" | "all") && node.args.len() == 1 {
+                let Expr::Closure(closure) = node.args.first()? else {
+                    return None;
+                };
+                let item = self.inferred_iterator_item(receiver)?;
+                return Some((closure.span().byte_range(), item));
+            }
+            let types = self.types();
+            let result = types.supports_result_api(receiver);
+            if !result && !types.supports_option_api(receiver) {
+                return None;
+            }
+            let (argument, payload) = match method.as_str() {
+                "map" | "and_then" | "is_some_and" => (0, 0),
+                "map_or" | "map_or_else" => (1, 0),
+                "map_err" | "or_else" if result => (0, 1),
+                _ => return None,
+            };
+            let argument = node.args.get(argument)?;
+            let Expr::Closure(closure) = argument else { return None };
+            let payload = types.payload(receiver, payload)?.into_owned();
+            Some((closure.span().byte_range(), payload))
+        });
+        let prior = inferred
+            .as_ref()
+            .and_then(|(span, ty)| self.closure_inputs.insert(span.clone(), ty.clone()));
         visit::visit_expr_method_call(self, node);
+        if let Some((span, _)) = inferred {
+            if let Some(prior) = prior {
+                let _removed = self.closure_inputs.insert(span, prior);
+            } else {
+                let _removed = self.closure_inputs.remove(&span);
+            }
+        }
     }
 
     fn visit_expr_index(&mut self, node: &'ast ExprIndex) {
@@ -4326,7 +5248,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_try(&mut self, node: &'ast ExprTry) {
         if self.wants("try.propagate_to_unwrap") {
             let value = self.text_of(node.expr.span());
-            self.emit("try.propagate_to_unwrap", node.span(), format_compact!("({value}).unwrap()"), 0);
+            self.emit(
+                "try.propagate_to_unwrap",
+                node.span(),
+                format_compact!("::gamma_rt::panic_on_failure({value})?"),
+                0,
+            );
         }
         visit::visit_expr_try(self, node);
     }

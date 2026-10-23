@@ -205,7 +205,7 @@ fn list_mutants<H: Host>(
     crate::report::skipped(host, &plan, styler)?;
 
     if let Some(path) = json_report {
-        write_population(host, &plan, shard, path)?;
+        write_population(host, &plan, shard, population_complete(select), path)?;
     }
 
     let mut stream = host.results();
@@ -234,6 +234,14 @@ fn list_mutants<H: Host>(
     Ok(EXIT_OK)
 }
 
+/// Grants authority to withdraw absent older identities only for complete per-file populations.
+///
+/// Whole-file/package selection preserves that authority; any explicit mutator selector (even an
+/// exhaustive spelling) or diff filter conservatively withholds it.
+fn population_complete(select: &super::cli::SelectArgs) -> bool {
+    select.in_diff.is_none() && select.mutators.is_none()
+}
+
 /// Describes one mutant for the plain listing, marking the ones a run will not test.
 ///
 /// A suppressed mutant stays in the population so reports can show what was skipped and why, so
@@ -260,15 +268,17 @@ fn write_population<H: Host>(
     host: &mut H,
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
+    population_complete: bool,
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
-    write_population_at(host, plan, shard, path, SystemTime::now())
+    write_population_at(host, plan, shard, population_complete, path, SystemTime::now())
 }
 
 fn write_population_at<H: Host>(
     host: &mut H,
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
+    population_complete: bool,
     path: &Utf8PathBuf,
     now: SystemTime,
 ) -> crate::Result<()> {
@@ -276,6 +286,7 @@ fn write_population_at<H: Host>(
         started_at: now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
+        population_complete: population_complete && shard.is_none(),
         shard: shard.map(|(count, index)| crate::elements::ShardInfo { index, count }),
         tests: None,
         // Filled in by `build` from the plan it is given, so that it cannot disagree with the
@@ -457,6 +468,23 @@ mod tests {
     }
 
     #[test]
+    fn population_authority_requires_no_mutator_or_diff_filter_but_allows_whole_file_selection() {
+        let mut select = super::super::cli::SelectArgs::default();
+        assert!(population_complete(&select));
+        select.files.push("src/*.rs".into());
+        select.exclude_files.push("src/generated.rs".into());
+        select.packages.push("included-package".into());
+        assert!(population_complete(&select));
+        for mutators in ["arith.add_to_sub", "all", "@all"] {
+            select.mutators = Some(mutators.into());
+            assert!(!population_complete(&select), "{mutators}");
+        }
+        select.mutators = None;
+        select.in_diff = Some("changes.patch".into());
+        assert!(!population_complete(&select));
+    }
+
+    #[test]
     #[cfg(feature = "system-tests")]
     fn population_publication_propagates_report_write_and_diagnostic_failures() {
         let directory = crate_dir("list-population-failures-");
@@ -472,31 +500,37 @@ mod tests {
         let blocker = root.join("not-a-directory");
         fs::write(&blocker, "fixture").unwrap();
         let report = blocker.join("population.json");
-        write_population(&mut Sink::default(), &plan, None, &report).expect_err("a report below a file cannot be published");
+        write_population(&mut Sink::default(), &plan, None, true, &report).expect_err("a report below a file cannot be published");
         list_mutants(&mut Sink::default(), &select, false, Some(&report), Styler::new(false), &cargo)
             .expect_err("the listing must return the population publication failure");
 
         let report = root.join("population.json");
-        write_population(&mut BrokenHost, &plan, Some((5, 2)), &report).expect_err("a failed publication diagnostic must be returned");
+        write_population(&mut BrokenHost, &plan, Some((5, 2)), true, &report)
+            .expect_err("a failed publication diagnostic must be returned");
         let report: Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
         assert_eq!(report["config"]["shard"], serde_json::json!({ "index": 2, "count": 5 }));
+        assert_eq!(report["config"]["populationComplete"], false);
 
         let path = root.join("unknown-start-time.json");
         let before_epoch = UNIX_EPOCH.checked_sub(core::time::Duration::from_secs(1)).unwrap();
-        write_population_at(&mut Sink::default(), &plan, None, &path, before_epoch).unwrap();
+        write_population_at(&mut Sink::default(), &plan, None, true, &path, before_epoch).unwrap();
         let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["startedAt"], 0);
-
         write_population_at(
             &mut Sink::default(),
             &plan,
             None,
+            true,
             &path,
             UNIX_EPOCH + core::time::Duration::from_secs(1_234_567),
         )
         .unwrap();
         let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["startedAt"], 1_234_567);
+        assert_eq!(report["config"]["populationComplete"], true);
+        write_population_at(&mut Sink::default(), &plan, None, false, &path, before_epoch).unwrap();
+        let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(report["config"]["populationComplete"], false);
     }
 
     #[test]

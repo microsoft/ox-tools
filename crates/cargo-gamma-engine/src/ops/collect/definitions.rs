@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use camino::Utf8Path;
 use compact_str::CompactString;
+use quote::ToTokens as _;
 
 use super::Candidate;
 use crate::HashMap;
@@ -14,6 +15,11 @@ use crate::model::{Interner, MutantDefinition, MutationSite, SiteIndex, mutant_i
 use crate::parse::SourceFile;
 
 /// Turns candidates into source-level mutant definitions, assigning stable ids.
+///
+/// # Panics
+///
+/// Panics if a caller supplies a `fn_value.stated` candidate whose replacement is not a Rust
+/// expression. Collected stated candidates have already passed expression validation.
 #[must_use]
 pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<MutantDefinition> {
     // One copy of the path for the whole file, rather than one per mutation.
@@ -88,6 +94,18 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
             index
         };
 
+        // Stated annotations can change independently of the site text; distinguish their
+        // replacements while keeping formatting-only annotation changes identity-neutral.
+        let stated = (candidate.mutator == "fn_value.stated").then(|| {
+            syn::parse_str::<syn::Expr>(&candidate.replacement)
+                .expect("fn_value.stated candidates must contain a valid Rust expression")
+                .to_token_stream()
+                .to_string()
+        });
+        let discriminator = stated
+            .as_deref()
+            .or_else(|| (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()));
+
         definitions.push(MutantDefinition {
             id: mutant_id_with_discriminator(
                 &file.path,
@@ -95,7 +113,7 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
                 candidate.mutator,
                 normalized,
                 SiteIndex::new(index, candidate.replacement_index),
-                (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()),
+                discriminator,
             ),
             file: Arc::clone(&path),
             site,
@@ -120,6 +138,62 @@ mod tests {
     use crate::cfg::CfgSet;
     use crate::ops::collect::collect_in;
     use crate::ops::registry::Selection;
+
+    #[test]
+    #[should_panic(expected = "fn_value.stated candidates must contain a valid Rust expression")]
+    fn manually_supplied_stated_candidates_require_valid_expressions() {
+        let file = SourceFile::parse("fixture.rs", "#[gamma::value(2)] fn f() -> u32 { 1 }".into()).unwrap();
+        let mut candidates = collect_in(&file, &Selection::parse("fn_value.stated").unwrap(), &CfgSet::unconditional());
+        candidates[0].replacement = "1 +".into();
+        let _definitions = into_definitions(&file, candidates);
+    }
+
+    #[test]
+    fn stated_identity_tracks_normalized_replacement_without_changing_other_mutants() {
+        let identify = |value: &str| {
+            let source = format!("#[gamma::value({value})] fn f() -> u32 {{ 1 }} fn other() -> u32 {{ 3 }}");
+            let file = SourceFile::parse("fixture.rs", source).unwrap();
+            into_definitions(&file, collect_in(&file, &Selection::everything(), &CfgSet::unconditional()))
+        };
+        let invalid = identify("false");
+        let corrected = identify("2");
+        let formatted = identify(" /* trivia */ 2 ");
+        let stated = |definitions: &[MutantDefinition]| {
+            definitions
+                .iter()
+                .find(|definition| definition.mutator.as_ref() == "fn_value.stated")
+                .unwrap()
+                .id
+                .clone()
+        };
+        assert_ne!(stated(&invalid), stated(&corrected));
+        assert_eq!(stated(&corrected), stated(&formatted));
+        for (compact, spaced) in [
+            ("1+2", "1 /* trivia */ + 2"),
+            ("(1,2).0", "( 1 , 2 ) . 0"),
+            ("Some::<u32>(2)", "Some :: < u32 > ( 2 )"),
+            ("\"a  b\"", " /* trivia */ \"a  b\" "),
+        ] {
+            assert_eq!(stated(&identify(compact)), stated(&identify(spaced)), "{compact}");
+        }
+        for (left, right) in [
+            ("1+2", "1-2"),
+            ("\"a b\"", "\"a  b\""),
+            ("r#\"a b\"#", "r#\"a  b\"#"),
+            ("left&&right", "left & &right"),
+        ] {
+            assert_ne!(stated(&identify(left)), stated(&identify(right)), "{left} versus {right}");
+        }
+        let unrelated = |definitions: Vec<MutantDefinition>| {
+            definitions
+                .into_iter()
+                .filter(|definition| definition.mutator.as_ref() != "fn_value.stated")
+                .map(|definition| (definition.item_path, definition.mutator, definition.id))
+                .collect::<Vec<_>>()
+        };
+        assert!(!unrelated(invalid.clone()).is_empty());
+        assert_eq!(unrelated(invalid), unrelated(corrected));
+    }
 
     #[test]
     fn externally_supplied_unreserved_candidates_start_each_site_family_at_zero() {

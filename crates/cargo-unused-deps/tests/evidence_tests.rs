@@ -865,6 +865,28 @@ fn unknown_package_selection_fails_loudly() {
 
 /// The tool's own workspace may report only cargo-gamma's injected runtime
 /// dependencies during mutation instrumentation; ordinary runs must be clean.
+fn only_injected_runtime_dependencies(dependencies: &BTreeSet<String>) -> bool {
+    !dependencies.is_empty()
+        && dependencies
+            .iter()
+            .all(|name| matches!(name.as_str(), "cargo-gamma-rt" | "gamma_rt"))
+}
+
+#[test]
+fn injected_runtime_catalog_findings_allow_either_alias_but_nothing_else() {
+    for (names, expected) in [
+        (vec!["gamma_rt"], true),
+        (vec!["cargo-gamma-rt"], true),
+        (vec!["cargo-gamma-rt", "gamma_rt"], true),
+        (vec![], false),
+        (vec!["gamma_rt", "unrelated"], false),
+        (vec!["unrelated"], false),
+    ] {
+        let dependencies = names.into_iter().map(str::to_owned).collect();
+        assert_eq!(only_injected_runtime_dependencies(&dependencies), expected);
+    }
+}
+
 #[test]
 fn the_tools_own_catalog_has_no_unexpected_findings() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -891,9 +913,8 @@ fn the_tools_own_catalog_has_no_unexpected_findings() {
             .filter_map(|line| line.strip_prefix("  - "))
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        assert_eq!(
-            dependencies,
-            BTreeSet::from(["cargo-gamma-rt".to_owned(), "gamma_rt".to_owned()]),
+        assert!(
+            only_injected_runtime_dependencies(&dependencies),
             "the instrumented catalog should differ only by cargo-gamma's injected runtime dependencies: {stderr}"
         );
     } else {

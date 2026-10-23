@@ -53,11 +53,10 @@ fn mutant(ordinal: u32, package: &str, item: &str) -> Mutant {
 
 #[test]
 fn converger_state_updates_are_exact_and_repeatable() {
-    let mut converger = Converger::default();
-    converger.target_discovery("artifact stream".to_owned());
-    assert_eq!(converger.target_discovery.as_deref(), Some("artifact stream"));
-
-    converger.rounds = 9;
+    let mut converger = Converger {
+        rounds: 9,
+        ..Converger::default()
+    };
     converger.per_round.extend([3, 2, 1]);
     converger.first_round = Some(Duration::from_secs(2));
     for _ in 0..isolation::MAX_INVOCATION_ISOLATION_PROOFS {
@@ -74,10 +73,9 @@ fn converger_state_updates_are_exact_and_repeatable() {
         "an earlier Cargo command must not consume a later command's proof budget"
     );
 
-    let preflight = Preflight::narrow(vec!["dropped".to_owned()], "discovery".to_owned());
+    let preflight = Preflight::narrow(vec!["dropped".to_owned()]);
     assert!(!preflight.whole_workspace);
     assert_eq!(preflight.dropped, ["dropped"]);
-    assert_eq!(preflight.discovery, "discovery");
 }
 
 #[test]
@@ -95,23 +93,6 @@ fn build_rounds_attribute_withdrawals_to_packages_without_dividing_elapsed_time(
     assert_eq!(round.packages.len(), 1);
     assert_eq!(&*round.packages[0].package, "alpha");
     assert_eq!(round.packages[0].mutants, 2);
-}
-
-#[test]
-fn probe_sets_respect_sentinel_withdrawal_package_hint_and_order() {
-    let sentinel = mutant(0, "a", "sentinel");
-    let first = mutant(3, "a", "one");
-    let second = mutant(1, "a", "two");
-    let other = mutant(2, "b", "three");
-    let mut converger = Converger::guided(HashSet::from_iter([first.id.clone(), second.id.clone(), other.id.clone()]));
-    let _ = converger.withdrawn.insert(3);
-    let _ = converger.probed.insert(2);
-    let plan = plan(vec![sentinel, first, second, other]);
-
-    let selected = vec!["a".to_owned()];
-    let (candidates, deferred) = converger.probe_sets(&plan, Some(&selected));
-    assert_eq!(candidates, [1]);
-    assert_eq!(deferred, HashSet::from_iter([2, 3]));
 }
 
 #[test]
@@ -230,14 +211,14 @@ fn isolation_bisects_left_right_and_interacting_items() {
 }
 
 #[test]
-fn isolation_refuses_empty_pristine_and_indeterminate_populations() {
+fn isolation_refuses_empty_passing_and_indeterminate_populations() {
     let directory = crate::testing::workdir("build-isolation-negative-");
     let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
     let work = Workspace::adopt(root.clone(), root.join("target"));
 
     for (population, oracle) in [
         (Vec::new(), (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
-        (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+        (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| Some(false)) as SubsetOracle),
         (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| None) as SubsetOracle),
     ] {
         let mut converger = Converger {

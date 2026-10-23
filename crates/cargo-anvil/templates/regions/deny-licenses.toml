@@ -12,3 +12,4 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.93
+unused-allowed-license = "allow"

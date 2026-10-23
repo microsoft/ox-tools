@@ -58,7 +58,7 @@ pub struct Report {
     /// What produced the report.
     pub framework: Framework,
 
-    /// One entry per mutated file, keyed by workspace-relative path.
+    /// One entry per analyzed file, including analyzed empty populations, keyed by workspace-relative path.
     ///
     /// Ordered rather than hashed because this is the one map whose iteration order is observable:
     /// the document is written straight from these types, so what the map yields is what the file
@@ -75,6 +75,13 @@ pub struct Report {
     pub config: Option<RunInfo>,
 }
 
+impl Report {
+    pub(crate) fn identity_version(&self) -> u32 {
+        // Scheme 5 predates the report stamp; its meaning must not follow the reader's version.
+        self.config.as_ref().and_then(|config| config.mutant_id_version).unwrap_or(5)
+    }
+}
+
 /// What `merge` needs to know about the run that produced a report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +94,7 @@ pub struct RunInfo {
 
     /// The mutant-identity scheme used by every ID in this report.
     ///
-    /// Reports written before this field existed omit it and are treated as the current scheme by
+    /// Reports written before this field existed omit it and are treated as historical scheme 5 by
     /// the merger. Keeping it with run metadata lets a shard rotation reject identities from a
     /// different namespace instead of counting the same logical mutant twice.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +106,14 @@ pub struct RunInfo {
     /// identity: it can combine an incomplete rotation and reports from different revisions.
     #[serde(default, skip_serializing_if = "is_false")]
     pub merged: bool,
+
+    /// Whether each analyzed file contains its complete current mutant population.
+    ///
+    /// Only an explicit `true` authorizes withdrawing absent historical identities. Legacy
+    /// reports omit this field and conservatively contribute observations, not absence evidence.
+    /// Sharded and merged reports never provide that authority, regardless of this field.
+    #[serde(default)]
+    pub population_complete: bool,
 
     /// The shard this run covered, when it was sharded.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -350,7 +365,7 @@ pub(super) const TIMEOUT_PREFIX: &str = "timed out: ";
 /// this run could not do. The per-mutant count is in `config.notBuilt`; this is what lets a reader
 /// tell which of the two *one* mutant was, and what stops incremental execution from freezing a mutant nobody
 /// ever judged into every later run as though it had been suppressed.
-pub(super) const NOT_BUILT_PREFIX: &str = "not built: ";
+pub(crate) const NOT_BUILT_PREFIX: &str = "not built: ";
 
 /// Marks a flake in `statusReason`, for the same reason [`OUT_OF_MEMORY_PREFIX`] exists.
 ///
@@ -482,9 +497,11 @@ pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds
     }
 
     for file in &plan.files {
-        let Some(mutants) = grouped.get(file.path.as_path()) else {
+        let mutants = grouped.get(file.path.as_path()).map_or(&[][..], Vec::as_slice);
+        // Evidence digests alone do not prove that mutation analysis succeeded for an empty file.
+        if mutants.is_empty() && (file.source.is_none() || !plan.digests.contains_key(&file.path)) {
             continue;
-        };
+        }
 
         let snapshot = source_root.map(|root| root.join(&file.path));
         let original = match snapshot.as_ref() {
@@ -1157,6 +1174,26 @@ mod tests {
             report.config.expect("requested run metadata is present").mutant_id_version,
             Some(MUTANT_ID_VERSION)
         );
+    }
+
+    #[test]
+    fn analyzed_empty_files_are_reported_but_unanalyzed_files_have_no_population_authority() {
+        let root = Utf8Path::new("synthetic-report-root");
+        let mut plan = survivor_retained_report_plan(root);
+        plan.mutants.clear();
+        let source = "pub struct Marker;\n";
+        plan.files[1].source = Some(source.to_owned());
+        plan.digests.insert("z-kept.rs".into(), crate::discover::digest(source.as_bytes()));
+        plan.skipped.push("a-empty.rs could not be analyzed".into());
+        let info = fixtures::report_with(None, 100, Vec::new()).config;
+        let report = build_from(&plan, None, Thresholds::default(), info).unwrap();
+        assert_eq!(report.files.keys().map(String::as_str).collect::<Vec<_>>(), ["z-kept.rs"]);
+        assert_eq!(report.files["z-kept.rs"].source, source);
+        assert!(report.files["z-kept.rs"].mutants.is_empty());
+        assert!(report.config.unwrap().population_complete);
+        plan.digests.insert("a-empty.rs".into(), crate::discover::digest(b"evidence only"));
+        let evidence_only = build_from(&plan, None, Thresholds::default(), None).unwrap();
+        assert!(!evidence_only.files.contains_key("a-empty.rs"));
     }
 
     #[test]
@@ -2251,6 +2288,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn actual_builder_not_built_discriminator_survives_wire_and_staging_without_counting_other_exclusions() {
+        let root = Utf8Path::new("synthetic-report-root");
+        let mut plan = survivor_retained_report_plan(root);
+        plan.mutants = [Outcome::NotBuilt, Outcome::CompileError, Outcome::Ignored, Outcome::Flaky]
+            .into_iter()
+            .enumerate()
+            .map(|(index, outcome)| {
+                let mut candidate = mutant(outcome, 11..16);
+                candidate.id = format!("{index:012x}").into();
+                candidate.file = Utf8PathBuf::from("z-kept.rs").into();
+                if outcome == Outcome::CompileError {
+                    candidate.note = Some("historical compiler exclusion: E0308".into());
+                }
+                candidate
+            })
+            .collect();
+        let info = fixtures::report_with(None, 100, Vec::new()).config;
+        for include_not_built in [true, false] {
+            if !include_not_built {
+                plan.mutants.retain(|mutant| mutant.outcome != Outcome::NotBuilt);
+            }
+            let expected = include_not_built.then_some(1);
+            let report = build_from(&plan, None, Thresholds::default(), info.clone()).unwrap();
+            assert_eq!(report.config.as_ref().unwrap().not_built, expected);
+            let decoded: Report = serde_json::from_str(&to_json(&report).unwrap()).unwrap();
+            let compiler_excluded = decoded.files["z-kept.rs"]
+                .mutants
+                .iter()
+                .find(|mutant| mutant.status == "CompileError")
+                .unwrap();
+            assert_eq!(
+                compiler_excluded.status_reason.as_deref(),
+                Some("historical compiler exclusion: E0308")
+            );
+            let merged = crate::merge::merge(&[("first".into(), decoded.clone()), ("duplicate".into(), decoded)], 200, None)
+                .report
+                .unwrap();
+            assert_eq!(merged.config.as_ref().unwrap().not_built, expected);
+            let stage: Report = serde_json::from_str(&to_json(&merged).unwrap()).unwrap();
+            let staged = crate::merge::merge(&[("stage".into(), stage)], 300, None).report.unwrap();
+            assert_eq!(staged.config.as_ref().unwrap().not_built, expected);
+            assert_eq!(staged.files["z-kept.rs"].mutants.len(), plan.mutants.len());
+        }
+    }
+
     /// A reader can count the mutants a run gave up on without walking every mutant in the report.
     #[test]
     fn a_report_counts_the_mutants_its_run_never_built() {
@@ -2293,6 +2376,7 @@ mod tests {
             started_at: 0,
             mutant_id_version: None,
             merged: false,
+            population_complete: true,
             shard: None,
             tests: None,
             not_built: None,
@@ -2320,6 +2404,7 @@ mod tests {
                 started_at: 0,
                 mutant_id_version: None,
                 merged: false,
+                population_complete: true,
                 shard: None,
                 tests: None,
                 not_built: None,
@@ -2418,6 +2503,16 @@ mod tests {
         let error = surviving_mutants(&report).expect_err("another identity scheme cannot select current mutants");
 
         assert!(error.contains("mutant-ID scheme"), "{error}");
+    }
+
+    #[test]
+    fn review_survivor_selection_rejects_unstamped_reports() {
+        let mut report = fixtures::report_with(None, 0, Vec::new());
+        report.config.as_mut().unwrap().mutant_id_version = None;
+        let error = surviving_mutants(&report).unwrap_err();
+        assert!(error.contains("scheme 5"), "{error}");
+        report.config = None;
+        assert!(surviving_mutants(&report).unwrap_err().contains("scheme 5"));
     }
 
     #[test]

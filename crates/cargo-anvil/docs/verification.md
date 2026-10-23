@@ -76,6 +76,11 @@ on tool availability. These checks protect the emitted artifact contract, not
 runtime PowerShell semantics; recipe execution is validated by the provisioned
 self-hosting pipeline described above.
 
+Recipe visibility tests likewise inspect the catalog's in-memory definitions:
+they pin the public groups, alias target, and private prerequisite signatures
+without invoking Just or writing input fixtures. Actual recipe listing and
+execution remain part of provisioned self-hosting validation.
+
 ### 2.3 Fixture-based integration tests
 
 Alongside the snapshot tests, a `tests/fixtures/` corpus covers

@@ -207,21 +207,23 @@ mod tests {
 
     #[test]
     fn survivor_edit_scripts_replay_both_sides_with_minimal_edits_for_repeated_lines() {
-        let words: &[&[&str]] = &[
-            &[],
-            &["a"],
-            &["b"],
-            &["a", "a"],
-            &["a", "b"],
-            &["b", "a"],
-            &["b", "b"],
-            &["a", "b", "a"],
-            &["b", "a", "b"],
-            &["a", "a", "b"],
-            &["b", "b", "a"],
-        ];
-        for old in words {
-            for new in words {
+        let mut words = vec![Vec::new()];
+        let mut level = vec![Vec::new()];
+        for _length in 1..=4 {
+            level = level
+                .into_iter()
+                .flat_map(|prefix| {
+                    ["a", "b", "c"].map(|line| {
+                        let mut word = prefix.clone();
+                        word.push(line);
+                        word
+                    })
+                })
+                .collect();
+            words.extend(level.iter().cloned());
+        }
+        for old in &words {
+            for new in &words {
                 let steps = script(old, new);
                 let recovered_old: Vec<_> = steps
                     .iter()

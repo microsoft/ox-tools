@@ -111,15 +111,9 @@ pub struct Config {
     /// Let tests from every workspace package judge mutants they can reach.
     pub test_workspace: bool,
 
-    /// Whether to collect case-level reachability before the mutant sweep.
-    ///
-    /// Disabled by default because this optimization must justify its own extra process launches.
-    pub optimize_test_execution: bool,
-
     /// Whether to run every selected test in a reachable binary instead of selecting cases by reachability.
     ///
-    /// False by default: case-level selection may be used when test-execution optimization is
-    /// enabled, its census is admitted, or checked hints provide equivalent evidence. True is the
+    /// False by default: checked reach evidence may avoid redundant binary executions. True is the
     /// conservative fallback for suites whose reachability depends on threads, clocks, randomness
     /// or hash iteration order.
     pub whole_test_binaries: bool,
@@ -162,7 +156,6 @@ impl Config {
             include_tests: Vec::new(),
             exclude_tests: Vec::new(),
             test_workspace: false,
-            optimize_test_execution: false,
             whole_test_binaries: false,
             nextest: false,
             resources: Vec::new(),
@@ -258,7 +251,6 @@ mod tests {
         assert!(!config.copy_ignored);
         assert!(!config.test_lib);
         assert!(!config.test_workspace);
-        assert!(!config.optimize_test_execution);
         assert!(!config.whole_test_binaries);
         assert!(!config.nextest);
         assert!(config.resources.is_empty());

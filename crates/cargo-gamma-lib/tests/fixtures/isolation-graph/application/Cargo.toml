@@ -1,0 +1,14 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "proof-application"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+proof-dependency = { path = "../dependency" }
+
+[dev-dependencies]
+proof-dependency = { path = "../dependency", features = ["dev-api"] }

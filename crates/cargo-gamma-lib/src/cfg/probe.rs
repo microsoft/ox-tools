@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 
 //! Resolving engine cfg evidence from the compiler selected by Cargo policy.
+//!
+//! These compiler queries are trusted, unbounded discovery setup, not owned campaign children.
+//! They have no build deadline or cooperative cancellation; callers must supervise a stuck helper
+//! and any descendants externally.
 
 use std::process::Command;
 
