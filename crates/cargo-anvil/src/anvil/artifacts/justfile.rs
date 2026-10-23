@@ -408,9 +408,12 @@ mod tests {
             assert!(examples.contains(needle), "examples selection must be ordinal: missing '{needle}'");
         }
         assert!(!examples.contains("-notin $excluded"));
-        // The metadata package ID is a source-qualified package spec; a
-        // manifest path would follow `default-members` for a workspace root.
-        assert!(examples.contains("'run', '--package', $target.id, '--example', $target.example"));
+        // A source-qualified spec built from the manifest directory, like
+        // cargo-each's `{cargo-spec}`; legacy metadata IDs are not valid
+        // `--package` specs, and a manifest path would follow `default-members`.
+        assert!(examples.contains("'run', '--package', $target.spec, '--example', $target.example"));
+        assert!(examples.contains("[Uri]::new((Split-Path -Parent $p.manifest_path)).AbsoluteUri"));
+        assert!(!examples.contains("$target.id"));
         assert!(!examples.contains("'--manifest-path', $target"));
     }
 
