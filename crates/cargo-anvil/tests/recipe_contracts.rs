@@ -2037,10 +2037,15 @@ fn bolero_discovery_failure_propagates() {
     let output = run_just(
         tmp.path(),
         &["anvil-bolero"],
-        &[("FAKE_BOLERO_LIST_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", log.as_os_str())],
+        &[("FAKE_EACH_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
 
     assert_failed(&output, "cargo bolero target discovery failure");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("target discovery failed for package 'fixture@0.1.0'"),
+        "the failure must come from target discovery:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -2097,11 +2102,11 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         "full-workspace discovery must enumerate members via `cargo metadata`, got:\n{calls}"
     );
     assert!(
-        calls.contains("bolero list --profile release --package fixture"),
+        calls.contains("each --package fixture@0.1.0 -- cargo +nightly-test bolero list --profile release --package {cargo-spec}"),
         "the first workspace member must be discovered, got:\n{calls}"
     );
     assert!(
-        calls.contains("bolero list --profile release --package other-package"),
+        calls.contains("each --package other-package@0.1.0 -- cargo +nightly-test bolero list --profile release --package {cargo-spec}"),
         "every workspace member must be discovered, not just the first, got:\n{calls}"
     );
     assert!(
