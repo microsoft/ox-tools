@@ -427,7 +427,7 @@ checksum = "sha256:3d1fae3bd4be3e549900528b40d2bff38ac1539a6b4647f18ba46a440350e
 [[region]]
 host = "deny.toml"
 id = "anvil-deny-licenses"
-checksum = "sha256:f8c9feb6bf637db1744d33be48a7cc1d039d2c23a0f73d917c97606a6e0ad704"
+checksum = "sha256:ef9033a590de7e6d488910e3c9833d519f5d5ddc7e39163b77f4a281e993c487"
 
 [[region]]
 host = "deny.toml"
