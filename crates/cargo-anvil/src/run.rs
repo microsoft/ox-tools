@@ -2760,6 +2760,50 @@ mod tests {
     }
 
     #[test]
+    fn scanner_only_host_refuses_generated_incomplete_lexical_state() {
+        let settings = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "/*\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"setting\": true,\n",
+            "  // <<< anvil-managed: settings\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+
+        assert_eq!(plan.refusals().len(), 1);
+        assert!(plan.refusals()[0].contains("unterminated block comment"));
+        assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
+    }
+
+    #[test]
     fn retained_json_scanner_host_refuses_hash_comment_regions() {
         let region = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),

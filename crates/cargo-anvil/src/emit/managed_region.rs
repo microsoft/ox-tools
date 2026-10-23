@@ -263,6 +263,9 @@ pub(crate) fn plan_region_with_splice(
         }
     }
     let spliced = splice()?;
+    scanner
+        .validate_marker_scan(&spliced)
+        .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::IncompleteJsonScan))?;
     Ok(PlanItem::write_region(
         host_relpath,
         region_id,
