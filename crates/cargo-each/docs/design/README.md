@@ -55,7 +55,7 @@ per object.
    `--package-file`, so callers do not need shell array expansion. cargo-each
    stays agnostic about who produced the file and what the selection means.
 3. **Four execution modes.** *per-package* (run the command once per member,
-   substituting `{name}`/`{spec}`/`{version}`/`{manifest}`) covers per-manifest
+   substituting `{name}`/`{spec}`/`{cargo-spec}`/`{version}`/`{manifest}`) covers per-manifest
    tools; *once* (run the command a single time when the set is non-empty)
    covers workspace-wide tools and single-invocation cargo commands, with a
    `{packages}` placeholder that expands to the cargo selection flags; and
@@ -166,6 +166,29 @@ arbitrary-command + metadata-filter spine do not overlap.
 
 ## 4. CLI surface
 
+### Source-qualified per-package selection
+
+`{cargo-spec}` is a per-package/per-target placeholder with the form
+`file:///...#name@version`. Its URL-encoded source is the absolute manifest
+directory; name and version come from structured package metadata. Metadata IDs
+are opaque and are never parsed or exposed. `{spec}` and `{packages}` are
+not source-qualified. Selector construction runs only for templates containing
+`{cargo-spec}`.
+
+All selections resolve against workspace members only, not registry packages or
+target names. Existing `-p` and `--package-file` inputs suffice for portable
+name/version selections; no cargo-delta dependency or record parser is involved.
+Selectors belong to the current checkout and are reconstructed from its
+metadata after relocation. Discovery preserves inherited Cargo/toolchain
+selection; it does not resolve a separate metadata toolchain.
+
+Aggregate `cargo build`/`cargo test` consumers can use ordinary Cargo
+`--workspace --exclude ...` selection without cargo-each. Cargo resolves that
+selection against workspace members, avoiding registry collisions and
+checkout-local selectors. Callers must skip explicitly empty selections:
+excluding every member is an error, not a Cargo no-op. Aggregate selection
+output and literal metadata-ID adapters are outside cargo-each's scope.
+
 ```
 cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
 ```
@@ -274,6 +297,7 @@ Substituted inside each `ARG` of the command template:
 |-------|-----------|------|
 | `{name}` | bare package name (`cargo-anvil`) | per-package |
 | `{spec}` | `name@version` | per-package |
+| `{cargo-spec}` | source-qualified `file:///...#name@version` for the member's absolute manifest directory, with URL encoding | per-package |
 | `{version}` | package version | per-package |
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
@@ -448,7 +472,7 @@ cargo each --package-file target/anvil/impact/affected.packages --filter lib -- 
 
 ```just
 cargo each --package-file target/anvil/impact/affected.packages --filter dep:loom -- \
-    cargo +{{ rust_nightly }} test --package {name} ...
+    cargo +{{ rust_nightly }} test --package {cargo-spec} ...
 ```
 
 **per-target examples** (run each selected example with a timeout):
@@ -456,7 +480,7 @@ cargo each --package-file target/anvil/impact/affected.packages --filter dep:loo
 ```just
 cargo each --package-file target/anvil/impact/affected.packages \
     --each-target example --timeout 30s -- \
-    cargo run --package {spec} --example {target}
+    cargo run --package {cargo-spec} --example {target}
 ```
 
 Recipes whose only per-tier logic is the skip/splat preamble become one

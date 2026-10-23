@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
+use std::path::Path;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -20,7 +21,7 @@ use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
-use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
+use crate::error::{EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
 use crate::filter::Predicate;
 use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
@@ -48,11 +49,20 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
         return run_json(args);
     }
+    run_workspace_with(args, build_selection, Workspace::load, execute)
+}
 
+/// Share workspace orchestration between production and tests, with controlled input, discovery, and execution.
+fn run_workspace_with(
+    args: &EachArgs,
+    load_selection: impl FnOnce(&EachArgs) -> Result<Selection, EachError>,
+    load_workspace: impl FnOnce(Option<&Path>) -> Result<Workspace, EachError>,
+    execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
+) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
 
-    let selection = build_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
-    let workspace = Workspace::load(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
+    let selection = load_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
+    let workspace = load_workspace(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
     apply_filters(&mut members, args)?;
@@ -111,7 +121,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    execute(&plan, args.keep_going, args.jobs, args.timeout)
+    execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
 }
 
 fn run_json(args: &EachArgs) -> Result<ExitCode, AppError> {
@@ -992,6 +1002,9 @@ fn exit_byte(raw: Option<i32>) -> u8 {
     let byte = u8::try_from(raw & 0xFF).expect("`raw & 0xFF` masks to the low byte, always within 0..=255");
     if byte == 0 { 1 } else { byte }
 }
+
+#[cfg(test)]
+mod package_identity_tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-20
+
+- ✨ Features
+
+  - expose source-qualified package identities
+
+- 🐛 Bug Fixes
+
+  - make identity regressions deterministic
+
+- ✔️ Tasks
+
+  - bump version to 0.6.0
+
 ## [0.5.0] - 2026-10-13
 
 - ⚠️ Breaking
