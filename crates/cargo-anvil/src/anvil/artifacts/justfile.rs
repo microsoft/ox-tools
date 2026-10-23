@@ -390,6 +390,16 @@ mod tests {
             "bolero discovery must not pass repeated --package arguments"
         );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
+        // Each discovered target runs under the member that reported it, and
+        // one failing target does not stop the remaining targets.
+        for needle in [
+            "$target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec",
+            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
+            "if ($LASTEXITCODE -ne 0) { $failed = $true }",
+            "if ($failed) { exit 1 }",
+        ] {
+            assert!(checks.contains(needle), "bolero dispatch contract missing '{needle}'");
+        }
     }
 
     #[test]
@@ -411,6 +421,7 @@ mod tests {
         // The metadata package ID is a source-qualified package spec on every
         // supported Cargo; a manifest path would follow `default-members`.
         assert!(examples.contains("'run', '--package', $target.id, '--example', $target.example"));
+        assert!(examples.contains("$start.WorkingDirectory = [string]$meta.workspace_root"));
         assert!(!examples.contains("'--manifest-path', $target"));
     }
 

@@ -2945,6 +2945,9 @@ anvil-examples package="" example="" timeout="30": anvil-examples-validate-prere
         $start.FileName = $cargo
         $start.UseShellExecute = $false
         $start.Environment['ANVIL_EXAMPLE'] = '1'
+        # Package IDs carry Cargo's canonical workspace path. Start from that
+        # path so a short (8.3) Windows working directory still matches it.
+        $start.WorkingDirectory = [string]$meta.workspace_root
         # The metadata package ID is a source-qualified package spec: it
         # selects exactly this member even when a registry dependency shares
         # its name and version, or the root is outside `default-members`.
