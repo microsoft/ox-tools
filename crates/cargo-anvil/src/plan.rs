@@ -17,7 +17,7 @@
 //! See [`updates.md §7`](../../docs/design/updates.md) for the proposed-file
 //! protocol.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -262,6 +262,7 @@ impl PlanItem {
 #[derive(Debug, Default)]
 pub struct Plan {
     items: Vec<PlanItem>,
+    json_array_paths: BTreeMap<RegionKey, Vec<String>>,
     json_scanner_hosts: BTreeSet<String>,
     json_scanner_hosts_authoritative: bool,
     notes: Vec<String>,
@@ -309,6 +310,10 @@ impl Plan {
     pub(crate) fn set_json_scanner_hosts(&mut self, hosts: BTreeSet<String>) {
         self.json_scanner_hosts = hosts;
         self.json_scanner_hosts_authoritative = true;
+    }
+
+    pub(crate) fn retain_json_array_path(&mut self, host: String, id: String, path: Vec<String>) {
+        self.json_array_paths.insert(RegionKey { host, id }, path);
     }
 
     pub(crate) fn region_has_checksum_update(&self, host: &str, id: &str) -> bool {
@@ -542,6 +547,8 @@ impl Plan {
                 previous_manifest.json_scanner_hosts.clone()
             },
         };
+        next.json_array_paths
+            .extend(self.json_array_paths.iter().map(|(key, path)| (key.clone(), path.clone())));
 
         for item in &self.items {
             if item.json_scanner

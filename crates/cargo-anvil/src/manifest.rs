@@ -252,6 +252,13 @@ impl Manifest {
                 if version >= 2
                     && let Some(path) = table.get("json_array_path")
                 {
+                    if !crate::emit::json_array_region::is_json_host(&key.host) {
+                        bail!(
+                            "[[region]] entry '{}'/'{}' has `json_array_path` but its host does not have a .json suffix",
+                            key.host,
+                            key.id
+                        );
+                    }
                     let path = path
                         .as_array()
                         .ok_or_else(|| app_err!("[[region]] entry '{}'/'{}' has a non-array `json_array_path`", key.host, key.id))?;
@@ -649,6 +656,10 @@ mod tests {
                 "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"root\", 1]\n",
                 "[[region]] entry 'config.json'/'entries' has a non-string `json_array_path` component",
             ),
+            (
+                "version = 2\n[[region]]\nhost = \"config.toml\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"entries\"]\n",
+                "[[region]] entry 'config.toml'/'entries' has `json_array_path` but its host does not have a .json suffix",
+            ),
         ] {
             let err = Manifest::parse(text).unwrap_err();
             assert!(err.to_string().contains(expected), "{err}");
@@ -670,6 +681,28 @@ mod tests {
 
         assert!(manifest.json_array_paths.is_empty());
         assert!(manifest.json_scanner_hosts.is_empty());
+    }
+
+    #[test]
+    fn schema_one_rewrites_as_schema_two_without_losing_ownership() {
+        let manifest = Manifest::parse(concat!(
+            "version = 1\n",
+            "[[file]]\n",
+            "path = \"generated.txt\"\n",
+            "checksum = \"sha256:file\"\n",
+            "[[region]]\n",
+            "host = \"config.json\"\n",
+            "id = \"settings\"\n",
+            "checksum = \"sha256:region\"\n",
+        ))
+        .unwrap();
+
+        let rewritten = manifest.to_toml();
+        let reparsed = Manifest::parse(&rewritten).unwrap();
+
+        assert!(rewritten.starts_with("version = 2\n"));
+        assert_eq!(reparsed.file_checksum("generated.txt"), Some("sha256:file"));
+        assert_eq!(reparsed.region_checksum("config.json", "settings"), Some("sha256:region"));
     }
 
     #[test]

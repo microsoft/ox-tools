@@ -587,8 +587,13 @@ fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
         } else if let Some(active_quote) = quote {
             if escaped {
                 escaped = false;
+                if byte == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
             } else if byte == b'\\' {
                 escaped = true;
+            } else if matches!(byte, b'\r' | b'\n') {
+                bail!("JSON-like host contains an unescaped line ending inside a quoted string; escape it or close the string");
             } else if byte == active_quote {
                 quote = None;
             }
@@ -836,7 +841,7 @@ fn prepend_region(text: &str, rendered: &str, syntax: CommentSyntax, newline: &s
 
 fn separate_region(out: &mut String, newline: &str) {
     if !out.is_empty() {
-        if !out.ends_with('\n') {
+        if !out.ends_with(['\r', '\n']) {
             out.push_str(newline);
         }
         if trailing_blank_line_len(out) == 0 {
@@ -848,16 +853,27 @@ fn separate_region(out: &mut String, newline: &str) {
 fn leading_newline_len(text: &str) -> usize {
     if text.starts_with("\r\n") {
         2
+    } else if text.starts_with('\r') {
+        1
     } else {
         usize::from(text.starts_with('\n'))
     }
 }
 
 fn trailing_blank_line_len(text: &str) -> usize {
-    if text.ends_with("\n\r\n") {
+    let last = trailing_newline_len(text);
+    if last > 0 && trailing_newline_len(&text[..text.len() - last]) > 0 {
+        last
+    } else {
+        0
+    }
+}
+
+fn trailing_newline_len(text: &str) -> usize {
+    if text.ends_with("\r\n") {
         2
     } else {
-        usize::from(text.ends_with("\n\n"))
+        usize::from(text.ends_with(['\r', '\n']))
     }
 }
 
@@ -2648,6 +2664,15 @@ mod tests {
         ] {
             assert_eq!(remove_region(&host, "x", SYN).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn bare_cr_region_introduction_and_removal_restore_the_host() {
+        let host = "user\r";
+        let introduced = upsert_region(host, "x", "body\n", SYN).unwrap();
+
+        assert_eq!(introduced, "user\r\r# >>> anvil-managed: x\rbody\r# <<< anvil-managed: x\r");
+        assert_eq!(remove_region(&introduced, "x", SYN).unwrap(), host);
     }
 
     #[test]

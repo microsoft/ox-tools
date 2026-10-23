@@ -281,7 +281,7 @@ fn build_plan_with_hosts(
                 && let Err(error) = scanner.validate_marker_scan(&text)
             {
                 let reason = error.to_string();
-                refuse_region(&mut plan, host.clone(), &key.id, &reason, RefusalRemedy::MalformedMarkers);
+                refuse_region(&mut plan, host.clone(), &key.id, &reason, RefusalRemedy::IncompleteJsonScan);
                 composed.states.insert(host, ComposedHostState::Unsafe(reason));
                 continue;
             }
@@ -923,7 +923,7 @@ fn push_region_at_with_scanner(
     if let Some(text) = current.as_deref()
         && let Err(error) = scanner.validate_marker_scan(text)
     {
-        refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::MalformedMarkers);
+        refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::IncompleteJsonScan);
         return Ok(());
     }
     if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref(), scanner) {
@@ -1272,6 +1272,10 @@ fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
              so anvil will not write this region rather than risk appending a second copy of it. Restore the \
              missing sentinel around the body anvil generated, or delete the stray one together with the \
              body it was meant to enclose."
+        }
+        RefusalRemedy::IncompleteJsonScan => {
+            "Close the unterminated string or block comment in the repository-owned host, then retry. \
+             Managed sentinels and bodies are unrelated to this lexical error and should be left unchanged."
         }
         RefusalRemedy::RetirementInference => {
             "Identify the marker pair whose body matches the recorded generated content and remove only competing \
@@ -1843,6 +1847,9 @@ fn plan_removals_with_array_hosts(
                     retained = retained.with_json_scanner();
                 }
                 plan.push(retained);
+            }
+            if let Some(path) = previous.json_array_paths.get(key) {
+                plan.retain_json_array_path(resolved_host.clone(), key.id.clone(), path.clone());
             }
             plan.push(PlanItem::orphaned_kept(Target::Region {
                 host: key.host.clone(),
@@ -2809,44 +2816,62 @@ mod tests {
             .build()
             .unwrap();
         let empty = Catalog::builder(test_cli()).build().unwrap();
-        let source = concat!(
-            "{\n",
-            "  /* unterminated repository comment\n",
-            "  // >>> anvil-managed: settings\n",
-            "  \"setting\": true,\n",
-            "  // <<< anvil-managed: settings\n",
-            "}\n",
-        );
         let mut manifest = Manifest::default();
         manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
         manifest.json_scanner_hosts.insert("config.json".to_owned());
-        for target_catalog in [&catalog, &empty] {
-            let mut hosts = memory_hosts();
-            hosts.set("config.json", source.to_owned());
-            hosts.newlines.insert("config.json".to_owned(), "\n");
+        for (source, diagnostic) in [
+            (
+                concat!(
+                    "{\n",
+                    "  /* unterminated repository comment\n",
+                    "  // >>> anvil-managed: settings\n",
+                    "  \"setting\": true,\n",
+                    "  // <<< anvil-managed: settings\n",
+                    "}\n",
+                ),
+                "unterminated block comment",
+            ),
+            (
+                concat!(
+                    "{\n",
+                    "  'broken\n",
+                    "  // >>> anvil-managed: settings\n",
+                    "  \"setting\": true,\n",
+                    "  // <<< anvil-managed: settings\n",
+                    "  string': true\n",
+                    "}\n",
+                ),
+                "unescaped line ending inside a quoted string",
+            ),
+        ] {
+            for target_catalog in [&catalog, &empty] {
+                let mut hosts = memory_hosts();
+                hosts.set("config.json", source.to_owned());
+                hosts.newlines.insert("config.json".to_owned(), "\n");
 
-            let plan = build_plan_with_hosts(
-                Path::new("in-memory-json-region-tests"),
-                &Workspace {
-                    members: Vec::new(),
-                    has_workspace_table: false,
-                },
-                &manifest,
-                &[],
-                target_catalog,
-                &mut hosts,
-            )
-            .unwrap();
-            let projected = plan.projected_manifest(&manifest);
+                let plan = build_plan_with_hosts(
+                    Path::new("in-memory-json-region-tests"),
+                    &Workspace {
+                        members: Vec::new(),
+                        has_workspace_table: false,
+                    },
+                    &manifest,
+                    &[],
+                    target_catalog,
+                    &mut hosts,
+                )
+                .unwrap();
+                let projected = plan.projected_manifest(&manifest);
 
-            assert_eq!(plan.refusals().len(), 1);
-            assert!(plan.refusals()[0].contains("unterminated block comment"), "{:?}", plan.refusals());
-            assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
-            assert_eq!(
-                projected.region_checksum("config.json", "settings"),
-                manifest.region_checksum("config.json", "settings")
-            );
-            assert!(projected.json_scanner_hosts.contains("config.json"));
+                assert_eq!(plan.refusals().len(), 1);
+                assert!(plan.refusals()[0].contains(diagnostic), "{:?}", plan.refusals());
+                assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
+                assert_eq!(
+                    projected.region_checksum("config.json", "settings"),
+                    manifest.region_checksum("config.json", "settings")
+                );
+                assert!(projected.json_scanner_hosts.contains("config.json"));
+            }
         }
     }
 
@@ -3494,6 +3519,81 @@ mod tests {
 
         assert_eq!(rerun.refusals().len(), 1);
         assert!(output.contains(example));
+    }
+
+    #[test]
+    fn case_renamed_structural_region_keeps_selector_when_catalog_becomes_ordinary() {
+        let ordinary = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("entries"),
+            body: "\"managed\",\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(ordinary))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "    \"managed\",\n",
+            "    // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "entries", checksum_str("    \"managed\",\n"));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = case_renamed_json_hosts();
+        hosts.set("Config.json", source.to_owned());
+        hosts.newlines.insert("Config.json".to_owned(), "\n");
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let projected = plan.projected_manifest(&manifest);
+        let renamed_key = crate::manifest::RegionKey {
+            host: "Config.json".to_owned(),
+            id: "entries".to_owned(),
+        };
+        assert_eq!(projected.json_array_paths.get(&renamed_key), Some(&vec!["entries".to_owned()]));
+        let malformed = source.trim_end_matches("}\n");
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let mut hosts = case_renamed_json_hosts();
+        hosts.set("Config.json", malformed.to_owned());
+        hosts.newlines.insert("Config.json".to_owned(), "\n");
+
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &projected,
+            &[],
+            &empty,
+            &mut hosts,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.starts_with("Refused JSON array host Config.json:"), "{error}");
     }
 
     #[test]

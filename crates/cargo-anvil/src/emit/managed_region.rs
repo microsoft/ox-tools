@@ -62,6 +62,9 @@ pub enum RefusalRemedy {
     /// The region's marker lines do not form a usable pair, so no boundary can
     /// be proven for whatever sits between them.
     MalformedMarkers,
+    /// JSON-aware marker scanning cannot finish because repository text has an
+    /// unterminated string or block comment.
+    IncompleteJsonScan,
     /// Retirement cannot uniquely identify which marker syntax owns the
     /// recorded body, or malformed XML prevents proving marker absence.
     RetirementInference,
