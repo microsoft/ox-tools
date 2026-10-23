@@ -265,7 +265,24 @@ pub(crate) fn plan_region_with_splice(
     let spliced = splice()?;
     scanner
         .validate_marker_scan(&spliced)
-        .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::IncompleteJsonScan))?;
+        .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::InvalidGeneratedJson))?;
+    if scanner == HostScanner::Json {
+        let region = scanner
+            .find(&spliced, region_id, syntax)
+            .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::InvalidGeneratedJson))?
+            .ok_or_else(|| {
+                ManagedRegionRefusal::new(
+                    app_err!("the generated region's sentinels are not visible after writing the host"),
+                    RefusalRemedy::InvalidGeneratedJson,
+                )
+            })?;
+        if checksum_str(region.body_str()) != template_checksum {
+            return Err(ManagedRegionRefusal::new(
+                app_err!("the generated region body is not preserved between its sentinels after writing the host"),
+                RefusalRemedy::InvalidGeneratedJson,
+            ));
+        }
+    }
     Ok(PlanItem::write_region(
         host_relpath,
         region_id,
@@ -483,6 +500,24 @@ mod tests {
 
     fn request<'a>(host_relpath: &'a str, region_id: &'a str, rendered_body: &'a str) -> ManagedRegionRequest<'a> {
         ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)
+    }
+
+    #[test]
+    fn json_splice_requires_visible_matching_generated_region() {
+        let request = ManagedRegionRequest::at_end("config.json", "r", "body\n", CommentSyntax::SlashSlash);
+        let missing = plan_region_with_splice(&Manifest::default(), None, request, HostScanner::Json, || {
+            Ok("{\"value\":true}\n".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(missing.remedy, RefusalRemedy::InvalidGeneratedJson);
+        assert!(missing.reason.to_string().contains("sentinels are not visible"));
+
+        let mismatch = plan_region_with_splice(&Manifest::default(), None, request, HostScanner::Json, || {
+            Ok(concat!("{\n", "// >>> anvil-managed: r\n", "other\n", "// <<< anvil-managed: r\n", "}\n",).to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(mismatch.remedy, RefusalRemedy::InvalidGeneratedJson);
+        assert!(mismatch.reason.to_string().contains("body is not preserved"));
     }
 
     #[test]

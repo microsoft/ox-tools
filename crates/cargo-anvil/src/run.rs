@@ -2776,6 +2776,7 @@ mod tests {
             "  // >>> anvil-managed: settings\n",
             "  \"setting\": true,\n",
             "  // <<< anvil-managed: settings\n",
+            "  /* repository */\n",
             "}\n",
         );
         let mut manifest = Manifest::default();
@@ -2799,7 +2800,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.refusals().len(), 1);
-        assert!(plan.refusals()[0].contains("unterminated block comment"));
+        assert!(plan.refusals()[0].contains("opening sentinel but no closing sentinel"));
+        assert!(plan.refusals()[0].contains("Repair the catalog template"));
         assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
     }
 
@@ -3840,7 +3842,7 @@ mod tests {
         hosts.set("config.json", source.to_owned());
         hosts.newlines.insert("config.json".to_owned(), "\n");
 
-        let error = build_plan_with_hosts(
+        let plan = build_plan_with_hosts(
             Path::new("in-memory-json-region-tests"),
             &Workspace {
                 members: Vec::new(),
@@ -3851,13 +3853,11 @@ mod tests {
             &catalog,
             &mut hosts,
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-        assert!(
-            error.contains("managed JSON array region \"entries\" is missing after composition"),
-            "{error}"
-        );
+        assert_eq!(plan.refusals().len(), 1);
+        assert!(plan.refusals()[0].contains("generated region body is not preserved"));
+        assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
     }
 
     #[test]
