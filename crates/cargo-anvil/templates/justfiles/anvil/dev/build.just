@@ -5,19 +5,15 @@
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
 # Build all targets and features for local development.
-[group("anvil")]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-[script("pwsh", "-NoProfile")]
 anvil-build package="" profile="": anvil-build-validate-prereqs
-    $ErrorActionPreference = 'Stop'
-    cargo {{_anvil_stable_toolchain_args}} build {{ if package == "" { "--workspace" } else { "--package " + package } }} {{ if profile == "" { "" } else { "--profile " + profile } }} --all-features --all-targets --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo each {{ if package == "" { "--workspace" } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if profile == "" { "" } else { "--profile " + quote(profile) } }} --all-features --all-targets --locked
 
 # Install prerequisites for the `anvil-build` recipe.
-[private]
-anvil-build-setup installer="install": anvil-toolchain-stable-install
+[group("anvil-setup")]
+anvil-build-setup installer="install": (anvil-toolchain-stable-install installer)
 
 # Validate prerequisites for the `anvil-build` recipe.
-[private]
-anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
+[group("anvil-setup")]
+anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
