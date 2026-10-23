@@ -41,10 +41,10 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         default { throw "unknown Miri profile '$profile'" }
     }
     if ($example) {
-        & cargo '+{{ rust_nightly }}' each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --exclude-filter 'metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo '+{{ rust_nightly }}' miri run --package '{spec}' --example $example --all-features --locked
+        & cargo '+{{ rust_nightly }}' each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo '+{{ rust_nightly }}' miri run --package '{cargo-spec}' --example $example --all-features --locked
     } else {
         $filter = if ($testFilter) { @('--', $testFilter) } else { @() }
-        & cargo '+{{ rust_nightly }}' each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --exclude-filter 'metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo '+{{ rust_nightly }}' miri test --package '{spec}' --tests --all-features --locked @filter
+        & cargo '+{{ rust_nightly }}' each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo '+{{ rust_nightly }}' miri test --package '{cargo-spec}' --tests --all-features --locked @filter
     }
     exit $LASTEXITCODE
 

@@ -1039,32 +1039,9 @@ fn push_region_at_with_scanner(
     {
         return Ok(());
     }
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "successful marker repair already cached this exact host, including absent files; the repeated lookup cannot perform I/O or return Err")]
-    let mut current = hosts.get_or_read(repo_root, &host)?;
-    if current.is_none()
-        && host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
-        && spec.id.as_str() == artifacts::justfile::JUSTFILE_REGION_ID
-    {
-        let scaffold = artifacts::justfile::scaffold().to_owned();
-        hosts.set(&host, scaffold.clone());
-        current = Some(scaffold);
-    }
-    if let Some(declared) = composed_host
-        && !declared.order.contains(&spec.id.as_str())
-    {
-        // End-of-file is the default placement everywhere else, and it is wrong
-        // here by construction: it lands below the region that closes the file.
-        // A built-in region reaching this is caught by the registry test in
-        // `artifacts::mod`, but a downstream catalog can add one at run time,
-        // and appending it below `CMD` would be silent and would classify the
-        // host as composable on every later run.
-        bail!(
-            "region '{}' targets the composed host '{host}', whose region order is semantic, \
-             but is not declared in that order. Add it to the host's `ComposedHost::order` \
-             at the position it must occupy.",
-            spec.id.as_str()
-        );
-    }
+    let cached = hosts.get_or_read(repo_root, &host)?;
+    let current = seed_justfile_scaffold_if_absent(hosts, &host, spec, cached);
+    validate_composed_host_region(&host, spec, composed_host)?;
     let Some(placement) = region_placement_or_refuse(plan, &host, spec, composed_host, current.as_deref()) else {
         return Ok(());
     };
@@ -1169,6 +1146,35 @@ fn repair_tracked_json_body_for_scan(
     }
     scanner.find(&repaired, spec.id.as_str(), spec.syntax).ok().flatten()?;
     Some(repaired)
+}
+
+fn seed_justfile_scaffold_if_absent(hosts: &mut HostTextCache, host: &str, spec: &RegionSpec, current: Option<String>) -> Option<String> {
+    if current.is_some()
+        || !host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
+        || spec.id.as_str() != artifacts::justfile::JUSTFILE_REGION_ID
+    {
+        return current;
+    }
+    let scaffold = artifacts::justfile::scaffold().to_owned();
+    hosts.set(host, scaffold.clone());
+    Some(scaffold)
+}
+
+fn validate_composed_host_region(host: &str, spec: &RegionSpec, composed_host: Option<ComposedHost>) -> Result<(), AppError> {
+    if let Some(declared) = composed_host
+        && !declared.order.contains(&spec.id.as_str())
+    {
+        // End-of-file is wrong here by construction: it lands below the region
+        // that closes the file. Built-ins are covered by the registry test, but
+        // downstream catalogs can add regions at run time.
+        bail!(
+            "region '{}' targets the composed host '{host}', whose region order is semantic, \
+             but is not declared in that order. Add it to the host's `ComposedHost::order` \
+             at the position it must occupy.",
+            spec.id.as_str()
+        );
+    }
+    Ok(())
 }
 
 fn region_placement_or_refuse(
