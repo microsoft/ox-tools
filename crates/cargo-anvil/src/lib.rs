@@ -107,7 +107,7 @@
 //! just anvil-build
 //! just anvil-build --package my-crate
 //! just anvil-doc-build --open
-//! just anvil-examples --run
+//! just anvil-examples
 //! just anvil-fmt --fix
 //! just anvil-miri --package my-crate --example basic
 //! just anvil-readme --fix
@@ -129,7 +129,7 @@
 //! - **fast checks** cover formatting, Clippy, documentation, dependency
 //!   policy, spelling, README drift, API compatibility, and metadata;
 //! - **tests and coverage** run tests, documentation tests, coverage gates,
-//!   and example compilation;
+//!   example compilation, and execution of selected examples;
 //! - **MSRV tests** execute affected tests with the repository's declared
 //!   minimum supported Rust version;
 //! - **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
@@ -197,7 +197,7 @@
 //! - **Tests and coverage:** tests under the declared MSRV, coverage with
 //!   [`cargo-llvm-cov`](https://crates.io/crates/cargo-llvm-cov) and
 //!   [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate),
-//!   documentation tests, and example compilation or optional execution.
+//!   documentation tests, example compilation, and execution of selected examples.
 //! - **Runtime analysis:** [`Miri`](https://github.com/rust-lang/miri),
 //!   [`cargo-careful`](https://crates.io/crates/cargo-careful),
 //!   [`Loom`](https://crates.io/crates/loom), and
@@ -341,15 +341,18 @@
 //!
 //! ### Examples
 //!
-//! `anvil-examples` always compiles selected examples. An unfiltered
-//! `--run` skips interactive, credentialed, or otherwise unsuitable examples
-//! declared by their package:
+//! `anvil-examples` always builds and runs selected examples, whether invoked
+//! directly or through PR and scheduled tests. Runs use `ANVIL_EXAMPLE=1`, no
+//! application arguments, and a 30-second per-example timeout. Nonzero exits
+//! and timeouts fail the check. Unfiltered runs skip interactive, credentialed,
+//! service-dependent, or otherwise unsuitable examples declared by their package:
 //!
 //! ```toml
 //! [package.metadata.anvil.examples]
 //! no-run = ["interactive-demo", "needs-production-credentials"]
 //! ```
 //!
+//! Excluded examples still compile.
 //! Explicit `--package` and `--example` selection overrides the default
 //! exclusion because the caller has deliberately chosen that example.
 //!

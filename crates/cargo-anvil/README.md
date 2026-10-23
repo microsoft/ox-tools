@@ -107,7 +107,7 @@ Other useful entry points are:
 just anvil-build
 just anvil-build --package my-crate
 just anvil-doc-build --open
-just anvil-examples --run
+just anvil-examples
 just anvil-fmt --fix
 just anvil-miri --package my-crate --example basic
 just anvil-readme --fix
@@ -129,7 +129,7 @@ the generated cloud workflow:
 * **fast checks** cover formatting, Clippy, documentation, dependency
   policy, spelling, README drift, API compatibility, and metadata;
 * **tests and coverage** run tests, documentation tests, coverage gates,
-  and example compilation;
+  example compilation, and execution of selected examples;
 * **MSRV tests** execute affected tests with the repository’s declared
   minimum supported Rust version;
 * **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
@@ -197,7 +197,7 @@ above compose these recipes into the default policy:
 * **Tests and coverage:** tests under the declared MSRV, coverage with
   [`cargo-llvm-cov`][__link17] and
   [`cargo-coverage-gate`][__link18],
-  documentation tests, and example compilation or optional execution.
+  documentation tests, example compilation, and execution of selected examples.
 * **Runtime analysis:** [`Miri`][__link19],
   [`cargo-careful`][__link20],
   [`Loom`][__link21], and
@@ -341,15 +341,18 @@ declares Loom support but exposes no matching test target.
 
 #### Examples
 
-`anvil-examples` always compiles selected examples. An unfiltered
-`--run` skips interactive, credentialed, or otherwise unsuitable examples
-declared by their package:
+`anvil-examples` always builds and runs selected examples, whether invoked
+directly or through PR and scheduled tests. Runs use `ANVIL_EXAMPLE=1`, no
+application arguments, and a 30-second per-example timeout. Nonzero exits
+and timeouts fail the check. Unfiltered runs skip interactive, credentialed,
+service-dependent, or otherwise unsuitable examples declared by their package:
 
 ```toml
 [package.metadata.anvil.examples]
 no-run = ["interactive-demo", "needs-production-credentials"]
 ```
 
+Excluded examples still compile.
 Explicit `--package` and `--example` selection overrides the default
 exclusion because the caller has deliberately chosen that example.
 
@@ -431,7 +434,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbmwsnX_ZuxfYbQ7aHRBJ4lYMb_Bf_GdwS79kbWF5SfNNbA5thZIGDa2NhcmdvLWFudmlsZjAuMTYuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbExZV6pDtcbYb97iufUocbo0bFyAWg29fSoYbXVvSuxITYxRhZIGDa2NhcmdvLWFudmlsZjAuMTcuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -451,9 +454,9 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link23]: https://mutants.rs/
  [__link24]: https://crates.io/crates/cargo-hack
  [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.16.0/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.16.0/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.16.0/cargo_anvil/fn.run_app.html
+ [__link26]: https://docs.rs/cargo-anvil/0.17.0/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.17.0/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.17.0/cargo_anvil/fn.run_app.html
  [__link3]: https://crates.io/crates/cargo-each
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather

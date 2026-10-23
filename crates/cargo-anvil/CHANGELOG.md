@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.16.0] - 2026-10-23
+## [0.17.0] - 2026-10-23
 
 - ✨ Features
 
@@ -10,6 +10,9 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: validate projected JSON placement
+  - cargo-anvil: sort manifest sections
+  - cargo-anvil: preserve changelog history
   - cargo-anvil: address final review feedback
   - cargo-anvil: preserve legacy retirement scanning
   - cargo-anvil: verify generated JSON regions
@@ -50,6 +53,12 @@
   - Merge origin/main into makolnek-microsoft-json-array-regions
   - Merge origin/main into makolnek-microsoft-json-array-regions
   - Merge remote-tracking branch 'origin/main' into makolnek-microsoft-json-array-regions
+
+## [0.16.0] - 2026-10-23
+
+- ✨ Features
+
+  - cargo-anvil: execute examples during verification ([#286](https://github.com/microsoft/ox-tools/pull/286))
 
 ## [0.15.2] - 2026-10-23
 

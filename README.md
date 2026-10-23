@@ -158,7 +158,7 @@ are also provided by Anvil:
 just anvil-build
 just anvil-build --package cargo-anvil
 just anvil-doc-build --open
-just anvil-examples --run
+just anvil-examples
 just anvil-fmt --fix
 just anvil-miri --package cargo-anvil --example basic
 just anvil-readme --fix
