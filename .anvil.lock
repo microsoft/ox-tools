@@ -137,7 +137,7 @@ checksum = "sha256:efa9fbddbdc4bf4d60add8dcf3a633f37edcb5e73ae9b006d306796a77c6d
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
-checksum = "sha256:f98b826d030c6a0d65528248bab2d3dd12c28d73d31e0ea532fa3c6c3c8b62a7"
+checksum = "sha256:7543e8888ddce02910a7a5dd2884d860edea5812d785b798912f1e36eec8cc27"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"

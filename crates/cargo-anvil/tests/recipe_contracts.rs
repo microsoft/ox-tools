@@ -482,10 +482,6 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         justfile.push_str(
             r#"
 [script("pwsh", "-NoProfile")]
-_anvil-impact-include tier:
-    Write-Output $(if ($env:FAKE_INCLUDE) { $env:FAKE_INCLUDE } else { '--workspace' })
-
-[script("pwsh", "-NoProfile")]
 _anvil-impact-exclude tier:
     Write-Output $(if ($env:FAKE_INCLUDE) { $env:FAKE_INCLUDE } else { '--workspace' })
 
@@ -2907,7 +2903,7 @@ fn doc_test_locked_capability_discovery_rejects_a_stale_lockfile() {
 }
 
 #[test]
-fn external_types_checks_every_library_including_non_publishable_ones() {
+fn external_types_runs_once_per_library_through_cargo_each() {
     if !tools_available() {
         return;
     }
@@ -2925,17 +2921,7 @@ fn external_types_checks_every_library_including_non_publishable_ones() {
     );
     seed_include(tmp.path(), "affected", "--workspace");
     let log = tmp.path().join("cargo.log");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-external-types"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("public-default")),
-            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("public-default")),
-            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("named-registry")),
-        ],
-    );
+    let output = run_just(tmp.path(), &["anvil-external-types"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(
         output.status.success(),
         "library selection failed\nstdout:\n{}\nstderr:\n{}",
