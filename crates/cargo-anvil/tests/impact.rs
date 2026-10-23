@@ -1218,11 +1218,17 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     let root = tmp.path();
     // Inject the checked-in cache directly; neither copy it nor compute impact.
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/msrv-impact-cache");
-    let affected = "--package alpha@0.1.0";
+    let affected = "--workspace --exclude beta";
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
-    fake_cargo(&bin, &log);
+    let metadata = root.join("metadata.json");
+    fs::write(
+        &metadata,
+        r#"{"workspace_members":["a","b"],"packages":[{"id":"a","name":"alpha","version":"0.1.0"},{"id":"b","name":"beta","version":"0.1.0"}]}"#,
+    )
+    .unwrap();
+    fake_cargo_with_metadata(&bin, &log, &metadata);
     let path = path_with_prefix(&bin);
     let run_msrv = || {
         just_cmd(root, &["anvil-msrv-test"])
@@ -1305,7 +1311,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = metadata ]; then cat '{meta}'; exit 0; fi; done\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );

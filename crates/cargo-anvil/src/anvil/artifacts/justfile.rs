@@ -437,7 +437,7 @@ mod tests {
     )]
     #[test]
     fn impact_scoped_checks_propagate_scope_resolution_failures() {
-        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
+        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-";
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
             let lines: Vec<&str> = body.lines().collect();
@@ -508,7 +508,13 @@ mod tests {
     #[test]
     fn impact_recipe_is_defined_and_reuses_shared_helpers() {
         // The single impact building block: snapshot + compute + resolve.
-        for needle in ["anvil-impact:", "_anvil-impact-snapshot:", "_anvil-impact-include tier:"] {
+        for needle in [
+            "anvil-impact:",
+            "_anvil-impact-snapshot:",
+            "_anvil-impact-include tier:",
+            "_anvil-impact-exclude tier:",
+            "_anvil-workspace-exclude +specs:",
+        ] {
             assert!(IMPACT_JUST.contains(needle), "impact.just missing recipe '{needle}'");
         }
         // It orchestrates around the shared helpers rather than duplicating
@@ -563,7 +569,11 @@ mod tests {
             // word. A recipe must resolve exactly one category, never two.
             let calls: Vec<&str> = ["modified", "affected", "required"]
                 .into_iter()
-                .filter(|cat| execution_body.contains(&format!("_anvil-impact-include {cat}")))
+                .filter(|cat| {
+                    ["include", "exclude"]
+                        .iter()
+                        .any(|resolver| execution_body.contains(&format!("_anvil-impact-{resolver} {cat}")))
+                })
                 .collect();
             assert!(
                 calls.len() <= 1,
@@ -579,7 +589,7 @@ mod tests {
                 None => {
                     // Unscoped: no cache dependency, no include call.
                     assert!(
-                        !execution_body.contains("_anvil-impact-include"),
+                        !execution_body.contains("_anvil-impact-include") && !execution_body.contains("_anvil-impact-exclude"),
                         "{path} is declared Unscoped but calls _anvil-impact-include"
                     );
                     assert!(!depends_on_impact, "{path} is declared Unscoped but depends on anvil-impact");
@@ -598,8 +608,8 @@ mod tests {
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
-                        "{path} must capture _anvil-impact-include into a local $include variable"
+                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-"),
+                        "{path} must capture its impact resolver into a local $include variable"
                     );
                 }
             }
