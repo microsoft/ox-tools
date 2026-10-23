@@ -125,8 +125,6 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         exit 0
     }
 
-    # The metadata and compiler-artifact streams must come from the same Cargo
-    # version because Cargo changed package-ID formats in 1.78.
     $metadata = & cargo '+{{ rust_nightly }}' metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil miri: cargo metadata failed'
