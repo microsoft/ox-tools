@@ -1079,12 +1079,16 @@ fn repair_tracked_json_body_for_scan(
     scanner: HostScanner,
     text: &str,
 ) -> Option<String> {
-    if scanner != HostScanner::Json || manifest.region_checksum(host, spec.id.as_str()).is_none() {
+    if scanner != HostScanner::Json {
         return None;
     }
+    manifest.region_checksum(host, spec.id.as_str())?;
     crate::region::find_region(text, spec.id.as_str(), spec.syntax).ok().flatten()?;
     let repaired = crate::region::upsert_region(text, spec.id.as_str(), &spec.body, spec.syntax).ok()?;
-    if repaired == text || scanner.validate_marker_scan(&repaired).is_err() {
+    if repaired == text {
+        return None;
+    }
+    if scanner.validate_marker_scan(&repaired).is_err() {
         return None;
     }
     scanner.find(&repaired, spec.id.as_str(), spec.syntax).ok().flatten()?;
