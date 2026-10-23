@@ -2997,6 +2997,14 @@ mod tests {
             repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Lines, text),
             None
         );
+        let repaired = repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Json, text)
+            .expect("tracked malformed JSON body is replaced with the catalog body");
+        assert!(repaired.contains("\"setting\": true,\n"));
+        assert!(!repaired.contains("\"unterminated"));
+        assert_eq!(
+            repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Json, &repaired),
+            None
+        );
     }
 
     #[test]
