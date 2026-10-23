@@ -3735,6 +3735,7 @@ mod tests {
             if array_first {
                 builder = builder.with_json_array_region(array.clone());
             }
+
             builder = builder.with_artifact(Artifact::region(neighbor.clone()));
             if !array_first {
                 builder = builder.with_json_array_region(array.clone());
@@ -3745,6 +3746,74 @@ mod tests {
             assert!(error.contains("required JSON array entry \"managed\""), "{error}");
             assert!(error.contains("No plan was produced; no files were changed"), "{error}");
         }
+    }
+
+    #[test]
+    fn json_array_required_entries_refuse_neighbor_that_hides_structural_region() {
+        let neighbor = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("neighbor"),
+            body: "// <<< anvil-managed: neighbor\n/*\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let array = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_json_array_region(array)
+            .with_artifact(Artifact::region(neighbor))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: neighbor\n",
+            "    // <<< anvil-managed: neighbor\n",
+            "    // >>> anvil-managed: entries\n",
+            "    \"managed\",\n",
+            "    // <<< anvil-managed: entries\n",
+            "    /* repository */\n",
+            "  ]\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "neighbor", checksum_str(""));
+        manifest.set_region("config.json", "entries", checksum_str("    \"managed\",\n"));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("managed JSON array region \"entries\" is missing after composition"),
+            "{error}"
+        );
     }
 
     #[test]

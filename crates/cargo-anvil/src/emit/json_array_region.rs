@@ -36,6 +36,7 @@ enum JsonValidationCondition {
     ScaffoldMissing,
     SelectedItemNotArray { path: Vec<String> },
     DuplicateProperty { property: String },
+    MissingManagedRegion { id: String },
     RequiredEntryCount { entry: String, count: usize },
 }
 
@@ -62,6 +63,9 @@ impl std::fmt::Display for JsonValidationCondition {
                     f,
                     "JSON object property {property:?} occurs more than once, so array ownership is ambiguous"
                 )
+            }
+            Self::MissingManagedRegion { id } => {
+                write!(f, "managed JSON array region {id:?} is missing after composition")
             }
             Self::RequiredEntryCount { entry, count } => {
                 write!(f, "required JSON array entry {entry:?} occurs {count} times after composition")
@@ -579,7 +583,12 @@ pub(crate) fn validate_required_entries(text: &str, spec: &JsonArrayRegionSpec) 
         .map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?
         .is_none()
     {
-        return Ok(());
+        return Err(validation_refusal(
+            JsonValidationCondition::MissingManagedRegion {
+                id: spec.region.id.as_str().to_owned(),
+            },
+            RefusalRemedy::ArrayDependency,
+        ));
     }
     let parsed = parse(text)?;
     let root = parsed
@@ -958,6 +967,10 @@ mod tests {
                     property: "flag".to_owned(),
                 },
                 "JSON object property \"flag\" occurs more than once, so array ownership is ambiguous",
+            ),
+            (
+                JsonValidationCondition::MissingManagedRegion { id: "entries".to_owned() },
+                "managed JSON array region \"entries\" is missing after composition",
             ),
             (
                 JsonValidationCondition::RequiredEntryCount {
@@ -1654,7 +1667,10 @@ mod tests {
         spec.region.id = RegionId::new("entries");
         spec.region.body = "\"managed\",\n".to_owned();
 
-        validate_required_entries("{\"entries\":[]}", &spec).unwrap();
+        assert_eq!(
+            validation_condition(&validate_required_entries("{\"entries\":[]}", &spec).unwrap_err()),
+            &JsonValidationCondition::MissingManagedRegion { id: "entries".to_owned() }
+        );
 
         let no_root = concat!("// >>> anvil-managed: entries\n", "// <<< anvil-managed: entries\n",);
         assert_eq!(
