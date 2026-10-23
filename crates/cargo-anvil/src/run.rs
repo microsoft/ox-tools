@@ -652,8 +652,7 @@ fn add_historical_array_inputs(
     candidates: &mut std::collections::BTreeMap<String, ArrayFormat>,
 ) -> Result<(), AppError> {
     for key in manifest.regions.keys() {
-        let extension = Path::new(&key.host).extension().and_then(std::ffi::OsStr::to_str);
-        let format = if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("toml")) {
+        let format = if HostScanner::for_path(&key.host) == HostScanner::Toml {
             Some(ArrayFormat::Toml)
         } else if crate::emit::json_array_region::is_json_host(&key.host) && manifest.json_array_paths.contains_key(key) {
             Some(ArrayFormat::Json)
@@ -2181,6 +2180,7 @@ mod tests {
             .build()
             .unwrap();
         let mut hosts = memory_hosts();
+        hosts.texts.insert("config.json".to_owned(), None);
 
         let plan = build_plan_with_hosts(
             Path::new("in-memory-json-array-tests"),
@@ -3876,6 +3876,34 @@ mod tests {
             array_plan(source, &Manifest::default(), &catalog).unwrap_err().to_string(),
             toml_array_plan_refusal("config.toml", &refusal).to_string()
         );
+    }
+
+    #[test]
+    fn toml_array_dotfile_retirement_runs_structural_preflight() {
+        let source = "[plugins]\ndefault = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("dir/.ToML", "entries", checksum_str("\"required\",\n"));
+        let empty = Catalog::builder(test_cli()).build().unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("dir/.ToML", source.to_owned());
+        hosts.newlines.insert("dir/.ToML".to_owned(), "\n");
+        let refusal = crate::emit::toml_array_region::existing_array_paths(source).unwrap_err();
+
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &empty,
+            &mut hosts,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(error, toml_array_plan_refusal("dir/.ToML", &refusal).to_string());
     }
 
     #[test]
