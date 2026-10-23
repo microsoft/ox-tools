@@ -108,7 +108,10 @@ TOML retirement hosts refuse while structural ownership is being inferred.
 Invalid JSON retirement hosts refuse when the lock carries `json_array_path`;
 records without that provenance remain ordinary line-oriented regions.
 Existing live ordinary regions otherwise retain their behavior. Dry runs run
-the same planning checks without writing anything.
+the same planning checks without writing anything. Every projected write is
+rechecked against retained JSON selector provenance before a plan is returned,
+so changing a structural declaration to an ordinary region cannot generate
+markers outside the array that the lock still records.
 
 Whole-file overlap checks resolve both catalog paths and recorded ownership
 paths using the same path resolver as writes, including repeated path separators.

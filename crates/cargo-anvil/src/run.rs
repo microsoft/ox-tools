@@ -326,8 +326,25 @@ fn build_plan_with_hosts(
     plan.set_json_scanner_hosts(retained_scanner_hosts);
 
     validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
+    validate_projected_json_placements(repo_root, manifest, &plan, hosts)?;
 
     Ok(plan)
+}
+
+fn validate_projected_json_placements(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &Plan,
+    hosts: &mut HostTextCache,
+) -> Result<(), AppError> {
+    let projected = plan.projected_manifest(manifest);
+    for (key, path) in &projected.json_array_paths {
+        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
+        crate::emit::json_array_region::validate_recorded_placement(&text, &key.id, path)
+            .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
+    }
+    Ok(())
 }
 
 fn repair_structural_json_markers(
@@ -3388,6 +3405,49 @@ mod tests {
             "  ]\n",
             "}\n",
         ));
+
+        assert!(error.contains("outside its recorded JSON array"), "{error}");
+        assert!(error.contains("No plan was produced; no files were changed"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_reintroduction_refuses_markers_outside_retained_json_array() {
+        let source = "{\"entries\":[]}\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "entries", checksum_str(""));
+        manifest.json_array_paths.insert(
+            crate::manifest::RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: String::new(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-json-array-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(error.contains("outside its recorded JSON array"), "{error}");
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");

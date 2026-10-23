@@ -1729,6 +1729,32 @@ mod tests {
             RefusalRemedy::MisplacedArrayMarkers
         );
 
+        let opens_outside = concat!(
+            "{\n",
+            "  // >>> anvil-managed: entries\n",
+            "  \"entries\": [\n",
+            "    // <<< anvil-managed: entries\n",
+            "  ]\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(opens_outside, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::MisplacedArrayMarkers
+        );
+
+        let closes_outside = concat!(
+            "{\n",
+            "  \"entries\": [\n",
+            "    // >>> anvil-managed: entries\n",
+            "  ],\n",
+            "  // <<< anvil-managed: entries\n",
+            "}\n",
+        );
+        assert_eq!(
+            validate_recorded_placement(closes_outside, "entries", &path).unwrap_err().remedy,
+            RefusalRemedy::MisplacedArrayMarkers
+        );
+
         let split = concat!(
             "{\n",
             "  \"entries\": [\n",
