@@ -6,15 +6,14 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Race coverage rotates the miri-many-seeds window daily by
-# day-of-month: day N -> seeds [2N-1, 2N+1) (2 seeds/day,
-# ~62 seeds/month). Rotating amortizes the seed space across the
-# schedule rather than retesting the same seeds every night; race
-# conditions surface as inter-seed nondeterminism rather than
-# per-seed crashes, so coverage matters more than depth-per-seed.
+# Race coverage rotates a two-seed miri-many-seeds window daily. The UTC
+# day-of-month N maps to N0..N2, yielding 62 distinct seeds over a 31-day
+# month without shell arithmetic. Rotating amortizes the seed space across the
+# schedule rather than retesting the same seeds every night; exact seed numbers
+# matter less than deterministic reproduction and bounded breadth.
 
 # Run Miri tests with race coverage tracking.
-anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-test "race-coverage")
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-profile "race-coverage")
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]

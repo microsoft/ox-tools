@@ -831,15 +831,20 @@ mod tests {
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
             .expect("miri.just is registered in CHECK_FILES");
         for needle in [
-            "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
-            "cargo '+{{ rust_nightly }}' each",
+            "_anvil-miri-profile profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
+            "[env(\"MIRIFLAGS\", anvil_miri_flags)]",
+            "[env(\"RUSTFLAGS\", anvil_miri_rustflags)]",
+            "_anvil-miri-test package=\"\" test_filter=\"\" example=\"\":",
+            "cargo +{{ rust_nightly }} each",
             "--filter 'not metadata:anvil.miri.exclude=true'",
             "--jobs {{ anvil_miri_jobs }}",
             "--keep-going",
             "miri test --package '{cargo-spec}'",
+            "anvil_miri_race_seed_range := anvil_miri_race_day + \"0..\" + anvil_miri_race_day + \"2\"",
         ] {
             assert!(miri.contains(needle), "miri runner is missing '{needle}'");
         }
+        assert!(!miri.contains("[script(\"pwsh\""), "Miri must not require PowerShell");
 
         for (check, profile) in [
             ("miri", "standard"),
@@ -852,17 +857,13 @@ mod tests {
                 .find_map(|(path, body)| path.ends_with(&format!("/{check}.just")).then_some(*body))
                 .unwrap_or_else(|| panic!("{check}.just is registered in CHECK_FILES"));
             let dependency = if check == "miri" {
-                format!("(_anvil-miri-test \"{profile}\" package test example)")
+                format!("(_anvil-miri-profile \"{profile}\" package test example)")
             } else {
-                format!("(_anvil-miri-test \"{profile}\")")
+                format!("(_anvil-miri-profile \"{profile}\")")
             };
             assert!(
                 body.contains(&dependency),
                 "{check}.just must inherit the shared Miri executable runner with its profile"
-            );
-            assert!(
-                !body.contains("& \"{{ just_executable() }}\" _anvil-miri-test"),
-                "{check}.just must not launch the main Miri runner through a nested just process"
             );
         }
     }
@@ -912,7 +913,11 @@ mod tests {
             let policy = *expected
                 .get(stem)
                 .unwrap_or_else(|| panic!("check '{stem}' is missing from EXPECTED_CHECK_POLICY; classify it explicitly"));
-            let execution_body = if body.contains("(_anvil-miri-test \"") { miri_runner } else { body };
+            let execution_body = if body.contains("(_anvil-miri-profile \"") {
+                miri_runner
+            } else {
+                body
+            };
 
             // Parse the package-file selector used by the recipe.
             let calls: Vec<&str> = ["modified", "affected", "required"]

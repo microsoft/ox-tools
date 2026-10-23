@@ -560,6 +560,8 @@ fn miri_profiles_set_their_distinct_environment() {
             .current_dir(root)
             .env("PATH", prepend_path(&fake_bin))
             .env("ANVIL_IMPACT", "off")
+            .env("MIRIFLAGS", "-Zmiri-disable-isolation")
+            .env("RUSTFLAGS", "--cfg inherited_miri_test")
             .env("FAKE_CARGO_LOG", &log)
             .output()
             .unwrap();
@@ -570,8 +572,26 @@ fn miri_profiles_set_their_distinct_environment() {
         );
         let invocation = std::fs::read_to_string(log).unwrap();
         assert!(invocation.contains(miri_flags), "{invocation}");
+        assert!(invocation.contains("-Zmiri-disable-isolation"), "{invocation}");
         assert!(invocation.contains(rust_flags), "{invocation}");
+        assert!(invocation.contains("--cfg inherited_miri_test"), "{invocation}");
         assert!(invocation.contains("miri test"), "{invocation}");
+    }
+
+    let range = run_just(
+        root,
+        &["--set", "anvil_miri_race_day", "7", "--evaluate", "anvil_miri_race_seed_range"],
+        &[],
+    );
+    assert!(range.status.success(), "stderr:\n{}", String::from_utf8_lossy(&range.stderr));
+    assert_eq!(String::from_utf8(range.stdout).unwrap().trim(), "70..72");
+
+    for args in [
+        ["_anvil-miri-test", "fixture", "test-name", "example-name"],
+        ["_anvil-miri-test", "", "", "example-name"],
+    ] {
+        let invalid = run_just(root, &args, &[("ANVIL_IMPACT", "off")]);
+        assert!(!invalid.status.success(), "{args:?} must fail");
     }
 }
 
