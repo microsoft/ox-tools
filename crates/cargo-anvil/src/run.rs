@@ -4547,6 +4547,11 @@ mod tests {
             "Refused JSON array host config.json: problem. No plan was produced; no files were changed. \
              This file does not parse as it stands, before this region is written, so no run can write it until the existing JSON is repaired."
         );
+        let planned = json_array_plan("{", &Manifest::default(), &json_array_catalog())
+            .unwrap_err()
+            .to_string();
+        assert!(planned.contains("until the existing JSON is repaired"), "{planned}");
+        assert!(!planned.contains("existing TOML"), "{planned}");
         let dependency = crate::emit::managed_region::ManagedRegionRefusal::new(app_err!("problem"), RefusalRemedy::BetweenManagedRegions);
         assert!(
             json_array_plan_refusal("config.json", &dependency)
