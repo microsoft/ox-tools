@@ -43,6 +43,8 @@ allow = [<CRLF>
     "Zlib",<CRLF>
 ]<CRLF>
 confidence-threshold = 0.93<CRLF>
+# The allow list is shared across repositories, so it may intentionally<CRLF>
+# include licenses absent from this repository's dependency graph.<CRLF>
 unused-allowed-license = "allow"<CRLF>
 # <<< anvil-managed: anvil-deny-licenses<CRLF>
 <CRLF>
