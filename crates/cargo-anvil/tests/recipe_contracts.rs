@@ -830,9 +830,11 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
         assert_eq!(
             fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
             [
-                format!("+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{spec}} --all-targets --locked"),
                 format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{spec}} --all-targets --no-default-features --locked"
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --locked"
+                ),
+                format!(
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --no-default-features --locked"
                 ),
             ],
             "both configurations must check packages independently, with both Cargo processes selecting stable"
@@ -869,8 +871,8 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
     assert_eq!(
         fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
         [
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {spec} --all-targets --locked",
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {spec} --all-targets --no-default-features --locked",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --locked",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --no-default-features --locked",
         ]
     );
 }
