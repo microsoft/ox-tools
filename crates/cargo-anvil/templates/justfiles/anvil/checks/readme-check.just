@@ -37,7 +37,6 @@
 [script("pwsh", "-NoProfile")]
 _anvil-readme mode: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    $stableArgs = {{_anvil_stable_toolchain_args}}
     $action = '{{ mode }}'
     if ($action -notin @('generate', 'check')) {
         [Console]::Error.WriteLine("anvil-readme: invalid mode '$action'; expected 'generate' or 'check'")
@@ -56,7 +55,7 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
     # Unscoped: a change to the workspace-level README template is a repo-level
     # input cargo-delta cannot map to a package, so this check always runs the
     # full eligible-crate set rather than an impact subset.
-    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error "${prefix}: cargo metadata failed"
         exit $LASTEXITCODE
@@ -102,7 +101,7 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
             $args = @('doc2readme', $target)
             if ($check) { $args += '--check' }
             if ($relTemplate) { $args += @('--template', $relTemplate) }
-            & cargo @stableArgs @args
+            & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} @args
             if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
         } finally {
             Pop-Location
@@ -111,18 +110,16 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
     if ($hadFailure) { exit 1 }
 
 # Check README files, or regenerate them with `--fix`.
-[group("anvil")]
 [arg("fix", long, value="true")]
 anvil-readme fix="false": (_anvil-readme if fix == "true" { "generate" } else { "check" })
 
 # Check that crate README files are up to date.
-[group("anvil")]
 anvil-readme-check: (_anvil-readme "check")
 
 # Install prerequisites for the `anvil-readme-check` recipe.
-[private]
-anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-install installer)
+[group("anvil-setup")]
+anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-readme-check` recipe.
-[private]
-anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs
+[group("anvil-setup")]
+anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs anvil-tool-cargo-each-validate-prereqs

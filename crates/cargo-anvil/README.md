@@ -86,8 +86,8 @@ switch from another tool built on the cargo-anvil engine.
 
 The generated command interface uses
 [`just`][__link0], a cross-platform command runner.
-A repository’s `Justfile` imports the generated recipes under
-`justfiles/anvil/`; each recipe invokes ordinary Rust and Cargo tools.
+A repository’s `Justfile` imports the `.anvil/anvil.just` hub, which loads
+generated checks, setup, and container recipe files.
 
 Run the complete pull-request tier locally:
 
@@ -107,7 +107,7 @@ Other useful entry points are:
 just anvil-build
 just anvil-build --package my-crate
 just anvil-doc-build --open
-just anvil-examples
+just anvil-examples --run
 just anvil-fmt --fix
 just anvil-miri --package my-crate --example basic
 just anvil-readme --fix
@@ -129,7 +129,7 @@ the generated cloud workflow:
 * **fast checks** cover formatting, Clippy, documentation, dependency
   policy, spelling, README drift, API compatibility, and metadata;
 * **tests and coverage** run tests, documentation tests, coverage gates,
-  example compilation, and execution of selected examples;
+  and example compilation;
 * **MSRV tests** execute affected tests with the repository’s declared
   minimum supported Rust version;
 * **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
@@ -192,19 +192,18 @@ above compose these recipes into the default policy:
   [`cargo-audit`][__link12],
   [`cargo-aprz`][__link13],
   [`cargo-udeps`][__link14],
-  [`cargo-semver-checks`][__link15], and
-  [`cargo-check-external-types`][__link16].
+  [`cargo-check-external-types`][__link15].
 * **Tests and coverage:** tests under the declared MSRV, coverage with
-  [`cargo-llvm-cov`][__link17] and
-  [`cargo-coverage-gate`][__link18],
-  documentation tests, example compilation, and execution of selected examples.
-* **Runtime analysis:** [`Miri`][__link19],
-  [`cargo-careful`][__link20],
-  [`Loom`][__link21], and
-  [`Bolero`][__link22].
+  [`cargo-llvm-cov`][__link16] and
+  [`cargo-coverage-gate`][__link17],
+  documentation tests, and example compilation or optional execution.
+* **Runtime analysis:** [`Miri`][__link18],
+  [`cargo-careful`][__link19],
+  [`Loom`][__link20], and
+  [`Bolero`][__link21].
 * **Broader validation:** diff-scoped and full
-  [`cargo-mutants`][__link23] runs,
-  [`cargo-hack`][__link24] feature-powerset
+  [`cargo-mutants`][__link22] runs,
+  [`cargo-hack`][__link23] feature-powerset
   checks, and benchmark compilation.
 
 `docs/design/checks.md` records the exact commands, impact scope, feature
@@ -219,7 +218,7 @@ the code it governs and lets the same configuration work with Anvil,
 direct Cargo commands, and editor integrations.
 
 cargo-anvil updates owned recipe and workflow files, plus marked regions in
-shared configuration files. Checksums in `.anvil.lock` record the generated
+shared configuration files. Checksums in `.anvil/manifest.toml` record the generated
 state. Repository configuration outside `anvil-managed` regions is
 preserved. If generated content is edited directly, cargo-anvil preserves
 the edit and writes changed catalog content to an `.anvil-proposed` sibling
@@ -251,42 +250,18 @@ dictionary format expected by cargo-spellcheck.
 
 #### Coverage
 
-[`cargo-coverage-gate`][__link25]
+[`cargo-coverage-gate`][__link24]
 metadata controls workspace and package thresholds, target-specific policy,
-and intentional exclusions. The generated check delegates both supported
-feature configurations to `cargo coverage-gate run`, which filters coverage
-to released Cargo library and binary surfaces before atomically publishing
-`target/coverage/lcov-all-features.info` and
-`target/coverage/lcov-no-default.info`. The local gate and hosted reporting
-consume those exact files, so provably test-only regions such as
-`#[cfg(test)]` modules and their assertion guards or helpers need no
-`coverage(off)` annotations merely to stay out of production coverage.
-Feature-exposed helpers such as `cfg(feature = "test-util")` remain part of
-the released surface and are still counted. Hosted coverage remains
-reporting rather than the source of the verdict.
-
-Impact selection controls which packages are tested and gated, while the
-released-surface source index validates every target in the workspace.
-Unsupported or ambiguous module layouts anywhere in the workspace therefore
-fail closed. Adoption may require semantics-preserving changes to test
-fixtures so their source remains available to parser or discovery tests
-without mounting an unsupported layout as a Cargo target.
-
-The generated recipe intentionally uses the invoking rustc host target.
-`cargo coverage-gate run` passes that target explicitly, overriding
-`CARGO_BUILD_TARGET` and Cargo `build.target`; each Anvil matrix leg measures
-its native target. Repositories that require non-host coverage need a native
-runner for that target or a documented repository-specific check until the
-catalog supports explicit coverage-target configuration.
+and intentional exclusions. Coverage enforcement is local to the generated
+check; a hosted coverage service is optional reporting rather than the
+source of the verdict.
 
 #### Miri
 
-Anvil compiles the selected scope together once with all features enabled,
-preserving Cargo feature unification, and runs the resulting Miri test
-executables concurrently.
-Each executable is one Cargo test target containing one or more libtest
-tests.
-`ANVIL_MIRI_JOBS` overrides the default worker count. Local callers can use
+Anvil uses cargo-each to run Miri once per selected package with all features
+enabled. `ANVIL_MIRI_JOBS` controls concurrent package processes while
+cargo-each provides deterministic output, process-tree cleanup, and
+aggregate failure. Local callers can use
 `--package` to override impact scope, `--test` to select libtest names, or
 `--example` with `--package` to run one example instead of the test suite.
 
@@ -341,18 +316,15 @@ declares Loom support but exposes no matching test target.
 
 #### Examples
 
-`anvil-examples` always builds and runs selected examples, whether invoked
-directly or through PR and scheduled tests. Runs use `ANVIL_EXAMPLE=1`, no
-application arguments, and a 30-second per-example timeout. Nonzero exits
-and timeouts fail the check. Unfiltered runs skip interactive, credentialed,
-service-dependent, or otherwise unsuitable examples declared by their package:
+`anvil-examples` always compiles selected examples. An unfiltered
+`--run` skips interactive, credentialed, or otherwise unsuitable examples
+declared by their package:
 
 ```toml
 [package.metadata.anvil.examples]
 no-run = ["interactive-demo", "needs-production-credentials"]
 ```
 
-Excluded examples still compile.
 Explicit `--package` and `--example` selection overrides the default
 exclusion because the caller has deliberately chosen that example.
 
@@ -374,13 +346,6 @@ just anvil-container just anvil-clippy
 just anvil-container cargo build
 ```
 
-`GITHUB_TOKEN` is not forwarded by default, and the launcher never acquires
-host GitHub CLI credentials. To use an explicitly supplied token, run
-`just anvil-container --github-token just anvil-aprz` (or omit the command
-for an authenticated shell). A missing token fails before engine resolution.
-Only use credentials with reviewed, trusted code: recipes and hooks run on
-the host, and opt-in prevents accidental exposure, not malicious code.
-
 The image contains the same tool versions used by the generated checks.
 Its tag is derived from the Dockerfile and its ignore file, the generated
 recipe tree, the declared root MSRV, and a root `rust-toolchain` file where
@@ -395,9 +360,9 @@ customization.
 ### Building another tool on the engine
 
 The crate also exposes the catalog engine used by `cargo-anvil`. A
-downstream tool can start from [`Catalog::anvil`][__link26], add, replace, or remove
-[`Artifact`][__link27] values, select its own CLI identity, and pass the result to
-[`run_app`][__link28]:
+downstream tool can start from [`Catalog::anvil`][__link25], add, replace, or remove
+[`Artifact`][__link26] values, select its own CLI identity, and pass the result to
+[`run_app`][__link27]:
 
 ```rust
 use std::process::ExitCode;
@@ -408,8 +373,9 @@ fn catalog() -> Catalog {
     Catalog::anvil()
         .into_builder()
         .subcommand("myforge")
-        .with_artifact(Artifact::owned_file(
-            "justfiles/anvil/extra.just",
+        .with_artifact(Artifact::owned_file_section(
+            ".anvil/checks.just",
+            "recipe:myforge-extra",
             "# generated by myforge\n",
         ))
         .without_artifact(artifacts::region::clippy())
@@ -434,7 +400,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbExZV6pDtcbYb97iufUocbo0bFyAWg29fSoYbXVvSuxITYxRhZIGDa2NhcmdvLWFudmlsZjAuMTkuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbmg9MFr_rA1EbzS0Vwh49-70bEfCLrmwyZoEbS5EnDEjACbNhZIGDa2NhcmdvLWFudmlsZjAuMTMuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -442,21 +408,20 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link12]: https://crates.io/crates/cargo-audit
  [__link13]: https://crates.io/crates/cargo-aprz
  [__link14]: https://crates.io/crates/cargo-udeps
- [__link15]: https://crates.io/crates/cargo-semver-checks
- [__link16]: https://crates.io/crates/cargo-check-external-types
- [__link17]: https://crates.io/crates/cargo-llvm-cov
- [__link18]: https://crates.io/crates/cargo-coverage-gate
- [__link19]: https://github.com/rust-lang/miri
+ [__link15]: https://crates.io/crates/cargo-check-external-types
+ [__link16]: https://crates.io/crates/cargo-llvm-cov
+ [__link17]: https://crates.io/crates/cargo-coverage-gate
+ [__link18]: https://github.com/rust-lang/miri
+ [__link19]: https://crates.io/crates/cargo-careful
  [__link2]: https://doc.rust-lang.org/clippy/
- [__link20]: https://crates.io/crates/cargo-careful
- [__link21]: https://crates.io/crates/loom
- [__link22]: https://crates.io/crates/bolero
- [__link23]: https://mutants.rs/
- [__link24]: https://crates.io/crates/cargo-hack
- [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.19.0/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.19.0/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.19.0/cargo_anvil/fn.run_app.html
+ [__link20]: https://crates.io/crates/loom
+ [__link21]: https://crates.io/crates/bolero
+ [__link22]: https://mutants.rs/
+ [__link23]: https://crates.io/crates/cargo-hack
+ [__link24]: https://crates.io/crates/cargo-coverage-gate
+ [__link25]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/?search=Catalog::anvil
+ [__link26]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/?search=Artifact
+ [__link27]: https://docs.rs/cargo-anvil/0.13.0/cargo_anvil/fn.run_app.html
  [__link3]: https://crates.io/crates/cargo-each
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather

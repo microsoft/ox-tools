@@ -9,21 +9,13 @@
 # Modified tier.
 
 # Check that workspace packages compile without default features.
-[group("anvil")]
-[script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-default-features: no modified packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} ensure-no-default-features
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} ensure-no-default-features
 
 # Install prerequisites for the `anvil-ensure-no-default-features` recipe.
-[private]
-anvil-ensure-no-default-features-setup installer="install": (anvil-tool-cargo-ensure-no-default-features-install installer)
+[group("anvil-setup")]
+anvil-ensure-no-default-features-setup installer="install": (anvil-tool-cargo-ensure-no-default-features-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-ensure-no-default-features` recipe.
-[private]
-anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-default-features-validate-prereqs
+[group("anvil-setup")]
+anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-default-features-validate-prereqs anvil-tool-cargo-each-validate-prereqs

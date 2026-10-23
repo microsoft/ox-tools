@@ -79,7 +79,7 @@ stages:
     dependsOn: [impact]
     jobs:
       # Cross-OS because pr-fast contains compile-sensitive checks
-      # (clippy, doc-build, udeps, semver-check, external-types) whose
+      # (clippy, doc-build, udeps, external-types) whose
       # results can differ across host OS for crates that use
       # #[cfg(target_os = ...)] gating.
       - template: steps/job.yml
@@ -92,16 +92,6 @@ stages:
               path: target/anvil/impact
           steps:
             - template: steps/pr-fast.yml
-            # Advisory PR comments. Recipes that surface non-blocking findings
-            # (e.g. cargo-semver-checks) write a markdown body to
-            # `target/anvil/comments/<name>.md` and exit 0; this step turns
-            # presence/absence of those files into upserts/closures of a
-            # sticky PR comment via the ADO REST API. Runs on the canonical
-            # Linux leg only so the Linux/Windows matrix doesn't race on the
-            # same thread. Skipped (silently) when the build identity lacks
-            # "Contribute to pull requests" so adopters who haven't opted in
-            # to write permissions aren't broken.
-            - template: steps/advisory-comments.yml
       - template: steps/job.yml
         parameters:
           name: windows

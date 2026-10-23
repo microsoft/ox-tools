@@ -342,7 +342,7 @@ impl Plan {
         })
     }
 
-    /// Record whether applying this plan would change `.anvil.lock`.
+    /// Record whether applying this plan would change `.anvil/manifest.toml`.
     pub(crate) fn set_manifest_update_required(&mut self, required: bool) {
         self.manifest_update_required = required;
     }
@@ -415,7 +415,7 @@ impl Plan {
 
         if self.manifest_update_required {
             let _ = writeln!(out, "Manifest update required: 1 item(s)");
-            let _ = writeln!(out, "  - .anvil.lock");
+            let _ = writeln!(out, "  - .anvil/manifest.toml");
         }
         if !in_syncs.is_empty() {
             let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
@@ -471,7 +471,7 @@ impl Plan {
     /// Apply only the owned-file and managed-region changes.
     ///
     /// Manifest projection is deliberately separate so dry-run and real
-    /// application calculate the same next `.anvil.lock`.
+    /// application calculate the same next `.anvil/manifest.toml`.
     pub(crate) fn apply_files(&self, repo_root: &Path) -> Result<(), AppError> {
         self.apply_files_with(
             repo_root,
@@ -997,7 +997,7 @@ mod tests {
 
         assert!(plan.has_changes());
         assert_eq!(plan.dry_run_exit_code(), 1);
-        assert!(plan.summary(None).contains(".anvil.lock"));
+        assert!(plan.summary(None).contains(".anvil/manifest.toml"));
     }
 
     #[test]

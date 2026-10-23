@@ -14,21 +14,13 @@
 # rustup component; same reasoning as fmt for the require.
 
 # Lint affected workspace packages with Clippy.
-[group("anvil")]
-[script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' --all-targets --all-features --locked -- -D warnings
 
 # Install prerequisites for the `anvil-clippy` recipe.
-[private]
-anvil-clippy-setup installer="install": anvil-component-default-clippy-install
+[group("anvil-setup")]
+anvil-clippy-setup installer="install": (anvil-component-default-clippy-install installer)
 
 # Validate prerequisites for the `anvil-clippy` recipe.
-[private]
-anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
+[group("anvil-setup")]
+anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs anvil-tool-cargo-each-validate-prereqs
