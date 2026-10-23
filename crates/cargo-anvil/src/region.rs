@@ -3689,6 +3689,12 @@ mod tests {
         assert_eq!(trim_leading_blank_lines("\tvalue"), "\tvalue");
     }
 
+    #[test]
+    fn json_scan_handles_escaped_crlf_and_bare_cr_prefixes() {
+        validate_json_comment_scan("\"escaped\\\r\nvalue\"").unwrap();
+        assert_eq!(leading_newline_len("\rvalue"), 1);
+    }
+
     // Marker parsing, repair, and placement contracts.
 
     #[test]

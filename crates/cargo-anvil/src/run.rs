@@ -2968,6 +2968,34 @@ mod tests {
     }
 
     #[test]
+    fn tracked_json_body_repair_requires_json_scanning_and_manifest_ownership() {
+        let spec = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"setting\": true,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let text = concat!(
+            "{\n",
+            "// >>> anvil-managed: settings\n",
+            "\"unterminated\n",
+            "// <<< anvil-managed: settings\n",
+            "}\n",
+        );
+
+        assert_eq!(
+            repair_tracked_json_body_for_scan(&Manifest::default(), "config.json", &spec, HostScanner::Json, text),
+            None
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("\"setting\": false,\n"));
+        assert_eq!(
+            repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Lines, text),
+            None
+        );
+    }
+
+    #[test]
     fn retained_json_scanner_host_refuses_hash_comment_regions() {
         let region = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),
