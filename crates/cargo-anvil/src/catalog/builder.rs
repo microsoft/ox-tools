@@ -890,7 +890,7 @@ mod tests {
         });
 
         assert_eq!(
-            canonical_repr(&region),
+            canonical_repr(&region, None),
             format!("region{SEP}path:dirs.proj{SEP}anvil-cloudbuild-projects{SEP}xml{SEP}<Project Include=\"src/demo\" />\n")
         );
     }

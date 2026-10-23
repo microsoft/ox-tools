@@ -695,19 +695,10 @@ mod tests {
         ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
     )]
     #[test]
-    fn checks_fail_closed_and_delegate_coverage_safety() {
+    fn checks_fail_closed_and_preserve_opted_out_tests() {
         let checks = all_check_bodies();
         for needle in [
             "${prefix}: cargo metadata failed",
-            "anvil-llvm-cov: no affected packages; skipping",
-            "coverage-gate run @packageArgs @collectionArgs",
-            "'--configuration', 'all-features'",
-            "'--configuration', 'no-default-features'",
-            "'--coverage-dir', 'target/coverage'",
-            "'--no-coverage-target', 'aarch64-pc-windows-msvc'",
-            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-            "could not resolve the cargo-careful executable",
-            "anvil-mutants-full: aarch64-pc-windows-msvc",
             "coverage-gate {{ anvil_explicit_package_args }} run",
             "mutants_command_prefix",
         ] {
@@ -830,7 +821,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(scoped, 20, "every direct impact-scoped check must be covered");
+        assert_eq!(scoped, 21, "every direct impact-scoped check must be covered");
     }
 
     #[test]
@@ -842,10 +833,10 @@ mod tests {
         for needle in [
             "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
             "cargo '+{{ rust_nightly }}' each",
-            "--exclude-filter 'metadata:anvil.miri.exclude=true'",
+            "--filter 'not metadata:anvil.miri.exclude=true'",
             "--jobs {{ anvil_miri_jobs }}",
             "--keep-going",
-            "miri test --package '{spec}'",
+            "miri test --package '{cargo-spec}'",
         ] {
             assert!(miri.contains(needle), "miri runner is missing '{needle}'");
         }
@@ -1196,22 +1187,6 @@ mod tests {
                 "cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}'"
             ),
             "stable fallback must delegate workspace rust-version resolution to cargo-each"
-        );
-        assert!(
-            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}"#),
-            "the bolero installer must invoke the generated just executable for its core helper"
-        );
-        assert!(
-            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}"#),
-            "the mutants installer must invoke the generated just executable for its core helper"
-        );
-        assert!(
-            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-bolero {{cargo_bolero_version}}"#),
-            "the bolero prerequisite check must invoke the generated just executable"
-        );
-        assert!(
-            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}"#),
-            "the mutants prerequisite check must invoke the generated just executable"
         );
         assert!(
             TOOLS_JUST.contains("bolero_command_prefix"),

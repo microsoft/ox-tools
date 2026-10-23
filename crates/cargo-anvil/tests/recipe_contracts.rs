@@ -232,9 +232,20 @@ fn common_checks_are_direct_cargo_each_invocations() {
         "cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}'",
         "cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{packages}'",
         "cargo +{{ rust_nightly_external_types }} each {{ anvil_affected_selection }} --filter target-kind:lib",
-        "cargo each {{ anvil_affected_selection }} --each-target test --target-required-feature loom",
+        "cargo each {{ anvil_affected_selection }} --filter doctest -- cargo {{ anvil_stable_toolchain_arg }} test --doc --package '{cargo-spec}'",
+        "cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package",
+        "--each-target example --target-filter",
+        "not name-in-metadata:anvil.examples.no-run",
+        "--timeout {{ timeout }}s --keep-going",
     ] {
         assert!(recipes.contains(command), "missing direct command shape: {command}");
+    }
+    for retired in [
+        "_anvil-examples-run",
+        "--target-required-feature",
+        "anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact\n    $ErrorActionPreference",
+    ] {
+        assert!(!recipes.contains(retired), "retired PowerShell selection survived: {retired}");
     }
 }
 
@@ -347,7 +358,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_aprz_version := \"1.2.0\"",
         "cargo_coverage_gate_version := \"0.6.0\"",
         "cargo_delta_version := \"0.4.0\"",
-        "cargo_each_version := \"0.4.0\"",
+        "cargo_each_version := \"0.6.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }
@@ -421,153 +432,6 @@ fn shell_scripts_are_limited_to_domain_exceptions() {
     ] {
         assert!(!recipes.contains(retired), "retired helper survived: {retired}");
     }
-}
-
-#[test]
-fn doc_tests_select_only_doctest_capable_packages() {
-    if !Command::new("pwsh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        return;
-    }
-
-    let catalog = Catalog::anvil()
-        .into_builder()
-        .replace_artifact(
-            cargo_anvil::artifacts::justfile::recipe("anvil-doc-test-validate-prereqs")
-                .unwrap()
-                .with_body("anvil-doc-test-validate-prereqs:\n"),
-        )
-        .build()
-        .unwrap();
-    let generated = generated_with_catalog(&catalog);
-    let root = generated.temp.path();
-    let impact = root.join("impact");
-    std::fs::create_dir_all(&impact).unwrap();
-    write(
-        &impact.join("affected.packages"),
-        "fixture@0.1.0\nbin-only@0.1.0\nmacro-package@0.1.0\n",
-    );
-    let log = root.join("cargo.log");
-    let fake_bin = install_fake_cargo(root);
-    let output = Command::new("just")
-        .arg("anvil-doc-test")
-        .current_dir(root)
-        .env("PATH", prepend_path(&fake_bin))
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env("ANVIL_IMPACT", "consume")
-        .env("ANVIL_IMPACT_INPUT_DIR", &impact)
-        .env("FAKE_CARGO_LOG", &log)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "doctest selection failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let commands = std::fs::read_to_string(&log).unwrap();
-    let doc_commands = commands.lines().filter(|line| line.contains("test --doc")).collect::<Vec<_>>();
-    assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
-    for command in doc_commands {
-        assert!(
-            command.contains("--package fixture@0.1.0"),
-            "library package was dropped:\n{command}"
-        );
-        assert!(
-            command.contains("--package macro-package@0.1.0"),
-            "proc-macro package was dropped:\n{command}"
-        );
-        assert!(
-            !command.contains("bin-only"),
-            "bin-only package reached cargo test --doc:\n{command}"
-        );
-    }
-
-    std::fs::remove_file(&log).unwrap();
-    write(&impact.join("affected.packages"), "bin-only@0.1.0\n");
-    let skipped = Command::new("just")
-        .arg("anvil-doc-test")
-        .current_dir(root)
-        .env("PATH", prepend_path(&fake_bin))
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env("ANVIL_IMPACT", "consume")
-        .env("ANVIL_IMPACT_INPUT_DIR", &impact)
-        .env("FAKE_CARGO_LOG", &log)
-        .output()
-        .unwrap();
-    assert!(skipped.status.success());
-    assert!(
-        String::from_utf8_lossy(&skipped.stdout).contains("no affected doctest-capable packages"),
-        "skip reason missing:\n{}",
-        String::from_utf8_lossy(&skipped.stdout)
-    );
-    assert!(!log.exists(), "bin-only selection must not invoke cargo test --doc");
-}
-
-#[test]
-fn loom_rejects_declared_support_without_a_loom_target() {
-    if !Command::new("pwsh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        return;
-    }
-
-    let catalog = Catalog::anvil()
-        .into_builder()
-        .replace_artifact(
-            cargo_anvil::artifacts::justfile::recipe("anvil-loom-validate-prereqs")
-                .unwrap()
-                .with_body("anvil-loom-validate-prereqs:\n"),
-        )
-        .build()
-        .unwrap();
-    let generated = generated_with_catalog(&catalog);
-    let root = generated.temp.path();
-    let fake_bin = install_fake_cargo(root);
-    let missing_target = r#"{"packages":[{"name":"fixture","version":"0.1.0","features":{"loom":[]},"dependencies":[],"targets":[{"name":"ordinary","kind":["test"],"required-features":[]}]}]}"#;
-    let rejected = Command::new("just")
-        .arg("anvil-loom")
-        .current_dir(root)
-        .env("PATH", prepend_path(&fake_bin))
-        .env("ANVIL_IMPACT", "off")
-        .env("FAKE_CARGO_METADATA", missing_target)
-        .output()
-        .unwrap();
-    assert!(!rejected.status.success());
-    let diagnostic = format!(
-        "{}{}",
-        String::from_utf8_lossy(&rejected.stdout),
-        String::from_utf8_lossy(&rejected.stderr)
-    );
-    assert!(diagnostic.contains("fixture@0.1.0"), "{diagnostic}");
-    assert!(diagnostic.contains("required-features"), "{diagnostic}");
-
-    let valid_target = r#"{"packages":[{"name":"fixture","version":"0.1.0","features":{"loom":[]},"dependencies":[],"targets":[{"name":"loom","kind":["test"],"required-features":["loom"]}]}]}"#;
-    let log = root.join("loom.log");
-    let accepted = Command::new("just")
-        .arg("anvil-loom")
-        .current_dir(root)
-        .env("PATH", prepend_path(&fake_bin))
-        .env("ANVIL_IMPACT", "off")
-        .env("FAKE_CARGO_METADATA", valid_target)
-        .env("FAKE_CARGO_LOG", &log)
-        .output()
-        .unwrap();
-    assert!(
-        accepted.status.success(),
-        "valid Loom target failed:\n{}",
-        String::from_utf8_lossy(&accepted.stderr)
-    );
-    let invocation = std::fs::read_to_string(log).unwrap();
-    assert!(
-        invocation.contains("--each-target test --target-required-feature loom"),
-        "{invocation}"
-    );
 }
 
 #[test]
@@ -653,77 +517,6 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
     let diff = std::fs::read_to_string(root.join("anvil-mutants-diff.diff")).unwrap();
     assert!(diff.contains("committed"), "{diff}");
     assert!(diff.contains("uncommitted"), "{diff}");
-}
-
-#[test]
-fn examples_honor_default_exclusions_and_explicit_selection() {
-    if !Command::new("pwsh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        return;
-    }
-
-    let catalog = Catalog::anvil()
-        .into_builder()
-        .replace_artifact(
-            cargo_anvil::artifacts::justfile::recipe("anvil-examples-validate-prereqs")
-                .unwrap()
-                .with_body("anvil-examples-validate-prereqs:\n"),
-        )
-        .build()
-        .unwrap();
-    let generated = generated_with_catalog(&catalog);
-    let root = generated.temp.path();
-    let fake_bin = install_fake_cargo(root);
-    let metadata = r#"{"packages":[{"name":"fixture","version":"0.1.0","metadata":{"anvil":{"examples":{"no-run":["blocked"]}}},"targets":[{"name":"ok","kind":["example"]},{"name":"blocked","kind":["example"]}]}]}"#;
-    let default_log = root.join("examples-default.log");
-    let default_run = Command::new("just")
-        .args(["anvil-examples", "--run"])
-        .current_dir(root)
-        .env("PATH", prepend_path(&fake_bin))
-        .env("ANVIL_IMPACT", "off")
-        .env("FAKE_CARGO_METADATA", metadata)
-        .env("FAKE_CARGO_LOG", &default_log)
-        .output()
-        .unwrap();
-    assert!(
-        default_run.status.success(),
-        "default example execution failed:\n{}",
-        String::from_utf8_lossy(&default_run.stderr)
-    );
-    let default_calls = std::fs::read_to_string(default_log).unwrap();
-    let run_calls = default_calls.lines().filter(|line| line.contains(" run ")).collect::<Vec<_>>();
-    assert_eq!(run_calls.len(), 1, "{default_calls}");
-    assert!(
-        run_calls[0].contains("--example ok"),
-        "eligible example was not run:\n{default_calls}"
-    );
-    assert!(!run_calls[0].contains("blocked"), "excluded example was run:\n{default_calls}");
-
-    let explicit_log = root.join("examples-explicit.log");
-    let explicit = Command::new("just")
-        .args(["anvil-examples", "--run", "--package", "fixture", "--example", "blocked"])
-        .current_dir(root)
-        .env("PATH", prepend_path(&fake_bin))
-        .env("ANVIL_IMPACT", "off")
-        .env("FAKE_CARGO_METADATA", metadata)
-        .env("FAKE_CARGO_LOG", &explicit_log)
-        .output()
-        .unwrap();
-    assert!(
-        explicit.status.success(),
-        "explicit example execution failed:\n{}",
-        String::from_utf8_lossy(&explicit.stderr)
-    );
-    let explicit_calls = std::fs::read_to_string(explicit_log).unwrap();
-    assert!(
-        explicit_calls
-            .lines()
-            .any(|line| line.contains(" run ") && line.contains("--example blocked")),
-        "explicit selection must override the default exclusion:\n{explicit_calls}"
-    );
 }
 
 #[test]

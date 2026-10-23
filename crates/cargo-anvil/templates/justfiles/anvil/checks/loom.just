@@ -36,8 +36,8 @@
 # Anvil does not impose a global exploration bound: each model owns its
 # topology and must remain tractable under exhaustive exploration.
 #
-# Fail-loud guard: a crate that *declares* loom support -- a `loom`
-# feature or a `cfg(loom)`-gated dependency -- but exposes no
+# Fail-loud guard: a crate that declares Loom support through a `loom`
+# feature but exposes no
 # `required-features = ["loom"]` test target is almost certainly a
 # regression (renamed/removed target), so we error rather than silently
 # skip it. When no crate ships a loom target (the common case) the recipe
@@ -49,77 +49,8 @@
 # invocations cleanly on both pwsh/bash.
 
 # Run Loom concurrency tests for affected workspace packages.
-[script("pwsh", "-NoProfile")]
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $selected = $null
-    if ('{{ anvil_impact_mode }}' -ne 'off') {
-        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
-        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
-            throw "anvil-loom: missing impact package file $packageFile"
-        }
-        $selected = [System.Collections.Generic.HashSet[string]]::new(
-            [System.StringComparer]::Ordinal
-        )
-        foreach ($spec in Get-Content -LiteralPath $packageFile) {
-            if ($spec) { $selected.Add($spec) | Out-Null }
-        }
-        if ($selected.Count -eq 0) {
-            Write-Host 'anvil-loom: no affected packages; skipping'
-            exit 0
-        }
-    }
-    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-loom: cargo metadata failed'; exit $LASTEXITCODE }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-loom: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    $workspacePackages = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal
-    )
-    foreach ($package in $meta.packages) {
-        $workspacePackages.Add("$($package.name)@$($package.version)") | Out-Null
-    }
-    if ($null -ne $selected) {
-        foreach ($spec in $selected) {
-            if (-not $workspacePackages.Contains($spec)) {
-                throw "anvil-loom: impact package spec '$spec' does not identify a workspace member"
-            }
-        }
-    }
-    $loomTargetPackages = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal
-    )
-    $declarers = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal
-    )
-    foreach ($package in $meta.packages) {
-        $spec = "$($package.name)@$($package.version)"
-        if ($null -ne $selected -and -not $selected.Contains($spec)) { continue }
-        if ($package.features.PSObject.Properties.Name -ccontains 'loom' -or
-            [bool]($package.dependencies | Where-Object { $_.target -and $_.target -match 'cfg\(.*\bloom\b.*\)' })) {
-            $declarers.Add($spec) | Out-Null
-        }
-        foreach ($target in $package.targets) {
-            if ($target.kind -ccontains 'test' -and $target.'required-features' -ccontains 'loom') {
-                $loomTargetPackages.Add($spec) | Out-Null
-            }
-        }
-    }
-    $missing = @($declarers | Where-Object { -not $loomTargetPackages.Contains($_) })
-    if ($missing.Count -ne 0) {
-        [Array]::Sort($missing, [System.StringComparer]::Ordinal)
-        throw 'anvil-loom: package(s) declare Loom support but expose no [[test]] target with required-features = ["loom"]: ' + ($missing -join ', ')
-    }
-    if ($loomTargetPackages.Count -eq 0) {
-        Write-Host 'anvil-loom: no Loom test targets; skipping'
-        exit 0
-    }
-    & cargo each {{ anvil_affected_selection }} --each-target test --target-required-feature loom -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
-    exit $LASTEXITCODE
+    cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
 
 # loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom;
 # no dedicated tool to install. The rust toolchain (rustc + cargo)
