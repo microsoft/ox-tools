@@ -40,6 +40,20 @@ entry, comment, delimiter, and formatting byte the repository owns.
   created only when scaffolding can be inserted without rewriting existing
   bytes or entering another region.
 
+## JSONC parser dependency
+
+Structural JSON ownership requires JSONC comments and trailing commas while
+retaining exact source byte ranges for arrays, values, properties, and managed
+sentinels. The existing `serde_json` dependency intentionally accepts strict
+JSON and does not provide that source-preserving syntax tree; no workspace or
+public Oxidizer dependency provides an equivalent JSONC parser.
+
+`jsonc-parser` supplies that missing capability as an implementation-only
+dependency. Default features are disabled, so the selected configuration adds
+no transitive runtime dependencies. Version 0.34.0 is MIT-licensed and sourced
+from the configured crates.io registry. It passes this repository's documented
+`deny.toml` policy for advisories, duplicate bans, licenses, and sources.
+
 ## Ownership and lifecycle
 
 Only the sentinel-delimited body is owned and checksummed. Table headers,
