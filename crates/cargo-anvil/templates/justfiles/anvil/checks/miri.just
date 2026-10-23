@@ -147,13 +147,13 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     $packageLabels = @{}
     $excludedPackages = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
     $excludedPackageIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($package in $metadata.packages) {
-        $packageId = [string]$package.id
+    foreach ($member in $metadata.packages) {
+        $packageId = [string]$member.id
         if (-not $workspaceMembers.Contains($packageId)) { continue }
-        $packageDirectories[$packageId] = Split-Path -Parent ([string]$package.manifest_path)
-        $packageLabels[$packageId] = "$($package.name) $($package.version)"
-        if ($package.metadata.anvil.miri.exclude -eq $true) {
-            [void]$excludedPackages.Add([string]$package.name)
+        $packageDirectories[$packageId] = Split-Path -Parent ([string]$member.manifest_path)
+        $packageLabels[$packageId] = "$($member.name) $($member.version)"
+        if ($member.metadata.anvil.miri.exclude -eq $true) {
+            [void]$excludedPackages.Add([string]$member.name)
             [void]$excludedPackageIds.Add($packageId)
         }
     }

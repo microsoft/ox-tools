@@ -48,26 +48,32 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
     $workspaceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($id in $meta.workspace_members) { [void]$workspaceIds.Add("$id") }
     $members = @($meta.packages | Where-Object { $workspaceIds.Contains("$($_.id)") })
-    $excluded = @(for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
-        if ($pkgArgs[$i] -eq '--exclude' -and ++$i -lt $pkgArgs.Count) { $pkgArgs[$i] }
-    })
-    $selectedPackages = if ($package) {
-        @(($package -split '@', 2)[0])
-    } else {
-        @($members | Where-Object { $_.name -notin $excluded } | ForEach-Object { $_.name })
+    $excluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
+        if ($pkgArgs[$i] -eq '--exclude' -and ++$i -lt $pkgArgs.Count) { [void]$excluded.Add($pkgArgs[$i]) }
+    }
+    $selectedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($p in $members) {
+        $selected = if ($package) {
+            [string]::Equals($package, $p.name, [System.StringComparison]::Ordinal) -or
+                [string]::Equals($package, "$($p.name)@$($p.version)", [System.StringComparison]::Ordinal)
+        } else {
+            -not $excluded.Contains($p.name)
+        }
+        if ($selected) { [void]$selectedIds.Add("$($p.id)") }
     }
     $targets = @(
         foreach ($p in $members) {
-            if ($p.name -notin $selectedPackages) { continue }
+            if (-not $selectedIds.Contains("$($p.id)")) { continue }
             $noRun = @($p.metadata.anvil.examples.'no-run')
             foreach ($target in $p.targets) {
                 if ($target.kind -notcontains 'example') { continue }
-                if ($example -and $target.name -ne $example) { continue }
-                if (-not $example -and $target.name -in $noRun) {
+                if ($example -and $target.name -cne $example) { continue }
+                if (-not $example -and $target.name -cin $noRun) {
                     Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
                     continue
                 }
-                [pscustomobject]@{ package = $p.name; manifest = $p.manifest_path; example = $target.name }
+                [pscustomobject]@{ package = $p.name; id = "$($p.id)"; example = $target.name }
             }
         }
     )
@@ -90,11 +96,11 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.Environment['ANVIL_EXAMPLE'] = '1'
-        # A member manifest path selects that workspace member without a
-        # package spec, which a same-named registry dependency would make
-        # ambiguous.
+        # The metadata package ID is a source-qualified package spec: it
+        # selects exactly this member even when a registry dependency shares
+        # its name and version, or the root is outside `default-members`.
         foreach ($arg in @($stableArgs) + @(
-            'run', '--manifest-path', $target.manifest, '--example', $target.example,
+            'run', '--package', $target.id, '--example', $target.example,
             '--all-features', '--locked'
         )) {
             $start.ArgumentList.Add($arg)
