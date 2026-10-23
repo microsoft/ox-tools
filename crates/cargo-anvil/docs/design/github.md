@@ -416,7 +416,7 @@ jobs:
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
-    # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
+    # runs on every leg except Windows ARM (omitted here for brevity).
     needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
@@ -1081,10 +1081,11 @@ checksums stale and takes them off the automatic update path.
 ## 10. Coverage upload
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the reusable
-workflow uploads the resulting coverage files to Codecov from every leg of the matrix
-except `windows-11-arm`. The upload condition uses `always()` plus a file-existence
-guard: completed coverage reports are retained even when the coverage gate or a later
-group recipe fails, while failures before both the all-features
+workflow uploads the released-surface-filtered coverage files to Codecov from every leg
+of the matrix except `windows-11-arm`. These are the same files evaluated by the local
+gate; Codecov applies no second source-exclusion policy. The upload condition uses
+`always()` plus a file-existence guard: completed coverage reports are retained even
+when the coverage gate or a later group recipe fails, while failures before both the all-features
 (`lcov-all-features.info`) and no-default-features (`lcov-no-default.info`)
 configurations complete do not trigger an empty or partial upload. The windows-arm leg is excluded because its
 LLVM-coverage instrumentation produces `malformed instrumentation profile data: symbol
@@ -1120,9 +1121,9 @@ additionally combines the OS flag with a `scheduled` marker
 (`flags: scheduled,${{ matrix.os }}`) so PR vs scheduled streams stay distinguishable
 in the Codecov UI while still being queryable per-OS.
 
-anvil does not gate the PR on coverage. The lcov upload is informational; Codecov's
-own status check is the gating layer when the adopter wants one (configured in Codecov,
-visible as a separate required check in branch protection).
+The generated recipe gates the PR locally before the upload step. Codecov is an
+informational view of the same filtered LCOV files; adopters may expose Codecov's own
+status check, but it is not the source of Anvil's coverage verdict.
 
 ## 11. Scheduled failure issues
 

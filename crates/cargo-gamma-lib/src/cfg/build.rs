@@ -737,13 +737,25 @@ fn host_triple(config: &CargoConfig, asked_about: bool) -> Option<&'static str> 
     }
 
     HOST.get_or_init(|| {
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; host parsing and command behavior are exercised independently")]
-        let program = env::var("RUSTC").unwrap_or_else(|_absent| "rustc".to_owned());
-        host_from_output(|| Command::new(program).arg("-vV").output())
+        host_triple_using(config, asked_about, || {
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; host parsing and command behavior are exercised independently")]
+            let program = env::var("RUSTC").unwrap_or_else(|_absent| "rustc".to_owned());
+            let output = Command::new(program).arg("-vV").output().ok()?;
+            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        })
     })
     .as_deref()
 }
 
+fn host_triple_using(config: &CargoConfig, asked_about: bool, read_output: impl FnOnce() -> Option<String>) -> Option<String> {
+    if !asked_about && config.keys(&["target"]).is_empty() {
+        return None;
+    }
+
+    read_output().and_then(|printed| parse_host(&printed))
+}
+
+#[cfg(test)]
 fn host_from_output(run: impl FnOnce() -> std::io::Result<std::process::Output>) -> Option<String> {
     let output = run().ok()?;
     let printed = String::from_utf8_lossy(&output.stdout);
@@ -926,6 +938,8 @@ fn lookup_bool(config: &CargoConfig, manifest: Option<&Table>, profile: &str, ke
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::cell::Cell;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -1033,61 +1047,42 @@ mod tests {
     }
 
     #[test]
-    fn survivor_public_profile_and_requested_host_queries_are_checked_in_an_isolated_environment() {
-        const ROOT: &str = "GAMMA_SURVIVOR_CFG_BUILD_CHILD_ROOT";
-        if let Ok(root) = env::var(ROOT) {
-            let root = Utf8Path::new(&root);
-            assert_eq!(Build::resolve(root, Some("quiet"), &[]).debug_assertions, Some(false));
-            assert_eq!(Build::resolve(root, None, &[]).debug_assertions, Some(true));
-            let config = CargoConfig {
-                tables: Vec::new(),
-                sources: Vec::new(),
-            };
-            assert!(host_triple(&config, false).is_none());
-            assert!(
-                host_triple(&config, true).is_some(),
-                "a named environment target needs the host even without file target tables"
-            );
-            return;
-        }
-        let directory = crate::testing::workdir("cfg-build-isolated-profile-");
-        let root = Utf8Path::from_path(directory.path()).expect("fixture paths are UTF-8");
-        crate::testing::write_fixture(
-            root.as_std_path(),
-            &[
-                (
-                    "Cargo.toml",
-                    "[package]\nname = 'subject'\nversion = '0.0.0'\n\
-                [profile.dev]\ndebug-assertions = true\n[profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
-                ),
-                (
-                    ".cargo/config.toml",
-                    "[profile.dev]\ndebug-assertions = true\n\
-                [profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
-                ),
-            ],
+    fn public_profile_and_requested_host_queries_use_explicit_inputs() {
+        let (_directory, root) = tree(&[(
+            ".cargo/config.toml",
+            "[build]\nrustflags = ['-Cdebug-assertions=off']\n\
+             [profile.dev]\ndebug-assertions = true\n\
+             [profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
+        )]);
+        // Match the public Cargo invocation's explicit empty RUSTFLAGS: it masks configured flags
+        // so these assertions exercise profile resolution rather than an ancestor's build policy.
+        let environment = Environment {
+            rustflags: Some(String::new()),
+            ..empty(&root)
+        };
+        assert_eq!(
+            Build::resolve_in(&root, Some("quiet"), &[], &environment).debug_assertions,
+            Some(false)
         );
-        let mut child = Command::new(env::current_exe().expect("the test executable has a native path"));
-        child
-            .args([
-                "--exact",
-                "cfg::build::tests::survivor_public_profile_and_requested_host_queries_are_checked_in_an_isolated_environment",
-                "--nocapture",
-            ])
-            .env(ROOT, root.as_str())
-            .env("RUSTFLAGS", "")
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("CARGO_BUILD_TARGET")
-            .env_remove("RUSTC")
-            .env("CARGO_HOME", root.join("private-cargo-home"));
-        let output = crate::testing::within(crate::testing::WATCHDOG, "isolated profile and host queries", move || {
-            child.output().expect("the isolated test process starts")
-        });
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        assert_eq!(Build::resolve_in(&root, None, &[], &environment).debug_assertions, Some(true));
+
+        let config = CargoConfig {
+            tables: Vec::new(),
+            sources: Vec::new(),
+        };
+        let consulted = Cell::new(false);
+        assert_eq!(
+            host_triple_using(&config, false, || {
+                consulted.set(true);
+                Some("host: should-not-be-read\n".to_owned())
+            }),
+            None
+        );
+        assert!(!consulted.get(), "an unrequested host query must not consult the compiler");
+        assert_eq!(
+            host_triple_using(&config, true, || Some("rustc fixture\nhost: fixture-host\n".to_owned())),
+            Some("fixture-host".to_owned()),
+            "a named environment target needs the host even without file target tables"
         );
     }
 

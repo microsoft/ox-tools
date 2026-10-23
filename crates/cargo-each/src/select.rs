@@ -55,9 +55,22 @@ impl Selection {
         exclude: &[String],
         none: bool,
     ) -> Result<Self, EachError> {
+        Self::from_sources_with_reader(packages, package_files, all, exclude, none, |path| fs::read(path))
+    }
+
+    /// Build a selection with an explicit package-file reader.
+    pub(crate) fn from_sources_with_reader(
+        packages: &[String],
+        package_files: &[PathBuf],
+        all: bool,
+        exclude: &[String],
+        none: bool,
+        mut read: impl FnMut(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> Result<Self, EachError> {
         let mut combined = packages.to_vec();
         for path in package_files {
-            combined.extend(read_package_file(path)?);
+            let bytes = read(path).map_err(|error| PackageFileReadError::caused_by(path.display().to_string(), error))?;
+            combined.extend(parse_package_file(path, bytes)?);
         }
         Ok(Self {
             packages: combined,
@@ -122,9 +135,8 @@ impl Selection {
     }
 }
 
-fn read_package_file(path: &Path) -> Result<Vec<String>, EachError> {
+fn parse_package_file(path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachError> {
     let display = path.display().to_string();
-    let bytes = fs::read(path).map_err(|error| PackageFileReadError::caused_by(display.clone(), error))?;
     let contents = String::from_utf8(bytes).map_err(|error| PackageFileUtf8Error::caused_by(display.clone(), error))?;
     contents
         .strip_prefix('\u{feff}')

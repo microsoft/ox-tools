@@ -56,8 +56,9 @@ mod package_identity_fixture;
 mod metadata_features_fixture;
 
 #[expect(dead_code, reason = "conditional module fixture is compiled without executing original source")]
-#[path = "fixtures/correctness/conditional_modules/lib.rs"]
-mod conditional_module_fixture;
+mod conditional_module_fixture {
+    include!("fixtures/correctness/conditional_modules/lib.rs");
+}
 
 #[expect(
     dead_code,

@@ -18,8 +18,9 @@ stages:
   - stage: scheduled_test
     displayName: anvil scheduled-test
     jobs:
-      # Publish coverage from both legs so OS-gated code is fully
-      # represented (see the pr-stages.yml comment for the rationale).
+      # Publish cargo-coverage-gate's released-surface-filtered reports from
+      # both legs so OS-gated code is fully represented (see the pr-stages.yml
+      # comment for the rationale).
       - template: steps/job.yml
         parameters:
           name: linux

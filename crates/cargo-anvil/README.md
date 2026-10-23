@@ -253,9 +253,31 @@ dictionary format expected by cargo-spellcheck.
 
 [`cargo-coverage-gate`][__link25]
 metadata controls workspace and package thresholds, target-specific policy,
-and intentional exclusions. Coverage enforcement is local to the generated
-check; a hosted coverage service is optional reporting rather than the
-source of the verdict.
+and intentional exclusions. The generated check delegates both supported
+feature configurations to `cargo coverage-gate run`, which filters coverage
+to released Cargo library and binary surfaces before atomically publishing
+`target/coverage/lcov-all-features.info` and
+`target/coverage/lcov-no-default.info`. The local gate and hosted reporting
+consume those exact files, so provably test-only regions such as
+`#[cfg(test)]` modules and their assertion guards or helpers need no
+`coverage(off)` annotations merely to stay out of production coverage.
+Feature-exposed helpers such as `cfg(feature = "test-util")` remain part of
+the released surface and are still counted. Hosted coverage remains
+reporting rather than the source of the verdict.
+
+Impact selection controls which packages are tested and gated, while the
+released-surface source index validates every target in the workspace.
+Unsupported or ambiguous module layouts anywhere in the workspace therefore
+fail closed. Adoption may require semantics-preserving changes to test
+fixtures so their source remains available to parser or discovery tests
+without mounting an unsupported layout as a Cargo target.
+
+The generated recipe intentionally uses the invoking rustc host target.
+`cargo coverage-gate run` passes that target explicitly, overriding
+`CARGO_BUILD_TARGET` and Cargo `build.target`; each Anvil matrix leg measures
+its native target. Repositories that require non-host coverage need a native
+runner for that target or a documented repository-specific check until the
+catalog supports explicit coverage-target configuration.
 
 #### Miri
 
@@ -409,7 +431,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb5STqOPWzBuIbGKo1M8rA_gwbnEE39p8Pne4bJAiNAgNsx6thZIGDa2NhcmdvLWFudmlsZjAuMTYuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbmwsnX_ZuxfYbQ7aHRBJ4lYMb_Bf_GdwS79kbWF5SfNNbA5thZIGDa2NhcmdvLWFudmlsZjAuMTYuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/

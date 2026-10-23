@@ -118,7 +118,7 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
-| `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
+| `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. GitHub uploads coverage from every leg except Windows ARM; ADO uploads from both x86_64 legs. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
@@ -238,9 +238,30 @@ matrix overhead.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config LCOV reports scoped to the same affected packages, so instrumented but unselected dependencies do not contaminate downstream coverage totals. For explicit `--package` selections, packages declaring `min-lines-percent = 0` run through plain `cargo nextest`, without coverage measurement or gating. Unscoped `--workspace` runs, including scheduled runs, still run those packages through `llvm-cov nextest`; the zero threshold disables gating, not instrumentation. Crate-level `coverage(off)` exclusions still exclude their test code from coverage. Neither path skips tests. On Windows, an `llvm-cov export` that exceeds the process command-line limit (OS error 206) is retried from cargo-llvm-cov's diagnostic through an LLVM response file. Other report failures remain failures. Per-config reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
+| `llvm-cov`   | Delegates the affected package set to `cargo +<catalog-nightly> coverage-gate run`, explicitly requesting all-features and no-default-features collection, `target/coverage`, and plain-nextest fallback for `aarch64-pc-windows-msvc`. The runner executes every selected package, filters each raw report to released Cargo library and binary surfaces, atomically publishes `lcov-all-features.info` and `lcov-no-default.info`, and gates those exact filtered files. Version-qualified impact selectors remain intact; unscoped runs select the whole workspace; `--skip` still produces no reports. Zero thresholds disable their gate without skipping tests, and an all-zero/no-coverable selection is represented by valid empty reports. The runner owns Windows error-206 response-file recovery. Collection, filtering, publication, metadata, and evaluation errors fail closed. Codecov and ADO consume the same files as the authoritative local gate, so no service-specific source exclusions are required. | oxidizer, oxidizer-github; collection and gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
 | `doc-test`   | Exactly two cargo-test runs over affected packages with at least one Cargo metadata target marked `doctest = true`: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). Capability discovery is locked, intersects `packages` with `workspace_members`, and is projected into the shared impact cache while impact metadata is already available; consuming checks therefore launch no additional metadata process. Unscoped, widened, and legacy-cache paths fall back to one locked metadata query. The capability flag includes explicit library crate types and proc macros while excluding bin-only packages, which make Cargo error when they are the complete selection. An empty doctest-capable subset is a successful no-op. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
+
+Impact selection scopes which packages are tested and gated, but released-surface
+source validation is workspace-wide. Before filtering any LCOV records,
+`cargo-coverage-gate` indexes every target of every workspace member so it can
+prove source ownership and distinguish released from test-only surfaces.
+Unsupported or ambiguous source layouts therefore fail closed even when they
+belong to a package outside the affected set. Adoption may require
+semantics-preserving fixture changes, such as compiling an immutable
+conditional-path fixture through `include!` while retaining its original source
+text for parser and discovery tests. The collector's
+[released-surface rules](../../../cargo-coverage-gate/docs/design/README.md)
+define the accepted layouts.
+
+The generated recipe intentionally omits `--target`.
+`cargo-coverage-gate run` resolves the invoking rustc host and passes that target
+explicitly, overriding `CARGO_BUILD_TARGET` and Cargo `build.target`
+configuration. Each Anvil matrix leg therefore measures its native target,
+rather than inheriting a configured cross-target from the checkout. Repositories
+that require coverage for a non-host target must provide a native runner for
+that target or retain a documented repository-specific check until the catalog
+supports explicit coverage-target configuration.
 
 #### `pr-msrv` (minimum-version tests)
 

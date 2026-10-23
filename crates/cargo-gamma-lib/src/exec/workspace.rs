@@ -5438,13 +5438,17 @@ mod tests {
     }
 
     fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {
-        let survey = crate::discover::Survey::for_build(
+        let survey = crate::discover::Survey::for_build_using(
             &crate::commands::SelectArgs {
                 dir: source.to_owned(),
                 ..crate::commands::SelectArgs::default()
             },
             None,
             &crate::exec::CargoOptions::default(),
+            |command| {
+                let mut command = command.clone();
+                command.env_remove("CARGO_TARGET_DIR").exec()
+            },
         )
         .expect("Cargo metadata resolves the configured external target");
         assert_eq!(survey.target, target);
@@ -6733,8 +6737,18 @@ mod tests {
         let executable = directory.path().join(format!("cargo-gamma{}", env::consts::EXE_SUFFIX));
         fs::copy(env::current_exe().unwrap(), &executable).unwrap();
         let self_wrapper = executable.to_str().unwrap();
+        let cargo_home = Utf8Path::from_path(directory.path()).unwrap().join("cargo-home");
+        fs::create_dir_all(&cargo_home).unwrap();
         for outer in [None, Some("distinct-outer-wrapper"), Some(self_wrapper)] {
-            let child = run_child_at(&executable, "wrapper_capture", &[("RUSTC_WRAPPER", outer)]);
+            let child = run_child_at(
+                &executable,
+                "wrapper_capture",
+                &[
+                    ("RUSTC_WRAPPER", outer),
+                    ("CARGO_BUILD_RUSTC_WRAPPER", None),
+                    ("CARGO_HOME", Some(cargo_home.as_str())),
+                ],
+            );
             assert_eq!(child["capture"], "retained");
         }
     }

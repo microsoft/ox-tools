@@ -1915,11 +1915,22 @@ fn selected() -> u32 {
     let value = ACTIVE.load(Ordering::Acquire);
 
     #[cfg(all(any(unix, windows), not(miri)))]
+    terminate_if_uninstalled(value);
+
+    value
+}
+
+/// Keeps the immediate-termination path separate from the normally returning selection load.
+///
+/// Termination cannot flush coverage counters, while the caller remains instrumented and executes
+/// for every ordinary guard lookup.
+#[cfg(all(any(unix, windows), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[inline]
+fn terminate_if_uninstalled(value: u32) {
     if value == UNINSTALLED {
         uninstalled_guard();
     }
-
-    value
 }
 
 /// Terminates when a guard observes [`UNINSTALLED`], rather than silently reporting the safe-looking

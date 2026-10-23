@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.16.0] - 2026-10-22
+## [0.16.0] - 2026-10-23
 
 - ✨ Features
 
@@ -10,6 +10,17 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: preserve legacy retirement scanning
+  - cargo-anvil: verify generated JSON regions
+  - cargo-anvil: validate scanner-only splices
+  - cargo-anvil: require active JSON regions
+  - cargo-anvil: preserve structural provenance edges
+  - cargo-anvil: refuse unmatched XML closes
+  - cargo-anvil: refuse incomplete JSON scans
+  - cargo-anvil: guard retained JSON syntax
+  - cargo-anvil: retain scanner on edited retirement
+  - cargo-anvil: harden JSON scanner lifecycle
+  - cargo-anvil: persist JSON scanner hosts
   - cargo-anvil: preserve renamed JSON tracking
   - cargo-anvil: scan bare CR line endings
   - cargo-anvil: retain scanner provenance on refusal
@@ -35,6 +46,7 @@
 
 - 🧩 Miscellaneous
 
+  - Merge origin/main into makolnek-microsoft-json-array-regions
   - Merge remote-tracking branch 'origin/main' into makolnek-microsoft-json-array-regions
 
 ## [0.15.1] - 2026-10-22
