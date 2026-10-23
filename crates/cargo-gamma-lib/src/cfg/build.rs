@@ -1050,10 +1050,16 @@ mod tests {
     fn public_profile_and_requested_host_queries_use_explicit_inputs() {
         let (_directory, root) = tree(&[(
             ".cargo/config.toml",
-            "[profile.dev]\ndebug-assertions = true\n\
+            "[build]\nrustflags = ['-Cdebug-assertions=off']\n\
+             [profile.dev]\ndebug-assertions = true\n\
              [profile.quiet]\ninherits = 'dev'\ndebug-assertions = false\n",
         )]);
-        let environment = empty(&root);
+        // Match the public Cargo invocation's explicit empty RUSTFLAGS: it masks configured flags
+        // so these assertions exercise profile resolution rather than an ancestor's build policy.
+        let environment = Environment {
+            rustflags: Some(String::new()),
+            ..empty(&root)
+        };
         assert_eq!(
             Build::resolve_in(&root, Some("quiet"), &[], &environment).debug_assertions,
             Some(false)

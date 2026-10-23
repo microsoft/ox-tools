@@ -242,6 +242,27 @@ matrix overhead.
 | `doc-test`   | Exactly two cargo-test runs over affected packages with at least one Cargo metadata target marked `doctest = true`: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). Capability discovery is locked, intersects `packages` with `workspace_members`, and is projected into the shared impact cache while impact metadata is already available; consuming checks therefore launch no additional metadata process. Unscoped, widened, and legacy-cache paths fall back to one locked metadata query. The capability flag includes explicit library crate types and proc macros while excluding bin-only packages, which make Cargo error when they are the complete selection. An empty doctest-capable subset is a successful no-op. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
 
+Impact selection scopes which packages are tested and gated, but released-surface
+source validation is workspace-wide. Before filtering any LCOV records,
+`cargo-coverage-gate` indexes every target of every workspace member so it can
+prove source ownership and distinguish released from test-only surfaces.
+Unsupported or ambiguous source layouts therefore fail closed even when they
+belong to a package outside the affected set. Adoption may require
+semantics-preserving fixture changes, such as compiling an immutable
+conditional-path fixture through `include!` while retaining its original source
+text for parser and discovery tests. The collector's
+[released-surface rules](../../../cargo-coverage-gate/docs/design/README.md)
+define the accepted layouts.
+
+The generated recipe intentionally omits `--target`.
+`cargo-coverage-gate run` resolves the invoking rustc host and passes that target
+explicitly, overriding `CARGO_BUILD_TARGET` and Cargo `build.target`
+configuration. Each Anvil matrix leg therefore measures its native target,
+rather than inheriting a configured cross-target from the checkout. Repositories
+that require coverage for a non-host target must provide a native runner for
+that target or retain a documented repository-specific check until the catalog
+supports explicit coverage-target configuration.
+
 #### `pr-msrv` (minimum-version tests)
 
 When the root manifest declares an MSRV, Anvil runs `cargo test --tests`

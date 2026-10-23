@@ -265,6 +265,20 @@
 //! the released surface and are still counted. Hosted coverage remains
 //! reporting rather than the source of the verdict.
 //!
+//! Impact selection controls which packages are tested and gated, while the
+//! released-surface source index validates every target in the workspace.
+//! Unsupported or ambiguous module layouts anywhere in the workspace therefore
+//! fail closed. Adoption may require semantics-preserving changes to test
+//! fixtures so their source remains available to parser or discovery tests
+//! without mounting an unsupported layout as a Cargo target.
+//!
+//! The generated recipe intentionally uses the invoking rustc host target.
+//! `cargo coverage-gate run` passes that target explicitly, overriding
+//! `CARGO_BUILD_TARGET` and Cargo `build.target`; each Anvil matrix leg measures
+//! its native target. Repositories that require non-host coverage need a native
+//! runner for that target or a documented repository-specific check until the
+//! catalog supports explicit coverage-target configuration.
+//!
 //! ### Miri
 //!
 //! Anvil compiles the selected scope together once with all features enabled,
