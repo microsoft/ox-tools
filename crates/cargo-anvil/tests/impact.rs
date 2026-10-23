@@ -1138,12 +1138,7 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
-    let metadata = root.join("metadata.json");
-    fs::write(
-        &metadata,
-        r#"{"workspace_members":["a","b"],"packages":[{"id":"a","name":"alpha","version":"0.1.0"},{"id":"b","name":"beta","version":"0.1.0"}]}"#,
-    )
-    .unwrap();
+    let metadata = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alpha-beta-metadata.json");
     fake_cargo_with_metadata(&bin, &log, &metadata);
     let path = path_with_prefix(&bin);
     // The cached `--package alpha@0.1.0` list reaches Cargo as the
@@ -1200,12 +1195,7 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
-    let metadata = root.join("metadata.json");
-    fs::write(
-        &metadata,
-        r#"{"workspace_members":["a","b"],"packages":[{"id":"a","name":"alpha","version":"0.1.0"},{"id":"b","name":"beta","version":"0.1.0"}]}"#,
-    )
-    .unwrap();
+    let metadata = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alpha-beta-metadata.json");
     fake_cargo_with_metadata(&bin, &log, &metadata);
     let path = path_with_prefix(&bin);
     let run_msrv = || {
