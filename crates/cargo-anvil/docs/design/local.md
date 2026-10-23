@@ -536,7 +536,7 @@ a CI shell and threading the result between jobs as environment variables.
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth). An unchanged tree yields an empty impact set, which cargo-delta reports either as a report with empty tiers or by printing nothing at all, in which case the recipe stores `{}`. A bare `{}` is therefore not a reliable "nothing changed" signal: the dirty-tree and baseline-without-a-workspace paths also write `{}` as a synthetic placeholder while widening every tier to `--workspace`. Read the `include_<tier>.txt` files for the scope actually selected. |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
-| `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid a redundant metadata process. |
+| `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid rereading target capabilities. |
 
 Because the modified/current set comes from cargo-delta's **committed** git diff against
 the base, local scoping reflects the commits your branch adds on top of the base ref, the

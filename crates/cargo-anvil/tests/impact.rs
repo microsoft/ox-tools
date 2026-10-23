@@ -1099,37 +1099,6 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     );
 }
 
-/// Write a fake `cargo` into `dir` that appends its argv (one invocation per
-/// line) to `log` and exits 0, so a check recipe's tool invocation can be
-/// observed without running real cargo. `dir` is meant to be prepended to
-/// PATH via [`path_with_prefix`].
-fn fake_cargo(dir: &Path, log: &Path) {
-    fs::create_dir_all(dir).unwrap();
-    #[cfg(windows)]
-    {
-        // Script shims receive the inline argument-array expression as one
-        // nested array, whereas native Cargo flattens it. Normalize the shim
-        // input before recording the native-process argv contract.
-        let script = format!(
-            "$effectiveArgs = @()\n\
-             foreach ($argument in $args) {{\n\
-             \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
-             }}\n\
-             Add-Content -LiteralPath '{}' -Value ($effectiveArgs -join ' ')\n\
-             exit 0\n",
-            log.display()
-        );
-        fs::write(dir.join("cargo.ps1"), script).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n", log.display());
-        let path = dir.join("cargo");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-}
-
 /// The process `PATH` with `dir` prepended, so an executable in `dir` shadows
 /// the same-named tool elsewhere on PATH.
 fn path_with_prefix(dir: &Path) -> OsString {
@@ -1169,12 +1138,21 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
-    fake_cargo(&bin, &log);
+    let metadata = root.join("metadata.json");
+    fs::write(
+        &metadata,
+        r#"{"workspace_members":["a","b"],"packages":[{"id":"a","name":"alpha","version":"0.1.0"},{"id":"b","name":"beta","version":"0.1.0"}]}"#,
+    )
+    .unwrap();
+    fake_cargo_with_metadata(&bin, &log, &metadata);
     let path = path_with_prefix(&bin);
+    // The cached `--package alpha@0.1.0` list reaches Cargo as the
+    // equivalent unambiguous workspace-exclude selection.
+    let selection = "--workspace --exclude beta";
 
     // consume mode: anvil-impact no-ops (no snapshot / cargo-delta), so the
-    // ONLY cargo invocation is the recipe's own `cargo bench` -- captured by
-    // the shim.
+    // ONLY logged cargo invocation is the recipe's own `cargo bench` --
+    // captured by the shim.
     let out = just_cmd(root, &["anvil-bench"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
@@ -1184,8 +1162,8 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     assert!(out.status.success(), "scoped anvil-bench run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("bench") && argv.contains(&affected) && argv.contains("--no-run"),
-        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: bench ... {affected} ... --no-run"
+        argv.contains("bench") && argv.contains(selection) && argv.contains("--no-run"),
+        "the cached package list must reach the tool; captured argv:\n{argv}\nexpected to contain: bench ... {selection} ... --no-run"
     );
 
     // The `--skip` sentinel must short-circuit: the tool is never invoked.
@@ -1301,6 +1279,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
              \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
              }}\n\
              if ($effectiveArgs -contains 'metadata') {{ Get-Content -Raw -LiteralPath '{meta}'; exit 0 }}\n\
+             if ($effectiveArgs -contains 'install' -and $effectiveArgs -contains '--list') {{ 'cargo-each v99.0.0:'; exit 0 }}\n\
              Add-Content -LiteralPath '{log}' -Value ($effectiveArgs -join ' ')\n\
              exit 0\n",
             meta = metadata_json.display(),
@@ -1311,7 +1290,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = metadata ]; then cat '{meta}'; exit 0; fi; done\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = metadata ]; then cat '{meta}'; exit 0; fi; done\nif [ \"$1\" = install ] && [ \"$2\" = --list ]; then echo 'cargo-each v99.0.0:'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
@@ -1334,7 +1313,8 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     // test can't catch this bespoke parsing. Here a fake `cargo metadata`
     // reports a crate with a `required-features = ["loom"]` test target; run
     // under ANVIL_IMPACT=off (so the tier resolves to --workspace), loom must
-    // detect that target and invoke `cargo test -p <pkg> --test <target>`.
+    // detect that target and invoke `cargo each --package <spec> -- cargo test
+    // --package {cargo-spec} --test <target>`.
     let tmp = workspace_at_base();
     let root = tmp.path();
 
@@ -1364,7 +1344,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     assert!(out.status.success(), "anvil-loom (full-workspace) run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("test") && argv.contains("-p gamma") && argv.contains("--test loomtest"),
+        argv.contains("each --package gamma@0.1.0") && argv.contains("test --package {cargo-spec}") && argv.contains("--test loomtest"),
         "loom must run the declared loom target in full-workspace mode; captured argv:\n{argv}"
     );
 }

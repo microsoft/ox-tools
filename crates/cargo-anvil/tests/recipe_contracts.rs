@@ -10,7 +10,7 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
@@ -483,6 +483,10 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
             r#"
 [script("pwsh", "-NoProfile")]
 _anvil-impact-include tier:
+    Write-Output $(if ($env:FAKE_INCLUDE) { $env:FAKE_INCLUDE } else { '--workspace' })
+
+[script("pwsh", "-NoProfile")]
+_anvil-impact-exclude tier:
     Write-Output $(if ($env:FAKE_INCLUDE) { $env:FAKE_INCLUDE } else { '--workspace' })
 
 "#,
@@ -1173,12 +1177,13 @@ fn miri_runner_preserves_impact_filtering() {
         tmp.path(),
         &["anvil-miri-tree-borrows"],
         &[
-            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0 --package excluded@0.1.0")),
+            ("FAKE_INCLUDE", OsStr::new("--workspace --exclude other")),
             ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("excluded")),
             ("FAKE_SECOND_MIRI_EXCLUDE", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("other")),
         ],
     );
 
@@ -1194,12 +1199,8 @@ fn miri_runner_preserves_impact_filtering() {
         .find(|call| call.contains("miri test"))
         .expect("the profile must compile its selected Miri targets");
     assert!(
-        build_call.contains("--package fixture@0.1.0"),
-        "impact-selected included packages must be forwarded:\n{build_call}"
-    );
-    assert!(
-        !build_call.contains("excluded@0.1.0"),
-        "impact-selected opted-out packages must be filtered:\n{build_call}"
+        build_call.ends_with("--workspace --exclude other --exclude excluded"),
+        "impact exclusions must be forwarded and opted-out packages added:\n{build_call}"
     );
 }
 
@@ -1290,8 +1291,9 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
         tmp.path(),
         &["_anvil-miri-test", "standard"],
         &[
-            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_INCLUDE", OsStr::new("--workspace --exclude other")),
             ("FAKE_MIRI_EXCLUDE", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other")),
         ],
     );
     assert!(all_excluded.status.success());
@@ -2488,7 +2490,9 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
         &["anvil-miri"],
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_INCLUDE", OsStr::new("--workspace --exclude other-package")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("other-package")),
         ],
     );
     assert!(
@@ -2521,7 +2525,7 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     let commands = fs::read_to_string(log).unwrap();
     assert!(
         commands.contains(
-            "+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture@0.1.0"
+            "+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --workspace --exclude other-package"
         ),
         "default Miri target selection was not preserved:\n{commands}"
     );
@@ -2781,7 +2785,13 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
     let output = run_just(
         tmp.path(),
         &["anvil-doc-test"],
-        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
+        &[
+            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("foo")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+        ],
     );
     assert!(
         output.status.success(),
@@ -2790,11 +2800,11 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    assert_exact_doc_test_commands(&commands, "--package Foo@0.1.0 --package macro-package@0.1.0");
+    assert_exact_doc_test_commands(&commands, "--workspace --exclude foo");
     assert_eq!(
-        commands.lines().count(),
-        2,
-        "a consumed impact projection must launch only the two doctest Cargo children and no metadata process:\n{commands}"
+        commands.lines().filter(|line| line.starts_with("metadata ")).collect::<Vec<_>>(),
+        ["metadata --locked --no-deps --format-version 1"],
+        "a consumed impact projection needs only the member query that builds the exclude list:\n{commands}"
     );
 
     fs::remove_file(&log).unwrap();
@@ -2851,16 +2861,11 @@ fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    assert_exact_doc_test_commands(&commands, "--package Foo@0.1.0 --package macro-package@0.1.0");
-    assert!(
-        !commands.lines().any(|line| line.contains("--package outside@0.1.0")),
-        "workspace selection must exclude doctest-capable non-members:\n{commands}"
-    );
+    assert_exact_doc_test_commands(&commands, "--workspace --exclude foo");
     let metadata_commands = commands.lines().filter(|line| line.starts_with("metadata ")).collect::<Vec<_>>();
     assert_eq!(
-        metadata_commands,
-        ["metadata --locked --no-deps --format-version 1"],
-        "unscoped capability discovery must issue exactly one locked metadata query:\n{commands}"
+        metadata_commands, ["metadata --locked --no-deps --format-version 1"; 2],
+        "unscoped runs issue one locked query for capability discovery and one for the exclude list:\n{commands}"
     );
 }
 
@@ -2913,6 +2918,8 @@ fn external_types_checks_every_library_including_non_publishable_ones() {
             "anvil-toolchain-nightly-external-types-validate-prereqs",
             "anvil-tool-cargo-check-external-types-install installer",
             "anvil-toolchain-nightly-external-types-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
             "anvil-impact",
         ],
     );
@@ -2936,29 +2943,12 @@ fn external_types_checks_every_library_including_non_publishable_ones() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(log).unwrap();
-    assert!(commands.contains("metadata --no-deps --format-version 1"));
-    let expected_manifests = [
-        tmp.path().join("Cargo.toml").to_string_lossy().into_owned(),
-        tmp.path()
-            .join("nested")
-            .join("public-default")
-            .join("Cargo.toml")
-            .to_string_lossy()
-            .into_owned(),
-        tmp.path()
-            .join("nested")
-            .join("named-registry")
-            .join("Cargo.toml")
-            .to_string_lossy()
-            .into_owned(),
-    ];
+    // cargo-each selects every library member, publishable or not, and
+    // passes the tool each member's manifest path.
     assert_eq!(
-        commands
-            .lines()
-            .filter_map(|command| { command.strip_prefix("+nightly-test check-external-types --manifest-path ") })
-            .map(str::to_owned)
-            .collect::<HashSet<_>>(),
-        expected_manifests.into_iter().collect()
+        commands.lines().collect::<Vec<_>>(),
+        ["each --workspace --filter lib --keep-going -- cargo +nightly-test check-external-types --manifest-path {manifest}"],
+        "external-types must run once per library through cargo-each:\n{commands}"
     );
 }
 
