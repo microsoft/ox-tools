@@ -981,11 +981,15 @@ jobs:
 
     const ALICE: [&str; 4] = ["-c", "user.name=Alice Fixture", "-c", "user.email=alice@example.invalid"];
     const BOB: [&str; 4] = ["-c", "user.name=Bob Fixture", "-c", "user.email=bob@example.invalid"];
+    static REPO_FIXTURE_GIT_LOCK: Mutex<()> = Mutex::new(());
 
     impl RepoFixture {
         /// Build a repository with commits outside the largest window and inside the 365-, 180-,
         /// and 90-day windows. One commit deliberately falls between the 90- and 180-day cutoffs.
         fn new(options: FixtureOptions) -> Self {
+            let _git_setup = REPO_FIXTURE_GIT_LOCK
+                .lock()
+                .expect("fixture setup cannot recover after another Git fixture panics while holding the setup lock");
             let tmp = tempfile::tempdir().expect("creating temp dir");
             let path = tmp.path().join("fixture-repo");
             fs::create_dir_all(&path).expect("creating fixture repo dir");
