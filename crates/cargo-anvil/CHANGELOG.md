@@ -2,11 +2,15 @@
 
 ## [Unreleased]
 
-## [0.15.2] - 2026-10-22
+## [0.15.2] - 2026-10-23
 
 - ✨ Features
 
   - cargo-anvil: roll out filtered coverage reports
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: clarify coverage adoption boundaries
 
 - 📚 Documentation
 
