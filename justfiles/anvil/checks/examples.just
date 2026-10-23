@@ -69,7 +69,7 @@ anvil-examples package="" example="" timeout="30": anvil-examples-validate-prere
                     Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
                     continue
                 }
-                [pscustomobject]@{ package = $p.name; spec = "$([Uri]::new((Split-Path -Parent $p.manifest_path)).AbsoluteUri)#$($p.name)@$($p.version)"; example = $target.name }
+                [pscustomobject]@{ package = $p.name; id = "$($p.id)"; example = $target.name }
             }
         }
     )
@@ -90,13 +90,11 @@ anvil-examples package="" example="" timeout="30": anvil-examples-validate-prere
         $start.FileName = $cargo
         $start.UseShellExecute = $false
         $start.Environment['ANVIL_EXAMPLE'] = '1'
-        # A source-qualified spec built like cargo-each's `{cargo-spec}`
+        # The metadata package ID is a source-qualified package spec: it
         # selects exactly this member even when a registry dependency shares
         # its name and version, or the root is outside `default-members`.
-        # Metadata IDs are not used because older Cargo emits them in a form
-        # `--package` rejects.
         foreach ($arg in @($stableArgs) + @(
-            'run', '--package', $target.spec, '--example', $target.example,
+            'run', '--package', $target.id, '--example', $target.example,
             '--all-features', '--locked'
         )) {
             $start.ArgumentList.Add($arg)

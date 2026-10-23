@@ -138,14 +138,12 @@ The shared recipe queries `_anvil-impact-include affected` after its
 Tree Borrows, strict-provenance, and race-coverage parameter values to their
 recipe names and profile flags before invoking Cargo.
 
-Cargo metadata and the compiler-artifact stream must come from the same pinned
-nightly Cargo. Cargo changed package-ID formatting in 1.78, so joining metadata
-from a stable or MSRV Cargo to nightly compiler artifacts would fail for older
-adopters. Metadata supplies the workspace-member set, package labels, manifest
-directories, and `[package.metadata.anvil.miri] exclude` policy. Full-workspace
-selection translates exclusions to Cargo `--exclude` arguments; impact-scoped
-selection removes excluded version-qualified package selectors before
-compilation. Excluded packages remain available as dependencies.
+Metadata comes from the same pinned nightly Cargo that compiles the artifacts.
+It supplies the workspace-member set, package labels, manifest
+directories, and `[package.metadata.anvil.miri] exclude` policy. Selection is
+`--workspace --exclude ...`, and Miri opt-outs are added to the exclusions; an
+explicitly selected opted-out package skips before compilation. Excluded
+packages remain available as dependencies.
 
 The compile phase uses `cargo miri test --all-features --tests --no-run` with
 Cargo's JSON diagnostic stream. Executable `compiler-artifact` records whose
