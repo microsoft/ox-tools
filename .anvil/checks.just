@@ -462,65 +462,63 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
 
 anvil_miri_jobs := env("ANVIL_MIRI_JOBS", "auto")
+anvil_miri_profile := "standard"
+anvil_miri_race_day := datetime_utc("%-d")
+anvil_miri_race_seed_range := anvil_miri_race_day + "0.." + anvil_miri_race_day + "2"
+anvil_miri_profile_miriflags := if anvil_miri_profile == "standard" {
+    ""
+} else if anvil_miri_profile == "tree-borrows" {
+    "-Zmiri-tree-borrows"
+} else if anvil_miri_profile == "strict-provenance" {
+    "-Zmiri-strict-provenance"
+} else if anvil_miri_profile == "race-coverage" {
+    "-Zmiri-many-seeds=" + anvil_miri_race_seed_range
+} else {
+    error("unknown Miri profile '" + anvil_miri_profile + "'")
+}
+anvil_miri_profile_rustflags := if anvil_miri_profile == "standard" {
+    ""
+} else {
+    "--cfg miri_" + replace(anvil_miri_profile, "-", "_")
+}
+anvil_miri_flags := trim(anvil_miri_profile_miriflags + " " + env("MIRIFLAGS", ""))
+anvil_miri_rustflags := trim(anvil_miri_profile_rustflags + " " + env("RUSTFLAGS", ""))
 
 # Run Miri tests for affected workspace packages.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-test "standard" package test example)
+anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-profile "standard" package test example)
 
-# Profile-specific environment is the only shell policy here. Package
-# selection, metadata filtering, concurrency, failure aggregation, and process
-# cleanup belong to cargo-each.
-[script("pwsh", "-NoProfile")]
-_anvil-miri-test profile package="" test_filter="" example="": anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $profile = '{{ replace(profile, "'", "''") }}'
-    $testFilter = '{{ replace(test_filter, "'", "''") }}'
-    $example = '{{ replace(example, "'", "''") }}'
-    if ($testFilter -and $example) { throw 'choose exactly one of --test or --example' }
-    if ($example -and '{{ replace(package, "'", "''") }}' -eq '') { throw '--example requires --package' }
-    switch ($profile) {
-        'standard' {}
-        'tree-borrows' {
-            $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
-            $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
-        }
-        'strict-provenance' {
-            $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
-            $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-        }
-        'race-coverage' {
-            $day = (Get-Date).Day
-            $env:MIRIFLAGS = "-Zmiri-many-seeds=$((2 * $day) - 1)..$((2 * $day) + 1) $($env:MIRIFLAGS)".Trim()
-            $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
-        }
-        default { throw "unknown Miri profile '$profile'" }
-    }
-    if ($example) {
-        & cargo '+{{ rust_nightly }}' each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo '+{{ rust_nightly }}' miri run --package '{cargo-spec}' --example $example --all-features --locked
-    } else {
-        $filter = if ($testFilter) { @('--', $testFilter) } else { @() }
-        & cargo '+{{ rust_nightly }}' each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo '+{{ rust_nightly }}' miri test --package '{cargo-spec}' --tests --all-features --locked @filter
-    }
-    exit $LASTEXITCODE
+# Impact is resolved before the child process so Miri profile flags are scoped
+# only to the executable runner and never reach prerequisite or impact commands.
+[private]
+_anvil-miri-profile profile package="" test_filter="" example="": anvil-impact
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_miri_profile {{ quote(profile) }} --set anvil_impact_override {{ quote(anvil_impact_mode) }} _anvil-miri-test {{ quote(package) }} {{ quote(test_filter) }} {{ quote(example) }}
+
+[private]
+[env("MIRIFLAGS", anvil_miri_flags)]
+[env("RUSTFLAGS", anvil_miri_rustflags)]
+_anvil-miri-test package="" test_filter="" example="":
+    {{ if test_filter != "" { if example != "" { error("choose exactly one of --test or --example") } else { "# test filter selected" } } else if example != "" { if package == "" { error("--example requires --package") } else { "# example selected" } } else { "# complete test suite selected" } }}
+    {{ if example == "" { "" } else { "# " } }}cargo +{{ rust_nightly }} each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo +{{ rust_nightly }} miri test --package '{cargo-spec}' --tests --all-features --locked {{ if test_filter == "" { "" } else { "-- " + quote(test_filter) } }}
+    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} each --package {{ quote(package) }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo +{{ rust_nightly }} miri run --package '{cargo-spec}' --example {{ quote(example) }} --all-features --locked
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Race coverage rotates the miri-many-seeds window daily by
-# day-of-month: day N -> seeds [2N-1, 2N+1) (2 seeds/day,
-# ~62 seeds/month). Rotating amortizes the seed space across the
-# schedule rather than retesting the same seeds every night; race
-# conditions surface as inter-seed nondeterminism rather than
-# per-seed crashes, so coverage matters more than depth-per-seed.
+# Race coverage rotates a two-seed miri-many-seeds window daily. The UTC
+# day-of-month N maps to N0..N2, yielding 62 distinct seeds over a 31-day
+# month without shell arithmetic. Rotating amortizes the seed space across the
+# schedule rather than retesting the same seeds every night; exact seed numbers
+# matter less than deterministic reproduction and bounded breadth.
 
 # Run Miri tests with race coverage tracking.
-anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-test "race-coverage")
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-profile "race-coverage")
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance")
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-profile "strict-provenance")
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -537,7 +535,7 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_an
 # A direct local invocation consumes the affected package file.
 
 # Run Miri tests with the Tree Borrows model.
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-profile "tree-borrows")
 
 # Run affected-package tests under the declared public MSRV. A repository
 # without a root MSRV is a no-op.

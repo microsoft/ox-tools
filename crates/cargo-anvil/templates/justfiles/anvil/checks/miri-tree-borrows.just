@@ -19,7 +19,7 @@
 # A direct local invocation consumes the affected package file.
 
 # Run Miri tests with the Tree Borrows model.
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-profile "tree-borrows")
 
 # The three nightly-miri profiles share the same toolchain prereqs
 # as anvil-miri; they only differ in the MIRIFLAGS / RUSTFLAGS the
