@@ -1412,7 +1412,7 @@ fn msrv_test_propagates_nested_just_failures() {
         return;
     }
     let helper_recipes = "\n[script(\"pwsh\", \"-NoProfile\")]\n\
-         _anvil-impact-include tier:\n\
+         _anvil-impact-exclude tier:\n\
          \x20   if ($env:FAKE_IMPACT_HELPER_OUTPUT) { Write-Output $env:FAKE_IMPACT_HELPER_OUTPUT }\n\
          \x20   exit [int]$env:FAKE_IMPACT_HELPER_EXIT\n\
          \n[script(\"pwsh\", \"-NoProfile\")]\n\
@@ -1451,6 +1451,11 @@ fn msrv_test_propagates_nested_just_failures() {
         ],
     );
     assert_failed(&impact_failure, "failed impact helper");
+    assert_eq!(
+        impact_failure.status.code(),
+        Some(31),
+        "the impact helper's exit code must propagate"
+    );
     assert!(
         fs::read_to_string(&cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after impact helper failure"
@@ -1466,6 +1471,11 @@ fn msrv_test_propagates_nested_just_failures() {
         ],
     );
     assert_failed(&resolver_failure, "failed MSRV resolver");
+    assert_eq!(
+        resolver_failure.status.code(),
+        Some(32),
+        "the MSRV resolver's exit code must propagate"
+    );
     assert!(
         fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after resolver failure"

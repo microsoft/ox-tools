@@ -1290,7 +1290,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = metadata ]; then cat '{meta}'; exit 0; fi; done\nif [ \"$1\" = install ] && [ \"$2\" = --list ]; then echo 'cargo-each v99.0.0:'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = metadata ]; then cat '{meta}'; exit 0; fi; done\nif (case \"$1\" in +*) shift;; esac; [ \"$1\" = install ] && [ \"$2\" = --list ]); then echo 'cargo-each v99.0.0:'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
