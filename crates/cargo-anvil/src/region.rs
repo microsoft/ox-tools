@@ -456,18 +456,8 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
                 end: ElementEnd::Close(prefix, local),
                 span,
             } => {
-                let opened = stack
-                    .pop()
-                    .expect("the XML tokenizer emits a closing token only after its matching element start");
                 let closed = (prefix.as_str(), local.as_str());
-                if opened.0 != closed.0 || opened.1 != closed.1 {
-                    return Err(format!(
-                        "the XML host closes `{}` while `{}` is still open",
-                        qualified_name(closed.0, closed.1),
-                        qualified_name(opened.0, opened.1),
-                    ));
-                }
-                if stack.is_empty() {
+                if close_xml_element(&mut stack, closed, qualified_name)? {
                     let range = span.range();
                     root_close = Some((range.start, complete_line_start(text, range)));
                 }
@@ -485,6 +475,27 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
         return Ok(None);
     }
     xml_root_bounds(root_opening_end, root_close)
+}
+
+fn close_xml_element<'a>(
+    stack: &mut Vec<(&'a str, &'a str)>,
+    closed: (&str, &str),
+    qualified_name: impl Fn(&str, &str) -> String,
+) -> Result<bool, String> {
+    let Some(opened) = stack.pop() else {
+        return Err(format!(
+            "the XML host closes `{}` without a matching open element",
+            qualified_name(closed.0, closed.1)
+        ));
+    };
+    if opened.0 != closed.0 || opened.1 != closed.1 {
+        return Err(format!(
+            "the XML host closes `{}` while `{}` is still open",
+            qualified_name(closed.0, closed.1),
+            qualified_name(opened.0, opened.1),
+        ));
+    }
+    Ok(stack.is_empty())
 }
 
 fn xml_root_bounds(root_opening_end: Option<usize>, root_close: Option<(usize, Option<usize>)>) -> Result<Option<XmlRootBounds>, String> {
@@ -3090,6 +3101,17 @@ mod tests {
         assert_eq!(
             xml_root_bounds(Some(1), None).unwrap_err(),
             "the XML host has an incomplete document element"
+        );
+        assert_eq!(
+            close_xml_element(&mut Vec::new(), ("", "root"), |prefix, local| {
+                if prefix.is_empty() {
+                    local.to_owned()
+                } else {
+                    format!("{prefix}:{local}")
+                }
+            })
+            .unwrap_err(),
+            "the XML host closes `root` without a matching open element"
         );
     }
 
