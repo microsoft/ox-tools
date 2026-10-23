@@ -466,7 +466,9 @@ scope without rereading capabilities. A spec stays ambiguous when a registry dep
 shares a member's name and version, so recipes do not pass these specs to Cargo:
 `_anvil-impact-exclude` converts them to `--workspace --exclude <name> ...`, and
 per-package tools run through cargo-each's source-qualified `{cargo-spec}` or
-`{manifest}`.
+`{manifest}`. `llvm-cov` is the exception: cargo-coverage-gate still receives the
+`name@version` specs, so coverage stays ambiguous in that case until
+cargo-coverage-gate selects packages unambiguously.
 
 Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
 category's scope by calling `_anvil-impact-include <category>` into a local `$include`
