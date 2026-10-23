@@ -111,7 +111,11 @@ Existing live ordinary regions otherwise retain their behavior. Dry runs run
 the same planning checks without writing anything. Every projected write is
 rechecked against retained JSON selector provenance before a plan is returned,
 so changing a structural declaration to an ordinary region cannot generate
-markers outside the array that the lock still records.
+markers outside the array that the lock still records. When retained JSON-aware
+scanning finds lexical corruption wholly inside a tracked managed body, intact
+sentinels and a valid current template provide enough proof to regenerate that
+body without changing either marker line. Lexical errors outside managed bodies,
+malformed markers, and invalid generated templates still refuse.
 
 Whole-file overlap checks resolve both catalog paths and recorded ownership
 paths using the same path resolver as writes, including repeated path separators.

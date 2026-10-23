@@ -946,12 +946,18 @@ fn push_region_at_with_scanner(
     scanner: HostScanner,
 ) -> Result<(), AppError> {
     let host = (hosts.resolve)(repo_root, host)?;
-    let current = hosts.get_or_read(repo_root, &host)?;
+    let mut current = hosts.get_or_read(repo_root, &host)?;
     if let Some(text) = current.as_deref()
         && let Err(error) = scanner.validate_marker_scan(text)
     {
-        refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::IncompleteJsonScan);
-        return Ok(());
+        if let Some(repaired) = repair_tracked_json_body_for_scan(manifest, &host, spec, scanner, text) {
+            hosts.set(&host, repaired.clone());
+            plan.push(PlanItem::repair_region(host.clone(), spec.id.as_str(), repaired.clone()));
+            current = Some(repaired);
+        } else {
+            refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::IncompleteJsonScan);
+            return Ok(());
+        }
     }
     if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref(), scanner) {
         return Ok(());
@@ -1064,6 +1070,25 @@ fn push_region_at_with_scanner(
     }
     plan.push(item);
     Ok(())
+}
+
+fn repair_tracked_json_body_for_scan(
+    manifest: &Manifest,
+    host: &str,
+    spec: &RegionSpec,
+    scanner: HostScanner,
+    text: &str,
+) -> Option<String> {
+    if scanner != HostScanner::Json || manifest.region_checksum(host, spec.id.as_str()).is_none() {
+        return None;
+    }
+    crate::region::find_region(text, spec.id.as_str(), spec.syntax).ok().flatten()?;
+    let repaired = crate::region::upsert_region(text, spec.id.as_str(), &spec.body, spec.syntax).ok()?;
+    if repaired == text || scanner.validate_marker_scan(&repaired).is_err() {
+        return None;
+    }
+    scanner.find(&repaired, spec.id.as_str(), spec.syntax).ok().flatten()?;
+    Some(repaired)
 }
 
 fn region_placement_or_refuse(
@@ -1301,8 +1326,9 @@ fn refusal_guidance(remedy: RefusalRemedy) -> &'static str {
              body it was meant to enclose."
         }
         RefusalRemedy::IncompleteJsonScan => {
-            "Close the unterminated string or block comment in the repository-owned host, then retry. \
-             Managed sentinels and bodies are unrelated to this lexical error and should be left unchanged."
+            "Anvil could not repair this lexical error by restoring a tracked body between intact sentinels. \
+             Close the unterminated string or block comment in repository-owned text, repair malformed markers, \
+             or correct the generated template, then retry."
         }
         RefusalRemedy::RetirementInference => {
             "Identify the marker pair whose body matches the recorded generated content and remove only competing \
@@ -2892,6 +2918,53 @@ mod tests {
         assert!(plan.refusals()[0].contains("opening sentinel but no closing sentinel"));
         assert!(plan.refusals()[0].contains("Repair the catalog template"));
         assert_eq!(hosts.cached("config.json").as_deref(), Some(source));
+    }
+
+    #[test]
+    fn scanner_only_host_repairs_incomplete_lexical_state_inside_tracked_body() {
+        let settings = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "  \"setting\": false,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(settings))
+            .build()
+            .unwrap();
+        let source = concat!(
+            "{\n",
+            "  // >>> anvil-managed: settings\n",
+            "  \"unterminated\n",
+            "  // <<< anvil-managed: settings\n",
+            "}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", checksum_str("  \"setting\": true,\n"));
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", source.to_owned());
+        hosts.newlines.insert("config.json".to_owned(), "\n");
+
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-json-region-tests"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let repaired = hosts.cached("config.json").unwrap();
+
+        assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+        assert_eq!(repaired.matches("// >>> anvil-managed: settings").count(), 1);
+        assert_eq!(repaired.matches("// <<< anvil-managed: settings").count(), 1);
+        assert!(repaired.contains("  \"setting\": false,\n"));
+        assert!(!repaired.contains("\"unterminated"));
     }
 
     #[test]
