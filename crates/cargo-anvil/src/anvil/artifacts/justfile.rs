@@ -378,7 +378,7 @@ mod tests {
             assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --profile release --package $packageName"),
+            checks.contains("bolero list --profile release --package '{cargo-spec}'"),
             "bolero discovery must use the execution profile once per affected package"
         );
         assert!(
@@ -390,6 +390,17 @@ mod tests {
             "bolero discovery must not pass repeated --package arguments"
         );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
+    }
+
+    #[test]
+    fn tool_version_probe_accepts_source_installs() {
+        // `cargo install --list` prints `name vX.Y.Z (source):` for path and
+        // git installs; the probe must not treat those as missing.
+        assert_eq!(
+            TOOLS_JUST.matches(r"' v(\S+?)(?: \(.*\))?:$'").count(),
+            2,
+            "install and check probes must both accept source-qualified install lines"
+        );
     }
 
     #[test]

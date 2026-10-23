@@ -1943,7 +1943,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
@@ -2008,7 +2008,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
-    $packageNames = [System.Collections.Generic.List[string]]::new()
+    $packageSpecs = [System.Collections.Generic.List[string]]::new()
     if ($include -and $include -ne '--workspace') {
         $pkgArgs = @(-split $include)
         for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
@@ -2016,9 +2016,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
                 Write-Error "anvil-bolero: unsupported affected-package arguments: $include"
                 exit 1
             }
-            # Impact emits version-qualified specs (name@version); cargo-bolero
-            # resolves workspace members by bare package name.
-            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
+            $packageSpecs.Add($pkgArgs[++$i])
         }
     } else {
         $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
@@ -2030,7 +2028,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             $metadata = $metadataJson | ConvertFrom-Json
             foreach ($package in $metadata.packages) {
                 if ($metadata.workspace_members -contains $package.id) {
-                    $packageNames.Add($package.name)
+                    $packageSpecs.Add("$($package.name)@$($package.version)")
                 }
             }
         } catch {
@@ -2040,20 +2038,25 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     }
 
     # cargo-bolero accepts only one --package, so discover each package
-    # separately and combine the emitted JSON target objects.
+    # separately and combine the emitted JSON target objects. cargo-each
+    # resolves each workspace-member spec and passes cargo-bolero a
+    # source-qualified '{cargo-spec}', which stays unambiguous when a
+    # registry dependency shares the member's name and version.
     $targets = [System.Collections.Generic.List[object]]::new()
-    foreach ($packageName in $packageNames) {
-        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --profile release --package $packageName
+    foreach ($packageSpec in $packageSpecs) {
+        $targetsJson = & cargo {{_anvil_stable_toolchain_args}} each --package $packageSpec '--' cargo '+{{ rust_nightly }}' bolero list --profile release --package '{cargo-spec}'
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "anvil-bolero: target discovery failed for package '$packageName'"
+            Write-Error "anvil-bolero: target discovery failed for package '$packageSpec'"
             exit $LASTEXITCODE
         }
         try {
             foreach ($targetJson in ($targetsJson | Where-Object { $_ -match '^\{' })) {
-                $targets.Add(($targetJson | ConvertFrom-Json))
+                $target = $targetJson | ConvertFrom-Json
+                $target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec
+                $targets.Add($target)
             }
         } catch {
-            Write-Error "anvil-bolero: could not parse target discovery output for package '$packageName': $_"
+            Write-Error "anvil-bolero: could not parse target discovery output for package '$packageSpec': $_"
             exit 1
         }
     }
@@ -2063,28 +2066,27 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     }
     $failed = $false
     foreach ($t in $targets) {
-        $packageName = if ($t.package) { $t.package } else { $t.package_name }
         $testName = if ($t.test) { $t.test } elseif ($t.test_name) { $t.test_name } else { $t.target }
-        if (-not $packageName -or -not $testName) {
+        if (-not $testName) {
             Write-Error "anvil-bolero: target discovery returned an unsupported object: $($t | ConvertTo-Json -Compress)"
             exit 1
         }
-        Write-Host "anvil-bolero: ${packageName}::${testName}"
-        & cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package $packageName $testName
+        Write-Host "anvil-bolero: $($t.anvilPackageSpec)::${testName}"
+        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
 
-# bolero needs cargo-bolero plus the pinned nightly toolchain
+# bolero needs cargo-bolero, cargo-each, and the pinned nightly toolchain
 # (libfuzzer engine requires nightly rustc features).
 
 # Install prerequisites for the `anvil-bolero` recipe.
 [private]
-anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
+anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-bolero` recipe.
 [private]
-anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs
+anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/careful.just ===
 # Copyright (c) Microsoft Corporation.
@@ -2100,7 +2102,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 [script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
@@ -2187,7 +2189,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 [script("pwsh", "-NoProfile")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude required)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-hack: no affected packages; skipping'; exit 0 }
@@ -2271,7 +2273,7 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
     foreach ($cfg in $configs) {
         Write-Host "anvil-check-all-targets: checking $($cfg.name) features"
         $featureArgs = $cfg.flags
-        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --package '{spec}' --all-targets @featureArgs --locked
+        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --package '{cargo-spec}' --all-targets @featureArgs --locked
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
@@ -2304,7 +2306,7 @@ anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvi
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
@@ -2367,7 +2369,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude required)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
@@ -2426,7 +2428,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         [System.StringComparer]::Ordinal
     )
     foreach ($spec in @(-split "$capableText")) { if ($spec) { $docPackages[$spec] = $true } }
-    $specs = if ($selection -contains '--workspace') {
+    $specs = @(if ($selection -contains '--workspace') {
         $workspaceSpecs = [string[]]@($docPackages.Keys)
         [Array]::Sort($workspaceSpecs, [System.StringComparer]::Ordinal)
         $workspaceSpecs
@@ -2439,16 +2441,16 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
                 }
             }
         )
-    }
+    })
     if ($specs.Count -eq 0) {
         Write-Host 'anvil-doc-test: no affected doctest-capable packages; skipping'
         exit 0
     }
-    $docSelection = [System.Collections.Generic.List[string]]::new()
-    foreach ($spec in $specs) {
-        $docSelection.Add('--package')
-        $docSelection.Add($spec)
-    }
+    # Workspace-exclude selection stays unambiguous when a registry
+    # dependency shares a member's name and version.
+    $docSelectionText = (& "{{ just_executable() }}" _anvil-workspace-exclude @specs)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $docSelection = @(-split $docSelectionText)
     & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --locked
@@ -2553,7 +2555,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
@@ -2572,22 +2574,19 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error "anvil-examples: could not parse cargo metadata output: $_"
         exit 1
     }
+    $workspaceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($id in $meta.workspace_members) { [void]$workspaceIds.Add("$id") }
+    $members = @($meta.packages | Where-Object { $workspaceIds.Contains("$($_.id)") })
+    $excluded = @(for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
+        if ($pkgArgs[$i] -eq '--exclude' -and ++$i -lt $pkgArgs.Count) { $pkgArgs[$i] }
+    })
     $selectedPackages = if ($package) {
-        @($package)
-    } elseif ($include -and $include -ne '--workspace') {
-        $names = [System.Collections.Generic.List[string]]::new()
-        $parts = @(-split $include)
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
-                $names.Add(($parts[$i] -split '@', 2)[0])
-            }
-        }
-        @($names)
+        @(($package -split '@', 2)[0])
     } else {
-        @($meta.packages | Where-Object { $meta.workspace_members -contains $_.id } | ForEach-Object { $_.name })
+        @($members | Where-Object { $_.name -notin $excluded } | ForEach-Object { $_.name })
     }
     $targets = @(
-        foreach ($p in $meta.packages) {
+        foreach ($p in $members) {
             if ($p.name -notin $selectedPackages) { continue }
             $noRun = @($p.metadata.anvil.examples.'no-run')
             foreach ($target in $p.targets) {
@@ -2597,7 +2596,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
                     Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
                     continue
                 }
-                [pscustomobject]@{ package = $p.name; example = $target.name }
+                [pscustomobject]@{ package = $p.name; manifest = $p.manifest_path; example = $target.name }
             }
         }
     )
@@ -2620,8 +2619,11 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.Environment['ANVIL_EXAMPLE'] = '1'
+        # A member manifest path selects that workspace member without a
+        # package spec, which a same-named registry dependency would make
+        # ambiguous.
         foreach ($arg in @($stableArgs) + @(
-            'run', '--package', $target.package, '--example', $target.example,
+            'run', '--manifest-path', $target.manifest, '--example', $target.example,
             '--all-features', '--locked'
         )) {
             $start.ArgumentList.Add($arg)
@@ -2674,15 +2676,10 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Affected tier (lints public API of changed crates and reverse dependencies).
 #
 # cargo-check-external-types is per-manifest: no --package/--workspace,
-# only --manifest-path. Iterate the affected library crates and run
-# the tool once each, pointing at the crate's Cargo.toml. Bin-only
-# crates have no public API surface and are skipped.
-# TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
-# skip/splat preamble, this recipe stays multi-step: cargo-check-
-# external-types is per-manifest (no --package/--workspace), so we
-# build a name->manifest map from cargo metadata, filter to lib crates,
-# intersect with the affected set ($include), and call the tool once per
-# crate. Hard-fails on errors (no tolerance, unlike semver-check).
+# only --manifest-path. cargo-each runs the tool once per affected
+# library crate with its `{manifest}` path, so no package spec reaches
+# Cargo. Bin-only crates have no public API surface and are filtered
+# out. Hard-fails on errors (no tolerance, unlike semver-check).
 
 # Check public APIs for unapproved external types.
 [group("anvil")]
@@ -2697,70 +2694,26 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
         exit 0
     }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # Build pkg-name -> manifest-path map, restricted to library crates.
-    $libPkgs = @{}
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
+    Write-Host "anvil-external-types: catalog tool minimum cargo-check-external-types {{ cargo_check_external_types_version }}; rustdoc toolchain {{ rust_nightly_external_types }}"
+    # cargo-check-external-types requires nightly rustdoc (uses unstable -Z
+    # flags) AND pins a specific rustdoc-types schema version. We pin nightly
+    # narrowly to the schema this tool version expects via
+    # `rust_nightly_external_types` in versions.just -- bump that pin
+    # alongside any cargo-check-external-types upgrade. No tolerance for
+    # schema mismatches: if it fails, the pin or the tool needs to move.
+    & cargo {{_anvil_stable_toolchain_args}} each @pkg --filter lib --keep-going '--' cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path '{manifest}'
     if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-external-types: cargo metadata failed'
+        Write-Error "anvil-external-types: failed. The installed tool may be newer than the catalog minimum; it must remain compatible with rustdoc from {{ rust_nightly_external_types }}."
         exit $LASTEXITCODE
     }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-external-types: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
-            $libPkgs[$p.name] = $p.manifest_path
-        }
-    }
-    # Decide which packages to check.
-    $packages = @()
-    if ($pkg -contains '--workspace') {
-        $packages = $libPkgs.Keys
-    } else {
-        for ($i = 0; $i -lt $pkg.Count; $i++) {
-            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Impact emits version-qualified specs (name@version);
-                # strip the @version to recover the bare package name
-                # this manifest-path map keys on.
-                $name = ($pkg[$i + 1] -split '@', 2)[0]
-                if ($libPkgs.ContainsKey($name)) { $packages += $name }
-                $i++
-            }
-        }
-    }
-    if ($packages.Count -eq 0) {
-        Write-Host 'anvil-external-types: no affected library crates; skipping'
-        exit 0
-    }
-    Write-Host "anvil-external-types: catalog tool minimum cargo-check-external-types {{ cargo_check_external_types_version }}; rustdoc toolchain {{ rust_nightly_external_types }}"
-    $failed = $false
-    foreach ($p in $packages) {
-        Write-Host "anvil-external-types: $p"
-        # cargo-check-external-types requires nightly rustdoc (uses
-        # unstable -Z flags) AND pins a specific rustdoc-types schema
-        # version. We pin nightly narrowly to the schema this tool
-        # version expects via `rust_nightly_external_types` in
-        # versions.just — bump that pin alongside any cargo-check-
-        # external-types upgrade. No tolerance for schema mismatches:
-        # if it fails, the pin or the tool needs to move.
-        & cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path $libPkgs[$p]
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "anvil-external-types: '$p' failed. The installed tool may be newer than the catalog minimum; it must remain compatible with rustdoc from {{ rust_nightly_external_types }}."
-            $failed = $true
-        }
-    }
-    if ($failed) { exit 1 }
 
 # Install prerequisites for the `anvil-external-types` recipe.
 [private]
-anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer)
+anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-external-types` recipe.
 [private]
-anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs
+anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/fmt.just ===
 # Copyright (c) Microsoft Corporation.
@@ -2936,8 +2889,8 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 #     (source swaps std<->loom atomics on `#[cfg(loom)]`, and
 #     `[target.'cfg(loom)'.dependencies] loom` links only under the cfg).
 #     The feature does NOT replace the cfg; both are required.
-# We scope `cargo test` to the owning package with `-p` (never
-# `--workspace`) so a global `--cfg loom` never leaks into deps reachable
+# We scope `cargo test` to the owning package (via cargo-each's
+# source-qualified `{cargo-spec}`, never `--workspace`) so a global `--cfg loom` never leaks into deps reachable
 # only through *other* members (e.g. concurrent-queue), and run
 # single-threaded (loom drives its own scheduling). --release per the
 # loom docs: permutation exploration is wall-clock dominated by the SUT.
@@ -2995,7 +2948,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $loomTargets = @(foreach ($pkg in $pkgs) {
         foreach ($t in $pkg.targets) {
             if (($t.kind -contains 'test') -and ($t.'required-features' -contains 'loom')) {
-                [pscustomobject]@{ pkg = $pkg.name; target = $t.name }
+                [pscustomobject]@{ pkg = $pkg.name; spec = "$($pkg.name)@$($pkg.version)"; target = $t.name }
             }
         }
     })
@@ -3021,21 +2974,24 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
     foreach ($lt in $loomTargets) {
         Write-Host "anvil-loom: $($lt.pkg) :: $($lt.target)"
-        & cargo {{_anvil_stable_toolchain_args}} test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
+        # cargo-each resolves the spec against workspace members and passes
+        # Cargo a source-qualified '{cargo-spec}', which stays unambiguous
+        # when a registry dependency shares the member's name and version.
+        & cargo {{_anvil_stable_toolchain_args}} each --package $lt.spec '--' cargo {{_anvil_stable_toolchain_args}} test --package '{cargo-spec}' --release --all-features --locked --test $lt.target '--' --test-threads=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
-# loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom;
-# no dedicated tool to install. The rust toolchain (rustc + cargo)
-# is the only prerequisite.
+# loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom,
+# run through cargo-each for unambiguous package selection. The rust
+# toolchain (rustc + cargo) and cargo-each are the prerequisites.
 
 # Install prerequisites for the `anvil-loom` recipe.
 [private]
-anvil-loom-setup installer="install": anvil-toolchain-stable-install
+anvil-loom-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [private]
-anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/miri-race-coverage.just ===
 # Copyright (c) Microsoft Corporation.
@@ -3151,9 +3107,10 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # [package.metadata.anvil.miri]
 # exclude = true
 #
-# They can still compile as dependencies of selected consumers. Workspace runs
-# translate the metadata to `--exclude`; impact-scoped runs remove matching
-# `--package name@version` pairs before compilation.
+# They can still compile as dependencies of selected consumers. Selection is
+# `--workspace --exclude ...` (unambiguous even when a registry dependency
+# shares a member's name and version); opted-out packages are added to the
+# `--exclude` list.
 #
 # ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
 
@@ -3219,7 +3176,7 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         exit 2
     }
 
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') {
@@ -3287,35 +3244,26 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     }
 
     if ($packageArgs -contains '--workspace') {
-        if ($workspaceMembers.Count -gt 0 -and $excludedPackageIds.Count -eq $workspaceMembers.Count) {
-            Write-Host 'anvil miri: all selected packages are excluded; nothing to test'
-            exit 0
+        # Impact selection arrives as `--workspace --exclude <name> ...`;
+        # add the Miri opt-outs that are still selected.
+        $impactExcluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        for ($i = 0; $i -lt $packageArgs.Count; $i++) {
+            if ($packageArgs[$i] -eq '--exclude' -and ($i + 1) -lt $packageArgs.Count) {
+                [void]$impactExcluded.Add($packageArgs[++$i])
+            }
         }
         foreach ($packageName in $excludedPackages) {
-            $packageArgs += @('--exclude', $packageName)
-        }
-    } else {
-        $filtered = [System.Collections.Generic.List[string]]::new()
-        for ($i = 0; $i -lt $packageArgs.Count; $i++) {
-            if ($packageArgs[$i] -ne '--package') {
-                Write-Error "anvil miri: unexpected impact argument '$($packageArgs[$i])'"
-                exit 1
+            if ($impactExcluded.Add($packageName)) {
+                $packageArgs += @('--exclude', $packageName)
             }
-            if (($i + 1) -ge $packageArgs.Count) {
-                Write-Error 'anvil miri: --package is missing its package spec'
-                exit 1
-            }
-            $packageSpec = $packageArgs[++$i]
-            $packageName = ($packageSpec -split '@', 2)[0]
-            if ($excludedPackages.Contains($packageName)) { continue }
-            $filtered.Add('--package')
-            $filtered.Add($packageSpec)
         }
-        $packageArgs = $filtered.ToArray()
-        if ($packageArgs.Count -eq 0) {
+        if ($workspaceMembers.Count -gt 0 -and $impactExcluded.Count -ge $workspaceMembers.Count) {
             Write-Host 'anvil miri: all selected packages are excluded; nothing to test'
             exit 0
         }
+    } elseif ($excludedPackages.Contains(($package -split '@', 2)[0])) {
+        Write-Host 'anvil miri: all selected packages are excluded; nothing to test'
+        exit 0
     }
 
     $logRoot = Join-Path ([IO.Path]::GetTempPath()) "anvil-miri-$PID-$([guid]::NewGuid())"
@@ -3522,7 +3470,7 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
@@ -4247,7 +4195,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude required)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
@@ -5904,8 +5852,12 @@ anvil-scheduled-test-validate-prereqs: \
 #     rather than `?? "--workspace"`, which would splat an empty arg cargo
 #     rejects).
 #   * "--package A@v --package B@v" - the tier has members. Packages are
-#     version-qualified cargo specs so they resolve uniquely even when a
-#     like-named crate is also a transitive dependency.
+#     version-qualified cargo specs. Aggregate Cargo commands instead call
+#     _anvil-impact-exclude, which returns the same set as
+#     "--workspace --exclude C ...": Cargo resolves that against workspace
+#     members only, so it stays unambiguous when a registry dependency has
+#     the same name and version as a member. Per-package fan-out passes the
+#     specs to cargo-each and uses its source-qualified '{cargo-spec}'.
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
 # These resolver outputs are only meaningful when the resolver succeeded, so
@@ -6761,6 +6713,64 @@ _anvil-impact-include tier:
         Write-Output $default
     }
 
+# Private. Same contract as _anvil-impact-include, but a member list is
+# returned as aggregate Cargo selection: "--workspace --exclude <name> ...".
+# Cargo resolves --exclude against workspace members only, so this stays
+# unambiguous when a registry dependency shares a member's name and version
+# (where `--package name@version` fails). "--skip", "--workspace" and the
+# empty modified default pass through unchanged, so callers keep their
+# explicit skip: excluding every member is a Cargo error, not a no-op.
+
+# Resolve a tier's scope as workspace-exclude Cargo selection.
+[script("pwsh", "-NoProfile")]
+_anvil-impact-exclude tier:
+    $ErrorActionPreference = 'Stop'
+    $include = (& "{{ just_executable() }}" _anvil-impact-include '{{ tier }}')
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
+    if ($include -notmatch '(^|\s)--package\s') { Write-Output $include; exit 0 }
+    $specs = @(-split $include | Where-Object { $_ -ne '--package' })
+    & "{{ just_executable() }}" _anvil-workspace-exclude @specs
+    exit $LASTEXITCODE
+
+# Private. Prints "--workspace --exclude <name> ..." selecting exactly the
+# given workspace-member name@version specs. Fails when a spec is not a
+# workspace member, so a stale selection never widens silently.
+
+# Convert workspace-member specs to workspace-exclude Cargo selection.
+[script("pwsh", "-NoProfile")]
+_anvil-workspace-exclude +specs:
+    $ErrorActionPreference = 'Stop'
+    $selected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($spec in -split '{{ specs }}') { [void]$selected.Add($spec) }
+    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --locked --no-deps --format-version 1
+    $metadataExit = $LASTEXITCODE
+    if ($metadataExit -ne 0) {
+        [Console]::Error.WriteLine('anvil: cargo metadata failed')
+        exit $metadataExit
+    }
+    $meta = $metadataJson | ConvertFrom-Json
+    $workspaceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($id in $meta.workspace_members) { [void]$workspaceIds.Add("$id") }
+    $selection = [System.Collections.Generic.List[string]]::new()
+    $selection.Add('--workspace')
+    $found = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($p in @($meta.packages | Where-Object { $workspaceIds.Contains("$($_.id)") })) {
+        $spec = "$($p.name)@$($p.version)"
+        if ($selected.Contains($spec)) {
+            [void]$found.Add($spec)
+        } else {
+            $selection.Add('--exclude')
+            $selection.Add($p.name)
+        }
+    }
+    $missing = @($selected | Where-Object { -not $found.Contains($_) })
+    if ($missing.Count -gt 0) {
+        [Console]::Error.WriteLine("anvil: not workspace members: $($missing -join ', ')")
+        exit 1
+    }
+    Write-Output ($selection -join ' ')
+
 === justfiles/anvil/mod.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -7424,7 +7434,8 @@ _install-tool-core name version installer source_prereq="":
     # every post-restore run would try to re-install on top of the
     # cached binaries and fail with "binary already exists in destination".
     $installed = $null
-    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    # Path and git installs append their source: `name vX.Y.Z (source):`.
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+?)(?: \(.*\))?:$'
     foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
@@ -7483,7 +7494,8 @@ _check-tool name version:
     $version = '{{version}}'
 
     $installed = $null
-    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    # Path and git installs append their source: `name vX.Y.Z (source):`.
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+?)(?: \(.*\))?:$'
     $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
     try {
         # Validation must not let the rustup proxy provision a missing selection.
@@ -8190,7 +8202,7 @@ cargo_coverage_gate_version := "0.7.1"
 cargo_delta_version := "0.3.1"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.3.0"
+cargo_each_version := "0.6.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.0"
 cargo_hack_version := "0.6.45"

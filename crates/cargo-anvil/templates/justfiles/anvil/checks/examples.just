@@ -26,7 +26,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
@@ -45,22 +45,19 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error "anvil-examples: could not parse cargo metadata output: $_"
         exit 1
     }
+    $workspaceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($id in $meta.workspace_members) { [void]$workspaceIds.Add("$id") }
+    $members = @($meta.packages | Where-Object { $workspaceIds.Contains("$($_.id)") })
+    $excluded = @(for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
+        if ($pkgArgs[$i] -eq '--exclude' -and ++$i -lt $pkgArgs.Count) { $pkgArgs[$i] }
+    })
     $selectedPackages = if ($package) {
-        @($package)
-    } elseif ($include -and $include -ne '--workspace') {
-        $names = [System.Collections.Generic.List[string]]::new()
-        $parts = @(-split $include)
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
-                $names.Add(($parts[$i] -split '@', 2)[0])
-            }
-        }
-        @($names)
+        @(($package -split '@', 2)[0])
     } else {
-        @($meta.packages | Where-Object { $meta.workspace_members -contains $_.id } | ForEach-Object { $_.name })
+        @($members | Where-Object { $_.name -notin $excluded } | ForEach-Object { $_.name })
     }
     $targets = @(
-        foreach ($p in $meta.packages) {
+        foreach ($p in $members) {
             if ($p.name -notin $selectedPackages) { continue }
             $noRun = @($p.metadata.anvil.examples.'no-run')
             foreach ($target in $p.targets) {
@@ -70,7 +67,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
                     Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
                     continue
                 }
-                [pscustomobject]@{ package = $p.name; example = $target.name }
+                [pscustomobject]@{ package = $p.name; manifest = $p.manifest_path; example = $target.name }
             }
         }
     )
@@ -93,8 +90,11 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.Environment['ANVIL_EXAMPLE'] = '1'
+        # A member manifest path selects that workspace member without a
+        # package spec, which a same-named registry dependency would make
+        # ambiguous.
         foreach ($arg in @($stableArgs) + @(
-            'run', '--package', $target.package, '--example', $target.example,
+            'run', '--manifest-path', $target.manifest, '--example', $target.example,
             '--all-features', '--locked'
         )) {
             $start.ArgumentList.Add($arg)
