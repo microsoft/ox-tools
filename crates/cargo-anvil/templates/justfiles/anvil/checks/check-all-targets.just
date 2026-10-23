@@ -12,30 +12,14 @@
 # defaults disabled, without linking or executing their test binaries.
 
 # Check all targets of affected packages independently.
-[group("anvil")]
-[script("pwsh", "-NoProfile")]
 anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-check-all-targets: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    $configs = @(
-        @{ name = 'default';    flags = @() },
-        @{ name = 'no-default'; flags = @('--no-default-features') }
-    )
-    foreach ($cfg in $configs) {
-        Write-Host "anvil-check-all-targets: checking $($cfg.name) features"
-        $featureArgs = $cfg.flags
-        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --package '{spec}' --all-targets @featureArgs --locked
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --no-default-features --locked
 
 # Install prerequisites for the `anvil-check-all-targets` recipe.
-[private]
+[group("anvil-setup")]
 anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-check-all-targets` recipe.
-[private]
+[group("anvil-setup")]
 anvil-check-all-targets-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
