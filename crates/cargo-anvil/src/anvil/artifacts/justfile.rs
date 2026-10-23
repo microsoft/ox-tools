@@ -393,6 +393,40 @@ mod tests {
     }
 
     #[test]
+    fn examples_select_and_run_members_by_exact_identity() {
+        let examples = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/examples.just").then_some(*body))
+            .expect("examples.just is registered in CHECK_FILES");
+        // Package names that differ only by case are distinct members, so
+        // selection must compare ordinally rather than with `-in`/`-notin`.
+        for needle in [
+            "$excluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)",
+            "$selectedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)",
+            "[string]::Equals($package, $p.name, [System.StringComparison]::Ordinal)",
+        ] {
+            assert!(examples.contains(needle), "examples selection must be ordinal: missing '{needle}'");
+        }
+        assert!(!examples.contains("-notin $excluded"));
+        // The metadata package ID is a source-qualified package spec; a
+        // manifest path would follow `default-members` for a workspace root.
+        assert!(examples.contains("'run', '--package', $target.id, '--example', $target.example"));
+        assert!(!examples.contains("'--manifest-path', $target"));
+    }
+
+    #[test]
+    fn miri_opt_out_reads_the_callers_package_selection() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+        // An explicitly selected opted-out package must skip before
+        // compilation, so the metadata loop must not shadow `$package`.
+        assert!(!miri.contains("foreach ($package in"));
+        assert!(miri.contains("} elseif ($excludedPackages.Contains(($package -split '@', 2)[0])) {"));
+    }
+
+    #[test]
     fn tool_version_probe_accepts_source_installs() {
         // `cargo install --list` prints `name vX.Y.Z (source):` for path and
         // git installs; the probe must not treat those as missing.

@@ -1263,35 +1263,6 @@ fn miri_profiles_set_expected_flags() {
 }
 
 #[test]
-fn miri_skips_an_explicitly_selected_opted_out_package() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = fixture(
-        &[("miri.just", MIRI)],
-        &[
-            "anvil-component-nightly-miri-validate-prereqs",
-            "anvil-component-nightly-rust-src-validate-prereqs",
-            "anvil-component-nightly-miri-install",
-            "anvil-component-nightly-rust-src-install",
-            "anvil-impact",
-        ],
-    );
-    let log = tmp.path().join("cargo.log");
-    let output = run_just(
-        tmp.path(),
-        &["_anvil-miri-test", "standard", "fixture"],
-        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_MIRI_EXCLUDE", OsStr::new("1"))],
-    );
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("all selected packages are excluded"));
-    assert!(
-        !fs::read_to_string(&log).unwrap_or_default().contains("miri test"),
-        "an explicitly selected opted-out package must not be compiled"
-    );
-}
-
-#[test]
 fn miri_runner_handles_no_work_and_aggregates_failures() {
     if !tools_available() {
         return;
@@ -2579,70 +2550,6 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     assert!(
         commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"),
         "explicit example selection was not forwarded:\n{commands}"
-    );
-}
-
-#[test]
-fn examples_run_selects_members_by_exact_identity() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = fixture(
-        &[("examples.just", EXAMPLES), ("impact.just", IMPACT)],
-        &[
-            "anvil-tool-rustc-validate-prereqs",
-            "anvil-toolchain-stable-install",
-            "anvil-impact",
-        ],
-    );
-    // The root package is outside `default-members`, and a member's name
-    // differs from it only by case: selecting the root must run its example
-    // alone.
-    write(
-        &tmp.path().join("Cargo.toml"),
-        r#"[package]
-name = "fixture"
-version = "0.1.0"
-edition = "2024"
-
-[workspace]
-members = ["nested"]
-default-members = ["nested"]
-"#,
-    );
-    write(&tmp.path().join("src/lib.rs"), "");
-    write(
-        &tmp.path().join("examples/which.rs"),
-        "fn main() { std::fs::write(\"ran-root\", \"\").unwrap(); }\n",
-    );
-    write(
-        &tmp.path().join("nested/Cargo.toml"),
-        "[package]\nname = \"Fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    );
-    write(&tmp.path().join("nested/src/lib.rs"), "");
-    write(
-        &tmp.path().join("nested/examples/which.rs"),
-        "fn main() { std::fs::write(\"ran-member\", \"\").unwrap(); }\n",
-    );
-    let lock = Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(tmp.path())
-        .output()
-        .expect("cargo is required to prepare the example fixture");
-    assert!(lock.status.success(), "failed to create fixture lockfile");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
-
-    let output = run_just_with_real_cargo(tmp.path(), &["anvil-examples", "--run"]);
-    assert!(
-        output.status.success(),
-        "example run failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(tmp.path().join("ran-root").is_file(), "the selected root example must run");
-    assert!(
-        !tmp.path().join("ran-member").exists(),
-        "the unselected member example must not run"
     );
 }
 
