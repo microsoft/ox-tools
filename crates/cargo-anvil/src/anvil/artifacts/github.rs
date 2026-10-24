@@ -539,10 +539,14 @@ export -f just
             "Check Group: Fast Checks (${{ matrix.os }})",
             "Check Group: Tests and Coverage (${{ matrix.os }})",
             "Check Group: Runtime Analysis (${{ matrix.os }})",
-            "Check Group: Mutation Testing (${{ matrix.os }})",
+            "Check Group: Mutation Testing (windows)",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
+        assert!(
+            !PR_IMPL_WORKFLOW.contains("Check Group: Mutation Testing (${{ matrix.os }})"),
+            "the required PR mutation gate must remain a single Windows x64 job"
+        );
         assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
