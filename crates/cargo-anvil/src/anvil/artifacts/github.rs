@@ -539,14 +539,16 @@ export -f just
             "Check Group: Fast Checks (${{ matrix.os }})",
             "Check Group: Tests and Coverage (${{ matrix.os }})",
             "Check Group: Runtime Analysis (${{ matrix.os }})",
-            "Check Group: Mutation Testing (windows)",
+            "Check Group: Mutation Testing (${{ matrix.os }})",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
-        assert!(
-            !PR_IMPL_WORKFLOW.contains("Check Group: Mutation Testing (${{ matrix.os }})"),
-            "the required PR mutation gate must remain a single Windows x64 job"
-        );
+        for (condition, purpose) in [
+            ("if: matrix.os == 'windows'", "run the mutation campaign"),
+            ("if: matrix.os != 'windows'", "complete non-Windows contexts through explicit no-op steps"),
+        ] {
+            assert!(PR_IMPL_WORKFLOW.contains(condition), "mutation matrix must {purpose}");
+        }
         assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
