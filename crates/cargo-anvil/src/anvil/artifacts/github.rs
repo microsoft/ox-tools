@@ -543,12 +543,10 @@ export -f just
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
-        for (condition, purpose) in [
-            ("if: matrix.os == 'windows'", "run the mutation campaign"),
-            ("if: matrix.os != 'windows'", "complete non-Windows contexts through explicit no-op steps"),
-        ] {
-            assert!(PR_IMPL_WORKFLOW.contains(condition), "mutation matrix must {purpose}");
-        }
+        assert!(
+            PR_IMPL_WORKFLOW.contains("if: matrix.os == 'windows'") && PR_IMPL_WORKFLOW.contains("if: matrix.os != 'windows'"),
+            "the mutation matrix must run on Windows and no-op every compatibility context"
+        );
         assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
