@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-24
+
+- ✨ Features
+
+  - cargo-anvil: manage JSON array entries
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: stabilize GitHub mutation gate
+  - cargo-anvil: repair body-local JSON corruption
+  - cargo-anvil: validate projected JSON placement
+  - cargo-anvil: sort manifest sections
+  - cargo-anvil: preserve changelog history
+  - cargo-anvil: address final review feedback
+  - cargo-anvil: preserve legacy retirement scanning
+  - cargo-anvil: verify generated JSON regions
+  - cargo-anvil: validate scanner-only splices
+  - cargo-anvil: require active JSON regions
+  - cargo-anvil: preserve structural provenance edges
+  - cargo-anvil: refuse unmatched XML closes
+  - cargo-anvil: refuse incomplete JSON scans
+  - cargo-anvil: guard retained JSON syntax
+  - cargo-anvil: retain scanner on edited retirement
+  - cargo-anvil: harden JSON scanner lifecycle
+  - cargo-anvil: persist JSON scanner hosts
+  - cargo-anvil: preserve renamed JSON tracking
+  - cargo-anvil: scan bare CR line endings
+  - cargo-anvil: retain scanner provenance on refusal
+  - cargo-anvil: retain JSON scanner provenance
+  - cargo-anvil: scan mixed JSON retirement safely
+  - cargo-anvil: scan mixed JSON hosts safely
+  - cargo-anvil: reject moved JSON regions
+  - cargo-anvil: isolate structural JSON scanning
+  - cargo-anvil: preserve JSON region provenance
+  - cargo-anvil: sequence JSON requirement checks
+  - cargo-anvil: validate required JSON entries
+  - cargo-anvil: validate composed JSON hosts
+  - cargo-anvil: harden JSON array splicing
+
+- 📚 Documentation
+
+  - cargo-anvil: record JSONC parser policy
+  - cargo-anvil: clarify JSON retirement provenance
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: key JSON specs by region
+  - cargo-anvil: clarify JSON array invariants
+
+- 🧩 Miscellaneous
+
+  - Merge origin/main into makolnek-microsoft-json-array-regions
+  - Merge origin/main into makolnek-microsoft-json-array-regions
+  - Merge origin/main into makolnek-microsoft-json-array-regions
+  - Merge remote-tracking branch 'origin/main' into makolnek-microsoft-json-array-regions
+
 ## [0.18.0] - 2026-10-24
 
 - ✨ Features

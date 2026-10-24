@@ -301,20 +301,28 @@ jobs:
           impact_mode: consume
 
   pr-mutants:
-    name: "Check Group: Mutation Testing (windows)"
+    name: "Check Group: Mutation Testing (${{ matrix.os }})"
     # Mutation testing: cargo mutants (diff-scoped against the PR base).
-    # Run the required PR gate once on Windows x64. GitHub-hosted Linux
-    # runners can be reclaimed during multi-hour mutation campaigns, which
-    # leaves the aggregate gate failed even when no mutant survived.
-    # Scheduled exhaustive checks retain Linux + Windows mutation coverage.
+    # Preserve all four repository-ruleset contexts, but run the multi-hour
+    # campaign only on Windows x64. The other legs complete as explicit no-ops;
+    # scheduled exhaustive checks retain Linux + Windows mutation coverage.
     needs: [impact-linux, impact-windows]
-    runs-on: ${{ inputs.windows_runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: matrix.os == 'windows'
         with:
           lfs: true
           fetch-depth: 0
       - name: Download impact artifact
+        if: matrix.os == 'windows'
         # See pr-fast: pull the OS-family impact cache so scoped checks read it
         # via their `anvil-impact` dependency.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -322,12 +330,17 @@ jobs:
           name: anvil-impact-Windows
           path: target/anvil/impact
       - uses: ./.github/actions/anvil-run-group
+        if: matrix.os == 'windows'
         with:
           group: pr-mutants
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
         env:
           BASE_REF: ${{ inputs.base_ref }}
+      - name: Mutation testing runs on Windows x64
+        if: matrix.os != 'windows'
+        shell: bash
+        run: echo "Mutation testing is covered by the Windows x64 matrix leg."
 
   required-checks:
     # This display name is the repository-ruleset context. Keep it stable
