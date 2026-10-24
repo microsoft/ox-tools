@@ -760,7 +760,9 @@ fn redact_toolchain(toolchain: Option<String>, redaction: Redaction) -> Option<S
         toolchain
             .lines()
             .filter_map(|line| {
-                let (key, value) = ["rustc=", "cargo=", "rustc_wrapper=", "rustc_workspace_wrapper="]
+                let (key, value) =
+                // #[gamma::skip(collection.reverse_array, reason = "These toolchain prefixes are pairwise prefix-disjoint (equals versus underscore differentiates overlaps). Each line matches at most one, so reversing find_map order preserves selected key/value and output line order.", tag = "equivalent")]
+                ["rustc=", "cargo=", "rustc_wrapper=", "rustc_workspace_wrapper="]
                     .into_iter()
                     .find_map(|key| line.strip_prefix(key).map(|value| (key, value)))?;
 
@@ -774,7 +776,9 @@ fn redact_toolchain(toolchain: Option<String>, redaction: Redaction) -> Option<S
                 toolchain
                     .lines()
                     .filter(|line| {
-                        !["rustc=", "cargo=", "rustc_wrapper=", "rustc_workspace_wrapper="]
+                        !
+                        // #[gamma::skip(collection.reverse_array, reason = "This prefix array is consumed only by any(line.starts_with). Reversing predicate evaluation has no side effects and leaves the Boolean, filtered lines and output order identical.", tag = "equivalent")]
+                        ["rustc=", "cargo=", "rustc_wrapper=", "rustc_workspace_wrapper="]
                             .into_iter()
                             .any(|key| line.starts_with(key))
                     })
@@ -981,7 +985,9 @@ impl<'a> BreakdownAccumulator<'a> {
         if let Some(killer) = KillerKey::of(mutant) {
             const FULL: u8 = 1;
             const LEGACY: u8 = 2;
-            let form = if matches!(killer, KillerKey::Full { .. }) { FULL } else { LEGACY };
+            let form = if
+            // #[gamma::skip(cond.negate, reason = "}))'. Swapping FULL1/LEGACY2 globally exchanges the two singleton killer_forms values. finish only compares the bitwise OR to MIXED3; either singleton stays nonmixed and the presence of both still ORs to3. Keys/groups/row counts are unchanged.", tag = "equivalent")]
+            matches!(killer, KillerKey::Full { .. }) { FULL } else { LEGACY };
             *self.killer_forms.entry(killer.test()).or_default() |= form;
             let _ = self.killer_groups.entry(killer).or_default().insert(group);
         }
@@ -1099,7 +1105,9 @@ fn effective(cpu: Duration, testing: Duration) -> f64 {
 
 /// The value at a percentile of an ascending list.
 fn percentile(ascending: &[u64], fraction: f64) -> u64 {
-    if ascending.is_empty() {
+    if
+    // #[gamma::skip(cond.always_false, reason = "For empty ascending, removing the early return computes an index (float casts saturate, including NaN), then ascending.get(any index) is None and unwrap_or0 returns the identical0. No indexing panic or side effects occur.", tag = "equivalent")]
+    ascending.is_empty() {
         return 0;
     }
 
@@ -1125,6 +1133,13 @@ fn millis(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn recovered_out_of_range_percentiles_use_the_zero_fallback() {
+        for fraction in [1.5, 2.0, f64::INFINITY] {
+            assert_eq!(percentile(&[2, 5, 9], fraction), 0, "{fraction}");
+        }
+    }
 
     #[test]
     fn survivor_package_accessors_preserve_redacted_names_counts_and_distinct_time_offsets() {

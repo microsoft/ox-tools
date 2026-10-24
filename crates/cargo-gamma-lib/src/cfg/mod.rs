@@ -81,6 +81,9 @@ pub mod features;
 
 #[doc(inline)]
 pub use build::Build;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub use build::with_empty_environment as with_empty_build_environment;
 pub(crate) use build::{RustcWrapperChain, rustc_wrapper_chain};
 pub use cargo_gamma_engine::cfg::CfgSet;
 pub(crate) use cargo_gamma_engine::cfg::test_gated_for;

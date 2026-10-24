@@ -424,6 +424,7 @@ impl Manifest {
 
             for registry in registries {
                 if let Some(table) = patch.get_mut(&registry).and_then(Item::as_table_like_mut) {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     anchor_dependencies(table, original, &self.within, &mut self.changed);
                 }
             }
@@ -440,6 +441,7 @@ impl Manifest {
 
                 for name in DEPENDENCY_TABLES {
                     if let Some(dependencies) = table.get_mut(name).and_then(Item::as_table_like_mut) {
+                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                         anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
                     }
                 }
@@ -450,6 +452,7 @@ impl Manifest {
         if let Some(workspace) = self.document.get_mut("workspace").and_then(Item::as_table_like_mut)
             && let Some(dependencies) = workspace.get_mut("dependencies").and_then(Item::as_table_like_mut)
         {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
         }
     }
@@ -457,6 +460,7 @@ impl Manifest {
     /// Rewrites the paths in one top-level table.
     fn anchor_table(&mut self, name: &str, original: &Utf8Path) {
         if let Some(table) = self.document.get_mut(name).and_then(Item::as_table_like_mut) {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(table, original, &self.within, &mut self.changed);
         }
     }
@@ -838,6 +842,7 @@ fn anchor_dependencies(table: &mut dyn toml_edit::TableLike, original: &Utf8Path
 
     for name in names {
         let Some(entry) = table.get_mut(&name) else {
+            // #[gamma::skip(loop.continue_to_break, reason = "anchor_dependencies snapshots names from table.iter immediately before the loop. The table never removes or renames dependency entries: only path fields inside their values are inserted. Therefore table.get_mut for each snapshotted key is always Some, and the mutated continue in its None branch is unreachable.", tag = "equivalent")]
             continue;
         };
 
@@ -1028,7 +1033,9 @@ pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     }
 
     if !found {
-        let build = manifest
+        let build =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "cap_lints previously inspects any existing build item and immediately returns Err unless it is table-like. The intervening target-table and rustflags changes cannot change the build item's kind. If build is absent, or_insert creates Item::Table. Thus the later as_table_like_mut().ok_or_else error is unreachable, making propagation versus unwrap identical.", tag = "equivalent")]
+        manifest
             .document
             .entry("build")
             .or_insert(Item::Table(Table::new()))
@@ -1064,6 +1071,25 @@ fn append_flag(flags: &mut Item) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_non_escaping_dependency_does_not_stop_later_external_path_anchoring() {
+        let mut document: DocumentMut = "[dependencies]\ninside = { path = '../sibling' }\noutside = { path = '../../external' }\n"
+            .parse()
+            .unwrap();
+        let original = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("member");
+        let mut changed = false;
+        anchor_dependencies(
+            document["dependencies"].as_table_like_mut().unwrap(),
+            &original,
+            Utf8Path::new("member"),
+            &mut changed,
+        );
+        assert!(changed);
+        assert_eq!(document["dependencies"]["inside"]["path"].as_str(), Some("../sibling"));
+        let expected = portable_path(&anchor("../../external", &original, Utf8Path::new("member")).unwrap());
+        assert_eq!(document["dependencies"]["outside"]["path"].as_str(), Some(expected.as_str()));
+    }
 
     #[test]
     fn feature_array_union_preserves_order_deduplicates_and_handles_malformed_values() {

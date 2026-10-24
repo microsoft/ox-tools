@@ -1768,6 +1768,7 @@ impl RunRecord {
                 .filter_map(|dependency| plan.specs.get(dependency).map(|(root, _version)| root.clone()))
                 .collect();
 
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             normalize_compilation_roots(&mut roots);
             let _previous = compilation_roots.insert(package.clone(), roots);
         }
@@ -2512,7 +2513,10 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
 }
 
 fn environment_digest(environment: &[(Vec<u8>, Vec<u8>)]) -> String {
-    let mut parts = Vec::with_capacity(environment.len().saturating_mul(2));
+    let mut parts = Vec::with_capacity(environment.len().saturating_mul(
+        // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_zero, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+        2,
+    ));
     for (name, value) in environment {
         parts.push(name.as_slice());
         parts.push(value.as_slice());

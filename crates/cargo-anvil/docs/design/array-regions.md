@@ -115,6 +115,12 @@ application order, including retirement, before returning the plan. A
 structural array-host refusal returns no applicable plan, so unrelated
 pending writes cannot expose a partially composed invalid host.
 
+When adoption removes several unrelated tables or root assignments, the
+planner tracks each original deletion range separately. Arrays between
+those deletions retain their source identity; treating the whole interval
+as one replacement would incorrectly refuse otherwise independent regions.
+Deleting an array delimiter or rebinding its selector still refuses.
+
 Overlapping/malformed ownership, misplaced markers, split values,
 non-array selectors, duplicate JSON properties, owned-file/array-host overlap,
 structural dependencies, and insertions requiring relocation refuse. Invalid

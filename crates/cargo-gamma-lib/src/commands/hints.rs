@@ -163,8 +163,122 @@ fn promotion_record(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use serde_json::{from_value, json, to_value};
+
     use super::*;
     use crate::error::error;
+
+    fn recovered_nonempty_hints() -> Hints {
+        let mutant = crate::model::Mutant {
+            file: camino::Utf8PathBuf::from("lib.rs").into(),
+            outcome: crate::model::Outcome::CompileError,
+            ..crate::fixtures::mutant()
+        };
+        let population = [mutant];
+        let mut wire = to_value(RunRecord::default()).unwrap();
+        wire["files"] = json!([{
+            "path": "lib.rs", "digest": "controlled", "size": 0,
+            "mutants": [{"id": population[0].id, "outcome": population[0].outcome}]
+        }]);
+        let record = from_value(wire).unwrap();
+        let hints = Hints::promoted(&record, &population);
+        assert!(!hints.is_empty());
+        hints
+    }
+
+    #[test]
+    fn recovered_empty_promotion_previews_removal_of_existing_knowledge_instead_of_claiming_nothing_to_promote() {
+        let root = camino::Utf8Path::new("never-read-promotion-root");
+        let existing = recovered_nonempty_hints();
+        let merged = Hints::default();
+        let mut host = crate::testing::Sink::default();
+        let exit = finish_promotion(
+            &mut host,
+            &HintsArgs {
+                dir: root.to_owned(),
+                cache_dir: None,
+                replace: false,
+                dry_run: true,
+            },
+            PreparedPromotion {
+                root,
+                base: root,
+                existing: &existing,
+                generation: None,
+                merged: &merged,
+                omitted: 0,
+            },
+            Styler::new(false),
+        )
+        .unwrap();
+        assert_eq!(exit, EXIT_OK);
+        assert!(host.out().is_empty());
+        assert_eq!(
+            host.err(),
+            format!(
+                "     Preview `{}`: 0 records added, 0 records updated, 1 record removed, and 0 records preserved\n",
+                hints_path(root)
+            )
+        );
+    }
+
+    #[test]
+    fn recovered_nothing_to_promote_returns_its_diagnostic_writer_error_without_touching_a_hint_file() {
+        let root = camino::Utf8Path::new("never-read-promotion-root");
+        let empty = Hints::default();
+        let result = finish_promotion(
+            &mut crate::testing::BrokenHost,
+            &HintsArgs {
+                dir: root.to_owned(),
+                cache_dir: None,
+                replace: false,
+                dry_run: false,
+            },
+            PreparedPromotion {
+                root,
+                base: root,
+                existing: &empty,
+                generation: None,
+                merged: &empty,
+                omitted: 0,
+            },
+            Styler::new(false),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "I/O error: broken pipe");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native publication failure requires filesystem access; pure promotion tests remain enabled"
+    )]
+    fn recovered_unchanged_promotion_without_a_loaded_generation_still_attempts_publication_and_returns_its_native_error() {
+        let root = camino::Utf8Path::new("invalid\0promotion-root");
+        let existing = recovered_nonempty_hints();
+        let merged = existing.clone();
+        let mut host = crate::testing::Sink::default();
+        let result = finish_promotion(
+            &mut host,
+            &HintsArgs {
+                dir: root.to_owned(),
+                cache_dir: None,
+                replace: false,
+                dry_run: false,
+            },
+            PreparedPromotion {
+                root,
+                base: root,
+                existing: &existing,
+                generation: None,
+                merged: &merged,
+                omitted: 0,
+            },
+            Styler::new(false),
+        );
+        assert_eq!(result.unwrap_err().message(), format!("could not write `{}`", hints_path(root)));
+        assert!(host.out().is_empty());
+        assert!(host.err().is_empty());
+    }
 
     #[cfg(all(feature = "system-tests", not(miri)))]
     mod native_acceptance {
@@ -513,10 +627,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            serde_json::to_value(record).unwrap(),
-            serde_json::to_value(RunRecord::default()).unwrap()
-        );
+        assert_eq!(to_value(record).unwrap(), to_value(RunRecord::default()).unwrap());
     }
 
     #[test]
@@ -527,10 +638,7 @@ mod tests {
             |_| panic!("partial evidence must take precedence over older completed evidence"),
         )
         .unwrap();
-        assert_eq!(
-            serde_json::to_value(partial).unwrap(),
-            serde_json::to_value(RunRecord::default()).unwrap()
-        );
+        assert_eq!(to_value(partial).unwrap(), to_value(RunRecord::default()).unwrap());
         let completed = promotion_record(
             false,
             || Ok(None),
@@ -540,10 +648,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            serde_json::to_value(completed).unwrap(),
-            serde_json::to_value(RunRecord::default()).unwrap()
-        );
+        assert_eq!(to_value(completed).unwrap(), to_value(RunRecord::default()).unwrap());
         let failure = promotion_record(
             false,
             || Err(error!("corrupt interrupted checkpoint")),

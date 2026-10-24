@@ -727,7 +727,9 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
+    use chrono::DateTime;
     use tempfile::TempDir;
+    use url::Url;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -749,6 +751,37 @@ mod tests {
     struct RecordingProgress {
         determinate: StdMutex<Option<DeterminateCallback>>,
         indeterminate: StdMutex<Option<Box<dyn Fn() -> String + Send + Sync>>>,
+    }
+
+    #[tokio::test]
+    async fn survivor_preparation_installs_progress_even_when_the_in_memory_body_is_invalid() {
+        let handler = fetch::fake::FakeHandler::from_fn(|_| fetch::HttpResponseBuilder::new_fake().header("content-length", "0").build());
+        let client = fetch::HttpClient::new_fake(handler);
+        let progress = Arc::new(RecordingProgress::default());
+        let result = prep_tables_core(
+            &client,
+            &Url::parse("https://example.test/db-dump.tar.gz").unwrap(),
+            Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf(),
+            Duration::from_hours(1),
+            DateTime::UNIX_EPOCH,
+            Arc::clone(&progress) as Arc<dyn Progress>,
+        )
+        .await;
+        result.unwrap_err();
+        let callback = progress
+            .determinate
+            .lock()
+            .expect("progress recorder only replaces callbacks; assertions run after unlocking")
+            .take();
+        let callback = callback.unwrap();
+        let (total, downloaded, _) = callback();
+        assert_eq!((total, downloaded), (0, 0));
+        let indeterminate = progress
+            .indeterminate
+            .lock()
+            .expect("progress recorder only replaces callbacks; assertions run after unlocking")
+            .is_some();
+        assert!(!indeterminate);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

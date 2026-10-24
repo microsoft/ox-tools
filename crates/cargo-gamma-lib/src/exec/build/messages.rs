@@ -393,7 +393,50 @@ pub(crate) fn normalize_separators(path: &str) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
+    use serde_json::json;
+
     use super::*;
+
+    #[test]
+    fn recovered_dep_info_walks_continue_after_the_first_read_or_directory_error() {
+        let root = Utf8Path::new("workspace");
+        let mut reads = Vec::new();
+        let compiled = compiled_sources_with(
+            "",
+            root,
+            |_| vec!["first.d".into(), "second.d".into()],
+            |path| {
+                reads.push(path.to_owned());
+                if path == Utf8Path::new("first.d") {
+                    Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "first read"))
+                } else {
+                    Ok("artifact: src/kept.rs\n".to_owned())
+                }
+            },
+        );
+        assert_eq!(reads, [Utf8PathBuf::from("first.d"), Utf8PathBuf::from("second.d")]);
+        assert_eq!(compiled, Some(HashSet::from_iter([Utf8PathBuf::from("src/kept.rs")])));
+
+        let stream = json!({
+            "reason":"compiler-artifact",
+            "filenames":["first/libsubject-hash.rlib","second/libsubject-hash.rlib"]
+        })
+        .to_string();
+        let mut calls = 0;
+        let mut accepted = None;
+        let found = dep_files_with(&stream, |directory| {
+            calls += 1;
+            if calls == 1 {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "first directory"))
+            } else {
+                let path = directory.join("subject-hash.d");
+                accepted = Some(path.clone());
+                Ok(vec![path])
+            }
+        });
+        assert_eq!(calls, 2);
+        assert_eq!(found, vec![accepted.unwrap()]);
+    }
 
     #[test]
     fn dep_info_rejections_do_not_discard_the_later_valid_message_or_filename() {
@@ -401,8 +444,8 @@ mod final_survivor_tests {
         let dependency = root.join("subject-exact-hash.d");
         let artifact = root.join("libsubject-exact-hash.rmeta");
         let stdout = [
-            serde_json::json!({"reason":"compiler-message"}),
-            serde_json::json!({
+            json!({"reason":"compiler-message"}),
+            json!({
                 "reason":"compiler-artifact",
                 "filenames":["", "unhashed.rmeta", artifact]
             }),
@@ -432,15 +475,15 @@ mod final_survivor_tests {
     #[test]
     fn evidence_preserves_artifact_counts_and_sorted_unique_target_labels() {
         let lines = [
-            serde_json::json!({"reason":"compiler-artifact", "fresh":true}),
-            serde_json::json!({"reason":"compiler-artifact", "target":{"name":"z", "kind":["bin"]}}),
-            serde_json::json!({"reason":"compiler-artifact", "target":{"name":"a", "kind":[]}, "profile":{"test":true}}),
-            serde_json::json!({"reason":"compiler-artifact", "target":{"name":"z", "kind":["bin"]}}),
-            serde_json::json!({"reason":"compiler-message", "target":{"name":"z", "kind":["bin"]}, "message":{"level":"warning"}}),
-            serde_json::json!({"reason":"compiler-message", "target":{"name":"b", "kind":["example","bin"]}, "message":{"level":"error"}}),
-            serde_json::json!({"reason":"compiler-message", "target":{"name":"a", "kind":["proc-macro"]}, "message":{"level":"error"}}),
-            serde_json::json!({"reason":"compiler-message", "target":{"name":"z", "kind":["lib"]}, "message":{"level":"error"}}),
-            serde_json::json!({"reason":"compiler-message", "target":{"name":"empty", "kind":[]}, "message":{"level":"error"}}),
+            json!({"reason":"compiler-artifact", "fresh":true}),
+            json!({"reason":"compiler-artifact", "target":{"name":"z", "kind":["bin"]}}),
+            json!({"reason":"compiler-artifact", "target":{"name":"a", "kind":[]}, "profile":{"test":true}}),
+            json!({"reason":"compiler-artifact", "target":{"name":"z", "kind":["bin"]}}),
+            json!({"reason":"compiler-message", "target":{"name":"z", "kind":["bin"]}, "message":{"level":"warning"}}),
+            json!({"reason":"compiler-message", "target":{"name":"b", "kind":["example","bin"]}, "message":{"level":"error"}}),
+            json!({"reason":"compiler-message", "target":{"name":"a", "kind":["proc-macro"]}, "message":{"level":"error"}}),
+            json!({"reason":"compiler-message", "target":{"name":"z", "kind":["lib"]}, "message":{"level":"error"}}),
+            json!({"reason":"compiler-message", "target":{"name":"empty", "kind":[]}, "message":{"level":"error"}}),
         ];
         let stdout = format!(
             "not cargo JSON\n{}",
@@ -473,10 +516,10 @@ mod final_survivor_tests {
     fn dep_info_skips_unrelated_lines_artifacts_and_directories_without_losing_later_sources() {
         let root = Utf8Path::new("/checkout with spaces");
         let deps = root.join("deps");
-        let artifact = |filenames: Vec<String>| serde_json::json!({"reason":"compiler-artifact","filenames":filenames}).to_string();
+        let artifact = |filenames: Vec<String>| json!({"reason":"compiler-artifact","filenames":filenames}).to_string();
         let stdout = [
             "not-json".to_owned(),
-            serde_json::json!({"reason":"compiler-message","filenames":[deps.join("old-999.rlib")]}).to_string(),
+            json!({"reason":"compiler-message","filenames":[deps.join("old-999.rlib")]}).to_string(),
             artifact(vec![deps.join("without_hash.rlib").into_string()]),
             artifact(vec![root.join("absent/subject-123.rlib").into_string()]),
             artifact(vec![deps.join("libsubject-123.rlib").into_string()]),

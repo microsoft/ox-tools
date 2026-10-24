@@ -133,9 +133,47 @@ pub fn advice(targets: &[CompileFailTarget]) -> Option<String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, from_value, json};
 
     use super::*;
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native source reader requires filesystem access; injected-reader cases remain enabled"
+    )]
+    fn recovered_native_compile_fail_discovery_reads_a_checked_in_source_without_generating_a_target() {
+        let root = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = root.join("src").join("discover").join("compile_fail.rs");
+        let metadata: Metadata = from_value(json!({
+            "packages":[{
+                "name":"subject","version":"0.0.0","id":"subject","source":null,
+                "dependencies":[{
+                    "name":"trybuild","source":null,"req":"*","kind":"dev","rename":null,
+                    "optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null
+                }],
+                "targets":[{
+                    "name":"checked-in","kind":["test"],"crate_types":["bin"],"src_path":source,
+                    "edition":"2024","test":true,"doc":false,"doctest":false,"required-features":[]
+                }],
+                "features":{},"manifest_path":root.join("Cargo.toml"),"metadata":null,
+                "authors":[],"categories":[],"keywords":[],"edition":"2024","publish":null,
+                "license":null,"license_file":null,"readme":null,"repository":null,"homepage":null,
+                "documentation":null,"description":null,"links":null,"default_run":null,"rust_version":null
+            }],
+            "workspace_members":["subject"],"workspace_default_members":["subject"],
+            "workspace_root":root,"target_directory":root.join("unused"),"resolve":null,"metadata":null,"version":1
+        }))
+        .unwrap();
+        assert_eq!(
+            compile_fail_targets(&metadata),
+            vec![CompileFailTarget {
+                package: "subject".to_owned(),
+                target: "checked-in".to_owned(),
+                harness: "trybuild".to_owned()
+            }]
+        );
+    }
 
     #[test]
     fn survivor_compile_fail_discovery_continues_after_unrelated_packages_and_missing_targets() {
@@ -154,7 +192,7 @@ mod tests {
                 "features": [], "target": null, "registry": null
             })
         };
-        let package = |name: &str, dependencies: Vec<serde_json::Value>, targets: Vec<serde_json::Value>| {
+        let package = |name: &str, dependencies: Vec<Value>, targets: Vec<Value>| {
             json!({
                 "name": name, "version": "0.0.0", "id": name, "source": null,
                 "dependencies": dependencies, "targets": targets, "features": {},
@@ -165,7 +203,7 @@ mod tests {
                 "links": null, "default_run": null, "rust_version": null
             })
         };
-        let metadata: Metadata = serde_json::from_value(json!({
+        let metadata: Metadata = from_value(json!({
             "packages": [
                 package("unrelated", Vec::new(), vec![target("unrelated", "harness.rs")]),
                 package("normal-dependency", vec![dependency("normal")], vec![target("normal", "harness.rs")]),

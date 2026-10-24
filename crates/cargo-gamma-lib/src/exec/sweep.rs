@@ -12,14 +12,14 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
-use std::time::Instant;
 
 use camino::Utf8Path;
 use cargo_gamma_process::MemoryRequest;
+use tick::{SimpleClock, Stopwatch};
 
 use super::events::{Events, SelectionAttempt, SelectionResult, SelectionTier};
 use super::harness_filters::HarnessFilters;
@@ -236,6 +236,7 @@ impl SweepDrain<'_> {
                     }
                 }
                 SweepEvent::Accounting(tier, confirmation, cost) => {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     apply_accounting(tally, tier, confirmation, &cost);
                     if !*checkpoint_failed {
                         let cost = super::measure::sweep_cost(Some(tally.checkpoint_spent(package_spans)), elapsed())
@@ -256,6 +257,8 @@ impl SweepDrain<'_> {
                     for attempt in &completed.attempts {
                         events.selection_attempt(attempt);
                     }
+
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record_package_span(package_spans, plan, &completed);
                     if let Some(mutant) = apply_completed(plan, killers, completed) {
                         if *checkpoint_failed {
@@ -346,7 +349,9 @@ fn send_accounting(tier: SelectionTier, confirmation: bool, cost: super::session
 pub(super) fn record_binary_launch_attempt(confirmation: bool) {
     if SELECTION_ATTEMPTS.with_borrow(Option::is_some) {
         let (tier, proof) = EXECUTION_TIER.get();
-        let _sent = send_accounting(
+        let _sent =
+        // #[gamma::skip(call_result.default, reason = "The return value is discarded; default_after still performs the original call and every side effect.", tag = "equivalent")]
+        send_accounting(
             tier,
             confirmation || proof,
             super::session::AttemptCost {
@@ -370,6 +375,28 @@ pub(super) fn take_execution_costs() -> Vec<(bool, super::session::AttemptCost)>
     EXECUTION_COSTS.with_borrow_mut(core::mem::take)
 }
 
+#[cfg(test)]
+pub(super) fn capture_launch_costs_for_test(body: impl FnOnce()) -> Vec<(SelectionTier, bool, super::session::AttemptCost)> {
+    struct Restore(Option<mpsc::Sender<SweepEvent>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ACCOUNTING_SENDER.with_borrow_mut(|sender| *sender = self.0.take());
+        }
+    }
+    let (sender, receiver) = mpsc::channel();
+    let _restore = Restore(ACCOUNTING_SENDER.with_borrow_mut(|slot| slot.replace(sender)));
+    body();
+    receiver
+        .try_iter()
+        .map(|event| {
+            let SweepEvent::Accounting(tier, confirmation, cost) = event else {
+                panic!("the observed runner emits accounting events only");
+            };
+            (tier, confirmation, cost)
+        })
+        .collect()
+}
+
 pub(super) fn record_binary_execution(confirmation: bool, elapsed: Duration, verdict: &Verdict) {
     if !SELECTION_ATTEMPTS.with_borrow(Option::is_some) {
         return;
@@ -385,7 +412,9 @@ pub(super) fn record_binary_execution(confirmation: bool, elapsed: Duration, ver
         finished.misses = 0;
         finished.inconclusive = 0;
     }
-    let _sent = send_accounting(tier, confirmation || proof, finished);
+    let _sent =
+    // #[gamma::skip(call_result.default, reason = "The return value is discarded; default_after still performs the original call and every side effect.", tag = "equivalent")]
+    send_accounting(tier, confirmation || proof, finished);
 }
 
 fn attempt_cost(elapsed: Duration, result: SelectionResult) -> super::session::AttemptCost {
@@ -423,7 +452,13 @@ fn record_selection_cost(tally: &Tally, tier: SelectionTier, result: SelectionRe
                 cost.misses = usize::from(result == SelectionResult::Miss);
                 cost.inconclusive = usize::from(result == SelectionResult::Inconclusive);
             }
-            if !send_accounting(tier, confirmation || additional, cost.clone()) {
+            if !send_accounting(
+                tier,
+                // #[gamma::skip(logical.or_remove_right, reason = "At this send_accounting site additional=true is observable only when ACCOUNTING_SENDER=None: any nonempty execution-cost vector with a sender takes the earlier successful send/clear/return branch. The only sender-present loop case creates one(false,...) scripted cost. Thus replacing confirmation||additional with confirmation changes only a Boolean passed to a no-sender no-op.", tag = "equivalent")]
+                confirmation || additional,
+                cost.clone(),
+            ) {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 apply_accounting(tally, tier, confirmation || additional, &cost);
             }
         }
@@ -551,8 +586,12 @@ impl<'a> InferredPlanning<'a> {
             .files
             .extend(hints.binaries.iter().map(|file| (file.file.as_path(), file.candidates.as_slice())));
         for cluster in &hints.reach {
-            let Ok(index) = usize::try_from(cluster.test_set) else { continue };
+            let Ok(index) = usize::try_from(cluster.test_set) else {
+                // #[gamma::skip(loop.continue_to_break, reason = "InferredPlanning::new first calls GeneralizedHints::supported(), which verifies every reach cluster test_set converts to usize AND is strictly below test_sets.len(). These collections have no interior mutation through the shared borrow. Neither subsequent failed conversion nor absent-set else-continue can execute; replacing either continue by break is inert.", tag = "equivalent")]
+                continue;
+            };
             let Some(candidates) = hints.test_sets.get(index).map(Vec::as_slice) else {
+                // #[gamma::skip(loop.continue_to_break, reason = "InferredPlanning::new first calls GeneralizedHints::supported(), which verifies every reach cluster test_set converts to usize AND is strictly below test_sets.len(). These collections have no interior mutation through the shared borrow. Neither subsequent failed conversion nor absent-set else-continue can execute; replacing either continue by break is inert.", tag = "equivalent")]
                 continue;
             };
             planning
@@ -795,6 +834,8 @@ struct Scheduler {
     by_item: crate::HashMap<(usize, Arc<str>), Vec<usize>>,
     state: Mutex<SchedulerState>,
     changed: Condvar,
+    #[cfg(test)]
+    notifications: AtomicUsize,
     resource_capacities: crate::HashMap<Arc<str>, usize>,
 }
 
@@ -898,6 +939,11 @@ impl Scheduler {
         resource_capacities: crate::HashMap<Arc<str>, usize>,
         remaining: Vec<bool>,
     ) -> Self {
+        assert_eq!(
+            work.len(),
+            remaining.len(),
+            "every pending state must belong to exactly one scheduled work item"
+        );
         let mut packages: crate::HashMap<Arc<str>, usize> = crate::HashMap::default();
         let package_slots = work
             .iter()
@@ -944,8 +990,8 @@ impl Scheduler {
             package_turns: vec![0; packages.len()],
             package_queues: vec![BTreeSet::new(); packages.len()],
             heads: BTreeSet::new(),
-            groups: (0..group_files.len()).map(|_| GroupQueue::default()).collect(),
-            files: (0..file_packages.len()).map(|_| FileQueue::default()).collect(),
+            groups: group_files.iter().map(|_| GroupQueue::default()).collect(),
+            files: file_packages.iter().map(|_| FileQueue::default()).collect(),
             priorities: vec![None; work.len()],
             pending_groups: BTreeSet::new(),
             active_resources: crate::HashMap::default(),
@@ -978,6 +1024,8 @@ impl Scheduler {
             by_item,
             state: Mutex::new(SchedulerState::default()),
             changed: Condvar::new(),
+            #[cfg(test)]
+            notifications: AtomicUsize::new(0),
             resource_capacities,
         };
         for key in scheduler.by_item.keys() {
@@ -1013,12 +1061,22 @@ impl Scheduler {
         mut before_wait: impl FnMut(),
         mut wait: impl FnMut(MutexGuard<'a, SchedulerState>) -> MutexGuard<'a, SchedulerState>,
     ) -> Option<usize> {
+        let waiting = Cell::new(false);
+        let mut wait = |state| {
+            let returned = wait(state);
+            waiting.set(false);
+            returned
+        };
         let mut state = self
             .state
             .lock()
             .expect("a scheduler panic can leave coupled queue and reservation state inconsistent");
 
         loop {
+            assert!(
+                !waiting.get(),
+                "a blocked claim must perform its wait before retrying while holding the queue lock"
+            );
             if abandoned.get().is_some() {
                 return None;
             }
@@ -1031,7 +1089,17 @@ impl Scheduler {
                 return None;
             }
 
+            assert!(
+                state.remaining_count > 0,
+                "an exhausted scheduler must return instead of waiting for unavailable work"
+            );
             before_wait();
+
+            // #[gamma::skip(stmt.delete_call, reason = "The waiting marker is reset unconditionally when the injected/native wait returns, before its only read at the loop head. This write is assertion bookkeeping, not a scheduling signal.", tag = "equivalent")]
+            waiting.set(
+                // #[gamma::skip(literal.bool_flip, reason = "The waiting marker is reset unconditionally when the injected/native wait returns, before its only read at the loop head. This write is assertion bookkeeping, not a scheduling signal.", tag = "equivalent")]
+                true,
+            );
             state = wait(state);
         }
     }
@@ -1133,12 +1201,28 @@ impl Scheduler {
         }
         self.refresh_item(&mut state, &key);
         self.attach_file(&mut state, work.file);
+        for slot in &self.by_file[work.file] {
+            let queue = &state.files[*slot];
+            assert_eq!(
+                queue.head.is_some(),
+                !queue.idle.is_empty(),
+                "releasing an assignment must republish every available file head before waking claimants"
+            );
+        }
         core::mem::drop(state);
-        self.changed.notify_all();
+        self.notify_all();
     }
 
     fn abandon(&self) {
-        self.abandon_with(|| self.changed.notify_all());
+        self.abandon_with(|| self.notify_all());
+    }
+
+    fn notify_all(&self) {
+        // Counts calls only; scheduler locks/worker joins, not this relaxed value, synchronize work.
+        #[cfg(test)]
+        let _prior = self.notifications.fetch_add(1, Ordering::Relaxed);
+        // #[gamma::skip(stmt.delete_call, reason = "This exact native Condvar wake has no synchronous observation. The preceding owned counter does not observe it; distinguishing deletion requires a blocked-thread scheduling/timing experiment, not a deterministic unit test.", tag = "native-boundary")]
+        self.changed.notify_all();
     }
 
     fn abandon_with(&self, notify_all: impl FnOnce()) {
@@ -1151,7 +1235,9 @@ impl Scheduler {
 
     // #[gamma::skip(fn_value.none, tag = "timeout", reason = "never selecting available work leaves scheduler waiters blocked")]
     fn select(&self, state: &SchedulerState) -> Option<usize> {
-        if self.resource_capacities.is_empty() {
+        if
+        // #[gamma::skip(cond.always_false, reason = "The sole production ScheduledWork constructor in test_all_with_accounting_hooks sets resources=Vec::new(); the second-stage scheduler clones those same records. Production never populates ScheduledWork.resources (test-only scheduler fixtures can). On the mutated empty-capacity path, the first head's resources_available uses all() over this empty vector and returns true, selecting the same head; if no head exists, no pending group has work. The removed private fast path changes only queue-search overhead in valid production states.", tag = "equivalent")]
+        self.resource_capacities.is_empty() {
             return state.heads.first().map(|head| head.local.index);
         }
         if let Some(index) = state.heads.first().map(|head| head.local.index)
@@ -1165,10 +1251,17 @@ impl Scheduler {
             .iter()
             .flat_map(|group| {
                 let queue = &state.groups[*group];
+
+                // #[gamma::skip(collection.reverse_array, reason = "Both cold/informed queue candidates are mapped without side effects then reduced by PackageHead::min. Reversing only the two queue enumeration positions yields the same total-order minimum; equal heads select the same index.", tag = "equivalent")]
                 [&queue.cold, &queue.informed]
             })
             .filter_map(|queue| {
-                let current = priority(&self.work, state, queue.first()?.index)?;
+                let first =
+                // #[gamma::skip(iter.first_to_last, reason = "GroupQueue members share the file/item distance and transfer key; only those two priority fields are copied from this representative.", tag = "equivalent")]
+                queue.first()?;
+                let current =
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "Scheduler select's group cold/informed queues contain only remaining jobs: reserve_next removes claimed job while holding the same state mutex, and release never reinserts it. Thus queue.first() index has remaining=true, so priority returns Some (its only None is remaining=false). panic_on_failure cannot observe None.", tag = "equivalent")]
+                priority(&self.work, state, first.index)?;
                 queue
                     .iter()
                     .find(|entry| self.resources_available(state, entry.index))
@@ -1199,6 +1292,8 @@ impl Scheduler {
     fn detach_file(&self, state: &mut SchedulerState, file: usize) {
         for slot in &self.by_file[file] {
             let package = self.file_packages[*slot];
+
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             remove_head(state, package);
             if let Some(head) = state.files[*slot].head.take() {
                 let removed = state.package_queues[package].remove(&head);
@@ -1225,6 +1320,8 @@ impl Scheduler {
             if let Some(head) = head {
                 state.package_queues[package].insert(head);
             }
+
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             insert_head(state, package);
         }
     }
@@ -1623,7 +1720,6 @@ pub(super) fn test_all_with_hooks(
     )
 }
 
-#[expect(clippy::too_many_lines, reason = "sweep setup and its scoped worker loop share borrowed state")]
 #[expect(
     clippy::too_many_arguments,
     reason = "execution adapters keep durability and admission failures deterministically testable"
@@ -1642,6 +1738,39 @@ pub(super) fn test_all_with_accounting_hooks(
         impl Fn() + Sync,
     ),
 ) -> Result<Option<Spent>> {
+    test_all_with_clock(
+        work,
+        plan,
+        reach,
+        sweep,
+        deterministic_reach,
+        killers,
+        events,
+        hooks,
+        &SimpleClock::new_system(),
+    )
+}
+
+#[expect(clippy::too_many_lines, reason = "sweep setup and its scoped worker loop share borrowed state")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the clock and execution adapters keep the same borrowed sweep state"
+)]
+fn test_all_with_clock(
+    work: &Workspace,
+    plan: &mut Plan,
+    reach: &Reachability<'_>,
+    sweep: Sweep,
+    deterministic_reach: bool,
+    killers: &mut Killers,
+    events: &mut impl Events,
+    hooks: (
+        impl FnMut(&Mutant, &Killers, &super::session::SweepCost) -> Result<()>,
+        impl Fn(u32) -> Option<Judgement> + Sync,
+        impl Fn() + Sync,
+    ),
+    clock: &SimpleClock,
+) -> Result<Option<Spent>> {
     let (mut checkpoint, judgement, before_wait) = hooks;
     let jobs = sweep.jobs;
 
@@ -1657,16 +1786,7 @@ pub(super) fn test_all_with_accounting_hooks(
 
     let captured = (!work.has_testing_journal()).then(|| super::session::InitialHints::capture(plan, killers));
     let initial = work.initial_hints().or(captured.as_ref());
-    let confirmed_initial_killers = work.prior_initial_confirmations();
-    let mut accounting = super::session::SweepAccounting::segment(initial, initial.is_some());
-    accounting.initial_killer_confirmed = initial.map(|_| confirmed_initial_killers.len());
-    let tally = Tally {
-        binary_kills: Mutex::new(BinaryKills::new(plan, killers)),
-        named_kills: Mutex::new(NamedKills::new(plan, killers)),
-        accounting: Mutex::new(accounting),
-        confirmed_initial_killers: Mutex::new(confirmed_initial_killers),
-        ..Tally::default()
-    };
+    let tally = tally_for_sweep(plan, killers, initial, work.prior_initial_confirmations());
     let abandoned: OnceLock<String> = OnceLock::new();
     let negative = NegativeLearning::default();
 
@@ -1745,7 +1865,7 @@ pub(super) fn test_all_with_accounting_hooks(
         .map(|file| FileLearning::from_hints(file, killers.generalized()))
         .collect();
 
-    let sweep_started = Instant::now();
+    let sweep_started = Stopwatch::new(clock);
     events.sweep_planned(&planned, jobs);
 
     let mut package_spans: crate::HashMap<Arc<str>, (usize, u64, u64)> = crate::HashMap::default();
@@ -1809,7 +1929,7 @@ pub(super) fn test_all_with_accounting_hooks(
             .expect("a sweep tally always produces a cost"),
     )?;
 
-    let states = (0..pending.len()).map(|_| Mutex::new(PendingState::default())).collect::<Vec<_>>();
+    let states = pending.iter().map(|_| Mutex::new(PendingState::default())).collect::<Vec<_>>();
     let staged_work = scheduler.work.clone();
     let mut first_scheduler = Some(scheduler);
     #[cfg(test)]
@@ -1822,35 +1942,19 @@ pub(super) fn test_all_with_accounting_hooks(
                 .iter()
                 .map(|state| !state.lock().unwrap_or_else(PoisonError::into_inner).finished)
                 .collect::<Vec<_>>();
-            let mut counts = crate::HashMap::default();
-            for (index, item) in staged_work.iter().enumerate() {
-                if remaining[index] {
-                    *counts.entry((item.file, Arc::clone(&item.item))).or_insert(0_usize) += 1;
-                }
-            }
-            let tail_work = staged_work
-                .iter()
-                .map(|item| ScheduledWork {
-                    sibling_benefit: counts
-                        .get(&(item.file, Arc::clone(&item.item)))
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(1),
-                    hinted: false,
-                    transfer: deterministic_reach && file_killers[item.file].has_fresh_killer(&item.item),
-                    ..item.clone()
-                })
-                .enumerate()
-                .map(|(index, mut item)| {
-                    item.cost = reachable[index].iter().map(|binary| binary.baseline).sum();
-                    item
-                })
-                .collect();
+            let tail_work = fallback_work(&staged_work, &remaining, &file_killers, deterministic_reach, &reachable);
             Scheduler::with_pending(tail_work, file_paths.len(), work.resource_capacities(), remaining)
+        });
+        #[cfg(test)]
+        SWEEP_PASSES.with_borrow_mut(|passes| {
+            if let Some(passes) = passes {
+                passes.push((exact, scheduler.work.iter().map(|work| work.hinted).collect()));
+            }
         });
         let (sender, receiver) = mpsc::channel::<SweepEvent>();
         thread::scope(|scope| {
-            launch_workers(jobs, || {
+            let spawn = || {
+                let sweep_started = &sweep_started;
                 let sender = sender.clone();
                 let scheduler = &scheduler;
                 let ordinals = &ordinals;
@@ -1870,6 +1974,7 @@ pub(super) fn test_all_with_accounting_hooks(
                 let judgement = &judgement;
                 let before_wait = &before_wait;
                 let states = &states;
+                let clock = &clock;
                 #[cfg(test)]
                 let shared_runner = shared_runner.clone();
 
@@ -1886,7 +1991,10 @@ pub(super) fn test_all_with_accounting_hooks(
                         let index = assignment.index();
                         let position = pending[index];
                         let mut state = lock_pending(states, index);
-                        if state.finished {
+                        if
+                        // #[gamma::skip(cond.always_false, reason = "A Scheduler assignment reserves each pending index once. Rebuilding fallback excludes finished PendingState entries, and finishing happens only while holding that same state lock. The already-finished defensive worker branch cannot be entered by the producer; removing or changing its continue is unreachable.", tag = "equivalent")]
+                        state.finished {
+                            // #[gamma::skip(loop.continue_to_break, loop.delete_continue, reason = "A Scheduler assignment reserves each pending index once. Rebuilding fallback excludes finished PendingState entries, and finishing happens only while holding that same state lock. The already-finished defensive worker branch cannot be entered by the producer; removing or changing its continue is unreachable.", tag = "equivalent")]
                             continue;
                         }
 
@@ -1894,8 +2002,10 @@ pub(super) fn test_all_with_accounting_hooks(
                         let active = ordinal;
                         let first = state.started_ms.is_none();
                         let first_started_ms = *state.started_ms.get_or_insert_with(|| elapsed_millis(sweep_started.elapsed()));
-                        let started = Instant::now();
+                        let started = Stopwatch::new(clock);
                         let reachable = &reachable[index];
+
+                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                         begin_selection_trace();
                         INITIAL_KILLER.with_borrow_mut(|initial| initial.clone_from(&initial_killers[index]));
                         if first {
@@ -1905,9 +2015,7 @@ pub(super) fn test_all_with_accounting_hooks(
                         }
                         let judged = judgement(active).map_or_else(
                             || {
-                                let steps = Stage::sequence();
-                                let steps = if exact { &steps[..1] } else { &steps[1..] };
-                                steps.iter().find_map(|&stage| {
+                                judge_learning_pass(exact, |stage| {
                                     judge_learning_step(
                                         work,
                                         active,
@@ -1971,10 +2079,19 @@ pub(super) fn test_all_with_accounting_hooks(
                             settled_ms,
                             attempts,
                         }));
-                        assignment.complete(deterministic_reach && file_killers[file_slots[index]].has_fresh_killer(&item_paths[index]));
+
+                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+                        complete_assignment(
+                            assignment,
+                            deterministic_reach,
+                            &file_killers[file_slots[index]],
+                            &item_paths[index],
+                        );
                     }
                 });
-            });
+            };
+            // #[gamma::skip(call_result.default, reason = "Worker launching returns (); default_after retains every spawn and changes only unit to unit.", tag = "equivalent")]
+            launch_workers(jobs, spawn);
 
             // The workers hold the only remaining senders, so the drain ends when the last one finishes.
             core::mem::drop(sender);
@@ -1995,6 +2112,12 @@ pub(super) fn test_all_with_accounting_hooks(
                 |events| receive_sweep_event(&receiver, events, SWEEP_HEARTBEAT_INTERVAL),
                 || sweep_started.elapsed(),
             );
+        });
+        #[cfg(test)]
+        SETTLED_SCHEDULER_OBSERVER.with_borrow_mut(|observer| {
+            if let Some(observer) = observer.as_mut() {
+                observer(exact, &scheduler);
+            }
         });
         if abandoned.get().is_some() {
             break;
@@ -2023,6 +2146,80 @@ pub(super) fn test_all_with_accounting_hooks(
             ))
         },
     )
+}
+
+/// Seeds each sweep segment from retained hint coverage; absent coverage stays unknown, not zero.
+fn tally_for_sweep(
+    plan: &Plan,
+    killers: &Killers,
+    initial: Option<&super::session::InitialHints>,
+    confirmed_initial_killers: BTreeSet<crate::model::MutantId>,
+) -> Tally {
+    let mut accounting = super::session::SweepAccounting::segment(initial, initial.is_some());
+    accounting.initial_killer_confirmed = initial.map(|_| confirmed_initial_killers.len());
+    Tally {
+        binary_kills: Mutex::new(BinaryKills::new(plan, killers)),
+        named_kills: Mutex::new(NamedKills::new(plan, killers)),
+        accounting: Mutex::new(accounting),
+        confirmed_initial_killers: Mutex::new(confirmed_initial_killers),
+        ..Tally::default()
+    }
+}
+
+#[cfg(test)]
+type ObservedSweepPasses = Vec<(bool, Vec<bool>)>;
+#[cfg(test)]
+thread_local! {
+    static SWEEP_PASSES: std::cell::RefCell<Option<ObservedSweepPasses>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs exact hints separately from fallback stages, stopping at the first decisive result.
+fn judge_learning_pass(exact: bool, mut judge: impl FnMut(Stage) -> Option<Judgement>) -> Option<Judgement> {
+    let steps = Stage::sequence();
+    let steps = if exact { &steps[..1] } else { &steps[1..] };
+    steps.iter().find_map(|&stage| judge(stage))
+}
+
+/// Releases an assignment with transferable priority only when fresh evidence can be reused safely.
+fn complete_assignment(assignment: Assignment<'_>, deterministic_reach: bool, learning: &FileLearning, item: &str) {
+    assignment.complete(deterministic_reach && learning.has_fresh_killer(item));
+}
+
+/// Refreshes fallback costs and priorities without changing alignment with the original pending mask.
+fn fallback_work(
+    staged_work: &[ScheduledWork],
+    remaining: &[bool],
+    file_killers: &[FileLearning],
+    deterministic_reach: bool,
+    reachable: &[&[&TestBinary]],
+) -> Vec<ScheduledWork> {
+    let mut counts = crate::HashMap::default();
+    for (index, item) in staged_work.iter().enumerate() {
+        if remaining[index] {
+            *counts.entry((item.file, Arc::clone(&item.item))).or_insert(0_usize) += 1;
+        }
+    }
+    staged_work
+        .iter()
+        .map(|item| ScheduledWork {
+            sibling_benefit: counts
+                .get(&(item.file, Arc::clone(&item.item)))
+                .copied()
+                .unwrap_or(
+                    // #[gamma::skip(literal.int_increment, reason = "Fallback sibling counts are populated for every remaining item before lookup. The absent-key fallback concerns finished entries, which are not scheduled; 0 versus 1 cannot affect remaining work.", tag = "equivalent")]
+                    0,
+                )
+                .saturating_sub(1),
+            hinted: false,
+            transfer: deterministic_reach && file_killers[item.file].has_fresh_killer(&item.item),
+            ..item.clone()
+        })
+        .enumerate()
+        .map(|(index, mut item)| {
+            item.cost = reachable[index].iter().map(|binary| binary.baseline).sum();
+            item
+        })
+        .collect()
 }
 
 fn apply_initial_confirmation(tally: &Tally, id: crate::model::MutantId) -> bool {
@@ -2077,8 +2274,12 @@ fn increment_item_count(counts: &mut crate::HashMap<(Arc<Utf8Path>, Arc<str>), u
 type PlanningObserver = Box<dyn FnMut(&[ScheduledWork], &[Vec<Candidate>])>;
 
 #[cfg(test)]
+type SettledSchedulerObserver = Box<dyn FnMut(bool, &Scheduler)>;
+
+#[cfg(test)]
 thread_local! {
     static PLANNING_OBSERVER: RefCell<Option<PlanningObserver>> = const { RefCell::new(None) };
+    static SETTLED_SCHEDULER_OBSERVER: RefCell<Option<SettledSchedulerObserver>> = const { RefCell::new(None) };
 }
 
 fn worker_count(jobs: usize) -> usize {
@@ -2233,6 +2434,7 @@ fn transfer_observation(verdict: &Verdict) -> Option<bool> {
         | Verdict::Stalled(_)
         | Verdict::MemoryLimit { .. }
         | Verdict::Flaky(_)
+        | Verdict::Unconfirmed(_, _)
         | Verdict::Unmetered(_)
         | Verdict::Unjudged(_) => None,
     }
@@ -2263,8 +2465,10 @@ fn trace_selection(
     fallback: Duration,
     confirmation: bool,
 ) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     record_selection_cost(tally, tier, selection_result(observation), elapsed, confirmation);
-    record_selection_attempt(SelectionAttempt {
+
+    let attempt = SelectionAttempt {
         ordinal,
         tier,
         package: binary.package.clone(),
@@ -2275,12 +2479,21 @@ fn trace_selection(
         all_tests,
         elapsed_ms: elapsed_millis(elapsed),
         fallback_ms: elapsed_millis(fallback),
-    });
+    };
+    // #[gamma::skip(call_result.default, reason = "Recording the completed selection attempt returns (); default_after preserves the entire recording side effect.", tag = "equivalent")]
+    record_selection_attempt(attempt);
 }
 
 /// Whether omitting a known-unreached binary preserves required whole-binary checks.
-fn negative_reach_hint_is_final(binary: &TestBinary, timeout_multiplier: Option<f64>, sweep: Sweep) -> bool {
-    reach_hint_is_final(whole_probe_attempt(binary, timeout_multiplier, sweep), sweep.confirm)
+fn negative_reach_hint_is_final(binary: &TestBinary, sweep: Sweep) -> bool {
+    reach_hint_is_final(
+        whole_probe_attempt(
+            binary,
+            // #[gamma::skip(option.none_to_some, reason = "negative_reach_hint_is_final only tests the timeout Option's presence through reach_hint_is_final. TestBinary::budget_for returns None iff binary.budget is None for both override None and Some(0.0); numeric budget changes cannot alter this Boolean classification.", tag = "equivalent")]
+            None, sweep,
+        ),
+        sweep.confirm,
+    )
 }
 
 fn whole_probe_attempt(binary: &TestBinary, timeout_multiplier: Option<f64>, sweep: Sweep) -> Attempt<'static> {
@@ -2410,22 +2623,29 @@ fn terminal_judgement(binary: &TestBinary, verdict: Verdict) -> Option<Judgement
             None,
             Some(flaky_note(&binary.path, test.as_deref())),
         )),
+        Verdict::Unconfirmed(test, reason) => {
+            let which = test.map_or_else(|| "the test binary".to_owned(), |name| format!("test `{name}`"));
+            Some(Judgement::Reached(
+                Outcome::Flaky,
+                None,
+                Some(format!(
+                    "the confirmation of {which} in `{}` ran with no mutant active and {reason}; \
+                     this mutant was never judged. Check the confirmation's resource budget and test reliability",
+                    binary.path
+                )),
+            ))
+        }
         Verdict::Unmetered(reason) => Some(Judgement::Abandoned(reason)),
         Verdict::Unjudged(reason) => Some(Judgement::Reached(Outcome::Pending, None, Some(reason))),
     }
 }
 
-fn negative_excludes(
-    negative: Option<(&NegativeLearning, &SiteIdentity, bool)>,
-    binary: &TestBinary,
-    timeout_multiplier: Option<f64>,
-    sweep: Sweep,
-) -> bool {
+fn negative_excludes(negative: Option<(&NegativeLearning, &SiteIdentity, bool)>, binary: &TestBinary, sweep: Sweep) -> bool {
     let Some((negative, site, true)) = negative else {
         return false;
     };
 
-    negative.contains(site, binary) && negative_reach_hint_is_final(binary, timeout_multiplier, sweep)
+    negative.contains(site, binary) && negative_reach_hint_is_final(binary, sweep)
 }
 
 #[cfg(test)]
@@ -2505,7 +2725,9 @@ fn judge_learning_step(
     let active = ordinal;
     let exact = if deterministic_reach { hint } else { None };
     let mut candidates = Vec::new();
-    if deterministic_reach && matches!(stage, Stage::Inferred | Stage::Binaries) {
+    if
+    // #[gamma::skip(logical.and_remove_right, reason = "Removing stage gate only supplies extra cloned candidates to Exact/Fallback. staged::judge counts candidates solely during Inferred/Binaries; Exact ignores candidate slice. Fallback initially derives order from candidates but immediately overwrites it unconditionally from binary_kills.order before any candidate execution. No tally/ranking/verdict changes, only unused allocation/work.", tag = "equivalent")]
+    deterministic_reach && matches!(stage, Stage::Inferred | Stage::Binaries) {
         candidates.extend(observed.select_candidates(item_path));
         candidates.extend_from_slice(promoted);
     }
@@ -2908,6 +3130,8 @@ impl FileLearning {
         let identity = BinaryIdentity::from_binary(binary);
         let mut state = self.locked();
         let order = state.next_order;
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         advance_order(&mut state);
         let candidate = || reached_candidate(identity.clone(), elapsed, order);
 
@@ -2928,6 +3152,8 @@ impl FileLearning {
 
         let mut state = self.locked();
         let order = state.next_order;
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         advance_order(&mut state);
         let item = state.items.entry(item_path.to_owned()).or_default();
 
@@ -2987,13 +3213,1005 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::cmp::Reverse;
     use core::iter::once;
     #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     use camino::Utf8PathBuf;
+    use serde_json::{Value, from_slice, from_str, from_value, to_string, to_value};
 
+    use super::super::session::AttemptCost;
     use super::*;
+    use crate::HashMap;
+    #[cfg(unix)]
+    use crate::exec::faults::{self, Fault};
+    #[cfg(unix)]
+    use crate::exec::memory;
+    use crate::exec::resources::Resources;
+    use crate::ops::collect::Shape;
+
+    #[test]
+    fn recovered_negative_hint_finality_preserves_budget_presence_and_every_policy_gate() {
+        let mut binary = crate::testing::test_binary("never-launched-negative-policy-matrix");
+        binary.baseline = Duration::from_secs(1);
+        for budget in [None, Some(Duration::ZERO), Some(Duration::from_secs(1)), Some(Duration::MAX)] {
+            binary.budget = budget;
+            for stall in [
+                Stall::NONE,
+                Stall {
+                    budget: Some(Duration::ZERO),
+                },
+            ] {
+                for meter in [false, true] {
+                    for confirm in [false, true] {
+                        let policy = Sweep {
+                            timeout_floor: Duration::from_secs(2),
+                            stall,
+                            jobs: 1,
+                            meter,
+                            confirm,
+                        };
+                        let expected = budget.is_none() && stall.budget.is_none() && !meter && !confirm;
+                        assert_eq!(negative_reach_hint_is_final(&binary, policy), expected);
+                        for multiplier in [None, Some(0.5), Some(2.0)] {
+                            assert_eq!(
+                                reach_hint_is_final(whole_probe_attempt(&binary, multiplier, policy), confirm),
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_filtered_exact_negative_probe_does_not_scale_an_extreme_multiplier() {
+        let mut work = Workspace::adopt(
+            "never-owned-negative-overflow".into(),
+            "never-written-negative-overflow-target".into(),
+        );
+        work.set_test_args(vec!["only-selected-test".into()]);
+        let mut binary = crate::testing::test_binary("never-launched-negative-overflow");
+        binary.baseline = Duration::from_secs(1);
+        let hint = staged::killer_for(&binary, "not-selected-test");
+        assert!(!HarnessFilters::parse(work.test_arguments()).admits(&hint.test));
+        let site = SiteIdentity::from_mutant(&crate::fixtures::mutant());
+        let negative = NegativeLearning::default();
+        negative.record(&site, &binary);
+        let policy = Sweep {
+            confirm: false,
+            ..sweep(Stall::NONE)
+        };
+        for budget in [None, Some(Duration::ZERO), Some(Duration::from_secs(1)), Some(Duration::MAX)] {
+            binary.budget = budget;
+            let mut state = PendingState::default();
+            let tally = Tally::default();
+            let judgement = super::super::verdict::with_binary_runner(
+                |_, _, _| panic!("neither a negative-reach exclusion nor a filtered exact hint may launch a binary"),
+                || {
+                    staged::judge(
+                        &work,
+                        1,
+                        &[&binary],
+                        Some(&hint),
+                        &[],
+                        None,
+                        Some((&negative, &site, true)),
+                        Some(f64::MAX),
+                        policy,
+                        &tally,
+                        Stage::Exact,
+                        &mut state.probes,
+                    )
+                },
+            );
+            assert!(judgement.is_none());
+            assert_eq!(state.probes.binary_runs, [None]);
+            assert!(state.probes.passed_tests.is_empty());
+            assert_eq!(tally.launches.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn recovered_exact_learning_barrier_visits_only_exact_and_fallback_stages_short_circuit_in_order() {
+        for (exact, expected) in [
+            (true, vec![Stage::Exact]),
+            (false, vec![Stage::Inferred, Stage::Binaries, Stage::Fallback]),
+        ] {
+            let mut visited = Vec::new();
+            assert!(
+                judge_learning_pass(exact, |stage| {
+                    visited.push(stage);
+                    None
+                })
+                .is_none()
+            );
+            assert_eq!(visited, expected);
+        }
+        let mut visited = Vec::new();
+        let judged = judge_learning_pass(false, |stage| {
+            visited.push(stage);
+            (stage == Stage::Binaries).then_some(Judgement::Reached(Outcome::Survived, None, None))
+        });
+        assert_eq!(visited, [Stage::Inferred, Stage::Binaries]);
+        assert!(matches!(judged, Some(Judgement::Reached(Outcome::Survived, None, None))));
+    }
+
+    #[test]
+    fn recovered_sweep_retains_the_initial_hint_scheduler_and_never_enters_fallback_after_abandonment() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SWEEP_PASSES.with_borrow_mut(|passes| *passes = None);
+            }
+        }
+        for abandon in [false, true] {
+            SWEEP_PASSES.with_borrow_mut(|passes| {
+                assert!(passes.is_none());
+                *passes = Some(Vec::new());
+            });
+            let reset = Reset;
+            let mut work = Workspace::adopt("in-memory-stage-boundary".into(), "never-written-stage/target".into());
+            work.set_live_sweep_publisher_for_test(|_, _| Ok(()));
+            let (journal, _entries) = super::super::testing_state::TestingJournal::memory_for_test(false);
+            work.set_journal_for_test(journal);
+            let mut mutant = crate::testing::ci_fixture::mutant("lib.rs", 1, "arith.add_to_sub", Outcome::Pending);
+            mutant.ordinal = 1;
+            let binary = crate::testing::test_binary("never-launched-stage-boundary");
+            let mut killers = Killers::default();
+            killers.record(mutant.id.clone(), staged::killer_for(&binary, "known"));
+            let mut plan = telemetry_plan(vec![mutant]);
+            let reach = Reachability::build(&plan, &[], &NARROW);
+            let mut events = SweepRecorder::default();
+            let result = test_all_with_accounting_hooks(
+                &work,
+                &mut plan,
+                &reach,
+                sweep(Stall::NONE),
+                true,
+                &mut killers,
+                &mut events,
+                (
+                    |_, _, _| Ok(()),
+                    |_| {
+                        Some(if abandon {
+                            Judgement::Abandoned("named in-memory abandonment".to_owned())
+                        } else {
+                            Judgement::Reached(Outcome::Survived, None, None)
+                        })
+                    },
+                    || {},
+                ),
+            );
+            if abandon {
+                assert!(result.unwrap_err().message().contains("named in-memory abandonment"));
+                assert_eq!(plan.mutants[0].outcome, Outcome::Pending);
+            } else {
+                assert!(result.unwrap().is_some());
+                assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
+            }
+            let expected = if abandon {
+                vec![(true, vec![true])]
+            } else {
+                vec![(true, vec![true]), (false, vec![false])]
+            };
+            SWEEP_PASSES.with_borrow(|passes| assert_eq!(passes.as_ref().unwrap(), &expected));
+            drop(reset);
+        }
+    }
+
+    #[test]
+    fn recovered_sweep_tally_seeds_both_killer_rankings_and_retains_prior_confirmations() {
+        let binaries = ranked_binaries();
+        let mut killers = Killers::default();
+        killers.record("historical".into(), staged::killer_for(&binaries[1], "retained"));
+        let plan = telemetry_plan(Vec::new());
+        let initial = super::super::session::InitialHints {
+            population: 3,
+            killers: once(("historical".into(), staged::killer_for(&binaries[1], "retained"))).collect(),
+        };
+        let prior = BTreeSet::from(["confirmed".into()]);
+        let tally = tally_for_sweep(&plan, &killers, Some(&initial), prior.clone());
+        let confirmed = tally
+            .confirmed_initial_killers
+            .lock()
+            .expect("only owned confirmations are recorded under this lock")
+            .clone();
+        let accounting = tally
+            .accounting
+            .lock()
+            .expect("only owned counters are copied under this lock")
+            .clone();
+        let binary_order = tally
+            .binary_kills
+            .lock()
+            .expect("ranking has no user callbacks or assertions")
+            .order(0, &[&binaries[0], &binaries[1]]);
+        assert_eq!(confirmed, prior);
+        assert_eq!(accounting.initial_killer_confirmed, Some(1));
+        assert_eq!(accounting.initial_exact_hints, Some(1));
+        assert_eq!(binary_order, [1, 0]);
+        let mut selections = [(0, "absent"), (1, "retained")];
+        tally
+            .named_kills
+            .lock()
+            .unwrap()
+            .rank(&mut selections, &[&binaries[0], &binaries[1]]);
+        assert_eq!(selections, [(1, "retained"), (0, "absent")]);
+        let without_initial = tally_for_sweep(&plan, &killers, None, prior);
+        let confirmed = without_initial
+            .accounting
+            .lock()
+            .expect("only an owned counter is read under this lock")
+            .initial_killer_confirmed;
+        assert_eq!(confirmed, None);
+    }
+
+    #[test]
+    fn recovered_assignment_completion_learns_once_and_transfers_only_fresh_deterministic_evidence() {
+        for deterministic in [false, true] {
+            for fresh in [false, true] {
+                let scheduler = Scheduler::new(
+                    vec![
+                        scheduled(0, "item", "alpha", 1, 1, false, 0),
+                        scheduled(0, "item", "alpha", 1, 1, false, 1),
+                    ],
+                    1,
+                );
+                let learning = FileLearning::new();
+                if fresh {
+                    learning.publish("item", &killed_by(killer("fresh")));
+                }
+                let assignment = scheduler
+                    .assignment_with(&OnceLock::new(), || panic!("one slot is immediately available"))
+                    .unwrap();
+                assert_eq!(assignment.index(), 0);
+                complete_assignment(assignment, deterministic, &learning, "item");
+                let state = scheduler.state.lock().unwrap();
+                let key = (0, Arc::<str>::from("item"));
+                assert!(state.learned_items.contains(&key));
+                assert_eq!(state.transfer_items.contains(&key), deterministic && fresh);
+                assert_eq!(state.active_files, [0]);
+                assert_eq!(state.remaining, [false, true]);
+                assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_fresh_killer_pool_retains_unique_identities_across_repeated_publications() {
+        let learning = FileLearning::new();
+        for name in ["first", "first", "second", "first"] {
+            learning.publish("item", &killed_by(killer(name)));
+        }
+        let state = learning.locked();
+        assert_eq!(state.items["item"].fresh, [killer("first"), killer("second")]);
+        assert_eq!(state.items["item"].exact.len(), 2);
+        assert_eq!(state.binaries.len(), 1);
+    }
+
+    #[test]
+    fn recovered_fallback_schedule_recounts_only_pending_siblings_and_resets_stage_metadata() {
+        let mut work = vec![
+            scheduled(0, "item", "alpha", 91, 99, true, 0),
+            scheduled(0, "item", "alpha", 92, 99, true, 1),
+            scheduled(0, "item", "alpha", 93, 99, true, 2),
+            scheduled(0, "other", "alpha", 94, 99, true, 3),
+            scheduled(1, "item", "beta", 95, 99, true, 4),
+        ];
+        for item in &mut work {
+            item.transfer = true;
+            item.resources = vec!["preserved".into()];
+        }
+        let remaining = [true, false, true, false, true];
+        let learning = [FileLearning::new(), FileLearning::new()];
+        learning[0].publish("item", &killed_by(killer("fresh")));
+        let mut first = crate::testing::test_binary("not-launched-first");
+        first.baseline = Duration::from_millis(7);
+        let mut second = crate::testing::test_binary("not-launched-second");
+        second.baseline = Duration::from_millis(11);
+        let reachable: [&[&TestBinary]; 5] = [&[&first, &second], &[&first], &[&second], &[], &[&second]];
+        for deterministic in [false, true] {
+            let fallback = fallback_work(&work, &remaining, &learning, deterministic, &reachable);
+            assert_eq!(fallback.len(), 5);
+            assert_eq!(
+                fallback.iter().map(|item| item.sibling_benefit).collect::<Vec<_>>(),
+                [1, 1, 1, 0, 0]
+            );
+            assert_eq!(fallback.iter().map(|item| item.hinted).collect::<Vec<_>>(), [false; 5]);
+            assert_eq!(
+                fallback.iter().map(|item| item.transfer).collect::<Vec<_>>(),
+                [deterministic, deterministic, deterministic, false, false]
+            );
+            assert_eq!(
+                fallback.iter().map(|item| item.cost.as_millis()).collect::<Vec<_>>(),
+                [18, 7, 11, 0, 11]
+            );
+            for (actual, original) in fallback.iter().zip(&work) {
+                assert_eq!(
+                    (actual.file, &actual.item, &actual.package),
+                    (original.file, &original.item, &original.package)
+                );
+                assert_eq!(actual.stable_order, original.stable_order);
+                assert_eq!(actual.resources, original.resources);
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_hinted_group_partition_and_active_item_distance_keep_exact_private_state() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "item", "alpha", 1, 1, true, 0),
+                scheduled(0, "item", "alpha", 2, 1, false, 1),
+            ],
+            1,
+        );
+        let mut state = scheduler.state.lock().unwrap();
+        let group = scheduler.work_groups[0];
+        assert_eq!(state.groups[group].informed.iter().map(|head| head.index).collect::<Vec<_>>(), [0]);
+        assert_eq!(state.groups[group].cold.iter().map(|head| head.index).collect::<Vec<_>>(), [1]);
+        let key = (0, Arc::<str>::from("item"));
+        for (active, distance) in [(false, (1, 0)), (true, (2, 0)), (false, (1, 0))] {
+            if active {
+                state.active_items.insert(key.clone(), 1);
+            } else {
+                state.active_items.remove(&key);
+            }
+            scheduler.refresh_item(&mut state, &key);
+            assert_eq!(state.groups[group].active_head.unwrap().distance, distance);
+        }
+    }
+
+    #[test]
+    fn oct25_releasing_work_reattaches_the_uncontended_head_before_notifying_waiters() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "first", "alpha", 1, 0, false, 0),
+                scheduled(0, "second", "alpha", 1, 0, false, 1),
+            ],
+            1,
+        );
+        {
+            let mut state = scheduler.state.lock().unwrap();
+            assert_eq!(scheduler.reserve_next(&mut state), Some(0));
+            assert_eq!(state.heads.first().unwrap().local.distance, (1, 1));
+        }
+        scheduler.release(0, false);
+        let state = scheduler.state.lock().unwrap();
+        assert_eq!(state.heads.first().unwrap().local.index, 1);
+        assert_eq!(state.heads.first().unwrap().local.distance, (0, 0));
+        assert_eq!(state.active_files, [0]);
+        assert!(state.active_items.is_empty());
+        assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn oct25_abandonment_notifies_waiters_once_without_waiting() {
+        let scheduler = Scheduler::new(vec![scheduled(0, "item", "alpha", 1, 0, false, 0)], 1);
+        assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 0);
+        scheduler.abandon();
+        assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 1);
+        let state = scheduler
+            .state
+            .try_lock()
+            .expect("abandonment releases its queue lock before returning");
+        assert_eq!(state.remaining, [true]);
+        assert_eq!(state.remaining_count, 1);
+    }
+
+    #[test]
+    fn oct25_scheduler_retries_only_after_the_owned_wait_adapter_returns_its_guard() {
+        let mut item = scheduled(0, "item", "alpha", 1, 0, false, 0);
+        item.resources = vec!["bounded".into()];
+        let scheduler = Scheduler::with_resources(vec![item], 1, once((Arc::from("bounded"), 1)).collect());
+        scheduler.state.lock().unwrap().active_resources.insert("bounded".into(), 1);
+        let before = std::cell::Cell::new(0);
+        let waits = std::cell::Cell::new(0);
+        let selected = scheduler.claim_with_wait(
+            &OnceLock::new(),
+            || {
+                before.set(before.get() + 1);
+                assert!(before.get() < 2, "the wait adapter must run before the next retry");
+            },
+            |mut state| {
+                waits.set(waits.get() + 1);
+                state.active_resources.clear();
+                state
+            },
+        );
+        assert_eq!(selected, Some(0));
+        assert_eq!((before.get(), waits.get()), (1, 1));
+    }
+
+    #[test]
+    fn recovered_hint_cost_planning_uses_the_requested_nonzero_plan_position() {
+        let mutants = (1..=2)
+            .map(|ordinal| {
+                let mut mutant = crate::testing::ci_fixture::mutant("lib.rs", ordinal, "arith.add_to_sub", Outcome::Pending);
+                mutant.ordinal = u32::try_from(ordinal).unwrap();
+                mutant.package = "subject".into();
+                mutant
+            })
+            .collect();
+        let plan = telemetry_plan(mutants);
+        let mut binary = crate::testing::test_binary("not-launched");
+        binary.baseline = Duration::from_millis(100);
+        let reach = Reachability::build(&plan, std::slice::from_ref(&binary), &NARROW);
+        let mut killers = Killers::default();
+        killers.record(plan.mutants[1].id.clone(), staged::killer_for(&binary, "retained"));
+        let hints = InferredPlanning::new(&killers);
+        let first = mutant_work_with_hints(0, &plan, &reach, &killers, &hints);
+        let second = mutant_work_with_hints(1, &plan, &reach, &killers, &hints);
+        assert_eq!(first.kind, crate::estimate::WorkKind::Whole);
+        assert_eq!(first.scheduling_cost(), Duration::from_millis(50));
+        assert_eq!(second.kind, crate::estimate::WorkKind::Exact);
+        assert_eq!(second.scheduling_cost(), Duration::from_micros(27_500));
+    }
+
+    #[test]
+    fn recovered_sweep_fake_clock_retains_exact_execution_and_package_timestamp_intervals() {
+        let mut work = Workspace::adopt("in-memory-clock".into(), "never-written-clock/target".into());
+        work.set_live_sweep_publisher_for_test(|_, _| Ok(()));
+        let (journal, entries) = super::super::testing_state::TestingJournal::memory_for_test(false);
+        work.set_journal_for_test(journal);
+        let mutants = (1..=2)
+            .map(|ordinal| {
+                let mut mutant = crate::testing::ci_fixture::mutant("lib.rs", ordinal, "arith.add_to_sub", Outcome::Pending);
+                mutant.ordinal = u32::try_from(ordinal).unwrap();
+                mutant.package = "subject".into();
+                mutant
+            })
+            .collect();
+        let mut plan = telemetry_plan(mutants);
+        let reach = Reachability::build(&plan, &[], &NARROW);
+        let mut killers = Killers::default();
+        let mut events = SweepRecorder::default();
+        let control = Arc::new(tick::ClockControl::new());
+        let clock = control.to_simple_clock();
+        let mut costs = Vec::new();
+        let spent = with_planning_observer(
+            {
+                let control = Arc::clone(&control);
+                move |items, _| {
+                    assert!(items.iter().all(|item| !item.transfer));
+                    control.advance(Duration::from_millis(5));
+                }
+            },
+            || {
+                test_all_with_clock(
+                    &work,
+                    &mut plan,
+                    &reach,
+                    Sweep {
+                        jobs: 1,
+                        ..sweep(Stall::NONE)
+                    },
+                    true,
+                    &mut killers,
+                    &mut events,
+                    (
+                        |mutant, _, cost| {
+                            costs.push((mutant.ordinal, cost.elapsed));
+                            Ok(())
+                        },
+                        |_| {
+                            control.advance(Duration::from_millis(7));
+                            Some(Judgement::Reached(Outcome::Survived, None, None))
+                        },
+                        || {},
+                    ),
+                    &clock,
+                )
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(plan.mutants.iter().map(|mutant| mutant.elapsed_ms).collect::<Vec<_>>(), [7, 7]);
+        assert_eq!(costs.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(costs.last().unwrap().1, Duration::from_millis(19));
+        let costs = entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|bytes| from_slice::<Value>(bytes).unwrap())
+            .filter(|entry| entry.get("diagnostic").is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(costs.len(), 2);
+        let initial: super::super::session::SweepCost = from_value(costs[0]["sweep"].clone()).unwrap();
+        let final_cost: super::super::session::SweepCost = from_value(costs[1]["sweep"].clone()).unwrap();
+        assert_eq!(initial.elapsed, Duration::ZERO);
+        assert_eq!(final_cost.elapsed, Duration::from_millis(19));
+        assert_eq!(spent.packages.len(), 1);
+        assert_eq!(
+            (
+                spent.packages[0].mutants,
+                spent.packages[0].first_started_ms,
+                spent.packages[0].settled_ms
+            ),
+            (2, 5, 19)
+        );
+    }
+
+    #[test]
+    fn recovered_sweep_propagates_both_durable_boundary_errors_and_skips_final_append_after_callback_failure() {
+        for (fail_after, callback_fails, expected_judgements, expected_entries, message) in [
+            (Some(0), false, 0, 1, "injected durable append error"),
+            (Some(2), false, 1, 3, "injected durable append error"),
+            (None, true, 1, 2, "injected verdict checkpoint failure"),
+        ] {
+            let mut work = Workspace::adopt("in-memory-boundaries".into(), "never-written-boundaries/target".into());
+            work.set_live_sweep_publisher_for_test(|_, _| Err(error!("named live-diagnostic refusal")));
+            let (journal, entries) = super::super::testing_state::TestingJournal::memory_failing_after_for_test(fail_after);
+            work.set_journal_for_test(journal);
+            let mut mutant = crate::testing::ci_fixture::mutant("lib.rs", 1, "arith.add_to_sub", Outcome::Pending);
+            mutant.ordinal = 1;
+            let mut plan = telemetry_plan(vec![mutant]);
+            let reach = Reachability::build(&plan, &[], &NARROW);
+            let judgements = AtomicUsize::new(0);
+            let result = test_all_with_accounting_hooks(
+                &work,
+                &mut plan,
+                &reach,
+                sweep(Stall::NONE),
+                true,
+                &mut Killers::default(),
+                &mut SweepRecorder::default(),
+                (
+                    |_, _, _| {
+                        if callback_fails {
+                            Err(error!("injected verdict checkpoint failure"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_| {
+                        let _previous = judgements.fetch_add(1, Ordering::Relaxed);
+                        Some(Judgement::Reached(Outcome::Survived, None, None))
+                    },
+                    || {},
+                ),
+            );
+            assert!(result.unwrap_err().to_string().contains(message), "{fail_after:?}/{callback_fails}");
+            assert_eq!(judgements.load(Ordering::Relaxed), expected_judgements);
+            assert_eq!(entries.lock().unwrap().len(), expected_entries);
+        }
+    }
+
+    #[test]
+    fn recovered_drain_checkpoints_only_new_confirmations_and_latches_the_first_append_failure() {
+        for initially_failed in [false, true] {
+            for preconfirmed in [false, true] {
+                for fail in [false, true] {
+                    let mut work = Workspace::adopt("in-memory-drain".into(), "never-written-drain/target".into());
+                    work.set_live_sweep_publisher_for_test(|_, _| Err(error!("named live-diagnostic refusal")));
+                    let (journal, entries) = super::super::testing_state::TestingJournal::memory_for_test(fail);
+                    work.set_journal_for_test(journal);
+                    let mut plan = telemetry_plan(Vec::new());
+                    let mut killers = Killers::default();
+                    let tally = Tally::default();
+                    if preconfirmed {
+                        assert!(apply_initial_confirmation(&tally, "retained".into()));
+                    }
+                    let mut spans = HashMap::default();
+                    let mut failed = initially_failed;
+                    let abandoned = OnceLock::new();
+                    let scheduler = Scheduler::new(Vec::new(), 0);
+                    let cost = super::super::session::AttemptCost {
+                        launches: 1,
+                        execution_ms: 7,
+                        ..super::super::session::AttemptCost::default()
+                    };
+                    let mut received = std::collections::VecDeque::from([
+                        SweepEvent::InitialKillerConfirmed("retained".into()),
+                        SweepEvent::InitialKillerConfirmed("retained".into()),
+                        SweepEvent::Accounting(SelectionTier::Exact, false, cost.clone()),
+                        SweepEvent::Accounting(SelectionTier::Exact, false, cost),
+                    ]);
+                    SweepDrain {
+                        work: &work,
+                        plan: &mut plan,
+                        killers: &mut killers,
+                        tally: &tally,
+                        package_spans: &mut spans,
+                        checkpoint_failed: &mut failed,
+                        abandoned: &abandoned,
+                        scheduler: &scheduler,
+                    }
+                    .drain(
+                        &mut SweepRecorder::default(),
+                        |_, _, _| panic!("these events contain no completed mutants"),
+                        |_| received.pop_front(),
+                        || Duration::from_millis(23),
+                    );
+                    let checkpoints = entries
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|bytes| from_slice::<Value>(bytes).unwrap())
+                        .filter(|entry| entry.get("diagnostic").is_none())
+                        .count();
+                    let expected = if initially_failed {
+                        0
+                    } else if fail {
+                        1
+                    } else if preconfirmed {
+                        2
+                    } else {
+                        3
+                    };
+                    assert_eq!(checkpoints, expected, "{initially_failed}/{preconfirmed}/{fail}");
+                    assert_eq!(failed, initially_failed || fail);
+                    assert_eq!(abandoned.get().is_some(), !initially_failed && fail);
+                    assert_eq!(
+                        scheduler.notifications.load(Ordering::Relaxed),
+                        usize::from(!initially_failed && fail)
+                    );
+                    assert_eq!(tally.confirmed_initial_killers.lock().unwrap().len(), 1);
+                    let accounting = tally.accounting.lock().unwrap();
+                    assert_eq!((accounting.exact.launches, accounting.exact.execution_ms), (2, 14));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_drain_completed_checkpoint_failure_notifies_once_and_suppresses_later_publication() {
+        let work = Workspace::adopt("in-memory-completed".into(), "in-memory-completed-target".into());
+        let mutants = (1..=2)
+            .map(|ordinal| {
+                let mut mutant = crate::testing::ci_fixture::mutant("lib.rs", ordinal, "arith.add_to_sub", Outcome::Pending);
+                mutant.ordinal = u32::try_from(ordinal).unwrap();
+                mutant
+            })
+            .collect();
+        let mut plan = telemetry_plan(mutants);
+        let mut killers = Killers::default();
+        let tally = Tally::default();
+        let mut spans = HashMap::default();
+        let mut failed = false;
+        let abandoned = OnceLock::new();
+        let scheduler = Scheduler::new(Vec::new(), 0);
+        let mut checkpoints = Vec::new();
+        let mut received = (0..2)
+            .map(|position| {
+                SweepEvent::Completed(Completed {
+                    position,
+                    outcome: Outcome::Survived,
+                    elapsed_ms: 7,
+                    killer: None,
+                    note: None,
+                    first_started_ms: 11,
+                    settled_ms: 18,
+                    attempts: Vec::new(),
+                })
+            })
+            .collect::<std::collections::VecDeque<_>>();
+        let mut events = SweepRecorder::default();
+        SweepDrain {
+            work: &work,
+            plan: &mut plan,
+            killers: &mut killers,
+            tally: &tally,
+            package_spans: &mut spans,
+            checkpoint_failed: &mut failed,
+            abandoned: &abandoned,
+            scheduler: &scheduler,
+        }
+        .drain(
+            &mut events,
+            |mutant, _, _| {
+                checkpoints.push(mutant.ordinal);
+                Err(error!("durable verdict failed"))
+            },
+            |_| received.pop_front(),
+            || Duration::from_millis(19),
+        );
+        assert_eq!(checkpoints, [1]);
+        assert!(failed);
+        assert_eq!(abandoned.get().map(String::as_str), Some("durable verdict failed"));
+        assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 1);
+        assert!(plan.mutants.iter().all(|mutant| mutant.outcome == Outcome::Survived));
+    }
+
+    #[test]
+    fn recovered_whole_probe_preserves_activation_and_rescales_the_measured_timeout() {
+        let mut binary = crate::testing::test_binary("not-launched");
+        binary.baseline = Duration::from_millis(7);
+        binary.budget = Some(Duration::from_millis(70));
+        binary.memory = Some(4096);
+        let sweep = Sweep {
+            timeout_floor: Duration::from_millis(3),
+            stall: Stall {
+                budget: Some(Duration::from_millis(11)),
+            },
+            jobs: 2,
+            meter: true,
+            confirm: false,
+        };
+        for (multiplier, timeout) in [(None, 70), (Some(2.0), 14), (Some(0.1), 3)] {
+            let attempt = whole_probe_attempt(&binary, multiplier, sweep);
+            assert_eq!(attempt.active, Some(1));
+            assert_eq!(attempt.timeout, Some(Duration::from_millis(timeout)));
+            assert_eq!(attempt.stall.budget, Some(Duration::from_millis(11)));
+            assert_eq!(attempt.request.limit, Some(4096));
+            assert!(attempt.request.meter);
+            assert!(matches!(attempt.only, Only::All));
+        }
+    }
+
+    #[test]
+    fn recovered_scheduler_resource_admission_requires_every_resource_and_a_default_single_slot() {
+        let work = vec![
+            scheduled(0, "free", "subject", 3, 0, false, 0),
+            ScheduledWork {
+                resources: vec![Arc::from("implicit"), Arc::from("explicit")],
+                ..scheduled(0, "bounded", "subject", 3, 0, false, 1)
+            },
+        ];
+        let scheduler = Scheduler::with_resources(work, 1, HashMap::from_iter([(Arc::from("explicit"), 2)]));
+        let mut state = scheduler.state.lock().unwrap();
+        for (implicit, explicit, expected) in [(0, 0, true), (0, 1, true), (1, 0, false), (0, 2, false), (1, 2, false)] {
+            state.active_resources.insert(Arc::from("implicit"), implicit);
+            state.active_resources.insert(Arc::from("explicit"), explicit);
+            assert_eq!(scheduler.resources_available(&state, 1), expected);
+            assert!(scheduler.resources_available(&state, 0));
+        }
+    }
+
+    #[test]
+    fn recovered_one_fresh_supported_killer_is_enough_among_stale_candidates() {
+        let learning = FileLearning::new();
+        let fresh = killer("fresh");
+        let stale = killer("stale");
+        learning.publish("item", &killed_by(stale));
+        learning.publish("item", &killed_by(fresh.clone()));
+        {
+            let mut learned = learning.locked();
+            let item = learned.items.get_mut("item").unwrap();
+            item.fresh.retain(|candidate| candidate == &fresh);
+        }
+        assert!(learning.has_fresh_killer("item"));
+        assert!(!learning.has_fresh_killer("absent"));
+        learning.observe("item", &Candidate::Exact(fresh.clone()), false, Duration::from_millis(1));
+        assert!(learning.has_fresh_killer("item"));
+        learning.observe("item", &Candidate::Exact(fresh), false, Duration::from_millis(1));
+        assert!(!learning.has_fresh_killer("item"));
+    }
+
+    #[test]
+    fn recovered_initial_confirmation_reports_only_new_identity_insertions() {
+        let tally = Tally::default();
+        assert!(apply_initial_confirmation(&tally, "first".into()));
+        assert!(!apply_initial_confirmation(&tally, "first".into()));
+        assert!(apply_initial_confirmation(&tally, "second".into()));
+        assert_eq!(
+            *tally.confirmed_initial_killers.lock().unwrap(),
+            BTreeSet::from(["first".into(), "second".into()])
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the complete in-memory sweep asserts its shared execution and durable accounting boundaries"
+    )]
+    fn recovered_in_process_sweep_retains_initial_hint_coverage_and_worker_accounting() {
+        let work = Workspace::adopt("synthetic-accounting".into(), "synthetic-accounting-target".into());
+        let mutants = (1..=3)
+            .map(|ordinal| {
+                let mut mutant = crate::testing::ci_fixture::mutant("src/lib.rs", ordinal, "arith.add_to_sub", Outcome::Pending);
+                mutant.ordinal = u32::try_from(ordinal).unwrap();
+                mutant.package = "subject".into();
+                mutant
+            })
+            .collect();
+        let mut plan = telemetry_plan(mutants);
+        let reach = Reachability::build(&plan, &[], &NARROW);
+        let binary = crate::testing::test_binary("never-launched-accounting");
+        let killer = staged::killer_for(&binary, "known");
+        let initial_id = plan.mutants[0].id.clone();
+        let mut killers = Killers::default();
+        killers.record(initial_id.clone(), killer.clone());
+        let mut events = SweepRecorder::default();
+        let mut checkpointed = Vec::new();
+        let spent = test_all_with_accounting_hooks(
+            &work,
+            &mut plan,
+            &reach,
+            Sweep {
+                jobs: 2,
+                ..sweep(Stall::NONE)
+            },
+            true,
+            &mut killers,
+            &mut events,
+            (
+                |mutant, _, _| {
+                    checkpointed.push(mutant.ordinal);
+                    Ok(())
+                },
+                |ordinal| {
+                    execution_tier(SelectionTier::Exact, false);
+                    let verdict = super::super::verdict::with_binary_runner(
+                        move |_binary, _attempt, _confirm| super::super::verdict::BinaryRun {
+                            verdict: if ordinal == 1 { Verdict::Failed(None) } else { Verdict::Passed },
+                            reach: super::super::verdict::ReachObservation::Reached,
+                        },
+                        || {
+                            let attempt = Attempt {
+                                active: Some(ordinal),
+                                timeout: None,
+                                stall: Stall::NONE,
+                                request: MemoryRequest::default(),
+                                only: Only::One("known"),
+                            };
+                            let first = run_binary_observed(&work, &binary, attempt, false);
+                            let second = run_binary_observed(&work, &binary, attempt, false);
+                            assert_eq!(first.reach, super::super::verdict::ReachObservation::Reached);
+                            assert_eq!(second.reach, super::super::verdict::ReachObservation::Reached);
+                            first.verdict
+                        },
+                    );
+                    record_binary_launch_attempt(false);
+                    record_binary_execution(false, Duration::from_millis(7), &verdict);
+                    trace_selection(
+                        &Tally::default(),
+                        ordinal,
+                        &binary,
+                        Some("known".into()),
+                        SelectionTier::Exact,
+                        1,
+                        Some(ordinal == 1),
+                        false,
+                        Duration::from_millis(19),
+                        Duration::ZERO,
+                        false,
+                    );
+                    Some(Judgement::Reached(
+                        if ordinal == 1 { Outcome::Killed } else { Outcome::Survived },
+                        (ordinal == 1).then(|| killer.clone()),
+                        None,
+                    ))
+                },
+                || {},
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        checkpointed.sort_unstable();
+        assert_eq!(checkpointed, [1, 2, 3]);
+        assert_eq!(events.starts, 3);
+        assert_eq!(events.attempts.len(), 3);
+        assert_eq!(spent.confirmed_initial_killers, BTreeSet::from([initial_id]));
+        let accounting = spent.accounting.unwrap();
+        assert!(accounting.complete);
+        assert_eq!(accounting.initial_exact_hints, Some(1));
+        assert_eq!(accounting.initial_killer_confirmed, Some(1));
+        assert_eq!(
+            (
+                accounting.exact.launches,
+                accounting.exact.execution_ms,
+                accounting.exact.hits,
+                accounting.exact.misses
+            ),
+            (3, 21, 1, 2)
+        );
+        assert_eq!(accounting.confirmation.launches, 0);
+        assert_eq!(spent.packages.len(), 1);
+        assert_eq!(spent.packages[0].mutants, 3);
+        assert_eq!(
+            plan.mutants.iter().map(|mutant| mutant.outcome).collect::<Vec<_>>(),
+            [Outcome::Killed, Outcome::Survived, Outcome::Survived]
+        );
+    }
+
+    #[test]
+    fn recovered_new_selection_discards_stale_initial_killers_and_execution_costs() {
+        begin_selection_trace();
+        INITIAL_KILLER.with_borrow_mut(|slot| *slot = Some(("stale".into(), killer("stale"))));
+        record_binary_execution(true, Duration::from_millis(7), &Verdict::Passed);
+        assert!(INITIAL_KILLER.with_borrow(Option::is_some));
+        EXECUTION_COSTS.with_borrow(|costs| assert_eq!(costs.len(), 1));
+        begin_selection_trace();
+        assert!(INITIAL_KILLER.with_borrow(Option::is_none));
+        assert!(take_execution_costs().is_empty());
+        assert!(take_selection_trace().is_empty());
+    }
+
+    #[test]
+    fn recovered_confirmation_keeps_its_own_result_when_the_primary_selection_differs() {
+        ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = None);
+        begin_selection_trace();
+        record_binary_execution(true, Duration::from_millis(7), &Verdict::Passed);
+        let tally = Tally::default();
+        record_selection_cost(&tally, SelectionTier::Exact, SelectionResult::Hit, Duration::from_millis(19), false);
+        let accounting = tally.accounting.lock().unwrap();
+        assert_eq!(
+            (
+                accounting.confirmation.launches,
+                accounting.confirmation.execution_ms,
+                accounting.confirmation.hits,
+                accounting.confirmation.misses,
+                accounting.confirmation.inconclusive,
+            ),
+            (1, 7, 0, 1, 0)
+        );
+        assert_eq!(accounting.exact.launches, 0);
+        drop(accounting);
+        assert!(take_selection_trace().is_empty());
+    }
+
+    #[test]
+    fn recovered_scripted_selection_cost_is_sent_or_applied_exactly_once() {
+        for asynchronous in [false, true] {
+            for confirmation in [false, true] {
+                let tally = Tally::default();
+                let (sender, receiver) = mpsc::channel();
+                ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = asynchronous.then_some(sender));
+                begin_selection_trace();
+                record_selection_cost(
+                    &tally,
+                    SelectionTier::Exact,
+                    SelectionResult::Hit,
+                    Duration::from_millis(19),
+                    confirmation,
+                );
+                ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = None);
+                let events: Vec<_> = receiver.try_iter().collect();
+                let expected = AttemptCost {
+                    launches: 1,
+                    execution_ms: 19,
+                    hits: 1,
+                    ..AttemptCost::default()
+                };
+                assert_eq!(events.len(), usize::from(asynchronous));
+                for event in events {
+                    let SweepEvent::Accounting(tier, actual_confirmation, cost) = event else {
+                        panic!("a scripted selection emits only accounting");
+                    };
+                    assert_eq!(tier, SelectionTier::Exact);
+                    assert_eq!(actual_confirmation, confirmation);
+                    assert_eq!(to_value(cost).unwrap(), to_value(&expected).unwrap());
+                }
+                let accounting = tally.accounting.lock().unwrap();
+                let destination = if confirmation {
+                    &accounting.confirmation
+                } else {
+                    &accounting.exact
+                };
+                assert_eq!(
+                    to_value(destination).unwrap(),
+                    to_value(if asynchronous { AttemptCost::default() } else { expected }).unwrap()
+                );
+                drop(accounting);
+                assert!(take_selection_trace().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_imported_ranking_starts_with_no_canonical_pass_evidence() {
+        let hint = RankedHint {
+            candidate: killer("imported"),
+            seeds: 1,
+            hits: 0,
+            misses: 0,
+            measured_ms: 12,
+            samples: 2,
+            order: 7,
+        };
+        let mut candidate = RankedCandidate::from_hint(&hint, Clone::clone);
+        for passes in 0..4 {
+            assert_eq!(candidate.score(), (0, Reverse(0), Duration::from_millis(6), 7), "{passes} passes");
+            candidate.observe_canonical_pass();
+        }
+        assert_eq!(candidate.score(), (1, Reverse(0), Duration::from_millis(6), 7));
+    }
 
     #[test]
     fn enumeration_diagnostics_retain_exactly_the_last_twenty_distinct_lines() {
@@ -3098,6 +4316,215 @@ mod tests {
     }
 
     #[test]
+    fn oct25_real_sweep_rebuilds_pending_work_without_extra_states_or_unbounded_waits() {
+        let root = camino::Utf8PathBuf::from("synthetic-two-pass-sweep");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut plan = plan_over(&["subject", "subject"]);
+        plan.root = root;
+        let binaries = [TestBinary {
+            package: "subject".into(),
+            baseline: Duration::from_millis(7),
+            ..crate::testing::test_binary("never-launched")
+        }];
+        let reach = Reachability::build(&plan, &binaries, &NARROW);
+        let visits = [AtomicUsize::new(0), AtomicUsize::new(0)];
+        let mut completed = Vec::new();
+        let mut killers = Killers::default();
+        let clock = tick::ClockControl::new().to_simple_clock();
+        let spent = test_all_with_clock(
+            &work,
+            &mut plan,
+            &reach,
+            Sweep { jobs: 1, ..ranked_sweep() },
+            false,
+            &mut killers,
+            &mut crate::testing::Recorder::default(),
+            (
+                |mutant, _, _| {
+                    completed.push((mutant.ordinal, mutant.outcome));
+                    Ok(())
+                },
+                |ordinal| {
+                    let index = usize::try_from(ordinal - 1).unwrap();
+                    let visit = visits[index].fetch_add(1, Ordering::Relaxed);
+                    assert!(visit < 2, "each mutant has exactly an exact and a fallback pass");
+                    (visit == 1).then_some(Judgement::Reached(Outcome::Survived, None, None))
+                },
+                || panic!("one worker with no resource reservations must never wait"),
+            ),
+            &clock,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(visits.map(AtomicUsize::into_inner), [2, 2]);
+        assert_eq!(completed, [(1, Outcome::Survived), (2, Outcome::Survived)]);
+        assert_eq!(
+            plan.mutants.iter().map(|mutant| mutant.outcome).collect::<Vec<_>>(),
+            [Outcome::Survived; 2]
+        );
+        assert_eq!(spent.launches, 0);
+        assert_eq!(spent.packages.len(), 1);
+        assert_eq!(spent.packages[0].mutants, 2);
+        assert_eq!(spent.packages[0].first_started_ms, 0);
+        assert_eq!(spent.packages[0].settled_ms, 0);
+    }
+
+    fn with_settled_scheduler_observer<T>(observer: impl FnMut(bool, &Scheduler) + 'static, body: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SETTLED_SCHEDULER_OBSERVER.with_borrow_mut(|observer| *observer = None);
+            }
+        }
+        SETTLED_SCHEDULER_OBSERVER.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "settled scheduler observers must not nest");
+            *slot = Some(Box::new(observer));
+        });
+        let _reset = Reset;
+        body()
+    }
+
+    #[test]
+    fn oct25_real_sweep_completes_assignments_and_transfers_only_fresh_deterministic_kills() {
+        for deterministic in [false, true] {
+            let root = Utf8PathBuf::from("never-read-completion-root");
+            let work = Workspace::adopt(root.clone(), root.join("target"));
+            let mut plan = plan_over(&["subject", "subject"]);
+            plan.root = root;
+            let binaries = [TestBinary {
+                package: "subject".into(),
+                baseline: Duration::from_millis(7),
+                ..crate::testing::test_binary("never-launched-completion-binary")
+            }];
+            let reach = Reachability::build(&plan, &binaries, &NARROW);
+            let known = staged::killer_for(&binaries[0], "known");
+            let mut killers = Killers::default();
+            killers.record(plan.mutants[0].id.clone(), known.clone());
+            let item = Arc::clone(&plan.mutants[0].item_path);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let passes = std::rc::Rc::new(std::cell::Cell::new(0));
+            let clock = tick::ClockControl::new().to_simple_clock();
+            let runner = Arc::new({
+                let calls = Arc::clone(&calls);
+                move |_: &TestBinary, attempt: Attempt<'_>, confirm: bool| {
+                    let mut calls = calls.lock().unwrap();
+                    assert!(calls.len() < 2, "each mutant must be killed by its first actual selection");
+                    assert!(!confirm);
+                    assert_eq!(attempt.only.names(), if deterministic { &["known"][..] } else { &[] });
+                    calls.push(attempt.active.unwrap());
+                    super::super::verdict::BinaryRun {
+                        verdict: Verdict::Failed(Some("known".into())),
+                        reach: super::super::verdict::ReachObservation::Reached,
+                    }
+                }
+            });
+            let result = with_settled_scheduler_observer(
+                {
+                    let passes = std::rc::Rc::clone(&passes);
+                    move |exact, scheduler| {
+                        passes.set(passes.get() + 1);
+                        let state = scheduler.state.lock().unwrap();
+                        let key = (0, Arc::clone(&item));
+                        if exact && !deterministic {
+                            assert!(state.learned_items.is_empty());
+                            assert!(state.transfer_items.is_empty());
+                        } else {
+                            assert_eq!(state.learned_items, crate::HashSet::from_iter([key.clone()]));
+                            assert_eq!(state.transfer_items.contains(&key), deterministic);
+                        }
+                        if !exact {
+                            assert_eq!(
+                                scheduler.work.iter().map(|work| work.transfer).collect::<Vec<_>>(),
+                                [deterministic; 2]
+                            );
+                        }
+                        assert_eq!(state.active_files, [0]);
+                        assert!(state.active_items.is_empty());
+                    }
+                },
+                || {
+                    super::super::verdict::with_shared_runner(runner, || {
+                        test_all_with_clock(
+                            &work,
+                            &mut plan,
+                            &reach,
+                            Sweep {
+                                confirm: false,
+                                ..ranked_sweep()
+                            },
+                            deterministic,
+                            &mut killers,
+                            &mut crate::testing::Recorder::default(),
+                            (
+                                |_, _, _| Ok(()),
+                                |_| None,
+                                || panic!("one worker with no resource reservations must not wait"),
+                            ),
+                            &clock,
+                        )
+                    })
+                },
+            );
+            let spent = result.unwrap().unwrap();
+            assert_eq!(spent.packages.len(), 1);
+            assert_eq!(spent.packages[0].mutants, 2);
+            assert_eq!(passes.get(), 2);
+            assert_eq!(*calls.lock().unwrap(), if deterministic { [1, 2] } else { [2, 1] });
+            assert!(plan.mutants.iter().all(|mutant| mutant.outcome == Outcome::Killed));
+            assert!(plan.mutants.iter().all(|mutant| killers.hint(&mutant.id) == Some(&known)));
+        }
+    }
+
+    #[test]
+    fn oct25_real_sweep_abandonment_wakes_waiters_after_releasing_the_current_assignment() {
+        let root = Utf8PathBuf::from("never-read-abandonment-root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut plan = plan_over(&["subject"]);
+        plan.root = root;
+        let reach = Reachability::build(&plan, &[], &NARROW);
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let clock = tick::ClockControl::new().to_simple_clock();
+        let result = with_settled_scheduler_observer(
+            {
+                let observed = std::rc::Rc::clone(&observed);
+                move |exact, scheduler| {
+                    assert!(exact);
+                    assert!(!observed.replace(true), "abandonment must prevent the fallback pass");
+                    assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 2);
+                    let state = scheduler.state.lock().unwrap();
+                    assert_eq!(state.active_files, [0]);
+                    assert!(state.active_items.is_empty());
+                    assert!(state.learned_items.is_empty());
+                }
+            },
+            || {
+                test_all_with_clock(
+                    &work,
+                    &mut plan,
+                    &reach,
+                    ranked_sweep(),
+                    true,
+                    &mut Killers::default(),
+                    &mut crate::testing::Recorder::default(),
+                    (
+                        |_, _, _| Ok(()),
+                        |_| Some(Judgement::Abandoned("owned abandonment".into())),
+                        || panic!("one worker must never wait"),
+                    ),
+                    &clock,
+                )
+            },
+        );
+        assert_eq!(
+            result.unwrap_err().message(),
+            "the run cannot be trusted to judge anything further: owned abandonment.\n\
+             It stops here rather than reach verdicts that would each have to be taken on faith."
+        );
+        assert!(observed.get());
+        assert_eq!(plan.mutants[0].outcome, Outcome::Pending);
+    }
+
+    #[test]
     fn actual_sweep_planning_preserves_sibling_counts_exact_flags_reach_candidates_and_resource_reservations() {
         let (_directory, mut work, _, binaries) = helper_harness(&["exit:0"]);
         let mut plan = plan_over(&["subject", "subject", "z", "a"]);
@@ -3131,18 +4558,20 @@ mod tests {
         });
         killers.replace_generalized(generalized);
         let observed = std::rc::Rc::new(std::cell::Cell::new(false));
-        let saw = std::rc::Rc::clone(&observed);
         let spent = with_planning_observer(
-            move |work, promoted| {
-                saw.set(true);
-                assert_eq!(work.len(), 4);
-                assert!(work.iter().all(|item| item.sibling_benefit == 3));
-                assert_eq!(work.iter().filter(|item| item.hinted).count(), 1);
-                assert!(
-                    work.iter().all(|item| item.resources.is_empty()),
-                    "resources belong to actual selections, not whole mutants"
-                );
-                assert!(promoted.iter().any(|candidates| !candidates.is_empty()));
+            {
+                let observed = std::rc::Rc::clone(&observed);
+                move |work, promoted| {
+                    observed.set(true);
+                    assert_eq!(work.len(), 4);
+                    assert!(work.iter().all(|item| item.sibling_benefit == 3));
+                    assert_eq!(work.iter().filter(|item| item.hinted).count(), 1);
+                    assert!(
+                        work.iter().all(|item| item.resources.is_empty()),
+                        "resources belong to actual selections, not whole mutants"
+                    );
+                    assert!(promoted.iter().any(|candidates| !candidates.is_empty()));
+                }
             },
             || {
                 test_all_with_hooks(
@@ -3173,7 +4602,7 @@ mod tests {
         tally.probes.store(3, Ordering::Relaxed);
         tally.saved.store(2, Ordering::Relaxed);
         tally.exact_hits.store(1, Ordering::Relaxed);
-        let spans = crate::HashMap::from_iter([(Arc::from("b"), (2, 5, 90)), (Arc::from("a"), (1, 10, 50))]);
+        let spans = HashMap::from_iter([(Arc::from("b"), (2, 5, 90)), (Arc::from("a"), (1, 10, 50))]);
         let actual = super::super::measure::sweep_cost(Some(tally.spent(&spans)), Duration::from_millis(100)).unwrap();
         let expected = super::super::session::SweepCost {
             accounting: Some(super::super::session::SweepAccounting::default()),
@@ -3198,7 +4627,7 @@ mod tests {
             ],
             ..super::super::session::SweepCost::default()
         };
-        assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+        assert_eq!(to_value(actual).unwrap(), to_value(expected).unwrap());
     }
 
     #[test]
@@ -3342,13 +4771,13 @@ mod tests {
             files: Vec::new(),
             mutants,
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             suppressed: 0,
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 
@@ -3501,11 +4930,10 @@ mod tests {
                 SweepEvent::Accounting(tier, confirmation, cost) => apply_accounting(&tally, tier, confirmation, &cost),
                 _ => panic!("telemetry must not emit terminal events"),
             }
-            snapshots
-                .push(super::super::measure::sweep_cost(Some(tally.spent(&crate::HashMap::default())), Duration::from_millis(1)).unwrap());
+            snapshots.push(super::super::measure::sweep_cost(Some(tally.spent(&HashMap::default())), Duration::from_millis(1)).unwrap());
         }
         assert_eq!(snapshots[0].accounting.as_ref().unwrap().initial_killer_confirmed, Some(1));
-        let partial: SweepCost = serde_json::from_value(serde_json::to_value(snapshots.last().unwrap()).unwrap()).unwrap();
+        let partial: SweepCost = from_value(to_value(snapshots.last().unwrap()).unwrap()).unwrap();
         assert_eq!(partial.accounting.as_ref().unwrap().initial_killer_confirmed, Some(1));
         let resumed = Tally {
             accounting: Mutex::new(SweepAccounting::segment(Some(&initial), true)),
@@ -3516,7 +4944,7 @@ mod tests {
             !apply_initial_confirmation(&resumed, plan.mutants[0].id.clone()),
             "a repeated confirmation after partial resume is not new"
         );
-        let segment = super::super::measure::sweep_cost(Some(resumed.spent(&crate::HashMap::default())), Duration::ZERO);
+        let segment = super::super::measure::sweep_cost(Some(resumed.spent(&HashMap::default())), Duration::ZERO);
         let completed = SweepCost::combine(Some(partial), segment).unwrap();
         assert_eq!(completed.accounting.as_ref().unwrap().initial_killer_confirmed, Some(1));
         assert_eq!(completed.accounting.as_ref().unwrap().exact.launches, 1);
@@ -3525,7 +4953,7 @@ mod tests {
             sweep: Some(completed),
             ..Phases::default()
         };
-        let published: Phases = serde_json::from_value(serde_json::to_value(frozen).unwrap()).unwrap();
+        let published: Phases = from_value(to_value(frozen).unwrap()).unwrap();
         assert_eq!(published.initial_hints.unwrap().killers[&plan.mutants[0].id], hint);
         assert_eq!(published.sweep.unwrap().accounting.unwrap().initial_killer_confirmed, Some(1));
     }
@@ -3542,10 +4970,10 @@ mod tests {
             confirmed_initial_killers: Mutex::new((0..10_000).map(|index| format!("{index:012x}").into()).collect()),
             ..Tally::default()
         };
-        let checkpoint = tally.checkpoint_spent(&crate::HashMap::default());
+        let checkpoint = tally.checkpoint_spent(&HashMap::default());
         assert!(checkpoint.confirmed_initial_killers.is_empty());
         assert_eq!(checkpoint.accounting.unwrap().initial_killer_confirmed, Some(10_000));
-        let completed = tally.spent(&crate::HashMap::default());
+        let completed = tally.spent(&HashMap::default());
         assert_eq!(completed.confirmed_initial_killers.len(), 10_000);
         assert_eq!(completed.accounting.unwrap().initial_killer_confirmed, Some(10_000));
     }
@@ -3752,8 +5180,8 @@ mod tests {
             apply_accounting(&tally, tier, confirmation, &cost);
         };
         apply_next();
-        let partial = super::super::measure::sweep_cost(Some(tally.spent(&crate::HashMap::default())), Duration::from_millis(1)).unwrap();
-        let restored: super::super::session::SweepCost = serde_json::from_str(&serde_json::to_string(&partial).unwrap()).unwrap();
+        let partial = super::super::measure::sweep_cost(Some(tally.spent(&HashMap::default())), Duration::from_millis(1)).unwrap();
+        let restored: super::super::session::SweepCost = from_str(&to_string(&partial).unwrap()).unwrap();
         let partial_accounting = restored.accounting.as_ref().unwrap();
         assert_eq!((partial_accounting.exact.launches, partial_accounting.exact.execution_ms), (1, 0));
         assert_eq!(
@@ -3844,12 +5272,6 @@ mod tests {
         assert_eq!(accounting.fallback.launches, 0, "canonical reuse is not a second launch");
         assert_eq!(accounting.duplicate_launches_avoided, 2);
     }
-    #[cfg(unix)]
-    use crate::exec::faults::{self, Fault};
-    #[cfg(unix)]
-    use crate::exec::memory;
-    use crate::exec::resources::Resources;
-    use crate::ops::collect::Shape;
 
     type JudgeStep = (&'static str, Only<'static>, Verdict, ReachObservation);
 
@@ -3934,7 +5356,7 @@ mod tests {
             package: "alpha".into(),
             ..plan.mutants[0].clone()
         });
-        let mut spans = crate::HashMap::default();
+        let mut spans = HashMap::default();
         for (position, first_started_ms, settled_ms) in [(0, 17, 21), (1, 9, 11), (0, 3, 15), (0, 25, 33), (99, 0, 99)] {
             record_package_span(
                 &mut spans,
@@ -4018,7 +5440,7 @@ mod tests {
             3,
         );
         let tally = Tally::default();
-        let mut package_spans = crate::HashMap::default();
+        let mut package_spans = HashMap::default();
         let mut checkpoint_failed = false;
         let abandoned = OnceLock::new();
         let mut checkpoints = 0;
@@ -5034,7 +6456,7 @@ mod tests {
 
         Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root,
             files: Vec::new(),
             mutants: vec![mutant],
@@ -5042,8 +6464,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 
@@ -5777,12 +7199,32 @@ mod tests {
         );
     }
 
-    /// A flake names the test to fix and says the mutant was never judged.
-    ///
-    /// The note is the whole value of this outcome. It scores as neither a detection nor a gap, so
-    /// a reader who is not told which test failed both ways is told only that something somewhere
-    /// is unreliable — which is less than recording it as a survivor would give, since a
-    /// survivor at least names a line.
+    #[test]
+    fn unfinished_confirmations_report_the_resource_cause_without_asserting_a_test_failed_twice() {
+        let [binary, _] = ranked_binaries();
+        for test in [None, Some("tests::selected".to_owned())] {
+            let Some(Judgement::Reached(Outcome::Flaky, None, Some(note))) =
+                terminal_judgement(&binary, Verdict::Unconfirmed(test.clone(), "exceeded its time budget"))
+            else {
+                panic!("an unfinished confirmation must remain score-neutral and retain its diagnostic");
+            };
+            assert!(note.contains("no mutant active"), "{note}");
+            assert!(note.contains("exceeded its time budget"), "{note}");
+            assert!(note.contains("never judged"), "{note}");
+            assert!(note.contains(binary.path.as_str()), "{note}");
+            assert!(!note.contains("fails with no mutant"), "{note}");
+            if let Some(test) = test {
+                assert!(note.contains(&format!("test `{test}`")), "{note}");
+            } else {
+                assert!(note.contains("the test binary"), "{note}");
+            }
+        }
+        assert_eq!(
+            transfer_observation(&Verdict::Unconfirmed(None, "stopped reporting progress")),
+            None
+        );
+    }
+
     #[test]
     fn a_flaky_note_names_the_test_and_says_nothing_was_judged() {
         let note = flaky_note(Utf8Path::new("target/debug/deps/unit-abc"), Some("a::b"));
@@ -6186,19 +7628,15 @@ mod tests {
             confirm: false,
         };
 
-        assert!(negative_reach_hint_is_final(&binary, None, base));
+        assert!(negative_reach_hint_is_final(&binary, base));
 
         binary.budget = Some(Duration::from_secs(1));
-        assert!(
-            !negative_reach_hint_is_final(&binary, None, base),
-            "timeout policy must run canonically"
-        );
+        assert!(!negative_reach_hint_is_final(&binary, base), "timeout policy must run canonically");
         binary.budget = None;
 
         assert!(
             !negative_reach_hint_is_final(
                 &binary,
-                None,
                 Sweep {
                     stall: Stall {
                         budget: Some(Duration::from_secs(1)),
@@ -6209,11 +7647,11 @@ mod tests {
             "stall policy must run canonically"
         );
         assert!(
-            !negative_reach_hint_is_final(&binary, None, Sweep { meter: true, ..base }),
+            !negative_reach_hint_is_final(&binary, Sweep { meter: true, ..base }),
             "memory limits and metering failures must run canonically"
         );
         assert!(
-            !negative_reach_hint_is_final(&binary, None, Sweep { confirm: true, ..base }),
+            !negative_reach_hint_is_final(&binary, Sweep { confirm: true, ..base }),
             "confirmation flakes must run canonically"
         );
     }
@@ -7992,8 +9430,8 @@ mod tests {
             confirm: false,
             ..sweep(Stall::NONE)
         };
-        assert!(negative_excludes(Some((&negative, &site, true)), &binaries[0], None, safe_sweep));
-        assert!(!negative_excludes(Some((&negative, &site, true)), &other_harness, None, safe_sweep));
+        assert!(negative_excludes(Some((&negative, &site, true)), &binaries[0], safe_sweep));
+        assert!(!negative_excludes(Some((&negative, &site, true)), &other_harness, safe_sweep));
     }
 
     #[test]
@@ -8294,6 +9732,104 @@ mod tests {
     }
 
     #[test]
+    fn recovered_scheduler_reserves_every_pending_job_and_never_waits_after_exhaustion() {
+        let scheduler = Scheduler::with_resources(
+            vec![
+                scheduled(0, "alpha", "alpha", 1, 1, false, 0),
+                scheduled(1, "beta", "beta", 1, 1, false, 1),
+            ],
+            2,
+            HashMap::default(),
+        );
+        assert_eq!(scheduler.work.len(), 2);
+        {
+            let mut state = scheduler.state.lock().unwrap();
+            assert_eq!(state.remaining_count, 2);
+            assert_eq!(scheduler.reserve_next(&mut state), Some(0));
+            assert_eq!(state.remaining_count, 1);
+            assert_eq!(state.remaining, [false, true]);
+            assert_eq!(state.active_files, [1, 0]);
+            assert_eq!(state.package_turns, [1, 0]);
+            assert_eq!(scheduler.reserve_next(&mut state), Some(1));
+            assert_eq!(state.remaining_count, 0);
+            assert_eq!(state.remaining, [false, false]);
+            assert_eq!(state.active_files, [1, 1]);
+            assert_eq!(state.package_turns, [1, 1]);
+            assert_eq!(scheduler.reserve_next(&mut state), None);
+        }
+        assert_eq!(
+            scheduler.claim_with_wait(
+                &OnceLock::new(),
+                || panic!("an exhausted population must not prepare to wait"),
+                |_| panic!("an exhausted population must not wait"),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn recovered_abandon_notifies_without_releasing_a_reservation() {
+        let resource: Arc<str> = "shared".into();
+        let scheduler = Scheduler::with_resources(
+            (0..2)
+                .map(|order| ScheduledWork {
+                    resources: vec![Arc::clone(&resource)],
+                    ..scheduled(0, "item", "package", 1, 1, false, order)
+                })
+                .collect(),
+            1,
+            HashMap::from_iter([(resource, 1)]),
+        );
+        let first = scheduler.reserve_next(&mut scheduler.state.lock().unwrap()).unwrap();
+        assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 0);
+        scheduler.abandon();
+        assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 1);
+        {
+            let state = scheduler
+                .state
+                .try_lock()
+                .expect("abandon releases its queue lock before returning");
+            assert_eq!(scheduler.select(&state), None);
+            assert_eq!(state.remaining_count, 1);
+            assert_eq!(state.remaining, [false, true]);
+            assert_eq!(state.active_files, [1]);
+        }
+        scheduler.release(first, false);
+    }
+
+    #[test]
+    fn unjudged_assignments_preserve_package_fairness_and_cannot_publish_learning() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "alpha", "alpha", 10, 0, false, 0),
+                scheduled(1, "alpha-next", "alpha", 10, 0, false, 1),
+                scheduled(2, "beta", "beta", 1, 0, false, 2),
+            ],
+            3,
+        );
+        let abandoned = OnceLock::new();
+        for expected in [0, 2, 1] {
+            let assignment = scheduler.assignment(&abandoned).unwrap();
+            assert_eq!(assignment.index(), expected, "an unserved package must precede repeat service");
+            {
+                let state = scheduler.state.lock().unwrap();
+                assert_eq!(
+                    state.package_turns.iter().sum::<usize>(),
+                    state.remaining.iter().filter(|remaining| !**remaining).count(),
+                    "package service accounting must match the work actually assigned"
+                );
+            }
+            drop(assignment);
+            let state = scheduler.state.lock().unwrap();
+            assert!(
+                state.learned_items.is_empty(),
+                "an unjudged assignment cannot manufacture killer learning"
+            );
+        }
+        assert!(scheduler.assignment(&abandoned).is_none());
+    }
+
+    #[test]
     fn scheduler_claim_and_release_fairness_is_deterministic_without_native_workers() {
         let work = vec![
             scheduled(0, "alpha::f", "alpha", 7, 2, false, 0),
@@ -8301,7 +9837,7 @@ mod tests {
             scheduled(1, "beta::f", "beta", 7, 2, false, 2),
             scheduled(1, "beta::f", "beta", 7, 2, false, 3),
         ];
-        let scheduler = Scheduler::with_resources(work, 2, crate::HashMap::default());
+        let scheduler = Scheduler::with_resources(work, 2, HashMap::default());
         let abandoned = OnceLock::new();
         let first = scheduler.assignment(&abandoned).unwrap();
         assert_eq!(first.index(), 0);
@@ -8617,7 +10153,7 @@ mod tests {
         let mut blocked = scheduled(1, "blocked", "b", 20, 0, false, 1);
         blocked.resources.push(Arc::clone(&resource));
         let unrelated = scheduled(2, "unrelated", "c", 10, 0, false, 2);
-        let mut capacities = crate::HashMap::default();
+        let mut capacities = HashMap::default();
         capacities.insert(resource, 1);
         let scheduler = Scheduler::with_resources(vec![first, blocked, unrelated], 3, capacities);
         let abandoned = OnceLock::new();
@@ -8909,7 +10445,7 @@ mod tests {
                 let capacities = if resource_limited {
                     [("resource-0".into(), 1), ("resource-1".into(), 2)].into_iter().collect()
                 } else {
-                    crate::HashMap::default()
+                    HashMap::default()
                 };
                 let scheduler = Scheduler::with_pending(work, 4, capacities, (0..96).map(|index| index % 13 != 0).collect());
                 let abandoned = OnceLock::new();

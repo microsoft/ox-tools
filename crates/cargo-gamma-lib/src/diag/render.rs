@@ -303,7 +303,9 @@ fn write_rounds(text: &mut String, session: &Session) {
 
     #[expect(clippy::cast_possible_truncation, reason = "a percentage of a ratio in [0, 1]")]
     #[expect(clippy::cast_sign_loss, reason = "both durations are non-negative")]
-    let share = if total.is_zero() {
+    let share = if
+    // #[gamma::skip(cond.always_false, reason = "At total=Duration::ZERO the alternative computes0.0/0.0=NaN; Rust float-to-u64 cast maps NaN to0. Original zero branch also yields0, so rendered percentage remains0.", tag = "equivalent")]
+    total.is_zero() {
         0
     } else {
         (converging.as_secs_f64() / total.as_secs_f64() * 100.0).round() as u64
@@ -427,7 +429,7 @@ const NOISE_FACTOR: u32 = 2;
 /// A run whose median mutant takes longer than the whole budget divided by [`NOISE_FACTOR`] is one
 /// where the timeout is doing something other than what it was set for.
 fn crowded_timeout(timeout: Duration, median: Duration) -> bool {
-    !median.is_zero() && !timeout.is_zero() && timeout < median.saturating_mul(NOISE_FACTOR)
+    !timeout.is_zero() && timeout < median.saturating_mul(NOISE_FACTOR)
 }
 
 /// Names the mutants that cost the most, which is where a scheduling change shows up first.
@@ -657,6 +659,48 @@ mod tests {
         assert_eq!(percentile(&sorted, 0.0), Duration::from_secs(1));
         assert_eq!(percentile(&sorted, 1.0), Duration::from_secs(3));
         assert_eq!(percentile(&sorted, 0.5), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn recovered_percentiles_clamp_overshooting_ranks_to_the_last_sample() {
+        let samples = [1, 7, 19].map(Duration::from_millis);
+        for fraction in [1.0, 1.25, 2.0, f64::INFINITY] {
+            assert_eq!(percentile(&samples, fraction), Duration::from_millis(19));
+        }
+        assert_eq!(percentile(&[Duration::from_millis(7)], 2.0), Duration::from_millis(7));
+    }
+
+    #[test]
+    fn recovered_one_millisecond_runs_are_measured_but_zero_cost_mutants_are_not_ranked() {
+        let mutants = [
+            mutant("unrun.rs", "m", Outcome::Pending, 0),
+            mutant("measured.rs", "m", Outcome::Survived, 1),
+        ];
+        let mut throughput = String::new();
+        write_throughput(&mut throughput, &mutants, None, 1, Duration::from_millis(1));
+        assert_eq!(
+            throughput,
+            "mutants   1 evaluated, 1ms cpu, 1.0 effective jobs of 1\n          min 1ms, p50 1ms, p90 1ms, p99 1ms, max 1ms\n"
+        );
+        let mut slowest = String::new();
+        write_slowest(&mut slowest, &mutants);
+        let rows: Vec<_> = slowest.lines().skip(2).collect();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("measured.rs"));
+        assert!(!slowest.contains("unrun.rs"));
+    }
+
+    #[test]
+    fn recovered_timeout_noise_uses_the_smallest_binary_budget() {
+        let mut fast = crate::testing::test_binary("fast");
+        fast.budget = Some(Duration::from_millis(3));
+        let mut slow = crate::testing::test_binary("slow");
+        slow.budget = Some(Duration::from_millis(30));
+        let session = session(vec![slow, fast]);
+        let mutants = [mutant("sample.rs", "m", Outcome::Survived, 2)];
+        let mut text = String::new();
+        write_throughput(&mut text, &mutants, Some(&session), 1, Duration::from_millis(2));
+        assert!(text.contains("warning   test binary timeout 3ms sits within 2x the p50 mutant duration 2ms:"));
     }
 
     #[test]

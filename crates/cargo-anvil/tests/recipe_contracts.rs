@@ -20,6 +20,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use cargo_anvil::test_support::{Cli, run_update};
+use serde_json::from_str;
 use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
@@ -1661,61 +1662,104 @@ fn the_image_names_its_default_toolchain() {
     );
 }
 
+fn container_impact_script() -> String {
+    let recipe = CONTAINER.split_once("anvil-container *command:\n").unwrap().1;
+    let mut recipe = recipe
+        .lines()
+        .take_while(|line| line.is_empty() || line.starts_with("    "))
+        .map(|line| line.strip_prefix("    ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (expression, value) in [
+        ("{{ replace(command, \"'\", \"''\") }}", "echo ok"),
+        ("{{ replace(just_executable(), \"'\", \"''\") }}", "Invoke-Just"),
+        ("{{ replace(justfile_directory(), \"'\", \"''\") }}", "."),
+        ("{{ replace(invocation_directory_native(), \"'\", \"''\") }}", "."),
+        ("{{anvil_container_workdir}}", "/workspace"),
+        ("{{anvil_container_name}}", "fixture"),
+    ] {
+        recipe = recipe.replace(expression, value);
+    }
+    assert!(!recipe.contains("{{"), "all recipe interpolation inputs must be controlled");
+
+    // Execute the complete recipe, with host/process collaborators scripted in
+    // the same interpreter. No nested just/pwsh startup or mutable disk fixture
+    // participates in the refusal or forwarding verdict.
+    format!(
+        "{}\n{recipe}",
+        r#"
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or newer is required' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+function Invoke-Just {
+    $global:LASTEXITCODE = 0
+    switch ($args[0]) {
+        '_anvil-container-engine' { 'Fake-Engine' }
+        '_anvil-container-image' { 'example.invalid/anvil:test' }
+        '_anvil-container-path' { $args[1] }
+        default { throw "unexpected just call: $args" }
+    }
+}
+function Get-Command {
+    param($Name, $ErrorAction, $CommandType)
+    if ($Name -ne 'git') { throw "unexpected command lookup: $Name" }
+}
+function Test-Path {
+    param([string]$LiteralPath, $PathType)
+    if ($LiteralPath.StartsWith('Env:')) {
+        $name = $LiteralPath.Substring(4)
+        if ($name -notin @('PR_TITLE', 'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
+                          'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS', 'ANVIL_IMPACT_INPUT_DIR')) {
+            throw "unexpected environment lookup: $name"
+        }
+        return $null -ne [Environment]::GetEnvironmentVariable($name)
+    }
+    if ($LiteralPath.Replace('\', '/').EndsWith('.anvil/container/hooks.ps1')) { return $false }
+    throw "unexpected path lookup: $LiteralPath"
+}
+function id {
+    if ($args.Count -ne 1 -or $args[0] -notin @('-u', '-g')) { throw "unexpected id call: $args" }
+    $global:LASTEXITCODE = 0
+    '1000'
+}
+function Fake-Engine {
+    ConvertTo-Json -InputObject @($args) -Compress
+    $global:LASTEXITCODE = 0
+}
+"#,
+    )
+}
+
 #[test]
 fn container_rejects_impact_input_override_only_in_consume_mode() {
     if !tools_available() {
         return;
     }
     let _powershell = powershell_process_lock();
-    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
-    let root = tmp.path();
-    let justfile_path = root.join("Justfile");
-    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
-    justfile.push_str(
-        r#"
-[script("pwsh", "-NoProfile")]
-_anvil-container-engine:
-    Write-Output $env:FAKE_CONTAINER_ENGINE
-
-[script("pwsh", "-NoProfile")]
-_anvil-container-image:
-    Write-Output 'example.invalid/anvil:test'
-
-[script("pwsh", "-NoProfile")]
-_anvil-container-path path:
-    Write-Output '{{path}}'
-"#,
-    );
-    write(&justfile_path, &justfile);
-
-    let engine = root.join("fake-container-engine.ps1");
-    write(
-        &engine,
-        r#"
-($args -join "`n") | Set-Content -LiteralPath $env:FAKE_CONTAINER_LOG
-exit 0
-"#,
-    );
-    let engine_log = root.join("container-engine.log");
-    let input = TempDir::new().unwrap();
-
-    let run = |mode: Option<&str>, input_override: &OsStr| {
-        let mut command = just_command(
-            root,
-            &["anvil-container", "echo", "ok"],
-            &[
-                ("ANVIL_IMPACT_INPUT_DIR", input_override),
-                ("FAKE_CONTAINER_ENGINE", engine.as_os_str()),
-                ("FAKE_CONTAINER_LOG", engine_log.as_os_str()),
-            ],
-        );
+    let script = container_impact_script();
+    let run = |mode: Option<&str>, input_override: &str| {
+        let mut command = Command::new("pwsh");
+        command.args(["-NoProfile", "-Command", &script]);
+        for name in [
+            "ANVIL_IMPACT",
+            "ANVIL_IN_CONTAINER",
+            "ANVIL_MIRI_JOBS",
+            "PR_TITLE",
+            "BASE_REF",
+            "GITHUB_BASE_REF",
+            "SYSTEM_PULLREQUEST_TARGETBRANCH",
+        ] {
+            command.env_remove(name);
+        }
+        command.env("ANVIL_IMPACT_INPUT_DIR", input_override);
         if let Some(mode) = mode {
             command.env("ANVIL_IMPACT", mode);
         }
-        command.output().expect("just is required to verify generated recipe behavior")
+        command.output().expect("pwsh was checked by tools_available")
     };
 
-    let consume = run(Some("consume"), input.path().as_os_str());
+    let consume = run(Some("consume"), "injected-impact-cache");
     assert_failed(&consume, "running a container with an injected consume cache");
     let consume_stderr = String::from_utf8_lossy(&consume.stderr);
     assert!(
@@ -1725,14 +1769,14 @@ exit 0
         "the refusal must identify the unsupported consume override\nstderr:\n{consume_stderr}"
     );
     assert!(
-        !engine_log.exists(),
+        consume.stdout.is_empty(),
         "consume mode must reject the override before invoking the container engine"
     );
 
     for (mode, input_override) in [
-        (Some("off"), input.path().as_os_str()),
-        (None, input.path().as_os_str()),
-        (Some("consume"), OsStr::new("")),
+        (Some("off"), "injected-impact-cache"),
+        (None, "injected-impact-cache"),
+        (Some("consume"), ""),
     ] {
         let output = run(mode, input_override);
         assert!(
@@ -1741,8 +1785,8 @@ exit 0
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let arguments = fs::read_to_string(&engine_log).unwrap();
-        let args: Vec<_> = arguments.lines().collect();
+        let arguments = String::from_utf8(output.stdout).unwrap();
+        let args: Vec<String> = from_str(&arguments).unwrap();
         let forwards_impact = args.windows(2).any(|pair| pair == ["-e", "ANVIL_IMPACT"]);
         assert_eq!(
             forwards_impact,
@@ -1750,14 +1794,14 @@ exit 0
             "unexpected impact-mode forwarding for {mode:?}:\n{arguments}"
         );
         assert!(
-            !arguments.contains("ANVIL_IMPACT_INPUT_DIR"),
+            !args.iter().any(|arg| arg.contains("ANVIL_IMPACT_INPUT_DIR")),
             "the host-only cache path must never be forwarded to the container engine:\n{arguments}"
         );
         assert!(
-            !arguments.contains(input.path().to_string_lossy().as_ref()),
+            !args.iter().any(|arg| arg.contains("injected-impact-cache")),
             "the impact-cache host path must never be forwarded to the container engine:\n{arguments}"
         );
-        fs::remove_file(&engine_log).unwrap();
+        assert_eq!(&args[args.len() - 3..], ["example.invalid/anvil:test", "echo", "ok"]);
     }
 }
 
@@ -2679,7 +2723,7 @@ members = ["other"]
     );
     write(
         &workspace.path().join("examples/sleeping.rs"),
-        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+        "fn main() { loop { std::thread::park(); } }\n",
     );
     write(
         &workspace.path().join("other/Cargo.toml"),
@@ -2768,7 +2812,7 @@ fn examples_timeout_terminates_example() {
         return;
     }
     let workspace = examples_workspace();
-    // Build first so the elapsed-time bound measures the timeout, not compilation.
+    // Build separately so a compiler failure is distinct from a timeout failure.
     let build = Command::new("cargo")
         .args([
             "build",
@@ -2784,16 +2828,14 @@ fn examples_timeout_terminates_example() {
         .expect("cargo is required to prepare the example fixture");
     assert!(build.status.success(), "failed to build the sleeping example");
 
-    let started = std::time::Instant::now();
     let timeout = run_just_with_real_cargo(
         workspace.path(),
         &["anvil-examples", "--package", "fixture", "--example", "sleeping", "--timeout", "1"],
     );
     assert_failed(&timeout, "sleeping example timeout");
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(10),
-        "the one-second timeout must terminate promptly"
-    );
+    // The target has no normal exit path, so completing output capture requires
+    // terminating it, independent of interpreter startup or lock queue time.
+    assert_eq!(timeout.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&timeout.stderr).contains("fixture::sleeping timed out after 1 seconds"),
         "timeout must identify the selected target\nstderr:\n{}",

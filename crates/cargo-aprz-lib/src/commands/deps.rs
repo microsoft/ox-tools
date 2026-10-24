@@ -101,9 +101,7 @@ fn configure_metadata_features(metadata_cmd: &mut MetadataCommand, args: &DepsAr
     if args.no_default_features {
         _ = metadata_cmd.features(CargoOpt::NoDefaultFeatures);
     }
-    if !args.features.is_empty() {
-        _ = metadata_cmd.features(CargoOpt::SomeFeatures(args.features.clone()));
-    }
+    _ = metadata_cmd.features(CargoOpt::SomeFeatures(args.features.clone()));
 }
 
 fn dependency_type_selected(selected: Option<&Vec<DependencyType>>, dependency_type: DependencyType) -> bool {
@@ -315,6 +313,8 @@ fn build_transitive_deps<'a>(
     }
 
     while let Some((pkg_id, activated_features)) = queue.pop() {
+        #[cfg(test)]
+        tests::record_transitive_visit(pkg_id);
         // Only re-process if we have new features to consider
         let was_seen = visited_features.contains_key(pkg_id);
         let entry = visited_features.entry(pkg_id).or_default();
@@ -362,6 +362,104 @@ mod tests {
 
     use super::*;
     use crate::commands::host::TestHost;
+
+    struct TransitiveVisits {
+        remaining: usize,
+        ids: Vec<PackageId>,
+    }
+
+    thread_local! {
+        static TRANSITIVE_VISITS: std::cell::RefCell<Option<TransitiveVisits>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn transitive_visit_budget(remaining: usize) -> impl Drop {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TRANSITIVE_VISITS.with_borrow_mut(|visits| *visits = None);
+            }
+        }
+        TRANSITIVE_VISITS.with_borrow_mut(|visits| {
+            assert!(visits.is_none());
+            *visits = Some(TransitiveVisits {
+                remaining,
+                ids: Vec::new(),
+            });
+        });
+        Restore
+    }
+
+    pub(super) fn record_transitive_visit(id: &PackageId) {
+        TRANSITIVE_VISITS.with_borrow_mut(|visits| {
+            if let Some(visits) = visits {
+                assert!(visits.remaining > 0, "a stabilized dependency cycle must not enqueue another visit");
+                visits.remaining -= 1;
+                visits.ids.push(id.clone());
+            }
+        });
+    }
+
+    #[test]
+    fn survivor_dependency_cycle_stops_after_its_first_stabilized_visit() {
+        let _budget = transitive_visit_budget(3);
+        let root = package("root", &plain_dep("first"), "{}");
+        let first = package("first", &plain_dep("second"), "{}");
+        let second = package("second", &plain_dep("first"), "{}");
+        let packages = [&root, &first, &second];
+        let all_packages = packages.iter().map(|package| (&package.id, *package)).collect();
+        let root_node = node("root", &["first"]);
+        let first_node = node("first", &["second"]);
+        let second_node = node("second", &["first"]);
+        let nodes = [&root_node, &first_node, &second_node];
+        let index = nodes.iter().map(|node| (&node.id, *node)).collect();
+        let dependencies = build_transitive_deps(&all_packages, &index, &root.id, DependencyType::Standard);
+        let mut names: Vec<_> = dependencies.iter().map(|(reference, _)| reference.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["first", "second"]);
+        TRANSITIVE_VISITS.with_borrow(|visits| {
+            let visits = visits.as_ref().unwrap();
+            assert_eq!(visits.remaining, 0);
+            assert_eq!(visits.ids, [first.id.clone(), second.id.clone(), first.id.clone()]);
+        });
+    }
+
+    #[test]
+    fn build_transitive_deps_does_not_expand_a_stable_diamond_twice() {
+        let _budget = transitive_visit_budget(5);
+        let root = package("root", &format!("{},{}", plain_dep("left"), plain_dep("right")), "{}");
+        let left = package("left", &plain_dep("shared"), "{}");
+        let right = package("right", &plain_dep("shared"), "{}");
+        let shared = package("shared", &plain_dep("leaf"), "{}");
+        let leaf = package("leaf", "", "{}");
+        let packages = [&root, &left, &right, &shared, &leaf];
+        let all_packages = packages.iter().map(|package| (&package.id, *package)).collect();
+        let nodes = [
+            node("root", &["left", "right"]),
+            node("left", &["shared"]),
+            node("right", &["shared"]),
+            node("shared", &["leaf"]),
+            node("leaf", &[]),
+        ];
+        let index = nodes.iter().map(|node| (&node.id, node)).collect();
+        let dependencies = build_transitive_deps(&all_packages, &index, &root.id, DependencyType::Standard);
+        let mut names: Vec<_> = dependencies.iter().map(|(reference, _)| reference.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["leaf", "left", "right", "shared"]);
+        TRANSITIVE_VISITS.with_borrow(|visits| {
+            let visits = visits.as_ref().unwrap();
+            assert_eq!(visits.remaining, 0);
+            assert_eq!(
+                visits.ids,
+                [
+                    right.id.clone(),
+                    shared.id.clone(),
+                    leaf.id.clone(),
+                    left.id.clone(),
+                    shared.id.clone()
+                ]
+            );
+        });
+    }
 
     fn make_package(json: &str) -> Package {
         serde_json::from_str(json).expect("valid Package JSON")
@@ -925,6 +1023,7 @@ mod tests {
 
     #[test]
     fn transitive_dependency_cycles_terminate_after_features_stabilize() {
+        let _budget = transitive_visit_budget(3);
         let root = package("root", &plain_dep("first"), "{}");
         let first = package("first", &plain_dep("second"), "{}");
         let second = package("second", &plain_dep("first"), "{}");
@@ -943,6 +1042,7 @@ mod tests {
 
     #[test]
     fn a_stabilized_cycle_does_not_discard_other_pending_dependencies() {
+        let _budget = transitive_visit_budget(3);
         let root = package("root", &format!("{},{}", plain_dep("pending"), plain_dep("cycle")), "{}");
         let pending = package("pending", "", "{}");
         let cycle = package("cycle", &plain_dep("cycle"), "{}");

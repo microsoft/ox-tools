@@ -1133,6 +1133,16 @@ mod tests {
     }
 
     #[test]
+    fn recovered_whole_test_binaries_remains_disabled_without_an_explicit_request() {
+        for text in ["", "whole-test-binaries = false\n"] {
+            let config = Config::parse(text).unwrap();
+            let mut args = RunArgs::default();
+            config.apply(&mut args).unwrap();
+            assert!(!args.measure.whole_test_binaries);
+        }
+    }
+
+    #[test]
     fn whole_test_binaries_in_the_file_selects_the_same_oracle_as_the_flag() {
         let config = Config::parse("whole-test-binaries = true\n").expect("the documented equivalence must hold");
         let mut args = RunArgs::default();

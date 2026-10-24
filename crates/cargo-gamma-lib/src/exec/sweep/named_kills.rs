@@ -33,7 +33,9 @@ impl NamedKills {
             return;
         };
         if let Some(previous) = self.credited.insert(ordinal, killer.clone()) {
-            if previous == *killer {
+            if
+            // #[gamma::skip(cond.always_false, reason = "On reconfirmation previous==new identity, forcing the early-return guard false decrements that identity's count then increments the very same entry. Credited map was already updated identically; count>=1 is guaranteed by its credited member. No callback/order read occurs between decrement/increment. Final counts and all exposed ranking remain identical.", tag = "equivalent")]
+            previous == *killer {
                 return;
             }
             let count = self
@@ -71,9 +73,42 @@ impl NamedKills {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::super::Mutant;
     use super::*;
     use crate::exec::sweep::staged::killer_for;
     use crate::exec::sweep::tests::{ranked_binaries, unreachable_harness};
+    use crate::fixtures;
+
+    #[test]
+    fn recovered_missing_legacy_named_credit_is_exactly_zero_after_a_qualified_hit() {
+        let binary = TestBinary {
+            package: "package".into(),
+            target: "same-name".into(),
+            target_kind: "test".into(),
+            ..crate::testing::test_binary("unused")
+        };
+        let mut killers = Killers::default();
+        killers.record("historical".into(), killer_for(&binary, "known"));
+        let counts = NamedKills::new(&fixtures::plan(Vec::new()), &killers);
+        assert_ne!(killer_for(&binary, "known").target, binary.target);
+        assert_eq!(counts.count(&binary, "known"), 1);
+        assert_eq!(counts.count(&binary, "missing"), 0);
+    }
+
+    #[test]
+    fn recovered_zero_ordinal_hints_do_not_become_named_executable_credits() {
+        let mutant = Mutant {
+            ordinal: 0,
+            ..fixtures::mutant()
+        };
+        let binary = crate::testing::test_binary("unused-binary");
+        let killer = killer_for(&binary, "known");
+        let mut killers = Killers::default();
+        killers.record(mutant.id.clone(), killer);
+        let counts = NamedKills::new(&fixtures::plan(vec![mutant]), &killers);
+        assert!(counts.credited.is_empty());
+        assert_eq!(counts.count(&binary, "known"), 1);
+    }
 
     fn killed(killer: Killer) -> Judgement {
         Judgement::Reached(Outcome::Killed, Some(killer), None)

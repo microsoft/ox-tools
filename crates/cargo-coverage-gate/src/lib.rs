@@ -657,9 +657,96 @@ fn evaluate_unfiltered_many_for_target_with_metadata_loader(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn survivor_public_wrappers_forward_exact_optional_manifests_before_metadata_execution() {
+        for manifest in [None, Some(PathBuf::from("distinct-wrapper-manifest/Cargo.toml"))] {
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            workspace::metadata_loader_test_seam::with_loader(
+                {
+                    let manifest = manifest.clone();
+                    let calls = std::rc::Rc::clone(&calls);
+                    move |actual| {
+                        assert_eq!(actual, manifest.as_deref());
+                        calls.set(calls.get() + 1);
+                        Err(crate::error::InvalidPackageSelectorError::new("public-wrapper-manifest-probe".to_owned()).into())
+                    }
+                },
+                || {
+                    for result in [
+                        filter_lcov("", manifest.as_deref()).map(|_| ()),
+                        filter_lcov_many(&[""], manifest.as_deref()).map(|_| ()),
+                        evaluate("", manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
+                        evaluate_unfiltered("", manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_unfiltered_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_unfiltered_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
+                    ] {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains("public-wrapper-manifest-probe"), "{error}");
+                    }
+                },
+            );
+            assert_eq!(calls.get(), 8);
+        }
+    }
+
+    #[test]
+    fn survivor_filter_wrappers_reject_malformed_input_without_metadata_discovery() {
+        for input in ["not lcov", "DA:not-a-line,1\n"] {
+            let error = workspace::metadata_loader_test_seam::with_loader(
+                |_| panic!("malformed LCOV must not load metadata"),
+                || filter_lcov(input, Some(Path::new("must-not-be-invoked/Cargo.toml"))),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("lcov tracefile"), "{error}");
+            let error = filter_lcov_with_metadata_loader(input, None, |_| panic!("malformed LCOV must not load metadata")).unwrap_err();
+            assert!(error.to_string().contains("lcov tracefile"), "{error}");
+        }
+    }
+
+    #[test]
+    fn survivor_unfiltered_evaluation_rejects_malformed_input_without_metadata_discovery() {
+        for input in [include_str!("../tests/fixtures/lcov/malformed.info"), "DA:not-a-line,1\n"] {
+            let error = workspace::metadata_loader_test_seam::with_loader(
+                |_| panic!("malformed LCOV must not load metadata"),
+                || evaluate_unfiltered_many_for_target(&[input], Some(Path::new("must-not-be-invoked/Cargo.toml")), &[], None),
+            )
+            .unwrap_err();
+            assert!(
+                std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                    .any(<dyn std::error::Error>::is::<crate::error::ParseLcovError>),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_metadata_loader_errors_propagate_through_each_in_process_wrapper() {
+        fn fail(_: Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError> {
+            Err(crate::error::InvalidPackageSelectorError::new("injected-loader-failure".to_owned()).into())
+        }
+        for result in [
+            filter_lcov_many_with_metadata_loader(&[""], None, fail).map(|_| ()),
+            evaluate_many_for_target_with_metadata_loader(&[""], None, &[], None, fail).map(|_| ()),
+            evaluate_unfiltered_many_for_target_with_metadata_loader(&[""], None, &[], None, fail).map(|_| ()),
+        ] {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("injected-loader-failure"), "{error}");
+        }
+        let mut metadata = fixture_metadata();
+        metadata.workspace_metadata = serde_json::json!({"coverage-gate": {"min-lines-percent": "invalid"}});
+        let error = evaluate_unfiltered_many_for_target_with_metadata_loader(&[""], None, &[], None, |_| Ok(metadata))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("min-lines-percent"), "{error}");
+    }
 
     fn fixture_metadata() -> cargo_metadata::Metadata {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index");

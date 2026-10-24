@@ -331,7 +331,9 @@ pub fn normalize_site_text(text: &str) -> CompactString {
         if let Some(end) = crate::parse::literal_end(text, offset) {
             if pending_space {
                 out.push(' ');
-                pending_space = false;
+                pending_space =
+                // #[gamma::skip(assign_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             }
 
             let literal = text
@@ -356,7 +358,9 @@ pub fn normalize_site_text(text: &str) -> CompactString {
 
         if pending_space {
             out.push(' ');
-            pending_space = false;
+            pending_space =
+            // #[gamma::skip(assign_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
 
         out.push(character);

@@ -63,6 +63,19 @@ mod final_survivor_tests {
     }
 
     #[test]
+    fn recovered_an_empty_nextest_argument_list_never_appends_the_harness_separator() {
+        let root = Utf8PathBuf::from("adopted-nextest");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let harness = Harness::fake(&[("subject-binary", "subject::tests")]);
+        let command = harness
+            .command(&work, &crate::testing::test_binary("subject-binary"), &[], false, false)
+            .unwrap();
+        let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "--"));
+        assert_eq!(args.last().map(String::as_str), Some("pass"));
+    }
+
+    #[test]
     fn narrowed_nextest_commands_cannot_turn_an_empty_selection_into_a_pass() {
         let root = Utf8PathBuf::from(if cfg!(windows) { "C:/nextest-policy" } else { "/nextest-policy" });
         let work = Workspace::adopt(root.clone(), root.join("target"));
@@ -454,6 +467,11 @@ mod tests {
     fn failure_names_are_trimmed_after_the_timing_prefix_and_empty_names_are_ignored() {
         assert_eq!(first_failure("FAIL [  0.123s] binary tests::fails  \n"), Some("tests::fails"));
         assert_eq!(first_failure("FAIL [  0.123s]   \n"), None);
+    }
+
+    #[test]
+    fn a_failure_without_a_test_name_does_not_report_the_binary_as_the_test() {
+        assert_eq!(first_failure("FAIL binary "), None);
     }
 
     /// The scan must not stop at the first line that is not a failure, or a suite that reports

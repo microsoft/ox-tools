@@ -25,6 +25,13 @@ mod workspace_snapshot;
 #[doc(hidden)]
 pub mod acceptance {
     #[doc(hidden)]
+    pub use super::survey::native_test_util;
+    #[doc(hidden)]
+    pub fn native_timestamp(path: &camino::Utf8Path, follow: bool) -> std::io::Result<std::time::SystemTime> {
+        super::workspace_snapshot::native_timestamp(path, follow)
+    }
+
+    #[doc(hidden)]
     pub use super::modules::{Declaration, declarations, excluded_files, identity};
     #[doc(hidden)]
     pub use super::survey::{DeclarationOutcome, Declarations, Scan, parse_declarations_of, parse_declarations_with_parser, scan};
@@ -63,6 +70,8 @@ pub use shard::shard_of;
 #[cfg(test)]
 #[doc(inline)]
 pub use survey::plan;
+#[cfg(test)]
+pub(crate) use survey::with_metadata_reader;
 pub(crate) use survey::{LibraryTestTarget, plan_for_build};
 #[doc(inline)]
 pub use survey::{Scanned, Survey, load_metadata};

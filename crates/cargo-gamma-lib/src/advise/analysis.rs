@@ -303,7 +303,7 @@ fn long_run(timing: &Timing) -> Option<Finding> {
         return None;
     }
 
-    let shards = (timing.wall.as_secs_f64() / TARGET_SHARD.as_secs_f64()).ceil().max(2.0);
+    let shards = (timing.wall.as_secs_f64() / TARGET_SHARD.as_secs_f64()).ceil();
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -368,7 +368,7 @@ fn out_of_memory(summary: Summary, mutants: &[Mutant]) -> Option<Finding> {
     let files: HashSet<&Utf8Path> = stopped.iter().map(|mutant| &*mutant.file).collect();
 
     let located = match files.iter().copied().next() {
-        Some(only) if files.len() == 1 && stopped.len() == 1 => format!("the one is in {only}"),
+        Some(only) if stopped.len() == 1 => format!("the one is in {only}"),
         Some(only) if files.len() == 1 => format!("all {} are in {only}", stopped.len()),
         _ => format!("spread across {} files, so no one site explains them", files.len()),
     };

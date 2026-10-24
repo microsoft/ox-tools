@@ -106,7 +106,9 @@ pub(super) fn stated_range(attrs: &[Attribute]) -> Option<Range<usize>> {
     let arguments = attrs.iter().find_map(arguments)?;
 
     if syn::parse2::<Expr>(arguments.clone()).is_err() {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     let mut tokens = arguments.into_iter();
@@ -215,7 +217,9 @@ impl Audit {
             } else if let Some(message) = inert {
                 let fault = if message == CONSTANT {
                     StatedValueError::Constant
-                } else if message == EMPTY {
+                } else if
+                // #[gamma::skip(cond.always_true, reason = "Audit::item's inert argument is supplied only by inert_reason, which returns CONSTANT, EMPTY or None. After excluding CONSTANT, a present message must equal EMPTY. Bodiless trait declarations are handled directly in on_trait_item_fn without calling item. The always-true comparison therefore changes no reachable diagnostic.", tag = "equivalent")]
+                message == EMPTY {
                     StatedValueError::Empty
                 } else {
                     StatedValueError::Bodiless
@@ -321,7 +325,9 @@ fn is_stated_value(attribute: &Attribute) -> bool {
 /// expression could be read out of, so both are reported rather than guessed at.
 fn arguments(attribute: &Attribute) -> Option<TokenStream> {
     if !is_stated_value(attribute) {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     match &attribute.meta {

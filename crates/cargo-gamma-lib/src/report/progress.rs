@@ -223,7 +223,9 @@ impl Progress {
     /// another line temporarily owns the row, only the retained subject changes so restore or
     /// completion uses the latest value.
     pub fn update_phase<H: Host>(&mut self, host: &mut H, subject: &str) {
-        if !self.enabled {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Progress.enabled is immutable after construction. A disabled instance can never begin/restore a phase, so pending=None and open=false always. Without update's outer guard its next pending check returns; close falls through to line which independently checks enabled; restore calls clear which independently checks enabled. No state/output differs.", tag = "equivalent")]
+        !self.enabled {
             return;
         }
 
@@ -258,7 +260,9 @@ impl Progress {
 
     /// Closes an open phase, either extending or replacing its in-progress subject.
     fn close<H: Host>(&mut self, host: &mut H, subject: &str, extend: bool) {
-        if !self.enabled {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Progress.enabled is immutable after construction. A disabled instance can never begin/restore a phase, so pending=None and open=false always. Without update's outer guard its next pending check returns; close falls through to line which independently checks enabled; restore calls clear which independently checks enabled. No state/output differs.", tag = "equivalent")]
+        !self.enabled {
             return;
         }
 
@@ -284,9 +288,18 @@ impl Progress {
         }
 
         let Some((_, completed, opening)) = pending else {
+            // #[gamma::skip(call.replace_with_default, stmt.delete_call, reason = "Unreachable orphan-open-phase branch: new starts open=false; only begin/restore set open=true, both with pending=Some. close takes pending only after testing open and sets open=false before returning. Other methods do not remove pending while open. Thus open=true with taken pending=None cannot arise from any public transition.", tag = "equivalent")]
             paint(host, &format!("{subject}\n"));
-            self.open = false;
-            self.dirty = true;
+
+            // #[gamma::skip(stmt.delete_assign, reason = "Unreachable orphan-open-phase branch: new starts open=false; only begin/restore set open=true, both with pending=Some. close takes pending only after testing open and sets open=false before returning. Other methods do not remove pending while open. Thus open=true with taken pending=None cannot arise from any public transition.", tag = "equivalent")]
+            self.open =
+            // #[gamma::skip(literal.bool_flip, reason = "Unreachable orphan-open-phase branch: new starts open=false; only begin/restore set open=true, both with pending=Some. close takes pending only after testing open and sets open=false before returning. Other methods do not remove pending while open. Thus open=true with taken pending=None cannot arise from any public transition.", tag = "equivalent")]
+            false;
+
+            // #[gamma::skip(stmt.delete_assign, reason = "Unreachable orphan-open-phase branch: new starts open=false; only begin/restore set open=true, both with pending=Some. close takes pending only after testing open and sets open=false before returning. Other methods do not remove pending while open. Thus open=true with taken pending=None cannot arise from any public transition.", tag = "equivalent")]
+            self.dirty =
+            // #[gamma::skip(literal.bool_flip, reason = "Unreachable orphan-open-phase branch: new starts open=false; only begin/restore set open=true, both with pending=Some. close takes pending only after testing open and sets open=false before returning. Other methods do not remove pending while open. Thus open=true with taken pending=None cannot arise from any public transition.", tag = "equivalent")]
+            true;
             return;
         };
 
@@ -337,17 +350,23 @@ impl Progress {
     /// the whole line — the phase would appear twice, once without its ending and once with.
     /// Erasing it instead leaves one line, written when there is something complete to say.
     fn retract(&mut self) {
-        if !self.open {
+        if
+        // #[gamma::skip(cond.always_false, reason = "retract is called only inside draw_borrowed_at, immediately before that caller overwrites shown=Some(new_line). Its shown=None assignment and closed-state return cannot escape. Also open=>shown=None: only begin/restore open the phase, both clear shown; draw_borrowed closes before setting shown. Hence shown==Some(line) already implies !open in the duplicate-row guard.", tag = "equivalent")]
+        !self.open {
             return;
         }
 
         self.open = false;
+
+        // #[gamma::skip(stmt.delete_assign, reason = "retract is called only inside draw_borrowed_at, immediately before that caller overwrites shown=Some(new_line). Its shown=None assignment and closed-state return cannot escape. Also open=>shown=None: only begin/restore open the phase, both clear shown; draw_borrowed closes before setting shown. Hence shown==Some(line) already implies !open in the duplicate-row guard.", tag = "equivalent")]
         self.shown = None;
     }
 
     /// Restores the active phase line after a borrowed build-progress row is released.
     pub fn restore<H: Host>(&mut self, host: &mut H) {
-        if !self.enabled || self.open {
+        if
+        // #[gamma::skip(logical.or_remove_left, reason = "Progress.enabled is immutable after construction. A disabled instance can never begin/restore a phase, so pending=None and open=false always. Without update's outer guard its next pending check returns; close falls through to line which independently checks enabled; restore calls clear which independently checks enabled. No state/output differs.", tag = "equivalent")]
+        !self.enabled || self.open {
             return;
         }
 
@@ -377,7 +396,14 @@ impl Progress {
             return;
         };
 
-        let filled = completed.saturating_mul(BAR_WIDTH).checked_div(total).unwrap_or(0).min(BAR_WIDTH);
+        let filled = completed
+            .saturating_mul(BAR_WIDTH)
+            .checked_div(total)
+            .unwrap_or(
+                // #[gamma::skip(literal.int_increment, reason = "phase_progress returns before division when total==0. On every division path total>0 and checked_div returns Some, so unwrap_or fallback0/1 is unreachable.", tag = "equivalent")]
+                0,
+            )
+            .min(BAR_WIDTH);
         let mut bar = String::with_capacity(BAR_WIDTH);
 
         if filled > 0 {
@@ -466,6 +492,11 @@ impl Progress {
         self.enabled
     }
 
+    #[cfg(test)]
+    pub(crate) const fn test_phase_state(&self) -> (bool, bool) {
+        (self.open, self.dirty)
+    }
+
     /// Redraws the progress bar if enough time has passed and something changed.
     pub(crate) fn draw_now<H: Host>(&mut self, host: &mut H) {
         self.last_draw = None;
@@ -525,17 +556,20 @@ impl Progress {
     /// coalesces writes within a frame and a visible flash on one that paints each write as it
     /// arrives, which is the difference between how this looked on Unix and on Windows.
     pub fn borrowed<H: Host>(&mut self, host: &mut H, line: &str) {
-        if !self.enabled {
+        self.borrowed_with_clock(host, line, Instant::now);
+    }
+
+    fn borrowed_with_clock<H: Host>(&mut self, host: &mut H, line: &str, mut clock: impl FnMut() -> Instant) {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Removing the outer disabled guard still invokes draw_borrowed_at, which checks disabled before output/state changes. Extra pure encoding/clock work does not alter the published result.", tag = "equivalent")]
+        !self.enabled {
             return;
         }
 
         // The throttle is checked before encoding as well as after, because cargo redraws its bar
         // far more often than the interval and most calls have nothing to say: encoding a line that
         // is about to be dropped is work nobody sees.
-        if self
-            .last_draw
-            .is_some_and(|last| Instant::now().duration_since(last) < REDRAW_INTERVAL)
-        {
+        if self.last_draw.is_some_and(|last| clock().duration_since(last) < REDRAW_INTERVAL) {
             return;
         }
 
@@ -543,7 +577,7 @@ impl Progress {
         // itself, so retaining that control would only make the encoder expose it as `\e[K`.
         let line = line.strip_prefix("\u{1b}[K").unwrap_or(line);
 
-        self.draw_borrowed(host, &encode_preserving_color(line));
+        self.draw_borrowed_at(host, &encode_preserving_color(line), clock());
     }
 
     /// Draws an already-encoded borrowed line.
@@ -556,7 +590,9 @@ impl Progress {
     }
 
     fn draw_borrowed_at<H: Host>(&mut self, host: &mut H, line: &str, now: Instant) {
-        if !self.enabled {
+        if
+        // #[gamma::skip(cond.always_false, reason = "draw_borrowed_at's disabled branch is unreachable through its production callers: borrowed already returns when disabled, and phase_progress requires pending=Some, which disabled instances cannot acquire. Direct internal tests can construct this input but the public state machine cannot.", tag = "equivalent")]
+        !self.enabled {
             return;
         }
 
@@ -566,7 +602,9 @@ impl Progress {
 
         let line = truncate(line, self.width);
 
-        if self.shown.as_deref() == Some(line.as_str()) && !self.open {
+        if
+        // #[gamma::skip(logical.and_remove_right, reason = "retract is called only inside draw_borrowed_at, immediately before that caller overwrites shown=Some(new_line). Its shown=None assignment and closed-state return cannot escape. Also open=>shown=None: only begin/restore open the phase, both clear shown; draw_borrowed closes before setting shown. Hence shown==Some(line) already implies !open in the duplicate-row guard.", tag = "equivalent")]
+        self.shown.as_deref() == Some(line.as_str()) && !self.open {
             return;
         }
 
@@ -606,7 +644,10 @@ impl Progress {
         )]
         let filled = (self.fraction() * BAR_WIDTH as f64) as usize;
 
-        let filled = filled.min(BAR_WIDTH);
+        let filled = filled.min(
+            // #[gamma::skip(expr.increment, reason = "This occurrence is filled.min(BAR_WIDTH), NOT the gauge-width constant used for rendering. fraction() returns0 for total0 and otherwise clamps the finite nonnegative ratio to[0,1], so (fraction*25) as usize is already<=25. Replacing only the clamp bound25 with26 cannot change filled or the rendered gauge.", tag = "equivalent")]
+            BAR_WIDTH,
+        );
         let mut bar = String::with_capacity(BAR_WIDTH);
 
         if filled > 0 {
@@ -622,7 +663,10 @@ impl Progress {
         }
 
         let room = self.width.saturating_sub(VERB_WIDTH + 1);
-        let mut findings = Vec::with_capacity(3);
+        let mut findings = Vec::with_capacity(
+            // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_one, literal.int_to_zero, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+            3,
+        );
 
         if self.survived > 0 {
             findings.push(format!("{} survived", self.survived));
@@ -648,7 +692,9 @@ impl Progress {
             full
         } else {
             // Everything after the bar is optional, in the order it is least useful.
-            if visible_width(&counted) <= room {
+            if
+            // #[gamma::skip(cond.always_false, relational.le_to_lt, reason = "The counted-caption condition chooses counted directly versus truncate(counted,room). truncate delegates to report::fit, whose first branch returns the input unchanged whenever visible_width<=room. Forcing the condition false or strictifying <= to < changes only which identical-return path is taken when the caption fits, including equality.", tag = "equivalent")]
+            visible_width(&counted) <= room {
                 counted
             } else {
                 truncate(&counted, room)
@@ -704,6 +750,52 @@ mod tests {
 
     use super::*;
     use crate::testing::Sink;
+
+    #[test]
+    fn recovered_restore_without_a_pending_phase_clears_the_borrowed_row_and_draw_state() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.draw_borrowed_at(&mut host, "stale row", Instant::now());
+        host.err.clear();
+        assert!(!progress.open);
+        assert!(progress.pending.is_none());
+        assert!(progress.shown.is_some());
+        progress.restore(&mut host);
+        assert_eq!(host.err, b"\r\x1b[2K");
+        assert!(progress.last_draw.is_none());
+        assert!(progress.shown.is_none());
+    }
+
+    #[test]
+    fn recovered_borrowed_rows_throttle_before_encoding_but_admit_the_exact_interval_boundary() {
+        let base = Instant::now();
+        for elapsed in [
+            REDRAW_INTERVAL
+                .checked_sub(Duration::from_nanos(1))
+                .expect("the redraw interval is strictly greater than one nanosecond"),
+            REDRAW_INTERVAL,
+            REDRAW_INTERVAL + Duration::from_nanos(1),
+        ] {
+            let mut progress = Progress::new(true, Styler::new(false), Some(80));
+            let mut host = Sink::default();
+            progress.draw_borrowed_at(&mut host, "old row", base);
+            host.err.clear();
+            let mut reads = 0;
+            progress.borrowed_with_clock(&mut host, "\x1b[Knew row", || {
+                reads += 1;
+                base + elapsed
+            });
+            if elapsed < REDRAW_INTERVAL {
+                assert_eq!(host.err, b"");
+                assert_eq!(progress.shown.as_deref(), Some("old row"));
+                assert_eq!(reads, 1);
+            } else {
+                assert_eq!(host.err, b"\r\x1b[2Knew row");
+                assert_eq!(progress.shown.as_deref(), Some("new row"));
+                assert_eq!(reads, 2);
+            }
+        }
+    }
 
     /// A stream that records how many separate writes reached it, not just the bytes.
     ///
@@ -765,6 +857,175 @@ mod tests {
         }
 
         progress.render()
+    }
+
+    #[test]
+    fn recovered_phase_changes_invalidate_a_previously_clean_frame() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.draw_borrowed_at(&mut host, "old row", Instant::now());
+        host.err.clear();
+        progress.dirty = false;
+        progress.begin(&mut host, "Building", "Built", "old");
+        assert_eq!(host.err(), "\r\x1b[2K    Building old");
+        assert!(progress.dirty);
+        progress.dirty = false;
+        progress.update_phase(&mut host, "new");
+        assert!(progress.dirty);
+        progress.dirty = false;
+        progress.complete(&mut host, "done");
+        assert!(progress.dirty);
+        assert!(!progress.open);
+
+        progress.begin(&mut host, "Building", "Built", "again");
+        progress.dirty = false;
+        progress.abandon(&mut host);
+        assert!(progress.dirty);
+        progress.begin(&mut host, "Building", "Built", "third");
+        progress.draw_borrowed_at(&mut host, "cargo", Instant::now());
+        assert!(!progress.open);
+        host.err.clear();
+        progress.dirty = false;
+        progress.update_phase(&mut host, "retained");
+        assert!(host.err.is_empty());
+        assert!(progress.dirty);
+        progress.dirty = false;
+        progress.restore(&mut host);
+        assert_eq!(host.err(), "\r\x1b[2K    Building retained");
+        assert!(progress.dirty);
+        assert!(progress.open);
+    }
+
+    #[test]
+    fn recovered_forced_draw_ignores_a_clean_frame_and_a_pending_throttle() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        let mut host = Sink::default();
+        progress.set_total(3);
+        progress.dirty = false;
+        progress.last_draw = Some(Instant::now() + Duration::from_hours(1));
+        progress.draw_now(&mut host);
+        assert_eq!(host.err(), format!("\r\x1b[2K{}", progress.render()));
+        assert!(!progress.dirty);
+    }
+
+    #[test]
+    fn unviable_confirmation_is_monotone_until_explicit_reset_without_resetting_testing() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        progress.set_total(11);
+        progress.record(Outcome::Survived);
+        progress.record(Outcome::Timeout);
+        progress.record(Outcome::OutOfMemory);
+        progress.dirty = false;
+        for (count, confirmed) in [(7, 7), (3, 7), (9, 9), (0, 9)] {
+            assert_eq!(progress.confirmed_unviable(count), confirmed);
+            assert_eq!(progress.unviable, confirmed);
+        }
+        progress.reset_unviable();
+        assert_eq!(progress.unviable, 0);
+        assert_eq!(progress.confirmed_unviable(2), 2);
+        assert_eq!(
+            (
+                progress.total,
+                progress.done,
+                progress.survived,
+                progress.timeouts,
+                progress.out_of_memory
+            ),
+            (11, 3, 1, 1, 1)
+        );
+        assert!(!progress.dirty);
+        assert!(progress.enabled);
+    }
+
+    #[test]
+    fn restored_outcomes_reset_prior_counters_and_only_replay_evaluated_population() {
+        for (outcome, done, survived, timeouts, out_of_memory) in [
+            (Outcome::Pending, 0, 0, 0, 0),
+            (Outcome::Killed, 1, 0, 0, 0),
+            (Outcome::Survived, 1, 1, 0, 0),
+            (Outcome::Timeout, 1, 0, 1, 0),
+            (Outcome::OutOfMemory, 1, 0, 0, 1),
+            (Outcome::CompileError, 0, 0, 0, 0),
+            (Outcome::Flaky, 1, 0, 0, 0),
+            (Outcome::Ignored, 0, 0, 0, 0),
+            (Outcome::NoCoverage, 1, 0, 0, 0),
+            (Outcome::NotBuilt, 0, 0, 0, 0),
+        ] {
+            let mut progress = Progress::new(true, Styler::new(false), Some(80));
+            progress.set_total(99);
+            for prior in [Outcome::Survived, Outcome::Timeout, Outcome::OutOfMemory] {
+                progress.record(prior);
+            }
+            progress.dirty = false;
+            assert_eq!(progress.restore_outcomes([outcome]), done, "{outcome:?}");
+            assert_eq!(
+                (
+                    progress.total,
+                    progress.done,
+                    progress.survived,
+                    progress.timeouts,
+                    progress.out_of_memory
+                ),
+                (0, done, survived, timeouts, out_of_memory),
+                "{outcome:?}"
+            );
+            assert!(progress.dirty);
+        }
+    }
+
+    #[test]
+    fn remaining_population_preserves_completed_verdicts_and_saturates_the_total() {
+        let mut progress = Progress::new(true, Styler::new(false), Some(80));
+        progress.set_total(11);
+        for outcome in [Outcome::Survived, Outcome::Timeout, Outcome::OutOfMemory] {
+            progress.record(outcome);
+        }
+        for (remaining, total) in [(7, 10), (0, 3), (usize::MAX, usize::MAX)] {
+            progress.dirty = false;
+            progress.set_remaining_total(remaining);
+            assert_eq!(
+                (
+                    progress.total,
+                    progress.done,
+                    progress.survived,
+                    progress.timeouts,
+                    progress.out_of_memory
+                ),
+                (total, 3, 1, 1, 1)
+            );
+            assert!(progress.dirty);
+        }
+    }
+
+    #[test]
+    fn phase_gauges_count_exact_cells_encode_units_and_do_not_draw_without_a_population() {
+        for (completed, expected) in [
+            (0, "                         "),
+            (1, ">                        "),
+            (24, "=======================> "),
+            (25, "========================="),
+            (26, "========================="),
+        ] {
+            let mut progress = Progress::new(true, Styler::new(false), Some(200));
+            let mut host = Sink::default();
+            progress.phase_progress(&mut host, completed, 25, "binary\nunits");
+            assert!(host.err.is_empty());
+            progress.begin(&mut host, "Building", "Built", "package");
+            host.err.clear();
+            progress.phase_progress(&mut host, completed, 0, "binary\nunits");
+            assert!(host.err.is_empty());
+            assert!(progress.open);
+            progress.phase_progress(&mut host, completed, 25, "binary\nunits");
+            assert_eq!(
+                host.err(),
+                format!("\r\x1b[2K    Building [{expected}] {completed}/25 binary\\nunits")
+            );
+            assert!(!progress.open);
+            assert_eq!(
+                progress.shown.as_deref(),
+                Some(format!("    Building [{expected}] {completed}/25 binary\\nunits").as_str())
+            );
+        }
     }
 
     #[test]

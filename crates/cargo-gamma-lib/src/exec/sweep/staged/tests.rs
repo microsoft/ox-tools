@@ -8,6 +8,176 @@ use crate::exec::nextest::Harness;
 use crate::exec::sweep::tests::{NARROW, one_mutant_plan, ranked_binaries, ranked_sweep};
 use crate::exec::verdict::{with_binary_runner, with_shared_runner};
 
+#[test]
+fn oct25_inferred_cases_continue_after_a_negative_reach_exclusion() {
+    let mut binaries = binaries(2);
+    for (index, binary) in binaries.iter_mut().enumerate() {
+        binary.path = Utf8PathBuf::from(format!(r"C:\scripted-negative\binary-{index}.exe"));
+        binary.budget = None;
+        binary.memory = None;
+    }
+    let plan = one_mutant_plan(workspace().root.clone());
+    let site = SiteIdentity::from_mutant(&plan.mutants[0]);
+    let negative = NegativeLearning::default();
+    negative.record(&site, &binaries[0]);
+    let candidates = [
+        Candidate::Exact(killer_for(&binaries[0], "unreached")),
+        Candidate::Exact(killer_for(&binaries[1], "later_killer")),
+    ];
+    let tally = Tally::default();
+    let mut state = ProbeState::default();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let judged = with_binary_runner(
+        {
+            let calls = std::rc::Rc::clone(&calls);
+            move |binary, attempt, confirm| {
+                calls.set(calls.get() + 1);
+                assert_eq!(binary.target, "binary-1");
+                assert_eq!(attempt.only, Only::One("later_killer"));
+                assert!(!confirm);
+                BinaryRun {
+                    verdict: Verdict::Failed(Some("later_killer".into())),
+                    reach: ReachObservation::Reached,
+                }
+            }
+        },
+        || {
+            judge(
+                &workspace(),
+                7,
+                &binaries.iter().collect::<Vec<_>>(),
+                None,
+                &candidates,
+                None,
+                Some((&negative, &site, true)),
+                None,
+                Sweep {
+                    confirm: false,
+                    meter: false,
+                    stall: Stall { budget: None },
+                    ..ranked_sweep()
+                },
+                &tally,
+                Stage::Inferred,
+                &mut state,
+            )
+        },
+    );
+    let Some(Judgement::Reached(Outcome::Killed, Some(killer), None)) = judged else {
+        panic!("the second candidate must still run after the first is proved unreachable");
+    };
+    assert_eq!(killer, killer_for(&binaries[1], "later_killer"));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(tally.item_probes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn recovered_inferred_probes_preserve_case_rank_primary_tier_and_only_successful_pass_evidence() {
+    let binaries = binaries(1);
+    let missing = Killer {
+        target: "missing-target".into(),
+        ..killer_for(&binaries[0], "missing")
+    };
+    let candidates = [
+        Candidate::Exact(missing.clone()),
+        Candidate::Exact(killer_for(&binaries[0], "alpha")),
+        Candidate::Exact(killer_for(&binaries[0], "beta")),
+    ];
+    let tally = Tally::default();
+    let mut state = ProbeState::default();
+    begin_selection_trace();
+    EXECUTION_TIER.set((SelectionTier::Whole, true));
+    let judged = with_binary_runner(
+        |_, attempt, _| {
+            assert_eq!(EXECUTION_TIER.get(), (SelectionTier::Item, false));
+            let verdict = match attempt.only {
+                Only::One("alpha") => Verdict::Passed,
+                Only::One("beta") => Verdict::TestEnumerationFailed("retained enumeration error".into()),
+                other => panic!("unexpected inferred selection: {other:?}"),
+            };
+            BinaryRun {
+                verdict,
+                reach: ReachObservation::Reached,
+            }
+        },
+        || {
+            step(
+                &workspace(),
+                &binaries,
+                Some(&missing),
+                &candidates,
+                Stage::Inferred,
+                &mut state,
+                &tally,
+            )
+        },
+    );
+    let attempts = take_selection_trace();
+    EXECUTION_TIER.set((SelectionTier::Whole, false));
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|attempt| (attempt.rank, attempt.test.as_deref()))
+            .collect::<Vec<_>>(),
+        [(1, Some("alpha")), (2, Some("beta"))]
+    );
+    assert_eq!(state.binary_runs.len(), 1);
+    assert_eq!(state.passed_tests, crate::HashSet::from_iter([(0, "alpha".into())]));
+    assert_eq!(tally.exact_candidates.load(Ordering::Relaxed), 0);
+    let Some(Judgement::Reached(Outcome::Killed, None, Some(note))) = judged else {
+        panic!("enumeration failures must retain their score and explanatory note");
+    };
+    assert_eq!(note, enumeration_note(&binaries[0].path, "retained enumeration error"));
+
+    let tally = Tally::default();
+    assert!(
+        step(
+            &workspace(),
+            &binaries,
+            Some(&missing),
+            &[],
+            Stage::Exact,
+            &mut ProbeState::default(),
+            &tally
+        )
+        .is_none()
+    );
+    assert_eq!(tally.exact_candidates.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn recovered_final_named_credit_uses_the_original_ordinal_to_deduplicate_an_existing_kill() {
+    let binaries = binaries(1);
+    let killer = killer_for(&binaries[0], "z-killer");
+    let tally = Tally::default();
+    {
+        let mut kills = tally.named_kills.lock().unwrap();
+        kills.record(7, &killed_by(killer.clone()));
+        kills.record(99, &killed_by(killer_for(&binaries[0], "a-control")));
+    }
+    let judged = with_binary_runner(
+        |_, _, _| BinaryRun {
+            verdict: Verdict::Failed(Some("z-killer".into())),
+            reach: ReachObservation::Reached,
+        },
+        || {
+            step(
+                &workspace(),
+                &binaries,
+                Some(&killer),
+                &[],
+                Stage::Exact,
+                &mut ProbeState::default(),
+                &tally,
+            )
+        },
+    );
+    assert!(matches!(judged, Some(Judgement::Reached(Outcome::Killed, Some(_), None))));
+    let mut selections = [(0, "z-killer"), (0, "a-control")];
+    tally.named_kills.lock().unwrap().rank(&mut selections, &[&binaries[0]]);
+    assert_eq!(selections, [(0, "a-control"), (0, "z-killer")]);
+}
+
 fn workspace() -> Workspace {
     Workspace::adopt(r"C:\gamma-stage-fixture".into(), r"C:\gamma-stage-fixture\target".into())
 }

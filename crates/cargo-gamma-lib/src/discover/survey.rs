@@ -39,6 +39,10 @@ use crate::{HashMap, HashSet, Result, suppress};
 #[path = "survey/resource_evidence_tests.rs"]
 mod resource_evidence_tests;
 
+#[cfg(any(test, feature = "internals"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod native_test_util;
+
 /// Builds the plan for a run.
 ///
 /// `notify` is called with a short human-readable message, so the caller can drive a progress
@@ -90,6 +94,7 @@ fn plan_survey(survey: Survey, selection: &Selection, notify: &mut impl FnMut(&s
     let mut ordinals = 0;
     let scanned = survey.scan(None, selection, &mut ordinals)?;
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     report_by_package(&survey.files, &scanned.mutants, notify);
 
     Ok(survey.into_plan(scanned))
@@ -257,6 +262,22 @@ pub struct Scanned {
 }
 
 impl Survey {
+    #[cfg(test)]
+    pub(crate) fn from_checked_fixture() -> Self {
+        native_test_util::checked_survey(Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_root(root: Utf8PathBuf) -> Self {
+        let mut survey = native_test_util::checked_survey(Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        survey.target = root.join("target");
+        survey.root = root;
+        survey.files.clear();
+        survey.by_package.clear();
+        survey.roots.clear();
+        survey
+    }
+
     /// Finds the workspace and the files worth mutating, without parsing any of them.
     ///
     /// The build this describes is the one the configuration file and the environment ask for.
@@ -330,6 +351,9 @@ impl Survey {
             external_inputs,
             cache_inputs,
             configuration,
+            walk_rust_files,
+            validate_trait_exclusions,
+            Diff::read,
         )
     }
 
@@ -360,6 +384,9 @@ impl Survey {
             ExternalPathInputs::default(),
             false,
             configuration,
+            walk_rust_files,
+            validate_trait_exclusions,
+            Diff::read,
         )
     }
 
@@ -378,6 +405,9 @@ impl Survey {
         external_inputs: ExternalPathInputs,
         cache_inputs: bool,
         configuration: impl FnOnce(&Utf8Path, &CargoOptions, &HashMap<String, Vec<String>>) -> Cfgs,
+        mut walk: impl FnMut(&Utf8Path) -> Result<Vec<Utf8PathBuf>>,
+        validate_exclusions: impl FnOnce(&[String], &[TargetFile], &Cfgs) -> Result<()>,
+        read_diff: impl FnOnce(&Utf8Path) -> Result<Diff>,
     ) -> Result<Self> {
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
         let target = Utf8PathBuf::from(metadata.target_directory.as_str());
@@ -402,7 +432,7 @@ impl Survey {
         let mut specs: HashMap<String, (Utf8PathBuf, String)> = HashMap::default();
         let mut source_dirs: HashSet<Utf8PathBuf> = HashSet::default();
 
-        let mut diff = args.in_diff.as_ref().map(|path| Diff::read(path)).transpose()?;
+        let mut diff = args.in_diff.as_ref().map(|path| read_diff(path)).transpose()?;
         let patterns = FilePatterns::new(args);
 
         // Only collected when there is something to check, since it is one string per Rust file in
@@ -446,7 +476,7 @@ impl Survey {
             // whereas `--package` narrows a single run; validating them against the narrowed set
             // would reject a correct config on every run that happened to select another package.
             // #[gamma::skip(cond.always_false, reason = "removing this fast path only walks unselected targets whose files are still rejected by the mutating guard below")]
-            if !mutating && !checking_patterns && !checking_exclusions && !resource_only {
+            if !checking_patterns && !checking_exclusions && !resource_only {
                 continue;
             }
 
@@ -468,15 +498,18 @@ impl Survey {
                 // The module tree is walked from here to find the files that exist only for tests,
                 // so a root is recorded whether or not it survives the filters below: a crate root
                 // excluded from mutation still says what the rest of the crate is.
-                if mutating || resource_only {
+                if
+                // #[gamma::skip(logical.or_remove_left, reason = "resource_roots is seeded with every target of every selected package before iteration. A selected package with targets therefore has resource_only=true; a targetless selected package has an empty target loop. Dropping mutating from these target guards preserves all reachable effects.", tag = "equivalent")]
+                mutating || resource_only {
                     roots.entry(package.name.to_string()).or_default().push(source_root.to_owned());
                 }
 
                 let Some(directory) = source_root.parent() else {
+                    // #[gamma::skip(loop.continue_to_break, reason = "Cargo metadata produces absolute target source file paths, not roots or empty paths. Every reached target.src_path therefore has a parent; this None arm cannot occur in the production metadata domain, so continue versus break is unreachable.", tag = "equivalent")]
                     continue;
                 };
 
-                for absolute in walk_rust_files(directory)? {
+                for absolute in walk(directory)? {
                     let relative = placed_under(&root, &absolute, &package.name)?;
 
                     // #[gamma::skip(all, reason = "widening this internal validation list only adds unused entries or duplicate syntax trees to an idempotent name set")]
@@ -490,12 +523,18 @@ impl Survey {
                     }
 
                     // #[gamma::skip(cond.always_true, reason = "collecting paths when neither patterns nor a diff consume them changes only discovery allocation")]
-                    if collecting_walked && (mutating || checking_patterns || checking_exclusions) {
+                    if
+                    // #[gamma::skip(logical.and_remove_left, reason = "If collecting_walked is false there are neither file patterns nor a diff; the additional walked paths have no consumer. If true, removing the conjunct changes nothing.", tag = "equivalent")]
+                    collecting_walked && (mutating || checking_patterns || checking_exclusions) {
                         walked.push(relative.clone());
                     }
 
                     // #[gamma::skip(cond.always_true, reason = "duplicate declaration parses contribute the same idempotent module edges and only add discovery work")]
-                    if (mutating || resource_only) && declaration_seen.insert(absolute.clone()) {
+                    if (
+                        // #[gamma::skip(logical.or_remove_left, reason = "resource_roots is seeded with every target of every selected package before iteration. A selected package with targets therefore has resource_only=true; a targetless selected package has an empty target loop. Dropping mutating from these target guards preserves all reachable effects.", tag = "equivalent")]
+                        mutating || resource_only
+                    ) && declaration_seen.insert(absolute.clone())
+                    {
                         declaration_files
                             .entry(package.name.to_string())
                             .or_default()
@@ -528,10 +567,12 @@ impl Survey {
         }
 
         files.sort_by(|left, right| left.path.cmp(&right.path));
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         normalize_file_lists(&mut declaration_files, &mut exclusion_files);
 
         let cfgs = configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(metadata, &selected));
-        validate_trait_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
+        validate_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
 
         // The diff names files; only the workspace can say which files those are. Resolving it
         // needs the walk to have happened, and it fails rather than selects nothing when not one
@@ -604,7 +645,11 @@ impl Survey {
         for directory in &self.source_dirs {
             match walk_rust_files(directory) {
                 Ok(found) => files.extend(found),
-                Err(_failure) => complete = false,
+                Err(_failure) => {
+                    complete =
+                // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+                false;
+                }
             }
         }
 
@@ -733,6 +778,7 @@ impl Survey {
             .collect();
         super::resource_dependencies::extend_roots(&mut resource_roots, &self.resource_dependencies);
         let participating = |name: &str| {
+            // #[gamma::skip(logical.or_remove_left, reason = "participating is called only on roots/declaration_files keys constructed together from mutable target roots. Every such package has at least one root. If package matches wanted (or None), all its roots were inserted into resource_roots immediately above, so the RHS any(root in resource_roots) is already true. Thus A implies B for each actual call, and removing A from A||B preserves participation.", tag = "equivalent")]
             package.is_none_or(|wanted| name == wanted)
                 || self
                     .roots
@@ -947,7 +993,13 @@ fn report_by_package(files: &[TargetFile], mutants: &[Mutant], notify: &mut impl
     }
 
     for package in order {
-        let (files, mutants) = counts.get(package).copied().unwrap_or((0, 0));
+        let (files, mutants) =
+        // #[gamma::skip(fallback.unwrap_or_to_default, reason = "The copied tuple type is(usize,usize); unwrap_or((0,0)) and unwrap_or_default() return identical missing values.", tag = "equivalent")]
+        counts.get(package).copied().unwrap_or((
+        // #[gamma::skip(literal.int_increment, reason = "report_by_package iterates order only after inserting each package into counts, and counts is never removed from. Every counts.get(package) is Some. Each mutated zero is solely inside unused unwrap_or((0,0)), so it changes no count or output.", tag = "equivalent")]
+        0,
+        // #[gamma::skip(literal.int_increment, reason = "report_by_package iterates order only after inserting each package into counts, and counts is never removed from. Every counts.get(package) is Some. Each mutated zero is solely inside unused unwrap_or((0,0)), so it changes no count or output.", tag = "equivalent")]
+        0));
 
         notify(&format!(
             "{package}, {} in {}",
@@ -1181,7 +1233,6 @@ fn scan_with_dependencies(
 
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "the declaration barrier shares complete mutation and resource evidence context"
 )]
 fn scan_with_declarations(
@@ -1248,6 +1299,7 @@ fn scan_with_declarations(
                 // first is a race. The earliest in file order is reported so the message does not
                 // change between runs.
                 Err((at, error)) => {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     retain_first_failure(&mut failure, at, error);
                 }
             }
@@ -1277,19 +1329,7 @@ fn scan_with_declarations(
 
     // Dependency roots supply proof evidence, not population membership. Only mutation
     // packages may make reachable source live during module-exclusion analysis.
-    let mutation_packages: HashSet<&str> = files.iter().map(|file| file.package.as_str()).collect();
-    let population_roots = roots
-        .iter()
-        .filter(|root| {
-            files
-                .iter()
-                .any(|file| modules::identity(&file.absolute) == modules::identity(root))
-                || declaration_files
-                    .iter()
-                    .any(|(path, _cfg, package)| modules::identity(path) == modules::identity(root) && mutation_packages.contains(package))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let population_roots = population_roots(files, declaration_files, roots);
     let excluded = modules::excluded_files(&population_roots, &declared);
     let total = collected.iter().map(|(_index, parsed)| parsed.mutants.len()).sum();
     let mut mutants = Vec::with_capacity(total);
@@ -1342,8 +1382,27 @@ fn scan_with_declarations(
     })
 }
 
+fn population_roots(files: &[&TargetFile], declaration_files: &[(&Utf8Path, &CfgSet, &str)], roots: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
+    let mutation_packages: HashSet<&str> = files.iter().map(|file| file.package.as_str()).collect();
+    roots
+        .iter()
+        .filter(|root| {
+            files
+                .iter()
+                .any(|file| modules::identity(&file.absolute) == modules::identity(root))
+                || declaration_files
+                    .iter()
+                    .any(|(path, _cfg, package)| modules::identity(path) == modules::identity(root) && mutation_packages.contains(package))
+        })
+        .cloned()
+        .collect()
+}
+
 fn retain_first_failure(failure: &mut Option<(usize, Error)>, at: usize, error: Error) {
-    if failure.as_ref().is_none_or(|(seen, _)| at < *seen) {
+    if failure.as_ref().is_none_or(|(seen, _)|
+    // #[gamma::skip(relational.lt_to_le, reason = "retain_first_failure is called only with work failure indexes claimed by one shared AtomicUsize fetch_add(1). Each index is assigned to at most one worker and each worker returns at most one failure; no distinct returned errors can tie at the same index. Changing strict< to<= therefore never changes which failure is retained.", tag = "equivalent")]
+    at < *seen)
+    {
         *failure = Some((at, error));
     }
 }
@@ -1420,6 +1479,16 @@ pub fn parse_declarations_with_parser(
     parallelism: impl FnOnce() -> std::io::Result<NonZero<usize>>,
     parse: impl Fn(&Utf8Path, &CfgSet) -> Result<DeclarationOutcome> + Sync,
 ) -> Result<Declarations> {
+    parse_declarations_with_workers(files, parallelism, parse, |_| {})
+}
+
+/// Reports admission before each spawn, without requiring parser callbacks to rendezvous.
+fn parse_declarations_with_workers(
+    files: &[(&Utf8Path, &CfgSet, &str)],
+    parallelism: impl FnOnce() -> std::io::Result<NonZero<usize>>,
+    parse: impl Fn(&Utf8Path, &CfgSet) -> Result<DeclarationOutcome> + Sync,
+    mut worker_started: impl FnMut(usize),
+) -> Result<Declarations> {
     if files.is_empty() {
         return Ok(Declarations {
             digests: HashMap::default(),
@@ -1431,9 +1500,13 @@ pub fn parse_declarations_with_parser(
         });
     }
 
-    let workers = parallelism().map_or(1, NonZero::get).min(files.len());
+    let workers =
+    // #[gamma::skip(fallback.map_or_to_default, reason = "CPU-query failure fallback1->0 changes workers from1 to0 for nonempty files. Both satisfy workers<=1 and use identical sequential enumerate/parse branch; workers is never read again in that branch. Empty files return before the query. No spawn, parse, result or error changes.", tag = "equivalent")]
+    parallelism().map_or(
+    // #[gamma::skip(literal.int_decrement, reason = "CPU-query failure fallback1->0 changes workers from1 to0 for nonempty files. Both satisfy workers<=1 and use identical sequential enumerate/parse branch; workers is never read again in that branch. Empty files return before the query. No spawn, parse, result or error changes.", tag = "equivalent")]
+    1, NonZero::get).min(files.len());
 
-    let mut results: Vec<DeclarationParse> = if workers <= 1 {
+    let results: Vec<DeclarationParse> = if workers <= 1 {
         let mut results = Vec::with_capacity(files.len());
 
         for (index, &(path, cfg, _package)) in files.iter().enumerate() {
@@ -1445,8 +1518,9 @@ pub fn parse_declarations_with_parser(
         let next = AtomicUsize::new(0);
 
         thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers)
-                .map(|_worker| {
+            let handles: Vec<_> = declaration_worker_indices(workers)
+                .map(|worker| {
+                    worker_started(worker);
                     let next = &next;
                     let parse = &parse;
 
@@ -1479,8 +1553,11 @@ pub fn parse_declarations_with_parser(
         })
     };
 
-    results.sort_by_key(|(index, _result)| *index);
+    gather_declarations(files, results)
+}
 
+fn gather_declarations(files: &[(&Utf8Path, &CfgSet, &str)], mut results: Vec<DeclarationParse>) -> Result<Declarations> {
+    results.sort_by_key(|(index, _result)| *index);
     // Check for errors after restoring input order, so scheduling cannot choose the diagnostic.
     let mut gathered = Declarations {
         digests: HashMap::default(),
@@ -1514,14 +1591,26 @@ pub fn parse_declarations_with_parser(
     Ok(gathered)
 }
 
+fn declaration_worker_indices(workers: usize) -> core::ops::Range<usize> {
+    0..workers
+}
+
 /// Reads one declaration-only file, turning a skippable failure into a named skip.
 pub fn parse_declarations_of(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
+    parse_declarations_with(path, cfg, module_identities::declarations)
+}
+
+fn parse_declarations_with(
+    path: &Utf8Path,
+    cfg: &CfgSet,
+    declarations: impl FnOnce(&Utf8Path, &syn::File, &CfgSet) -> Result<Vec<module_identities::Edge>>,
+) -> Result<DeclarationOutcome> {
     match SourceFile::read(path) {
         Ok(source) => Ok(DeclarationOutcome::Declared(
             path.to_owned(),
             modules::declarations(path, source.ast(), cfg),
             Box::new(collect::Defaults::of_source_in(source.ast(), cfg, path.as_str())),
-            module_identities::declarations(path, source.ast(), cfg)?,
+            declarations(path, source.ast(), cfg)?,
             crate::discover::digest(retained_source(&source).as_bytes()),
         )),
 
@@ -1766,8 +1855,11 @@ fn sort_target_files(files: &mut [TargetFile]) {
 
 fn normalize_file_lists(declaration_files: &mut HashMap<String, Vec<Utf8PathBuf>>, exclusion_files: &mut [TargetFile]) {
     for paths in declaration_files.values_mut() {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         sort_paths(paths);
     }
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     sort_target_files(exclusion_files);
 }
 
@@ -1823,6 +1915,7 @@ fn reachable(metadata: &Metadata) -> HashMap<String, HashSet<String>> {
 
     for package in metadata.workspace_packages() {
         let Some(&src_id) = name_to_id.get(package.name.as_str()) else {
+            // #[gamma::skip(loop.continue_to_break, reason = "reachable constructs name_to_id from exactly metadata.workspace_packages(), then iterates that same immutable set. Every package name has an entry, so src_id lookup cannot take its else-continue arm; replacing that unreachable continue with break is inert.", tag = "equivalent")]
             continue;
         };
 
@@ -1939,7 +2032,19 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
         stack.push(start);
         on_stack[start] = true;
 
+        let mut previous_frame = None;
         while let Some(frame) = call_stack.last_mut() {
+            let position = (frame.node, frame.edge_at);
+            assert_ne!(
+                previous_frame,
+                Some(position),
+                "each Tarjan iteration must consume an edge or change the active node"
+            );
+
+            // #[gamma::skip(stmt.delete_assign, reason = "This assignment only records the progress assertion's previous frame. On every valid traversal the edge cursor or active frame advances; clearing this guard cannot change the SCC algorithm without a second fault.", tag = "equivalent")]
+            previous_frame =
+            // #[gamma::skip(option.some_to_none, reason = "This assignment only records the progress assertion's previous frame. On every valid traversal the edge cursor or active frame advances; clearing this guard cannot change the SCC algorithm without a second fault.", tag = "equivalent")]
+            Some(position);
             let node = frame.node;
 
             if frame.edge_at < edges[node].len() {
@@ -1954,7 +2059,10 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
                 } else {
                     index_of[neighbor] = Some(next_index);
                     low_link[neighbor] = next_index;
-                    next_index = next_discovery_index(next_index);
+                    next_index = next_discovery_index(
+                        // #[gamma::skip(expr.increment, reason = "Discovery labels are used only for relative order/equality, so spacing them by two preserves SCCs until u32 overflow. A distinguishing graph requires over two billion discoveries; allocating that unsafe workload is not a legitimate unit test.", tag = "resource-boundary")]
+                        next_index,
+                    );
                     stack.push(neighbor);
                     on_stack[neighbor] = true;
                     call_stack.push(Frame {
@@ -2122,7 +2230,41 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
 /// Metadata and cfg/host queries are trusted, unbounded discovery setup. They do not use campaign
 /// process-tree ownership, build deadlines, or cooperative cancellation.
 pub fn load_metadata(dir: &Utf8Path, features: &FeatureArgs) -> Result<Metadata> {
-    load_metadata_using(dir, features, MetadataCommand::exec)
+    load_metadata_using(dir, features, execute_metadata)
+}
+
+/// Replaces Cargo metadata execution while retaining command construction and result handling.
+#[cfg(test)]
+type MetadataReader = Box<dyn FnMut(&MetadataCommand) -> std::result::Result<Metadata, cargo_metadata::Error>>;
+
+#[cfg(test)]
+thread_local! {
+    static METADATA_READER: std::cell::RefCell<Option<MetadataReader>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Installs a non-nestable current-thread reader and clears it even when the operation unwinds.
+#[cfg(test)]
+pub(crate) fn with_metadata_reader<T>(reader: MetadataReader, operation: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            METADATA_READER.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    METADATA_READER.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "a thread cannot install two Cargo metadata readers");
+        *slot = Some(reader);
+    });
+    let _reset = Reset;
+    operation()
+}
+
+fn execute_metadata(command: &MetadataCommand) -> std::result::Result<Metadata, cargo_metadata::Error> {
+    #[cfg(test)]
+    if let Some(result) = METADATA_READER.with_borrow_mut(|slot| slot.as_mut().map(|read| read(command))) {
+        return result;
+    }
+    command.exec()
 }
 
 fn load_metadata_using(
@@ -2133,6 +2275,8 @@ fn load_metadata_using(
     let mut command = MetadataCommand::new();
 
     let _builder = command.current_dir(dir).no_deps();
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     apply_metadata_features(&mut command, features);
 
     read(&command).map_err(|cause| error!("could not read cargo metadata for `{dir}`").caused_by(cause))
@@ -2150,6 +2294,8 @@ fn load_survey_metadata_using(
 
     let mut command = MetadataCommand::new();
     let _builder = command.current_dir(dir).other_options(vec!["--offline".to_owned()]);
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     apply_metadata_features(&mut command, features);
 
     read(&command).map_err(|cause| {
@@ -2193,7 +2339,12 @@ fn metadata_feature_options(features: &FeatureArgs) -> Vec<MetadataFeatureOption
         let named = features
             .features
             .iter()
-            .flat_map(|entry| entry.split([',', ' ']))
+            .flat_map(|entry| {
+                entry.split(
+                    // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+                    [',', ' '],
+                )
+            })
             .filter(|entry| !entry.is_empty())
             .map(ToOwned::to_owned)
             .collect();
@@ -2342,6 +2493,7 @@ fn owning_package(metadata: &Metadata, dir: &Utf8Path) -> Option<String> {
 
     for package in metadata.workspace_packages() {
         let Some(home) = Utf8Path::new(package.manifest_path.as_str()).parent() else {
+            // #[gamma::skip(loop.continue_to_break, reason = "owning_package receives Cargo metadata whose package manifest_path is an absolute path to Cargo.toml, never a filesystem root or empty string. Such a path always has a parent directory. The else-continue arm cannot run; changing it to break does not change valid metadata resolution.", tag = "equivalent")]
             continue;
         };
 
@@ -2353,7 +2505,10 @@ fn owning_package(metadata: &Metadata, dir: &Utf8Path) -> Option<String> {
 
         let depth = home.components().count();
 
-        if best.as_ref().is_none_or(|(deepest, _name)| depth > *deepest) {
+        if best.as_ref().is_none_or(|(deepest, _name)|
+        // #[gamma::skip(relational.gt_to_ge, reason = "Cargo workspace packages have unique canonical manifest directories (one Cargo.toml per directory). For a fixed invocation directory, distinct ancestor directories form a strict component-depth chain, so two candidate packages cannot tie deepest depth. The change > to>= affects only the impossible tied-directory case.", tag = "equivalent")]
+        depth > *deepest)
+        {
             best = Some((depth, package.name.to_string()));
         }
     }
@@ -2592,16 +2747,586 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::ffi::OsStringExt as _;
 
+    use serde_json::{from_str, from_value, json};
+    use syn::{Item, parse_file, parse_str};
     use tempfile::TempDir;
 
     use super::*;
     use crate::testing::discover_fixture::counting_mutant;
+
+    fn selection_metadata() -> Metadata {
+        let mut metadata: Metadata = from_str(include_str!("../../tests/fixtures/correctness/resource-dependencies.json")).unwrap();
+        let mut unrelated = metadata.packages[1].clone();
+        unrelated.name = from_str("\"gamma\"").unwrap();
+        unrelated.id.repr = "path+file:///fixture/gamma#1.2.3".into();
+        unrelated.manifest_path = "C:/outside/gamma/Cargo.toml".into();
+        unrelated.targets[0].src_path = "C:/fixture/gamma/src/lib.rs".into();
+        metadata.workspace_members.push(unrelated.id.clone());
+        metadata.packages.push(unrelated);
+        metadata
+    }
+
+    #[test]
+    fn oct25_metadata_selection_keeps_resource_roots_and_exact_sorted_populations() {
+        let metadata = selection_metadata();
+        let args = SelectArgs {
+            dir: metadata.workspace_root.clone(),
+            packages: vec!["alpha".into()],
+            ..SelectArgs::default()
+        };
+        let mut directories = Vec::new();
+        let survey = Survey::for_build_with_metadata(
+            &args,
+            None,
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            &metadata,
+            ExternalPathInputs::default(),
+            false,
+            |_, _, _| Cfgs::unconditional(),
+            |directory| {
+                if directory == Utf8Path::new("C:/fixture/gamma/src") {
+                    return Err(error!("the unselected package must not introduce a walk failure"));
+                }
+                directories.push(directory.to_owned());
+                Ok(["z.rs", "a.rs", "z.rs", "last.rs"].map(|name| directory.join(name)).to_vec())
+            },
+            validate_trait_exclusions,
+            Diff::read,
+        )
+        .unwrap();
+        assert_eq!(
+            directories,
+            ["C:/fixture/alpha/src", "C:/fixture/alpha/src", "C:/fixture/beta/src"].map(Utf8PathBuf::from)
+        );
+        assert_eq!(
+            survey.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            ["alpha/src/a.rs", "alpha/src/last.rs", "alpha/src/z.rs"]
+        );
+        assert_eq!(survey.by_package["alpha"], [0, 1, 2]);
+        assert_eq!(survey.selected, ["alpha"]);
+        assert_eq!(survey.specs["gamma"].0, Utf8Path::new(""));
+        assert_eq!(
+            survey.declaration_files["alpha"],
+            ["a.rs", "last.rs", "z.rs"].map(|name| Utf8Path::new("C:/fixture/alpha/src").join(name))
+        );
+        assert_eq!(
+            survey.declaration_files["beta"],
+            ["a.rs", "last.rs", "z.rs"].map(|name| Utf8Path::new("C:/fixture/beta/src").join(name))
+        );
+        assert_eq!(survey.declaration_files.len(), 2);
+        assert_eq!(survey.source_dirs, [Utf8PathBuf::from("C:/fixture/alpha/src")]);
+        assert_eq!(
+            survey.roots["alpha"],
+            ["C:/fixture/alpha/src/lib.rs", "C:/fixture/alpha/src/main.rs"].map(Utf8PathBuf::from)
+        );
+        assert_eq!(survey.roots["beta"], [Utf8PathBuf::from("C:/fixture/beta/src/lib.rs")]);
+        assert_eq!(survey.roots.len(), 2);
+        assert_eq!(survey.resource_dependencies, super::super::resource_dependencies::of(&metadata));
+    }
+
+    #[test]
+    fn oct25_cached_resource_inventory_is_selected_without_recomputing_metadata() {
+        let metadata = selection_metadata();
+        let args = SelectArgs {
+            dir: metadata.workspace_root.clone(),
+            packages: vec!["alpha".into()],
+            ..SelectArgs::default()
+        };
+        let expected = super::super::resource_dependencies::of(&metadata);
+        for cache_inputs in [false, true] {
+            let mut directories = Vec::new();
+            let survey = Survey::for_build_with_metadata(
+                &args,
+                None,
+                None,
+                &CargoOptions::default(),
+                &FeatureArgs::default(),
+                &metadata,
+                ExternalPathInputs::default(),
+                cache_inputs,
+                |_, _, _| Cfgs::unconditional(),
+                |directory| {
+                    directories.push(directory.to_owned());
+                    Ok(vec![directory.join("lib.rs")])
+                },
+                validate_trait_exclusions,
+                Diff::read,
+            )
+            .unwrap();
+            assert_eq!(
+                survey.resource_dependencies,
+                if cache_inputs { Vec::new() } else { expected.clone() }
+            );
+            assert_eq!(directories.len(), if cache_inputs { 2 } else { 3 });
+            assert_eq!(survey.declaration_files.len(), if cache_inputs { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn oct25_pattern_validation_walks_unselected_packages_without_mutating_them() {
+        let mut metadata = selection_metadata();
+        let mut extra_target = metadata.packages[0].targets[1].clone();
+        extra_target.src_path = "C:/fixture/beta/tools/main.rs".into();
+        metadata.packages[1].targets.push(extra_target);
+        let args = SelectArgs {
+            dir: metadata.workspace_root.clone(),
+            packages: vec!["alpha".into()],
+            files: vec!["alpha/**/*.rs".into(), "gamma/**/*.rs".into()],
+            ..SelectArgs::default()
+        };
+        let mut directories = Vec::new();
+        let survey = Survey::for_build_with_metadata(
+            &args,
+            None,
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            &metadata,
+            ExternalPathInputs::default(),
+            false,
+            |_, _, _| Cfgs::unconditional(),
+            |directory| {
+                directories.push(directory.to_owned());
+                Ok(vec![directory.join("lib.rs")])
+            },
+            validate_trait_exclusions,
+            Diff::read,
+        )
+        .unwrap();
+        assert_eq!(
+            directories,
+            [
+                "C:/fixture/alpha/src",
+                "C:/fixture/alpha/src",
+                "C:/fixture/beta/src",
+                "C:/fixture/beta/tools",
+                "C:/fixture/gamma/src",
+            ]
+            .map(Utf8PathBuf::from)
+        );
+        assert_eq!(survey.files.len(), 1);
+        assert_eq!(survey.files[0].path, Utf8Path::new("alpha/src/lib.rs"));
+        assert_eq!(survey.declaration_files.len(), 2);
+        assert_eq!(survey.roots.len(), 2);
+        assert_eq!(
+            survey.source_dirs,
+            [
+                "C:/fixture/alpha/src",
+                "C:/fixture/beta/src",
+                "C:/fixture/beta/tools",
+                "C:/fixture/gamma/src",
+            ]
+            .map(Utf8PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn oct25_trait_exclusion_validation_walks_unselected_packages_without_mutating_them() {
+        let metadata = selection_metadata();
+        let args = SelectArgs {
+            dir: metadata.workspace_root.clone(),
+            packages: vec!["alpha".into()],
+            exclude_trait_impls: vec!["Debug".into()],
+            ..SelectArgs::default()
+        };
+        let mut directories = Vec::new();
+        let checked = std::cell::Cell::new(false);
+        let survey = Survey::for_build_with_metadata(
+            &args,
+            None,
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            &metadata,
+            ExternalPathInputs::default(),
+            false,
+            |_, _, _| Cfgs::unconditional(),
+            |directory| {
+                directories.push(directory.to_owned());
+                Ok(vec![directory.join("lib.rs")])
+            },
+            |excluded, files, _| {
+                assert_eq!(excluded, ["Debug"]);
+                assert_eq!(
+                    files
+                        .iter()
+                        .map(|file| (file.package.as_str(), file.path.as_str()))
+                        .collect::<Vec<_>>(),
+                    [
+                        ("alpha", "alpha/src/lib.rs"),
+                        ("beta", "beta/src/lib.rs"),
+                        ("gamma", "gamma/src/lib.rs"),
+                    ]
+                );
+                checked.set(true);
+                Ok(())
+            },
+            Diff::read,
+        )
+        .unwrap();
+        assert!(checked.get());
+        assert_eq!(
+            directories,
+            [
+                "C:/fixture/alpha/src",
+                "C:/fixture/alpha/src",
+                "C:/fixture/beta/src",
+                "C:/fixture/gamma/src"
+            ]
+            .map(Utf8PathBuf::from)
+        );
+        assert_eq!(survey.files.len(), 1);
+        assert_eq!(survey.files[0].path, Utf8Path::new("alpha/src/lib.rs"));
+        assert_eq!(
+            survey.source_dirs,
+            ["C:/fixture/alpha/src", "C:/fixture/beta/src", "C:/fixture/gamma/src"].map(Utf8PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn oct25_diff_resolution_indexes_resource_only_packages_only_when_exclusions_require_them() {
+        let metadata = selection_metadata();
+        for checking_exclusions in [false, true] {
+            let args = SelectArgs {
+                dir: metadata.workspace_root.clone(),
+                packages: vec!["alpha".into()],
+                in_diff: Some("owned-diff".into()),
+                exclude_trait_impls: if checking_exclusions { vec!["Debug".into()] } else { Vec::new() },
+                ..SelectArgs::default()
+            };
+            let result = Survey::for_build_with_metadata(
+                &args,
+                None,
+                None,
+                &CargoOptions::default(),
+                &FeatureArgs::default(),
+                &metadata,
+                ExternalPathInputs::default(),
+                false,
+                |_, _, _| Cfgs::unconditional(),
+                |directory| Ok(vec![directory.join("lib.rs")]),
+                |_, _, _| Ok(()),
+                |path| {
+                    assert_eq!(path, Utf8Path::new("owned-diff"));
+                    Ok(Diff::parse(
+                        "--- a/beta/src/lib.rs\n+++ b/beta/src/lib.rs\n@@ -0,0 +1,1 @@\n+changed\n",
+                    ))
+                },
+            );
+            if checking_exclusions {
+                let survey = result.unwrap();
+                assert!(survey.files.is_empty());
+                assert!(survey.by_package.is_empty());
+                assert!(survey.diff.unwrap().touches_file(Utf8Path::new("beta/src/lib.rs")));
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!(
+                    failure.message(),
+                    "the diff names 1 path of Rust source that this workspace does not contain (b/beta/src/lib.rs); \
+                     continuing would silently generate no mutants for them and report a score for a \
+                     population that never included them"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oct25_metadata_selection_preserves_walk_failure_as_an_error() {
+        let metadata = selection_metadata();
+        let args = SelectArgs {
+            dir: metadata.workspace_root.clone(),
+            ..SelectArgs::default()
+        };
+        let failure = Survey::for_build_with_metadata(
+            &args,
+            None,
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            &metadata,
+            ExternalPathInputs::default(),
+            false,
+            |_, _, _| panic!("configuration must not run after a failed walk"),
+            |directory| {
+                assert_eq!(directory, Utf8Path::new("C:/fixture/alpha/src"));
+                Err(error!("scripted source inventory failure"))
+            },
+            |_, _, _| panic!("exclusion validation must not run after a failed walk"),
+            Diff::read,
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "scripted source inventory failure");
+    }
+
+    #[test]
+    fn recovered_declaration_worker_indices_never_allocate_an_extra_worker() {
+        for workers in [0, 1, 2, 3, 17, usize::MAX] {
+            let indices = declaration_worker_indices(workers);
+            assert_eq!(indices.start, 0);
+            assert_eq!(indices.end, workers);
+            assert_eq!(indices.len(), workers);
+        }
+    }
 
     /// The name a test gives a file it wants a phase-1 survey worker to panic on.
     ///
     /// Injected by name rather than by an armed flag so that nothing has to be disarmed and no
     /// other test running at the same time can trip it.
     const PANIC_PROBE: &str = "gamma_panic_probe.rs";
+
+    #[test]
+    fn recovered_trait_walk_descends_through_active_nested_modules() {
+        let syntax = parse_file(
+            "mod nested { struct S; trait Active {} impl Active for S {} }
+             #[cfg(any())] mod inactive { struct S; impl Hidden for S {} }",
+        )
+        .unwrap();
+        assert_eq!(
+            TraitImplementations::collect(&syntax, &CfgSet::parse("")),
+            once("Active".into()).collect()
+        );
+    }
+
+    #[test]
+    fn recovered_component_indices_distinguish_cycles_from_forward_only_edges() {
+        assert_eq!(strongly_connected_components(&[vec![1], vec![0], vec![3], vec![]]), [0, 0, 2, 1]);
+    }
+
+    #[test]
+    fn recovered_population_roots_require_selected_files_or_declarations_of_mutated_packages() {
+        let cfg = CfgSet::default();
+        let files = ["selected.rs", "other.rs"].map(|path| TargetFile {
+            path: path.into(),
+            absolute: path.into(),
+            package: "alpha".into(),
+            source: None,
+        });
+        let declarations = [
+            (Utf8Path::new("lib.rs"), &cfg, "alpha"),
+            (Utf8Path::new("foreign.rs"), &cfg, "beta"),
+            (Utf8Path::new("unrooted.rs"), &cfg, "alpha"),
+        ];
+        let roots = ["lib.rs", "selected.rs", "foreign.rs", "absent.rs"].map(Utf8PathBuf::from);
+        assert_eq!(
+            population_roots(&files.iter().collect::<Vec<_>>(), &declarations, &roots),
+            [Utf8PathBuf::from("lib.rs"), Utf8PathBuf::from("selected.rs")]
+        );
+        assert!(population_roots(&[], &declarations, &roots).is_empty());
+    }
+
+    #[test]
+    fn recovered_declaration_gather_restores_input_error_precedence() {
+        let cfg = CfgSet::default();
+        let files = [(Utf8Path::new("z.rs"), &cfg, "z"), (Utf8Path::new("a.rs"), &cfg, "a")];
+        let error = gather_declarations(&files, vec![(1, Err(error!("later input"))), (0, Err(error!("first input")))]).unwrap_err();
+        assert_eq!(error.message(), "first input");
+    }
+
+    #[test]
+    fn recovered_declaration_empty_input_does_not_query_native_parallelism() {
+        let parsed = parse_declarations_with_parser(
+            &[],
+            || panic!("an empty scan must not query CPUs"),
+            |_, _| panic!("an empty scan must not parse"),
+        )
+        .unwrap();
+        assert!(parsed.declared.is_empty());
+        assert!(parsed.skipped.is_empty());
+        assert!(parsed.defaults.is_empty());
+    }
+
+    #[test]
+    fn recovered_declaration_cpu_fallback_is_serial_but_two_cpus_admit_two_workers() {
+        let cfg = CfgSet::default();
+        let files = [(Utf8Path::new("a.rs"), &cfg, "a"), (Utf8Path::new("z.rs"), &cfg, "z")];
+        let caller = thread::current().id();
+        let fallback = Mutex::new(Vec::new());
+        parse_declarations_with_parser(
+            &files,
+            || Err(std::io::Error::other("unavailable")),
+            |path, _| {
+                fallback.lock().unwrap().push(thread::current().id());
+                Ok(DeclarationOutcome::Skipped(path.to_owned(), path.to_string()))
+            },
+        )
+        .unwrap();
+        assert_eq!(fallback.into_inner().unwrap(), [caller, caller]);
+
+        let mut admitted = Vec::new();
+        let parsed = parse_declarations_with_workers(
+            &files,
+            || Ok(NonZero::new(2).unwrap()),
+            |path, _| {
+                assert_ne!(thread::current().id(), caller);
+                Ok(DeclarationOutcome::Skipped(path.to_owned(), path.to_string()))
+            },
+            |worker| admitted.push(worker),
+        )
+        .unwrap();
+        assert_eq!(admitted, [0, 1]);
+        assert_eq!(
+            parsed.skipped.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            ["a.rs", "z.rs"]
+        );
+        assert_eq!(parsed.incomplete_packages, ["a".into(), "z".into()].into_iter().collect());
+    }
+
+    #[test]
+    fn recovered_declaration_skips_follow_path_order_not_input_order() {
+        let cfg = CfgSet::default();
+        let files = [(Utf8Path::new("z.rs"), &cfg, "z"), (Utf8Path::new("a.rs"), &cfg, "a")];
+        let parsed = parse_declarations_with_parser(
+            &files,
+            || Ok(NonZero::new(1).unwrap()),
+            |path, _| Ok(DeclarationOutcome::Skipped(path.to_owned(), format!("skip {path}"))),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.skipped,
+            [
+                (Utf8PathBuf::from("a.rs"), "skip a.rs".into()),
+                (Utf8PathBuf::from("z.rs"), "skip z.rs".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn recovered_merged_defaults_withhold_negative_evidence_for_both_skip_sources() {
+        for declaration_skip in [false, true] {
+            let source = parse_file("pub struct Error;").unwrap();
+            let defaults = collect::Defaults::of(&source);
+            assert!(defaults.lacks_error_default("Error"));
+            let incomplete: HashSet<String> = if declaration_skip {
+                once("alpha".into()).collect()
+            } else {
+                HashSet::default()
+            };
+            let shared = Shared {
+                next: AtomicUsize::new(0),
+                partials: Mutex::new(vec![once(("alpha".into(), defaults)).collect()]),
+                skipped: Mutex::new(if declaration_skip { Vec::new() } else { vec![(0, "skip".into())] }),
+                barrier: Barrier::new(1),
+                defaults: OnceLock::new(),
+                incomplete_packages: &incomplete,
+                named: Mutex::new(Vec::new()),
+                roots: &[],
+                resource_dependencies: &[],
+            };
+            let target = TargetFile {
+                path: "lib.rs".into(),
+                absolute: "lib.rs".into(),
+                package: "alpha".into(),
+                source: None,
+            };
+            let merged = shared.merged_defaults(&[&target]);
+            assert!(
+                !merged["alpha"].lacks_error_default("Error"),
+                "declaration skip: {declaration_skip}"
+            );
+            let partials_empty = shared
+                .partials
+                .lock()
+                .expect("only plain partial-result updates occur under this lock")
+                .is_empty();
+            assert!(partials_empty);
+        }
+    }
+
+    #[test]
+    fn recovered_merged_defaults_share_dependency_helpers_without_merging_nominal_type_indexes() {
+        let app_root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("memory/app/lib.rs");
+        let dependency_root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("memory/dependency/lib.rs");
+        let cfg = CfgSet::unconditional();
+        let app = "use helpers::width;
+        fn visible_width(text: &str) -> usize { width(text) }
+        pub fn equalize(left: &mut Vec<String>, right: &mut Vec<String>) {
+            let target = left.len().max(right.len());
+            while left.len() < target {
+                let width = visible_width(&left[0]);
+                left.insert(left.len() - 1, format!(\"│{}│\", \" \".repeat(width.saturating_sub(2))));
+            }
+        }";
+        let dependency = "pub struct Foreign; pub fn width(_text: &str) -> usize { 3 }";
+        let source = SourceFile::parse("app.rs", app.to_owned()).unwrap();
+        let roots = [app_root.clone(), dependency_root.clone()];
+        let dependencies = [collect::ResourceDependency {
+            crate_root: app_root.to_string(),
+            import_name: "helpers".into(),
+            package_id: "dependency 1.0.0".into(),
+            package_name: "dependency".into(),
+            version: "1.0.0".into(),
+            source: String::new(),
+            features: Vec::new(),
+            registry_closure: false,
+            library_root: Some(dependency_root.to_string()),
+        }];
+        let target = TargetFile {
+            path: "app.rs".into(),
+            absolute: app_root.clone(),
+            package: "app".into(),
+            source: None,
+        };
+        for include_dependency in [false, true] {
+            let mut partial: HashMap<String, collect::Defaults> = once((
+                "app".into(),
+                collect::Defaults::of_source_in(&parse_file(app).unwrap(), &cfg, app_root.as_str()),
+            ))
+            .collect();
+            if include_dependency {
+                partial.insert(
+                    "dependency".into(),
+                    collect::Defaults::of_source_in(&parse_file(dependency).unwrap(), &cfg, dependency_root.as_str()),
+                );
+            }
+            let shared = Shared {
+                resource_dependencies: &dependencies,
+                named: Mutex::new(vec![(app_root.clone(), Vec::new()), (dependency_root.clone(), Vec::new())]),
+                roots: &roots,
+                next: AtomicUsize::new(0),
+                partials: Mutex::new(vec![partial]),
+                skipped: Mutex::new(Vec::new()),
+                barrier: Barrier::new(1),
+                defaults: OnceLock::new(),
+                incomplete_packages: &HashSet::default(),
+            };
+            let merged = shared.merged_defaults(&[&target]);
+            assert!(!merged["app"].defines("Foreign"));
+            let candidates = collect::collect_with(&source, &Selection::parse("stmt.delete_call").unwrap(), &cfg, &merged["app"]);
+            let deletions = candidates
+                .iter()
+                .filter(|candidate| source.slice(&candidate.span).starts_with("left.insert"))
+                .count();
+            assert_eq!(
+                deletions,
+                usize::from(!include_dependency),
+                "dependency evidence: {include_dependency}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_library_inventory_deduplicates_targets_and_recognizes_mixed_kinds() {
+        let mut metadata: Metadata = from_str(include_str!("../../tests/fixtures/correctness/resource-dependencies.json")).unwrap();
+        let package = metadata
+            .packages
+            .iter_mut()
+            .find(|package| package.name.as_str() == "alpha")
+            .unwrap();
+        let mut library = package.targets.iter().find(|target| target_is_library(target)).unwrap().clone();
+        library.kind = vec![TargetKind::Bin, TargetKind::Lib];
+        assert!(target_is_library(&library));
+        package.targets.push(library.clone());
+        let tests = library_tests(&metadata);
+        assert_eq!(
+            tests
+                .iter()
+                .filter(|test| test.package == "alpha" && test.target == library.name)
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn survivor_every_item_kind_retains_the_attributes_that_disable_its_configuration() {
@@ -2624,7 +3349,7 @@ mod tests {
             "union U { x: i32 }",
             "use core::fmt;",
         ] {
-            let item: syn::Item = syn::parse_str(&format!("#[cfg(any())] {declaration}")).unwrap();
+            let item: Item = parse_str(&format!("#[cfg(any())] {declaration}")).unwrap();
             let attributes = item_attributes(&item);
             assert_eq!(attributes.len(), 1, "{declaration}");
             assert!(!cfg.holds_for(attributes), "{declaration}");
@@ -4563,7 +5288,7 @@ mod tests {
     fn survey_retains_the_injected_cargo_target_directory() {
         let root = Utf8PathBuf::from("synthetic/workspace");
         let target = Utf8PathBuf::from("synthetic/distinct-metadata-target");
-        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+        let metadata: Metadata = from_value(json!({
             "packages": [],
             "workspace_members": [],
             "workspace_default_members": [],
@@ -4590,6 +5315,9 @@ mod tests {
             ExternalPathInputs::default(),
             false,
             |_root, _cargo, _enabled| Cfgs::default(),
+            |_| panic!("empty metadata has no source directories"),
+            validate_trait_exclusions,
+            Diff::read,
         )
         .expect("the injected metadata must survey");
 

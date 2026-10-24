@@ -149,7 +149,14 @@ impl Selection {
             if let Some(rest) = selector.strip_prefix('!') {
                 self.remove(rest.trim())?;
             } else {
-                self.add(selector, selector != "@default" && selector != "default")?;
+                self.add(
+                    selector,
+                    // #[gamma::skip(logical.and_remove_right, reason = "Selection::add resolves the selector before consulting admit_optimistic. Bare default and xyzzy are rejected by resolve, and empty selectors are skipped by apply. Only invalid/skipped selectors observe a changed admission expression, so neither the resulting selection nor errors change.", tag = "equivalent")]
+                    selector != "@default"
+                        && selector !=
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "Selection::add resolves the selector before consulting admit_optimistic. Bare default and xyzzy are rejected by resolve, and empty selectors are skipped by apply. Only invalid/skipped selectors observe a changed admission expression, so neither the resulting selection nor errors change.", tag = "equivalent")]
+                "default",
+                )?;
             }
         }
 

@@ -342,38 +342,55 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
         }
 
         let newline = text_newline(text);
-        let parent_indent = line_indent(text, closing_delimiter_offset(&object.range));
+        let parent_indent = line_indent(
+            text,
+            // #[gamma::skip(expr.increment, reason = "including the closing non-whitespace brace leaves line_indent's line start and leading whitespace unchanged", tag = "equivalent")]
+            closing_delimiter_offset(&object.range),
+        );
         let unit = indent_unit(text, object);
         let property = nested_property(&path[index..], parent_indent, &unit, newline);
         let close = closing_delimiter_offset(&object.range);
         let insert_at = closing_line_start(text, close).unwrap_or(close);
-        let mut output = String::with_capacity(text.len() + property.len() + newline.len() * 2 + 1);
-        if let Some(last) = object.properties.last() {
-            output.push_str(&text[..last.range.end]);
-            if separator_comma(&text[last.range.end..insert_at]).is_none() {
-                if regions
-                    .iter()
-                    .any(|region| (region.body.start..=region.body.end).contains(&last.range.end))
-                {
+        let (prefix, separator, gap, prefix_newline) = if let Some(last) = object.properties.last() {
+            let separator = if separator_comma(&text[last.range.end..insert_at]).is_none() {
+                if regions.iter().any(|region| {
+                    // #[gamma::skip(range.inclusive_to_exclusive, reason = "a parsed property ends before the full-line closing sentinel starts, never exactly at region.body.end")]
+                    (region.body.start..=region.body.end).contains(&last.range.end)
+                }) {
                     return Err(refusal(
                         "scaffolding would add a separator inside another managed region",
                         RefusalRemedy::EnclosingOwnership,
                     ));
                 }
-                output.push(',');
-            }
-            output.push_str(&text[last.range.end..insert_at]);
-            if !text[last.range.end..insert_at].ends_with(['\r', '\n']) {
-                output.push_str(newline);
-            }
+                ","
+            } else {
+                ""
+            };
+            let gap = &text[last.range.end..insert_at];
+            let prefix_newline = if gap.ends_with(
+                // #[gamma::skip(collection.reverse_array, reason = "ends_with treats this character array as a set; its order is immaterial")]
+                ['\r', '\n'],
+            ) {
+                ""
+            } else {
+                newline
+            };
+            (&text[..last.range.end], separator, gap, prefix_newline)
         } else {
-            output.push_str(&text[..insert_at]);
-            output.push_str(newline);
-        }
-        output.push_str(&property);
-        output.push_str(newline);
-        output.push_str(parent_indent);
-        output.push_str(&text[close..]);
+            (&text[..insert_at], "", "", newline)
+        };
+        let output = [
+            prefix,
+            separator,
+            gap,
+            prefix_newline,
+            &property,
+            newline,
+            parent_indent,
+            &text[close..],
+        ]
+        .concat();
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "the input was parsed and only a serialized property plus a missing separator was inserted outside protected regions; scaffolding preserves JSONC syntax")]
         parse(&output)?;
         return Ok(output);
     }
@@ -468,6 +485,7 @@ pub(crate) fn plan_json_array_region(
         let without = remove_region_exact(base, &other);
         validate_neighbor_splice(base, &without, std::slice::from_ref(&spec.path))?;
     }
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "validated_regions already proved every marker pair in this unchanged base is well formed")]
     let region = find_region_in_lines(base, spec.region.id.as_str(), CommentSyntax::SlashSlash, json_comment_lines(base))
         .map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
     if let Some(region) = &region {
@@ -502,7 +520,9 @@ pub(crate) fn plan_json_array_region(
         rendered_body: &body,
         syntax: CommentSyntax::SlashSlash,
         placement: RegionPlacement::End,
-        newline: Some(newline),
+        newline:
+        // #[gamma::skip(option.some_to_none, reason = "newline was inferred from original host text exactly as the managed-region fallback infers it")]
+        Some(newline),
     };
     plan_region_with_splice(manifest, host_text, request, HostScanner::Json, || {
         let spliced = if let Some(region) = region {
@@ -838,21 +858,28 @@ fn separator_comma(gap: &str) -> Option<usize> {
             } else if byte == b'\\' {
                 escaped = true;
             } else if byte == b'"' {
-                string = false;
+                string =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to this assigned value")]
+                false;
             }
         } else if line_comment {
             if matches!(byte, b'\r' | b'\n') {
-                line_comment = false;
+                line_comment =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to this assigned value")]
+                false;
             }
         } else if block_comment {
             if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                block_comment = false;
+                block_comment =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to this assigned value")]
+                false;
                 index += 1;
             }
         } else if byte == b'"' {
             string = true;
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
             line_comment = true;
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "rescanning the second opening slash while in a line comment cannot change its newline boundary or comma visibility")]
             index += 1;
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
             block_comment = true;
@@ -860,6 +887,7 @@ fn separator_comma(gap: &str) -> Option<usize> {
         } else if byte == b',' {
             return Some(index);
         }
+        // #[gamma::skip(literal.int_decrement, stmt.delete_assign, tag = "timeout", reason = "Removing the scan increment or reducing it to zero leaves an ordinary byte at the same index forever.")]
         index += 1;
     }
     None
@@ -888,6 +916,52 @@ mod tests {
     use crate::{Catalog, CliMeta, HostSelector, RegionId, RegionSpec};
 
     const ENTRY: &str = r#""build\\Extensions\\Anvil","#;
+
+    #[test]
+    fn scaffold_preserves_exact_indentation_and_newline_boundaries() {
+        let path = vec!["entries".to_owned()];
+        for (source, expected) in [
+            ("{}", "{\n  \"entries\": []\n}"),
+            ("{  }", "{  \n  \"entries\": []\n}"),
+            ("{\n\t\"keep\": true,\n}", "{\n\t\"keep\": true,\n\t\"entries\": []\n}"),
+            ("{\r\"keep\": true\r}", "{\r\"keep\": true,\r  \"entries\": []\r}"),
+            ("{ \"keep\": true, }", "{ \"keep\": true, \n  \"entries\": []\n}"),
+            ("{\n  }", "{\n\n    \"entries\": []\n  }"),
+        ] {
+            assert_eq!(scaffold(source, &path).unwrap(), expected, "{source:?}");
+        }
+        assert_eq!(line_indent("  value", 2), "  ");
+        assert_eq!(closing_line_start("  }", 2), Some(0));
+        let refusal = scaffold("{broken", &path).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::HostAlreadyUnparsable);
+    }
+
+    /// Commas remain visible only outside strings and comments, with byte offsets
+    /// preserved across escapes. Overlapping `/*/`, `*/`, and stray `*` cases
+    /// distinguish entering a comment from actually terminating one.
+    #[test]
+    fn separator_scanner_reports_exact_offsets_across_lexical_transitions() {
+        for (gap, expected) in [
+            (",", Some(0)),
+            ("/* /,x *x, */ ,", Some(14)),
+            ("// ,\r,", Some(5)),
+            ("// ,\n,", Some(5)),
+            ("//\n,", Some(3)),
+            ("x/ ,", Some(3)),
+            ("x* ,", Some(3)),
+            ("/**/,", Some(4)),
+            ("/* */*,", Some(6)),
+            ("/*/,*/", None),
+            ("//,", None),
+            ("\"\",", Some(2)),
+            (r#""a\"b", "#, Some(6)),
+            (r#""\\", "#, Some(4)),
+            (r#""a","b", "#, Some(3)),
+            ("/*,*/\"x\",", Some(8)),
+        ] {
+            assert_eq!(separator_comma(gap), expected, "{gap:?}");
+        }
+    }
 
     fn spec() -> JsonArrayRegionSpec {
         JsonArrayRegionSpec {

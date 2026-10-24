@@ -211,7 +211,9 @@ impl WorkspaceSnapshot {
             path.as_str(),
             "Cargo.toml" | "Cargo.lock" | "rust-toolchain" | "rust-toolchain.toml"
         ) || path.starts_with(".cargo")
-            || roots.iter().any(|root| root.as_str().is_empty() || path.starts_with(root))
+            || roots.iter().any(|root|
+            // #[gamma::skip(logical.or_remove_left, reason = "Utf8Path::starts_with compares path-component prefixes. The empty path has no components and is a prefix of every path, including empty and absolute paths. Therefore root.is_empty() implies path.starts_with(root), making the removed left operand logically redundant for every Utf8Path input.", tag = "equivalent")]
+            root.as_str().is_empty() || path.starts_with(root))
     }
 
     fn source_generation_matches(snapshot: &str, normalized: &str, retained: Option<&str>) -> bool {
@@ -389,8 +391,39 @@ fn symlink_modified_at(path: &Utf8Path, query: impl FnOnce(&Utf8Path, bool) -> s
     modified(query(path, false))
 }
 
-fn native_timestamp(path: &Utf8Path, follow: bool) -> std::io::Result<std::time::SystemTime> {
-    let metadata = if follow { fs::metadata(path) } else { fs::symlink_metadata(path) }?;
+/// Preserves the caller's link-versus-target choice through the native timestamp boundary.
+pub(super) fn native_timestamp(path: &Utf8Path, follow: bool) -> std::io::Result<std::time::SystemTime> {
+    timestamp_query(path, follow)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TIMESTAMP_VALUES: std::cell::Cell<Option<(std::time::SystemTime, std::time::SystemTime)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Uses current-thread link/target values when supplied, otherwise querying native metadata.
+fn timestamp_query(path: &Utf8Path, follow: bool) -> std::io::Result<std::time::SystemTime> {
+    #[cfg(test)]
+    if let Some((link, target)) = TIMESTAMP_VALUES.get() {
+        return Ok(if follow { target } else { link });
+    }
+    timestamp_query_using(
+        path,
+        // #[gamma::skip(bool_expr.negate, reason = "This thin native metadata adapter selects follow versus symlink_metadata. Distinguishing its exact follow argument requires a real symlink/host metadata fixture; owned operation-selection policy is tested separately.", tag = "native-boundary")]
+        follow,
+        |path| fs::metadata(path),
+        |path| fs::symlink_metadata(path),
+    )
+}
+
+/// Separates metadata-operation selection from native queries and timestamp conversion.
+fn timestamp_query_using(
+    path: &Utf8Path,
+    follow: bool,
+    metadata: impl FnOnce(&Utf8Path) -> std::io::Result<fs::Metadata>,
+    symlink_metadata: impl FnOnce(&Utf8Path) -> std::io::Result<fs::Metadata>,
+) -> std::io::Result<std::time::SystemTime> {
+    let metadata = if follow { metadata(path) } else { symlink_metadata(path) }?;
     metadata.modified()
 }
 
@@ -430,7 +463,55 @@ mod tests {
 
     use camino::Utf8Path;
 
-    use super::{WorkspaceSnapshot, digest};
+    use super::{TIMESTAMP_VALUES, WorkspaceSnapshot, digest, native_timestamp, timestamp_query_using};
+
+    #[test]
+    fn oct25_timestamp_query_selects_the_actual_metadata_operation() {
+        let path = Utf8Path::new("synthetic-timestamp");
+        for follow in [false, true] {
+            let called = std::cell::Cell::new(None);
+            let failure = timestamp_query_using(
+                path,
+                follow,
+                |seen| {
+                    assert_eq!(seen, path);
+                    called.set(Some(true));
+                    Err(std::io::ErrorKind::PermissionDenied.into())
+                },
+                |seen| {
+                    assert_eq!(seen, path);
+                    called.set(Some(false));
+                    Err(std::io::ErrorKind::NotFound.into())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(called.get(), Some(follow));
+            assert_eq!(
+                failure.kind(),
+                if follow {
+                    std::io::ErrorKind::PermissionDenied
+                } else {
+                    std::io::ErrorKind::NotFound
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_native_timestamp_adapter_keeps_following_and_nonfollowing_queries_distinct() {
+        struct Reset(Option<(std::time::SystemTime, std::time::SystemTime)>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TIMESTAMP_VALUES.set(self.0);
+            }
+        }
+        let link = std::time::UNIX_EPOCH + core::time::Duration::from_nanos(101);
+        let target = std::time::UNIX_EPOCH + core::time::Duration::from_nanos(307);
+        let _reset = Reset(TIMESTAMP_VALUES.replace(Some((link, target))));
+        let path = Utf8Path::new("never-inspected-native-timestamp");
+        assert_eq!(native_timestamp(path, false).unwrap(), link);
+        assert_eq!(native_timestamp(path, true).unwrap(), target);
+    }
 
     #[test]
     fn survivor_snapshot_timestamp_queries_preserve_controlled_values_and_return_none_for_errors() {

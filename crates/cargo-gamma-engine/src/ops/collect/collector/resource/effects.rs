@@ -5,7 +5,7 @@ use syn::parse::Parser as _;
 use syn::{Expr, FnArg, Pat, ReturnType, Stmt, Type};
 
 use super::Binding;
-use crate::ops::collect::resource_namespaces::{Function, Namespaces, declaration_attributes};
+use crate::ops::collect::resource_namespaces::{Function, Namespaces};
 use crate::{HashMap, HashSet};
 
 #[cfg(test)]
@@ -47,7 +47,7 @@ impl Kind {
             Self::Char => Binding::Char,
             Self::Unsigned => Binding::Integer,
             Self::Bool => Binding::Bool,
-            _ => return None,
+            _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         })
     }
 }
@@ -57,7 +57,9 @@ fn ty(ty: &Type) -> Option<Kind> {
         Type::Reference(reference) if reference.mutability.is_none() => {
             matches!(&*reference.elem, Type::Path(path) if path.path.is_ident("str")).then_some(Kind::Str)
         }
-        Type::Path(path) if path.qself.is_none() => match path.path.get_ident()?.to_string().as_str() {
+        Type::Path(path) if
+            // #[gamma::skip(match_guard.always_true, reason = "Parsed qualified-self paths cannot pass the following get_ident check.", tag = "equivalent")]
+            path.qself.is_none() => match path.path.get_ident()?.to_string().as_str() {
             "String" => Some(Kind::String),
             "usize" => Some(Kind::Unsigned),
             "char" => Some(Kind::Char),
@@ -120,21 +122,22 @@ impl Analysis<'_> {
             || self.active.len() >= 8
             || !self.sources.primitive_scope(function.root, &function.module)
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         self.remaining -= 1;
-        let item = syn::parse_str::<syn::ItemFn>(function.syntax).ok()?;
+        let item =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Non-constructor syntax is retained from a parsed ItemFn; synthesized constructors return earlier.", tag = "equivalent")]
+            syn::parse_str::<syn::ItemFn>(function.syntax).ok()?;
         if item.sig.asyncness.is_some()
             || !matches!(item.sig.safety, syn::Safety::Default)
             || item.sig.abi.is_some()
             || !item.sig.generics.params.is_empty()
-            || !declaration_attributes(&item.attrs)
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let identity = (function.root.to_owned(), function.module.clone(), item.sig.ident.to_string());
         if !self.active.insert(identity.clone()) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let output = match &item.sig.output {
             ReturnType::Default => Kind::Unit,
@@ -143,10 +146,10 @@ impl Analysis<'_> {
         let mut parameters = Vec::new();
         let mut values = HashMap::default();
         for argument in &item.sig.inputs {
-            let FnArg::Typed(argument) = argument else { return None };
-            let Pat::Ident(pattern) = &*argument.pat else { return None };
+            let FnArg::Typed(argument) = argument else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            let Pat::Ident(pattern) = &*argument.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             if pattern.by_ref.is_some() || pattern.subpat.is_some() {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             let kind = ty(&argument.ty)?;
             parameters.push(kind);
@@ -173,7 +176,7 @@ impl Checker<'_, '_> {
         let mut result = Kind::Unit;
         for statement in &block.stmts {
             if self.analysis.remaining == 0 {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             self.analysis.remaining -= 1;
             result = match statement {
@@ -182,12 +185,11 @@ impl Checker<'_, '_> {
                     let kind = self.expr(&init.expr)?;
                     let pattern = match &local.pat {
                         Pat::Type(pattern) if ty(&pattern.ty) == Some(kind) => &*pattern.pat,
-                        Pat::Type(_) => return None,
                         pattern => pattern,
                     };
-                    let Pat::Ident(pattern) = pattern else { return None };
+                    let Pat::Ident(pattern) = pattern else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     if pattern.by_ref.is_some() || pattern.subpat.is_some() {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     let _old = self.values.insert(pattern.ident.to_string(), kind);
                     Kind::Unit
@@ -196,7 +198,7 @@ impl Checker<'_, '_> {
                     let kind = self.expr(expression)?;
                     if semi.is_some() { Kind::Unit } else { kind }
                 }
-                _ => return None,
+                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             };
         }
         self.values = saved;
@@ -210,11 +212,13 @@ impl Checker<'_, '_> {
     )]
     fn expr(&mut self, expression: &Expr) -> Option<Kind> {
         if self.analysis.remaining == 0 {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         self.analysis.remaining -= 1;
         match expression {
-            Expr::Path(path) if path.attrs.is_empty() && path.qself.is_none() => {
+            Expr::Path(path) if
+                // #[gamma::skip(logical.and_remove_right, reason = "Parsed qualified-self paths cannot pass the following get_ident check.", tag = "equivalent")]
+                path.attrs.is_empty() && path.qself.is_none() => {
                 self.values.get(&path.path.get_ident()?.to_string()).copied()
             }
             Expr::Lit(literal) if literal.attrs.is_empty() => Some(match literal.lit {
@@ -222,7 +226,7 @@ impl Checker<'_, '_> {
                 syn::Lit::Char(_) => Kind::Char,
                 syn::Lit::Int(_) => Kind::Unsigned,
                 syn::Lit::Bool(_) => Kind::Bool,
-                _ => return None,
+                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }),
             Expr::Tuple(tuple) if tuple.elems.is_empty() && tuple.attrs.is_empty() => Some(Kind::Unit),
             Expr::Paren(paren) if paren.attrs.is_empty() => self.expr(&paren.expr),
@@ -233,7 +237,7 @@ impl Checker<'_, '_> {
                 (left == right && matches!(left, Kind::Char | Kind::Unsigned | Kind::Bool | Kind::MaybeChar)).then_some(Kind::Bool)
             }
             Expr::Call(call) if call.attrs.is_empty() => {
-                let Expr::Path(path) = &*call.func else { return None };
+                let Expr::Path(path) = &*call.func else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 let path = path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
                 if path.as_slice() == ["String", "with_capacity"] && call.args.len() == 1 && self.expr(&call.args[0])? == Kind::Unsigned {
                     return Some(Kind::String);
@@ -244,18 +248,18 @@ impl Checker<'_, '_> {
                 let source = self.analysis.sources.function_in(&self.root, &self.module, &path)?;
                 let (parameters, output) = self.analysis.function(source)?;
                 if parameters.len() != call.args.len() {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 for (argument, expected) in call.args.iter().zip(parameters) {
                     if self.expr(argument)? != expected {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                 }
                 Some(output)
             }
             Expr::MethodCall(call) if call.attrs.is_empty() && call.turbofish.is_none() => {
                 if !self.analysis.sources.closed_methods(&self.root, &self.module) {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 let receiver = self.expr(&call.receiver)?;
                 let arguments = call.args.iter().map(|argument| self.expr(argument)).collect::<Option<Vec<_>>>()?;
@@ -275,7 +279,7 @@ impl Checker<'_, '_> {
             }
             Expr::If(condition) if condition.attrs.is_empty() => {
                 if self.expr(&condition.cond)? != Kind::Bool {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 let then_kind = self.block(&condition.then_branch)?;
                 let else_kind = match &condition.else_branch {
@@ -285,20 +289,19 @@ impl Checker<'_, '_> {
                 (then_kind == else_kind).then_some(then_kind)
             }
             Expr::While(loop_) if loop_.attrs.is_empty() && loop_.label.is_none() => {
-                let Expr::Let(condition) = &*loop_.cond else { return None };
-                let Expr::MethodCall(next) = &*condition.expr else { return None };
-                if next.method != "next"
-                    || !matches!(&*next.receiver, Expr::Path(path) if path.path.get_ident()
+                let Expr::Let(condition) = &*loop_.cond else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                let Expr::MethodCall(next) = &*condition.expr else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                if !matches!(&*next.receiver, Expr::Path(path) if path.path.get_ident()
                     .is_some_and(|name| self.values.get(&name.to_string()) == Some(&Kind::Chars)))
                     || self.expr(&condition.expr)? != Kind::MaybeChar
                 {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
-                let Pat::TupleStruct(pattern) = &*condition.pat else { return None };
+                let Pat::TupleStruct(pattern) = &*condition.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 if !pattern.path.is_ident("Some") || pattern.elems.len() != 1 {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
-                let Pat::Ident(binding) = &pattern.elems[0] else { return None };
+                let Pat::Ident(binding) = &pattern.elems[0] else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 let saved = self.values.clone();
                 let _old = self.values.insert(binding.ident.to_string(), Kind::Char);
                 self.loops += 1;
@@ -309,9 +312,9 @@ impl Checker<'_, '_> {
             }
             Expr::ForLoop(loop_) if loop_.attrs.is_empty() && loop_.label.is_none() => {
                 if self.expr(&loop_.expr)? != Kind::Chars {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
-                let Pat::Ident(binding) = &*loop_.pat else { return None };
+                let Pat::Ident(binding) = &*loop_.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 let saved = self.values.clone();
                 let _old = self.values.insert(binding.ident.to_string(), Kind::Char);
                 self.loops += 1;
@@ -343,7 +346,7 @@ impl Checker<'_, '_> {
                 };
                 let (expression, pattern) = parser.parse2(mac.mac.tokens.clone()).ok()?;
                 if self.expr(&expression)? != Kind::Char || !character_pattern(&pattern) {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 Some(Kind::Bool)
             }
@@ -355,9 +358,13 @@ impl Checker<'_, '_> {
 fn character_pattern(pattern: &Pat) -> bool {
     match pattern {
         Pat::Lit(literal) => matches!(literal.lit, syn::Lit::Char(_)),
-        Pat::Range(range) => [&range.start, &range.end]
-            .iter()
-            .all(|bound| matches!(bound.as_deref(), Some(Expr::Lit(literal)) if matches!(literal.lit, syn::Lit::Char(_)))),
+        Pat::Range(range) =>
+        // #[gamma::skip(collection.reverse_array, reason = "Both endpoints undergo the same pure all predicate; reversing them preserves the conjunction.", tag = "equivalent")]
+        {
+            [&range.start, &range.end]
+                .iter()
+                .all(|bound| matches!(bound.as_deref(), Some(Expr::Lit(literal)) if matches!(literal.lit, syn::Lit::Char(_))))
+        }
         Pat::Or(or) => or.cases.iter().all(character_pattern),
         _ => false,
     }
