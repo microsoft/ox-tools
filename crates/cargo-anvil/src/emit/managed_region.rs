@@ -26,8 +26,8 @@ use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
     CommentSyntax, HostScanner, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, legacy_lint_region_id, lint_region_placement,
-    mask_retiring_toml_regions as mask_retiring_managed_regions, start_region_offset, text_newline, toml_region_ids as managed_region_ids,
-    upsert_located_region_with_newline,
+    mask_retiring_toml_regions as mask_retiring_managed_regions, render_body_with_newline, start_region_offset, text_newline,
+    toml_region_ids as managed_region_ids, upsert_located_region_with_newline,
 };
 
 /// What the reader should do about a refused region.
@@ -52,6 +52,9 @@ pub enum RefusalRemedy {
     /// The catalog rendered TOML that does not parse even without any host
     /// content. Repository edits cannot repair the generated body.
     InvalidGeneratedToml,
+    /// The catalog rendered JSON that does not parse even without any host
+    /// content. Repository edits cannot repair the generated body.
+    InvalidGeneratedJson,
     /// The region is live, but its body on disk matches neither the body anvil
     /// last generated nor the current template. Nothing was parsed and no
     /// table collided; the host's format is irrelevant.
@@ -59,6 +62,9 @@ pub enum RefusalRemedy {
     /// The region's marker lines do not form a usable pair, so no boundary can
     /// be proven for whatever sits between them.
     MalformedMarkers,
+    /// JSON-aware marker scanning cannot finish because repository text has an
+    /// unterminated string or block comment.
+    IncompleteJsonScan,
     /// Retirement cannot uniquely identify which marker syntax owns the
     /// recorded body, or malformed XML prevents proving marker absence.
     RetirementInference,
@@ -154,14 +160,22 @@ impl ManagedRegionRequest<'_> {
 ///
 /// Returns the fault that stopped the region being planned, classified so the
 /// caller can offer the remedy that actually applies.
-pub fn plan_managed_region(
+#[cfg(test)]
+pub(crate) fn plan_managed_region(
     manifest: &Manifest,
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
 ) -> Result<PlanItem, ManagedRegionRefusal> {
-    plan_region_with_splice(manifest, host_text, request, HostScanner::for_path(request.host_relpath), || {
-        splice(HostScanner::for_path(request.host_relpath), host_text, request)
-    })
+    plan_managed_region_with_scanner(manifest, host_text, request, HostScanner::for_path(request.host_relpath))
+}
+
+pub(crate) fn plan_managed_region_with_scanner(
+    manifest: &Manifest,
+    host_text: Option<&str>,
+    request: ManagedRegionRequest<'_>,
+    scanner: HostScanner,
+) -> Result<PlanItem, ManagedRegionRefusal> {
+    plan_region_with_splice(manifest, host_text, request, scanner, || splice(scanner, host_text, request))
 }
 
 pub(crate) fn plan_region_with_splice(
@@ -177,9 +191,11 @@ pub(crate) fn plan_region_with_splice(
         rendered_body,
         syntax,
         placement,
-        ..
+        newline,
     } = request;
-    let template_checksum = checksum_str(rendered_body);
+    let newline = newline.unwrap_or_else(|| text_newline(host_text.unwrap_or("")));
+    let rendered_body = render_body_with_newline(rendered_body, newline);
+    let template_checksum = checksum_str(&rendered_body);
     // Case-insensitively, as the retirement path does. `push_region_at`
     // resolves the host to its on-disk spelling, so after a rename such as
     // `Deny.toml` to `deny.toml` an exact lookup misses the lock entry, and a
@@ -247,10 +263,30 @@ pub(crate) fn plan_region_with_splice(
         }
     }
     let spliced = splice()?;
+    scanner
+        .validate_marker_scan(&spliced)
+        .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::InvalidGeneratedJson))?;
+    if scanner == HostScanner::Json {
+        let region = scanner
+            .find(&spliced, region_id, syntax)
+            .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::InvalidGeneratedJson))?
+            .ok_or_else(|| {
+                ManagedRegionRefusal::new(
+                    app_err!("the generated region's sentinels are not visible after writing the host"),
+                    RefusalRemedy::InvalidGeneratedJson,
+                )
+            })?;
+        if checksum_str(region.body_str()) != template_checksum {
+            return Err(ManagedRegionRefusal::new(
+                app_err!("the generated region body is not preserved between its sentinels after writing the host"),
+                RefusalRemedy::InvalidGeneratedJson,
+            ));
+        }
+    }
     Ok(PlanItem::write_region(
         host_relpath,
         region_id,
-        rendered_body.to_owned(),
+        rendered_body,
         spliced,
         template_checksum,
     ))
@@ -464,6 +500,24 @@ mod tests {
 
     fn request<'a>(host_relpath: &'a str, region_id: &'a str, rendered_body: &'a str) -> ManagedRegionRequest<'a> {
         ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)
+    }
+
+    #[test]
+    fn json_splice_requires_visible_matching_generated_region() {
+        let request = ManagedRegionRequest::at_end("config.json", "r", "body\n", CommentSyntax::SlashSlash);
+        let missing = plan_region_with_splice(&Manifest::default(), None, request, HostScanner::Json, || {
+            Ok("{\"value\":true}\n".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(missing.remedy, RefusalRemedy::InvalidGeneratedJson);
+        assert!(missing.reason.to_string().contains("sentinels are not visible"));
+
+        let mismatch = plan_region_with_splice(&Manifest::default(), None, request, HostScanner::Json, || {
+            Ok(concat!("{\n", "// >>> anvil-managed: r\n", "other\n", "// <<< anvil-managed: r\n", "}\n",).to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(mismatch.remedy, RefusalRemedy::InvalidGeneratedJson);
+        assert!(mismatch.reason.to_string().contains("body is not preserved"));
     }
 
     #[test]

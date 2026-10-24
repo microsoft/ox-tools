@@ -11,9 +11,10 @@
 //! catalog supplies. The anvil base catalog's templates live in
 //! [`crate::anvil`].
 
+pub(crate) mod json_array_region;
 pub mod managed_region;
 pub mod owned_file;
 pub(crate) mod toml_array_region;
 
-pub use managed_region::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, toml_introduction_refusal};
+pub use managed_region::{ManagedRegionRequest, RefusalRemedy, toml_introduction_refusal};
 pub use owned_file::plan_owned_file;

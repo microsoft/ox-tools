@@ -450,6 +450,7 @@ pub(crate) mod workspace;
 /// must not depend on it — use the crate-root surface (`Catalog`, `Artifact`,
 /// `artifacts`, `run_app`, …) instead.
 #[doc(hidden)]
+#[cfg(any(test, feature = "internals"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     pub use crate::checksum::checksum_str;
@@ -482,7 +483,9 @@ use std::process::ExitCode;
 // is deliberately not surfaced at the crate root.
 pub use anvil::artifacts;
 pub use backend::Backend;
-pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec, TomlArrayRegionSpec};
+pub use catalog::{
+    Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, JsonArrayRegionSpec, OwnedFileSpec, RegionId, RegionSpec, TomlArrayRegionSpec,
+};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

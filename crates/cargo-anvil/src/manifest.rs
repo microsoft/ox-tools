@@ -10,21 +10,20 @@
 //! template content.
 //!
 //! Schema is documented in [`updates.md §1`](../../docs/design/updates.md).
-//! The schema version is `1`. Newer schemas cause the tool to refuse
-//! running; older schemas are migrated automatically (no older schemas
-//! exist today).
+//! The schema version is `2`. Newer schemas cause the tool to refuse
+//! running; schema 1 is read without JSON scanner or selector provenance.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err, bail};
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// File name of the manifest at the repo root.
 pub const MANIFEST_FILE_NAME: &str = ".anvil.lock";
 
 /// Current schema version we read/write.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The full parsed manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -50,6 +49,14 @@ pub struct Manifest {
     /// Last-rendered checksum per managed region, keyed by `(host_path,
     /// region_id)`.
     pub regions: BTreeMap<RegionKey, String>,
+
+    /// JSON array selector recorded for regions created through the structural
+    /// JSON array API. Ordinary slash-comment regions have no entry here.
+    pub json_array_paths: BTreeMap<RegionKey, Vec<String>>,
+
+    /// Hosts that must retain JSONC-aware marker scanning because they contain
+    /// or previously contained structural JSON array ownership.
+    pub json_scanner_hosts: BTreeSet<String>,
 }
 
 /// Composite key identifying one managed region.
@@ -158,6 +165,7 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error on malformed TOML or unsupported schema version.
+    #[expect(clippy::too_many_lines, reason = "parses one compact versioned lock schema in declaration order")]
     pub fn parse(text: &str) -> Result<Self, AppError> {
         let doc: DocumentMut = text.parse::<DocumentMut>().into_app_err("manifest is not valid TOML")?;
 
@@ -181,6 +189,22 @@ impl Manifest {
                 .map(str::to_owned)
         });
         let catalog_checksum = doc.get("catalog_checksum").and_then(Item::as_str).map(str::to_owned);
+        let mut json_scanner_hosts = BTreeSet::new();
+        if version >= 2
+            && let Some(hosts) = doc.get("json_scanner_hosts")
+        {
+            let hosts = hosts
+                .as_array()
+                .ok_or_else(|| app_err!("top-level `json_scanner_hosts` must be an array"))?;
+            for host in hosts {
+                let host = host
+                    .as_str()
+                    .ok_or_else(|| app_err!("top-level `json_scanner_hosts` has a non-string component"))?
+                    .to_owned();
+                ensure_contained(&host, "`json_scanner_hosts` entry")?;
+                json_scanner_hosts.insert(host);
+            }
+        }
 
         let mut files = BTreeMap::new();
         if let Some(arr) = doc.get("file").and_then(Item::as_array_of_tables) {
@@ -203,6 +227,7 @@ impl Manifest {
         }
 
         let mut regions = BTreeMap::new();
+        let mut json_array_paths = BTreeMap::new();
         if let Some(arr) = doc.get("region").and_then(Item::as_array_of_tables) {
             for table in arr {
                 let host = table
@@ -224,6 +249,36 @@ impl Manifest {
                 if regions.insert(key.clone(), checksum).is_some() {
                     bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
+                if version >= 2
+                    && let Some(path) = table.get("json_array_path")
+                {
+                    if !crate::emit::json_array_region::is_json_host(&key.host) {
+                        bail!(
+                            "[[region]] entry '{}'/'{}' has `json_array_path` but its host does not have a .json suffix",
+                            key.host,
+                            key.id
+                        );
+                    }
+                    let path = path
+                        .as_array()
+                        .ok_or_else(|| app_err!("[[region]] entry '{}'/'{}' has a non-array `json_array_path`", key.host, key.id))?;
+                    let path = path
+                        .iter()
+                        .map(|component| {
+                            component.as_str().map(str::to_owned).ok_or_else(|| {
+                                app_err!(
+                                    "[[region]] entry '{}'/'{}' has a non-string `json_array_path` component",
+                                    key.host,
+                                    key.id
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if path.is_empty() {
+                        bail!("[[region]] entry '{}'/'{}' has an empty `json_array_path`", key.host, key.id);
+                    }
+                    json_array_paths.insert(key.clone(), path);
+                }
                 ensure_contained(&key.host, "[[region]] host")?;
             }
         }
@@ -234,6 +289,8 @@ impl Manifest {
             catalog_checksum,
             files,
             regions,
+            json_array_paths,
+            json_scanner_hosts,
         })
     }
 
@@ -255,6 +312,13 @@ impl Manifest {
         if let Some(catalog_checksum) = &self.catalog_checksum {
             doc.insert("catalog_checksum", value(catalog_checksum.as_str()));
         }
+        if !self.json_scanner_hosts.is_empty() {
+            let mut hosts = Array::new();
+            for host in &self.json_scanner_hosts {
+                hosts.push(host.as_str());
+            }
+            doc.insert("json_scanner_hosts", Item::Value(hosts.into()));
+        }
 
         let mut file_tables = ArrayOfTables::new();
         for (path, checksum) in &self.files {
@@ -271,6 +335,13 @@ impl Manifest {
             table.insert("host", value(key.host.as_str()));
             table.insert("id", value(key.id.as_str()));
             table.insert("checksum", value(checksum.as_str()));
+            if let Some(path) = self.json_array_paths.get(key) {
+                let mut array = Array::new();
+                for component in path {
+                    array.push(component.as_str());
+                }
+                table.insert("json_array_path", Item::Value(array.into()));
+            }
             region_tables.push(table);
         }
         doc.insert("region", Item::ArrayOfTables(region_tables));
@@ -424,6 +495,15 @@ mod tests {
         m.set_file("justfiles/anvil/checks/fmt.just", "sha256:bbbb");
         m.set_region("Cargo.toml", "anvil-workspace-lints", "sha256:cccc");
         m.set_region("Justfile", "anvil-imports", "sha256:dddd");
+        m.json_array_paths.insert(
+            RegionKey {
+                host: "CloudBuild.json".to_owned(),
+                id: "anvil-source-root".to_owned(),
+            },
+            vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+        );
+        m.json_scanner_hosts.insert("CloudBuild.json".to_owned());
+        m.set_region("CloudBuild.json", "anvil-source-root", "sha256:eeee");
         m
     }
 
@@ -439,7 +519,7 @@ mod tests {
     fn empty_manifest_round_trip() {
         let m1 = Manifest::default();
         let text = m1.to_toml();
-        assert_eq!(text, "version = 1\n");
+        assert_eq!(text, "version = 2\n");
         let m2 = Manifest::parse(&text).unwrap();
         assert_eq!(m1, m2);
     }
@@ -564,9 +644,81 @@ mod tests {
                 "version = 1\n[[region]]\nhost = \"Cargo.toml\"\nid = \"anvil-x\"\n",
                 "[[region]] entry 'Cargo.toml'/'anvil-x' is missing `checksum`",
             ),
+            (
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = \"entries\"\n",
+                "[[region]] entry 'config.json'/'entries' has a non-array `json_array_path`",
+            ),
+            (
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = []\n",
+                "[[region]] entry 'config.json'/'entries' has an empty `json_array_path`",
+            ),
+            (
+                "version = 2\n[[region]]\nhost = \"config.json\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"root\", 1]\n",
+                "[[region]] entry 'config.json'/'entries' has a non-string `json_array_path` component",
+            ),
+            (
+                "version = 2\n[[region]]\nhost = \"config.toml\"\nid = \"entries\"\nchecksum = \"sha256:x\"\njson_array_path = [\"entries\"]\n",
+                "[[region]] entry 'config.toml'/'entries' has `json_array_path` but its host does not have a .json suffix",
+            ),
         ] {
             let err = Manifest::parse(text).unwrap_err();
             assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn schema_one_ignores_json_provenance_fields() {
+        let manifest = Manifest::parse(concat!(
+            "version = 1\n",
+            "json_scanner_hosts = [\"config.json\"]\n",
+            "[[region]]\n",
+            "host = \"config.json\"\n",
+            "id = \"entries\"\n",
+            "checksum = \"sha256:x\"\n",
+            "json_array_path = [\"entries\"]\n",
+        ))
+        .unwrap();
+
+        assert!(manifest.json_array_paths.is_empty());
+        assert!(manifest.json_scanner_hosts.is_empty());
+    }
+
+    #[test]
+    fn schema_one_rewrites_as_schema_two_without_losing_ownership() {
+        let manifest = Manifest::parse(concat!(
+            "version = 1\n",
+            "[[file]]\n",
+            "path = \"generated.txt\"\n",
+            "checksum = \"sha256:file\"\n",
+            "[[region]]\n",
+            "host = \"config.json\"\n",
+            "id = \"settings\"\n",
+            "checksum = \"sha256:region\"\n",
+        ))
+        .unwrap();
+
+        let rewritten = manifest.to_toml();
+        let reparsed = Manifest::parse(&rewritten).unwrap();
+
+        assert!(rewritten.starts_with("version = 2\n"));
+        assert_eq!(reparsed.file_checksum("generated.txt"), Some("sha256:file"));
+        assert_eq!(reparsed.region_checksum("config.json", "settings"), Some("sha256:region"));
+    }
+
+    #[test]
+    fn rejects_malformed_json_scanner_hosts() {
+        for (text, expected) in [
+            (
+                "version = 2\njson_scanner_hosts = \"config.json\"\n",
+                "top-level `json_scanner_hosts` must be an array",
+            ),
+            (
+                "version = 2\njson_scanner_hosts = [\"config.json\", 1]\n",
+                "top-level `json_scanner_hosts` has a non-string component",
+            ),
+        ] {
+            let error = Manifest::parse(text).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
         }
     }
 

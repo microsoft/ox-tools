@@ -627,7 +627,8 @@ mod tests {
     /// Attempts the cache lock once, without waiting.
     async fn try_lock_cache(root: &Path) -> Result<std::fs::File> {
         let lock = open_cache_lock(root).await?;
-        wait_for_cache_lock(&lock, Duration::ZERO, &tick::ClockControl::new().to_clock()).await?;
+        lock.try_lock()
+            .map_err(|error| ohno::app_err!("failed to try the advisory cache lock: {error}"))?;
         Ok(lock)
     }
 

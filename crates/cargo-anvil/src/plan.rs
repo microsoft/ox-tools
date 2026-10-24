@@ -17,6 +17,7 @@
 //! See [`updates.md §7`](../../docs/design/updates.md) for the proposed-file
 //! protocol.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,6 +78,11 @@ pub struct PlanItem {
     /// whenever it is present, so a decision that leaves it `None` leaves
     /// the previously recorded checksum untouched.
     pub rendered_checksum: Option<String>,
+    /// Structural JSON array selector whose provenance must be retained in
+    /// the manifest. `None` for every other plan item.
+    pub(crate) json_array_path: Option<Vec<String>>,
+    /// Whether this region must retain JSONC-aware marker scanning.
+    pub(crate) json_scanner: bool,
 }
 
 impl PlanItem {
@@ -92,6 +98,8 @@ impl PlanItem {
             rendered: None,
             spliced_host: Some(spliced_host),
             rendered_checksum: None,
+            json_array_path: None,
+            json_scanner: false,
         }
     }
     /// Construct a plan item for an in-sync, skipped, or leave-alone
@@ -105,6 +113,8 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -125,6 +135,8 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: Some(template_checksum),
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -137,6 +149,8 @@ impl PlanItem {
             rendered: Some(rendered),
             spliced_host: None,
             rendered_checksum: Some(checksum),
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -156,6 +170,8 @@ impl PlanItem {
             rendered: Some(rendered),
             spliced_host: None,
             rendered_checksum: Some(template_checksum),
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -171,6 +187,8 @@ impl PlanItem {
             rendered: Some(body),
             spliced_host: Some(spliced_host),
             rendered_checksum: Some(body_checksum),
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -185,6 +203,8 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -202,6 +222,8 @@ impl PlanItem {
             rendered: None,
             spliced_host: Some(spliced_host),
             rendered_checksum: None,
+            json_array_path: None,
+            json_scanner: false,
         }
     }
 
@@ -217,7 +239,22 @@ impl PlanItem {
             rendered: None,
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
+            json_scanner: false,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_json_array_path(mut self, path: Vec<String>) -> Self {
+        self.json_array_path = Some(path);
+        self.json_scanner = true;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_json_scanner(mut self) -> Self {
+        self.json_scanner = true;
+        self
     }
 }
 
@@ -225,6 +262,9 @@ impl PlanItem {
 #[derive(Debug, Default)]
 pub struct Plan {
     items: Vec<PlanItem>,
+    json_array_paths: BTreeMap<RegionKey, Vec<String>>,
+    json_scanner_hosts: BTreeSet<String>,
+    json_scanner_hosts_authoritative: bool,
     notes: Vec<String>,
     refusals: Vec<String>,
     manifest_update_required: bool,
@@ -265,6 +305,41 @@ impl Plan {
     #[must_use]
     pub fn items(&self) -> &[PlanItem] {
         &self.items
+    }
+
+    pub(crate) fn set_json_scanner_hosts(&mut self, hosts: BTreeSet<String>) {
+        self.json_scanner_hosts = hosts;
+        self.json_scanner_hosts_authoritative = true;
+    }
+
+    pub(crate) fn retain_json_array_path(&mut self, host: String, id: String, path: Vec<String>) {
+        self.json_array_paths.insert(RegionKey { host, id }, path);
+    }
+
+    pub(crate) fn region_has_checksum_update(&self, host: &str, id: &str) -> bool {
+        self.items.iter().any(|item| {
+            item.rendered_checksum.is_some()
+                && matches!(
+                    &item.target,
+                    Target::Region {
+                        host: item_host,
+                        id: item_id
+                    } if item_host == host && item_id == id
+                )
+        })
+    }
+
+    pub(crate) fn region_tracking_removed(&self, host: &str, id: &str) -> bool {
+        self.items.iter().any(|item| {
+            matches!(item.decision, Decision::Remove | Decision::OrphanedKept)
+                && matches!(
+                    &item.target,
+                    Target::Region {
+                        host: item_host,
+                        id: item_id
+                    } if item_host == host && item_id == id
+                )
+        })
     }
 
     /// Record whether applying this plan would change `.anvil.lock`.
@@ -465,9 +540,22 @@ impl Plan {
             catalog_checksum: previous_manifest.catalog_checksum.clone(),
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
+            json_array_paths: previous_manifest.json_array_paths.clone(),
+            json_scanner_hosts: if self.json_scanner_hosts_authoritative {
+                self.json_scanner_hosts.clone()
+            } else {
+                previous_manifest.json_scanner_hosts.clone()
+            },
         };
+        next.json_array_paths
+            .extend(self.json_array_paths.iter().map(|(key, path)| (key.clone(), path.clone())));
 
         for item in &self.items {
+            if item.json_scanner
+                && let Target::Region { host, .. } = &item.target
+            {
+                next.json_scanner_hosts.insert(host.clone());
+            }
             match item.decision {
                 Decision::Write | Decision::Propose | Decision::InSync => {
                     if let Some(checksum) = &item.rendered_checksum {
@@ -476,13 +564,14 @@ impl Plan {
                                 next.files.insert(path.clone(), checksum.clone());
                             }
                             Target::Region { host, id } => {
-                                next.regions.insert(
-                                    RegionKey {
-                                        host: host.clone(),
-                                        id: id.clone(),
-                                    },
-                                    checksum.clone(),
-                                );
+                                let key = RegionKey {
+                                    host: host.clone(),
+                                    id: id.clone(),
+                                };
+                                next.regions.insert(key.clone(), checksum.clone());
+                                if let Some(path) = &item.json_array_path {
+                                    next.json_array_paths.insert(key, path.clone());
+                                }
                             }
                         }
                     }
@@ -492,10 +581,12 @@ impl Plan {
                         next.files.remove(path);
                     }
                     Target::Region { host, id } => {
-                        next.regions.remove(&RegionKey {
+                        let key = RegionKey {
                             host: host.clone(),
                             id: id.clone(),
-                        });
+                        };
+                        next.regions.remove(&key);
+                        next.json_array_paths.remove(&key);
                     }
                 },
                 Decision::LeaveAlone => {}
@@ -619,6 +710,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn checksum_update_requires_a_matching_region_with_a_rendered_checksum() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::repair_region("config.json", "settings", "{}".to_owned()));
+        plan.push(PlanItem::insync(
+            Target::Region {
+                host: "config.json".to_owned(),
+                id: "other".to_owned(),
+            },
+            "checksum".to_owned(),
+        ));
+
+        assert!(!plan.region_has_checksum_update("config.json", "settings"));
+        assert!(plan.region_has_checksum_update("config.json", "other"));
+    }
+
     /// Only owned files propose: a managed region's proposal would be a sidecar
     /// nobody can apply, because moving it over the host would replace the
     /// repository's own content around the region as well. The arm that says so
@@ -639,6 +746,8 @@ mod tests {
             rendered: Some("[advisories]\n".to_owned()),
             spliced_host: None,
             rendered_checksum: None,
+            json_array_path: None,
+            json_scanner: false,
         });
 
         drop(plan.apply_files(tmp.path()));

@@ -11,6 +11,7 @@
 
 use ohno::{AppError, bail};
 
+use crate::JsonArrayRegionSpec;
 use crate::catalog::artifact::Artifact;
 use crate::catalog::meta::CliMeta;
 use crate::catalog::{HostSelector, RegionId, RegionSpec, TomlArrayRegionSpec};
@@ -25,6 +26,7 @@ const SEP: char = '\u{1f}';
 pub struct Catalog {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    json_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
     toml_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
 }
 
@@ -36,6 +38,7 @@ impl Catalog {
         Self {
             cli,
             artifacts,
+            json_array_paths: Vec::new(),
             toml_array_paths: Vec::new(),
         }
     }
@@ -46,6 +49,7 @@ impl Catalog {
         CatalogBuilder {
             cli,
             artifacts: Vec::new(),
+            json_array_paths: Vec::new(),
             toml_array_paths: Vec::new(),
             errors: Vec::new(),
         }
@@ -57,6 +61,7 @@ impl Catalog {
         CatalogBuilder {
             cli: self.cli,
             artifacts: self.artifacts,
+            json_array_paths: self.json_array_paths,
             toml_array_paths: self.toml_array_paths,
             errors: Vec::new(),
         }
@@ -72,6 +77,15 @@ impl Catalog {
     #[must_use]
     pub fn artifacts(&self) -> &[Artifact] {
         &self.artifacts
+    }
+
+    /// The JSON array property components for this region identity, if opted in.
+    #[must_use]
+    pub fn json_array_path(&self, region: &RegionSpec) -> Option<&[String]> {
+        self.json_array_paths
+            .iter()
+            .find(|(host, id, _)| host == &region.host && id == &region.id)
+            .map(|(_, _, path)| path.as_slice())
     }
 
     /// The TOML array key components for this region identity, if opted in.
@@ -95,6 +109,11 @@ impl Catalog {
     #[must_use]
     pub fn checksum(&self) -> String {
         let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
+        entries.extend(
+            self.json_array_paths
+                .iter()
+                .map(|(host, id, path)| format!("json-array-path{SEP}{}{SEP}{}{SEP}{path:?}", host_repr(host), id.as_str())),
+        );
         entries.extend(
             self.toml_array_paths
                 .iter()
@@ -156,6 +175,7 @@ fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
 pub struct CatalogBuilder {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    json_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
     toml_array_paths: Vec<(HostSelector, RegionId, Vec<String>)>,
     errors: Vec<String>,
 }
@@ -236,6 +256,33 @@ impl CatalogBuilder {
         self
     }
 
+    /// Append an ordinary region with opt-in JSON array placement.
+    ///
+    /// Duplicate host/id identities are rejected, including ordinary regions.
+    /// Replacement preserves the selector; removal removes it.
+    /// The path must contain at least one literal JSON object-property name.
+    /// The host must have a `.json` suffix (case insensitive).
+    /// The region must use slash-slash comments and contain at least one JSON
+    /// string entry, allowing JSONC comments, with a trailing comma after the
+    /// last entry. Invalid specifications are reported by [`Self::build`].
+    /// Ownership migrations and dependencies on other regions' object or array
+    /// delimiters refuse.
+    #[must_use]
+    pub fn with_json_array_region(mut self, spec: JsonArrayRegionSpec) -> Self {
+        let placement = (spec.region.host.clone(), spec.region.id, spec.path);
+        let artifact = Artifact::region(spec.region);
+        if self.position_of(&artifact).is_some() {
+            self.errors.push(format!(
+                "with_json_array_region: an artifact with identity {:?} already exists; use replace_artifact to override it",
+                artifact.key()
+            ));
+        } else {
+            self.json_array_paths.push(placement);
+            self.artifacts.push(artifact);
+        }
+        self
+    }
+
     /// Override an existing artifact in place (preserving its position).
     /// Records an error if no artifact with that identity exists.
     #[must_use]
@@ -261,6 +308,8 @@ impl CatalogBuilder {
         match self.position_of(&artifact) {
             Some(index) => {
                 if let Artifact::Region(region) = &artifact {
+                    self.json_array_paths
+                        .retain(|(host, id, _)| host != &region.host || id != &region.id);
                     self.toml_array_paths
                         .retain(|(host, id, _)| host != &region.host || id != &region.id);
                 }
@@ -278,15 +327,32 @@ impl CatalogBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if any `with_artifact` / `with_toml_array_region` / `replace_artifact` /
+    /// Returns an error if any `with_artifact` / `with_toml_array_region` /
+    /// `with_json_array_region` / `replace_artifact` /
     /// `without_artifact` call violated its add/override/remove invariant, or
     /// if an owned file under `justfiles/` is not a `.just` recipe. TOML array
-    /// regions also fail validation for an empty selector path, non-hash syntax,
-    /// empty or invalid TOML entry bodies, generated ownership sentinel comments,
-    /// or a missing final comma.
+    /// regions also fail validation for invalid selectors, syntax, generated
+    /// entry bodies, sentinel comments, or a missing final comma. JSON array
+    /// regions likewise fail validation for invalid selectors, generated entry
+    /// bodies, sentinel comments, missing final commas, or region syntax that
+    /// is incompatible with the JSON host.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let (_, _, path) = self
+                .json_array_paths
+                .iter()
+                .find(|(host, id, _)| host == &region.host && id == &region.id)?;
+            let spec = JsonArrayRegionSpec {
+                region: region.clone(),
+                path: path.clone(),
+            };
+            crate::emit::json_array_region::validate_spec(&spec)
+                .err()
+                .map(|refusal| format!("JSON array region '{}': {}", spec.region.id, refusal.reason))
+        }));
         errors.extend(self.artifacts.iter().filter_map(|artifact| {
             let region = artifact.region_spec()?;
             let (_, _, path) = self
@@ -300,6 +366,12 @@ impl CatalogBuilder {
             crate::emit::toml_array_region::validate_spec(&spec)
                 .err()
                 .map(|refusal| format!("TOML array region '{}': {}", spec.region.id, refusal.reason))
+        }));
+        errors.extend(self.artifacts.iter().filter_map(|artifact| {
+            let region = artifact.region_spec()?;
+            let json_host = self.json_array_paths.iter().any(|(host, _, _)| host == &region.host);
+            (json_host && region.syntax != crate::region::CommentSyntax::SlashSlash)
+                .then(|| format!("region '{}' has comment syntax incompatible with its JSON array host", region.id))
         }));
         errors.extend(self.artifacts.iter().filter_map(|artifact| {
             let region = artifact.region_spec()?;
@@ -330,6 +402,7 @@ impl CatalogBuilder {
         Ok(Catalog {
             cli: self.cli,
             artifacts: self.artifacts,
+            json_array_paths: self.json_array_paths,
             toml_array_paths: self.toml_array_paths,
         })
     }
@@ -388,6 +461,61 @@ mod tests {
             error.to_string(),
             "invalid catalog for 'anvil':\n  - region 'other' has comment syntax incompatible with its TOML array host"
         );
+    }
+
+    #[test]
+    fn rejects_conflicting_json_array_host_comment_syntax() {
+        let array = JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["plugins".to_owned()],
+        };
+        let error = Catalog::builder(CliMeta::new("anvil"))
+            .with_json_array_region(array)
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("other"),
+                body: "\"setting\": true\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid catalog for 'anvil':\n  - region 'other' has comment syntax incompatible with its JSON array host"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_json_array_region_identity() {
+        let array = JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["plugins".to_owned()],
+        };
+
+        let error = Catalog::builder(CliMeta::new("anvil"))
+            .with_json_array_region(array.clone())
+            .with_json_array_region(array)
+            .build()
+            .unwrap_err();
+
+        assert!(error.to_string().contains("with_json_array_region: an artifact with identity"));
+    }
+
+    #[test]
+    fn json_array_spec_remains_unwind_safe_for_downstream_catalogs() {
+        fn assert_traits<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+
+        assert_traits::<JsonArrayRegionSpec>();
     }
 
     #[test]
@@ -555,6 +683,62 @@ mod tests {
         assert_eq!(after.toml_array_path(&same_id.region), Some(same_id.path.as_slice()));
         assert_eq!(after.checksum(), expected.checksum());
         assert_ne!(after.checksum(), before.checksum());
+    }
+
+    #[test]
+    fn without_json_array_artifact_removes_its_selector_and_checksum_contribution() {
+        let array = JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let before = Catalog::builder(CliMeta::new("tool"))
+            .with_json_array_region(array.clone())
+            .build()
+            .unwrap();
+        let after = before
+            .clone()
+            .into_builder()
+            .without_artifact(Artifact::region(array.region.clone()))
+            .build()
+            .unwrap();
+
+        assert!(after.artifacts().is_empty());
+        assert_eq!(after.json_array_path(&array.region), None);
+        assert_ne!(after.checksum(), before.checksum());
+    }
+
+    #[test]
+    fn without_json_array_artifact_preserves_other_selector_identities() {
+        let array = |host: &str, id: &'static str| JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: "\"managed\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let removed = array("config.json", "entries");
+        let same_host = array("config.json", "other");
+        let same_id = array("other.json", "entries");
+        let catalog = Catalog::builder(CliMeta::new("tool"))
+            .with_json_array_region(removed.clone())
+            .with_json_array_region(same_host.clone())
+            .with_json_array_region(same_id.clone())
+            .build()
+            .unwrap()
+            .into_builder()
+            .without_artifact(Artifact::region(removed.region))
+            .build()
+            .unwrap();
+
+        assert_eq!(catalog.json_array_path(&same_host.region), Some(same_host.path.as_slice()));
+        assert_eq!(catalog.json_array_path(&same_id.region), Some(same_id.path.as_slice()));
     }
 
     #[test]
