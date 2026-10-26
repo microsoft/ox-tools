@@ -7,7 +7,9 @@
 //! library/binary surface or only to tests, examples, benches, and build
 //! scripts. Out-of-line modules are followed with Rust's module-resolution
 //! rules. Within released files, syntax ranges guarded exclusively by test
-//! configuration are removed from every line-bearing LCOV record.
+//! configuration are removed from every line-bearing LCOV record. Opaque
+//! production includes limit exclusions to file-local proofs, retaining
+//! counters whose indirect source contexts cannot be established.
 
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
@@ -26,7 +28,7 @@ use crate::error::{
     CoverageLineOutOfRangeError, InspectCoverageSourceError, InvalidModulePathAttributeError, InvalidTestAttributePathError,
     InvalidTestAttributesValueError, NormalizedSourceChecksumError, PackageScopedTestAttributesError, ParseCoverageSourceError,
     ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError,
-    UnsupportedSourceEditionError, UnsupportedSourceInclusionError,
+    UnsupportedSourceEditionError,
 };
 
 const LINE_RELEASED: u8 = 1;
@@ -157,6 +159,8 @@ impl IndexedSource {
 struct SourceIndex {
     workspace_root: PathBuf,
     files: BTreeMap<PathBuf, IndexedSource>,
+    member_dirs: MemberDirectories,
+    opaque_include_sources: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -285,15 +289,6 @@ impl SourceIndex {
             } else {
                 analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?
             };
-            if pending.role != SourceRole::IncludedSource {
-                reject_unsupported_released_includes(
-                    &pending.resolution_path,
-                    analysis.syntax(),
-                    pending.surface,
-                    &pending.guard,
-                    &test_attributes,
-                )?;
-            }
             let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &pending.guard, &test_attributes)?;
             let released_path = released_source_attributed_path(&member_dirs, &pending)?;
             let test_only_lines = if released_path.is_some() {
@@ -320,7 +315,23 @@ impl SourceIndex {
             )?;
         }
 
-        Ok(Self { workspace_root, files })
+        let opaque_include_sources = files
+            .iter()
+            .filter(|(_, indexed)| {
+                indexed.analysis.syntax.as_ref().is_some_and(|syntax| {
+                    indexed.visit_contexts.iter().any(|(surface, role, _, _, guard)| {
+                        *role != SourceRole::IncludedSource && source_has_released_include(syntax, *surface, guard, &test_attributes)
+                    })
+                })
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        Ok(Self {
+            workspace_root,
+            files,
+            member_dirs,
+            opaque_include_sources,
+        })
     }
 
     fn revisit_indexed_source(
@@ -349,15 +360,6 @@ impl SourceIndex {
             indexed.merge_released_test_only_lines(current);
         }
         indexed.add_visit(pending, released_path)?;
-        if pending.role != SourceRole::IncludedSource {
-            reject_unsupported_released_includes(
-                &pending.resolution_path,
-                indexed.analysis.syntax(),
-                pending.surface,
-                &pending.guard,
-                test_attributes,
-            )?;
-        }
         source_declarations(
             &pending.resolution_path,
             &indexed.analysis,
@@ -368,18 +370,63 @@ impl SourceIndex {
         .map(Some)
     }
 
-    fn source_for_lcov(&self, path: &Path) -> Result<&IndexedSource, CoverageGateError> {
+    fn source_for_lcov(&self, path: &Path) -> Result<(&Path, &IndexedSource), CoverageGateError> {
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.workspace_root.join(path)
         };
         let resolved = resolve_source_path(&candidate)?;
-        let source = self
+        let (canonical, source) = self
             .files
-            .get(&resolved)
+            .get_key_value(&resolved)
             .ok_or_else(|| UnownedCoverageSourceError::new(diagnostic_path(path)))?;
-        Ok(source)
+        Ok((canonical, source))
+    }
+
+    fn retained_source_path(&self, canonical: &Path, source: &IndexedSource) -> Result<PathBuf, CoverageGateError> {
+        if let Some(path) = &source.released_path {
+            return Ok(path.clone());
+        }
+        if let Some(path) = attributed_path(&self.member_dirs, canonical) {
+            return Ok(path);
+        }
+
+        let mut retained: Option<PathBuf> = None;
+        for (_, _, _, member, _) in &source.visit_contexts {
+            let reported = self
+                .member_dirs
+                .reported_by_canonical
+                .get(member)
+                .expect("every source visit originates from an indexed Cargo member");
+            let relative =
+                relative_path(member, canonical).ok_or_else(|| UnattributableReleasedSourceError::new(diagnostic_path(canonical)))?;
+            let candidate = reported.join(relative);
+            if let Some(first) = &retained
+                && first != &candidate
+            {
+                return Err(ConflictingReleasedSourceAttributionError::new(
+                    diagnostic_path(canonical),
+                    diagnostic_path(first),
+                    diagnostic_path(&candidate),
+                )
+                .into());
+            }
+            retained = Some(candidate);
+        }
+        retained.ok_or_else(|| UnownedCoverageSourceError::new(diagnostic_path(canonical)).into())
+    }
+
+    fn conservative_warning(&self) -> Option<String> {
+        self.opaque_include_sources.first().map(|path| {
+            format!(
+                "warning: coverage-gate: opaque production `include!` in `{}`; \
+                 excluding only file-local test-only ranges and retaining ambiguous source counters. \
+                 Filtered LCOV is conservative, not complete production-only classification; \
+                 use `#[cfg_attr(coverage_nightly, coverage(off))]` for exceptional code only when appropriate",
+                diagnostic_path(path)
+            )
+        })
     }
 }
 
@@ -650,7 +697,7 @@ fn analyze_source_text(
 }
 
 fn test_only_lines_for_guard(analysis: &SourceAnalysis, guard: &CfgFormula, test_attributes: &BTreeSet<String>) -> BTreeSet<u32> {
-    if *guard == CfgFormula::Value(true) {
+    if *guard == CfgFormula::Value(true) || analysis.syntax.is_none() {
         return analysis.test_only_lines.clone();
     }
     classify_test_only_lines(analysis.syntax().syntax(), &analysis.line_starts, test_attributes, guard)
@@ -1124,25 +1171,21 @@ fn approximate_cfg_possibilities_without_test(formula: &CfgFormula) -> CfgPossib
     }
 }
 
-fn reject_unsupported_released_includes(
-    path: &Path,
+fn source_has_released_include(
     source: &ast::SourceFile,
     surface: Surface,
     inherited_guard: &CfgFormula,
     test_attributes: &BTreeSet<String>,
-) -> Result<(), CoverageGateError> {
+) -> bool {
     if surface == Surface::NonReleased {
-        return Ok(());
+        return false;
     }
     let (source_guard, source_possibilities) = extend_cfg_guard(
         inherited_guard,
         cfg_formula_possibilities_without_test(inherited_guard),
         attributes_guard(ast::attrs_including_inner(source), test_attributes),
     );
-    if syntax_contains_released_include(source.syntax(), test_attributes, &source_guard, source_possibilities) {
-        return Err(UnsupportedSourceInclusionError::new(diagnostic_path(path)).into());
-    }
-    Ok(())
+    syntax_contains_released_include(source.syntax(), test_attributes, &source_guard, source_possibilities)
 }
 
 fn syntax_contains_released_include(
@@ -1400,7 +1443,14 @@ enum SourceDisposition<'a> {
 
 fn filter_report(report: lcov::Report, sources: &SourceIndex) -> Result<String, CoverageGateError> {
     filter_report_with(report, |path| {
-        let source = sources.source_for_lcov(path)?;
+        let (canonical, source) = sources.source_for_lcov(path)?;
+        if !sources.opaque_include_sources.is_empty() {
+            return Ok(SourceDisposition::Include {
+                source_file: sources.retained_source_path(canonical, source)?,
+                line_count: source.analysis.line_count,
+                test_only_lines: &source.analysis.test_only_lines,
+            });
+        }
         let Some(source_file) = &source.released_path else {
             return Ok(SourceDisposition::Exclude {
                 line_count: source.analysis.line_count,
@@ -1499,6 +1549,9 @@ pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata:
         return Ok(Vec::new());
     }
     let sources = SourceIndex::from_metadata(metadata)?;
+    if let Some(warning) = sources.conservative_warning() {
+        eprintln!("{warning}");
+    }
     reports.into_iter().map(|report| filter_report(report, &sources)).collect()
 }
 
@@ -2736,52 +2789,53 @@ mod tests {
         miri,
         ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
     )]
-    fn released_include_macros_fail_closed_even_when_tests_reach_the_file() {
+    fn released_includes_enable_conservative_filtering_even_when_tests_reach_the_file() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root.join("member/src/include-root.rs").to_string_lossy().into_owned().into();
 
-        let error = SourceIndex::from_metadata(&metadata).expect_err("released include macros must be rejected");
-        let inclusion = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-            .find_map(|source| source.downcast_ref::<UnsupportedSourceInclusionError>())
-            .expect("unsupported inclusion cause");
-        let declaring = resolve_module_resolution_path(&root.join("member/src/include-root.rs")).expect("include root resolution path");
-        assert_eq!(inclusion.declaring, diagnostic_path(&declaring));
+        let index = SourceIndex::from_metadata(&metadata).expect("released includes retain uncertain counters");
+        let declaring = fs::canonicalize(root.join("member/src/include-root.rs")).expect("canonical include root");
+        assert_eq!(index.opaque_include_sources, BTreeSet::from([declaring]));
+        let warning = index.conservative_warning().expect("conservative filtering must be visible");
+        assert!(warning.contains("retaining ambiguous source counters"));
+        assert!(warning.contains("not complete production-only classification"));
+        assert!(warning.contains("coverage(off)"));
 
         let test_only = analyze(
             Path::new("/workspace/lib.rs"),
             "#[cfg(test)] mod tests { include!(\"helper.rs\"); }\n",
         );
-        reject_unsupported_released_includes(
-            Path::new("/workspace/lib.rs"),
+        assert!(!source_has_released_include(
             test_only.syntax(),
             Surface::Released,
             &CfgFormula::Value(true),
             &BTreeSet::new(),
-        )
-        .expect("test-only include macro is outside the released surface");
+        ));
 
         for path in ["include", "::core::include", "std::prelude::v1::include"] {
             let analysis = analyze(Path::new("/workspace/lib.rs"), &format!("{path}!(\"helper.rs\");\n"));
-            reject_unsupported_released_includes(
-                Path::new("/workspace/lib.rs"),
+            assert!(source_has_released_include(
                 analysis.syntax(),
                 Surface::Released,
                 &CfgFormula::Value(true),
                 &BTreeSet::new(),
-            )
-            .expect_err("built-in include spelling must be rejected");
+            ));
+            assert!(!source_has_released_include(
+                analysis.syntax(),
+                Surface::NonReleased,
+                &CfgFormula::Value(true),
+                &BTreeSet::new(),
+            ));
         }
 
         let custom = analyze(Path::new("/workspace/lib.rs"), "company::include!(\"helper.rs\");\n");
-        reject_unsupported_released_includes(
-            Path::new("/workspace/lib.rs"),
+        assert!(!source_has_released_include(
             custom.syntax(),
             Surface::Released,
             &CfgFormula::Value(true),
             &BTreeSet::new(),
-        )
-        .expect("arbitrary qualified include macro is not the built-in");
+        ));
 
         let dynamic = analyze(
             Path::new("/workspace/lib.rs"),
@@ -2814,12 +2868,287 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn opaque_includes_exclude_local_test_ranges_but_preserve_shared_production_aliases() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/conservative-root.rs").to_string_lossy().into_owned().into();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 100}});
+        let root_lines = [
+            (6, 2),
+            (7, 2),
+            (8, 2),
+            (17, 1),
+            (18, 1),
+            (19, 1),
+            (22, 0),
+            (23, 0),
+            (24, 0),
+            (28, 0),
+            (29, 0),
+            (30, 0),
+            (33, 1),
+            (34, 1),
+            (35, 1),
+            (38, 2),
+            (39, 2),
+            (40, 2),
+            (43, 1),
+            (44, 1),
+            (45, 1),
+        ];
+        let shared_lines = [(4, 1), (5, 1), (6, 1), (8, 0), (9, 0), (10, 0), (15, 1), (16, 1), (17, 1)];
+        let raw = format!(
+            "{}{}{}",
+            lcov_section(&root.join("member/src/conservative-root.rs"), &root_lines),
+            lcov_section(&root.join("member/src/conservative-shared.rs"), &shared_lines),
+            lcov_section(
+                &root.join("member/src/../src/conservative-shared.rs"),
+                &[(4, 2), (5, 2), (6, 2), (9, 0)]
+            ),
+        );
+        let filtered = filter_reports_with_metadata(parse_reports(&[&raw]).expect("raw LCOV parses"), &metadata)
+            .expect("opaque production does not block authored test filtering");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.len(), 2);
+        for (key, section) in &report.sections {
+            let lines = section
+                .lines
+                .iter()
+                .map(|(line, value)| (line.line, value.count))
+                .collect::<BTreeMap<_, _>>();
+            if key.source_file == root.join("member/src/conservative-root.rs") {
+                assert_eq!(
+                    lines,
+                    BTreeMap::from([
+                        (6, 2),
+                        (7, 2),
+                        (8, 2),
+                        (33, 1),
+                        (34, 1),
+                        (35, 1),
+                        (38, 2),
+                        (39, 2),
+                        (40, 2),
+                        (43, 1),
+                        (44, 1),
+                        (45, 1),
+                    ])
+                );
+            } else {
+                assert_eq!(key.source_file, root.join("member/src/conservative-shared.rs"));
+                assert_eq!(lines, BTreeMap::from([(4, 3), (5, 3), (6, 3), (8, 0), (9, 0), (10, 0)]));
+            }
+            assert!(section.functions.is_empty());
+            assert!(section.branches.is_empty());
+        }
+        let repeated = filter_reports_with_metadata(parse_reports(&[&filtered[0]]).expect("filtered LCOV parses"), &metadata)
+            .expect("filtered output is stable");
+        assert_eq!(repeated, filtered);
+        let evaluated = crate::evaluate_reports_with_metadata(vec![report], &metadata, &[], None).expect("filtered reports evaluate");
+        assert_eq!(
+            evaluated.verdict(),
+            crate::Verdict::Fail,
+            "genuine shared production misses must fail the unchanged policy"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn opaque_includes_preserve_target_guard_ambiguity_and_validate_inputs() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root
+            .join("member/src/required-feature-root.rs")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        metadata.packages[0].targets[0].required_features = vec!["x".to_owned()];
+        let mut opaque_target = metadata.packages[0].targets[0].clone();
+        opaque_target.src_path = root.join("member/src/conservative-root.rs").to_string_lossy().into_owned().into();
+        metadata.packages[0].targets.push(opaque_target);
+        let index = SourceIndex::from_metadata(&metadata).expect("source index builds");
+        let (_, constrained) = index
+            .source_for_lcov(&root.join("member/src/required-feature-root.rs"))
+            .expect("constrained root is indexed");
+        assert!(constrained.test_only_lines.contains(&7));
+        assert!(!constrained.analysis.test_only_lines.contains(&7));
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:member/src/required-feature-root.rs\nDA:7,0\nend_of_record\n")],
+            &metadata,
+        )
+        .expect("target-context-only exclusion is conservatively retained");
+        let report = parse_lcov(&filtered[0]);
+        let section = report.sections.values().next().expect("retained source");
+        assert_eq!(section.lines.len(), 1);
+        assert_eq!(section.lines.values().next().expect("retained miss").count, 0);
+
+        for (source, line) in [
+            ("conservative-root.rs", 0),
+            ("conservative-root.rs", 46),
+            ("implementation/root.rs", 4),
+        ] {
+            let raw = format!("TN:\nSF:member/src/{source}\nDA:{line},1\nend_of_record\n");
+            let error =
+                filter_reports_with_metadata(vec![parse_lcov(&raw)], &metadata).expect_err("unrelated input failures remain explicit");
+            let causes = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source());
+            assert!(
+                if source == "implementation/root.rs" {
+                    causes
+                        .into_iter()
+                        .any(<dyn std::error::Error + 'static>::is::<UnownedCoverageSourceError>)
+                } else {
+                    causes
+                        .into_iter()
+                        .any(<dyn std::error::Error + 'static>::is::<CoverageLineOutOfRangeError>)
+                },
+                "{error}"
+            );
+        }
+        let conflicting = concat!(
+            "TN:\nSF:member/src/conservative-shared.rs\nDA:4,1,first\nend_of_record\n",
+            "TN:\nSF:member/src/../src/conservative-shared.rs\nDA:4,1,second\nend_of_record\n"
+        );
+        let error =
+            filter_reports_with_metadata(vec![parse_lcov(conflicting)], &metadata).expect_err("alias checksum conflicts still fail");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<NormalizedSourceChecksumError>)
+        );
+    }
+
+    #[test]
+    fn conservative_retention_preserves_external_attribution_errors() {
+        let member = PathBuf::from("/workspace/member");
+        let other = PathBuf::from("/workspace/other");
+        let path = PathBuf::from("/workspace/shared.rs");
+        let index = SourceIndex {
+            workspace_root: PathBuf::from("/workspace"),
+            files: BTreeMap::new(),
+            member_dirs: MemberDirectories {
+                reported_by_canonical: BTreeMap::from([(member.clone(), member.clone()), (other.clone(), other.clone())]),
+            },
+            opaque_include_sources: BTreeSet::new(),
+        };
+        assert!(index.conservative_warning().is_none());
+        let mut source = IndexedSource {
+            analysis: SourceAnalysis {
+                syntax: None,
+                line_count: 0,
+                line_starts: vec![0],
+                test_only_lines: BTreeSet::new(),
+            },
+            edition: Edition::Edition2024,
+            released_path: None,
+            test_only_lines: BTreeSet::new(),
+            visit_contexts: BTreeSet::new(),
+        };
+        let error = index
+            .retained_source_path(&path, &source)
+            .expect_err("a source without any visit has no package attribution");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<UnownedCoverageSourceError>)
+        );
+        let pending = PendingSource {
+            owning_member: MemberDirectory {
+                canonical: member.clone(),
+                reported: member.clone(),
+            },
+            ..pending_source(Surface::NonReleased, SourceRole::PathModule, &path, CfgFormula::Value(true))
+        };
+        source.add_visit(&pending, None).expect("first owner");
+        assert_eq!(
+            index.retained_source_path(&path, &source).expect("one owner"),
+            member.join("../shared.rs")
+        );
+        let pending = PendingSource {
+            owning_member: MemberDirectory {
+                canonical: other.clone(),
+                reported: other,
+            },
+            ..pending
+        };
+        source
+            .add_visit(&pending, None)
+            .expect("non-release visits may have distinct owners");
+        let error = index
+            .retained_source_path(&path, &source)
+            .expect_err("retention cannot invent one package namespace");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<ConflictingReleasedSourceAttributionError>)
+        );
+        assert_eq!(
+            index
+                .retained_source_path(&member.join("inside.rs"), &source)
+                .expect("canonical member ownership wins"),
+            member.join("inside.rs")
+        );
+        source.released_path = Some(PathBuf::from("known.rs"));
+        assert_eq!(
+            index.retained_source_path(&path, &source).expect("known released ownership"),
+            PathBuf::from("known.rs")
+        );
+        source.released_path = None;
+        let error = index
+            .retained_source_path(Path::new(r"D:\unrelated.rs"), &source)
+            .expect_err("cross-filesystem attribution remains unsupported");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<UnattributableReleasedSourceError>)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
+    fn guarded_production_include_fragments_are_retained_without_standalone_parsing() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root
+            .join("member/src/conservative-static-root.rs")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        let index = SourceIndex::from_metadata(&metadata).expect("guarded literal inclusion is conservatively indexed");
+        let (_, included) = index
+            .source_for_lcov(&root.join("member/src/included-expression.rs"))
+            .expect("included fragment");
+        assert!(included.analysis.syntax.is_none());
+        let filtered = filter_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:member/src/included-expression.rs\nDA:4,0\nend_of_record\n")],
+            &metadata,
+        )
+        .expect("production fragment counters are retained");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.len(), 1);
+        assert_eq!(
+            report
+                .sections
+                .values()
+                .next()
+                .expect("fragment")
+                .lines
+                .values()
+                .next()
+                .expect("miss")
+                .count,
+            0
+        );
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
     fn test_only_included_sources_are_indexed_without_parsing() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
         let index = SourceIndex::from_metadata(&metadata).expect("test-only include is indexed");
+        assert!(index.opaque_include_sources.is_empty());
+        assert!(index.conservative_warning().is_none());
         let included = fs::canonicalize(root.join("member/src/included-test.rs")).expect("canonical included test source");
         let indexed = index.files.get(&included).expect("included test source indexed");
         assert_eq!(indexed.released_path, None);
@@ -2889,7 +3218,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
-    fn promoted_included_source_rejects_released_include_macros() {
+    fn promoted_included_source_still_rejects_unresolvable_include_paths() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root
@@ -2898,10 +3227,10 @@ mod tests {
             .into_owned()
             .into();
 
-        let error = SourceIndex::from_metadata(&metadata).expect_err("released promotion must inspect include macros");
+        let error = SourceIndex::from_metadata(&metadata).expect_err("literal include sources must still resolve");
         assert!(
             std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                .any(<dyn std::error::Error + 'static>::is::<UnsupportedSourceInclusionError>)
+                .any(<dyn std::error::Error + 'static>::is::<ResolveCoverageSourceError>)
         );
     }
 

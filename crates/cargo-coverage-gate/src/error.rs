@@ -57,7 +57,6 @@ use serde_json::Value;
     AmbiguousModuleSourceError,
     InvalidModulePathAttributeError,
     ConditionalModulePathError,
-    UnsupportedSourceInclusionError,
     InvalidTestAttributesValueError,
     InvalidTestAttributePathError,
     PackageScopedTestAttributesError,
@@ -334,17 +333,6 @@ pub(crate) struct ConditionalModulePathError {
     pub declaring: String,
     pub module: String,
     pub attribute: String,
-}
-
-/// A released source uses `include!`, whose ownership and nested module
-/// resolution cannot be reconstructed from Cargo metadata.
-#[ohno::error]
-#[display(
-    "released Rust source `{declaring}` uses `include!`, which released-surface filtering cannot follow; \
-     replace it with a supported `mod` declaration, or use the explicit unfiltered library API"
-)]
-pub(crate) struct UnsupportedSourceInclusionError {
-    pub declaring: String,
 }
 
 /// `coverage-gate.test-attributes` was not an array of Rust attribute paths.

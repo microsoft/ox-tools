@@ -47,8 +47,10 @@ lower-coverage code.
    not carry platform-specific coverage scripts.
 7. **Released-surface measurement**: tests still execute and cover production
    code, but source that can only belong to test/example/bench/build-script
-   targets, plus item regions that provably require `cfg(test)`, never enters
-   the denominator or the LCOV report `run` publishes.
+   targets, plus item regions that provably require `cfg(test)`, is excluded.
+   Opaque production includes conservatively retain counters whose indirect
+   source contexts cannot be proven; ordinary authored test-only ranges are
+   still removed.
 8. **Open source**: ships from `github.com/microsoft/ox-tools` to crates.io.
 
 ## 3. Non-Goals
@@ -188,8 +190,10 @@ diagnostics, and creates no LCOV output.
 
 Released-surface discovery remains workspace-wide even with package selection:
 every workspace target graph is validated before reports are filtered. A source
-layout the filter cannot represent therefore fails explicitly even when its
-package is not selected for the verdict.
+layout the filter cannot represent still fails explicitly even when its package
+is not selected for the verdict, except for the conservative opaque-include
+handling described below. Package selection does not silently discard measured
+dependencies.
 
 ### 5.3 Policy metadata
 
@@ -579,9 +583,31 @@ the released Cargo surface:
   than hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
-released line surface as the gate. Function and branch records are omitted
-entirely because the proof is line-granular. A source/path/parse state the tool
-cannot classify safely is exit `2`, not a silent exclusion.
+line surface as the gate. A recognizable production `include!` can introduce
+another released context for a file otherwise reached only through a test module
+or non-release target. In that case the tool warns on stderr and uses file-local
+test-only proofs throughout the workspace: ordinary authored `#[cfg(test)]`
+blocks, locally provable `cfg(all(test, ...))` regions, and configured test
+attributes are still excluded. Whole-file/non-release-target exclusions and
+additional exclusions depending on inherited module or target guards are not
+assumed. Ambiguous hit and zero-hit counters remain measured under their existing
+source/package attribution, including all canonical aliases.
+
+This is an intentionally conservative line set, **not complete production-only
+classification**. No annotation is required on ordinary test modules.
+Exceptional helpers may use the existing Rust coverage opt-out:
+
+```rust,ignore
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn exceptional_helper() {}
+```
+
+This is user-controlled and should not hide ordinary production misses.
+Function and branch records are omitted entirely because the proof is
+line-granular. Unrelated source/path/parse failures remain exit `2`, not silent
+exclusions or blanket unfiltered success.
 
 Rust source CRLF line endings are normalized to LF before syntax parsing and
 line-offset mapping, so leading-comment attachment and test-only line
@@ -646,33 +672,37 @@ upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
 ### 6.2 File-to-package attribution
 
 Released-surface filtering requires every `SF:` path to be reachable from a
-Cargo target root through supported module declarations. A source reached only
-from a non-release target is removed. An unresolvable, unreadable, unparseable
+Cargo target root through supported module declarations or a statically located
+include leaf. A source reached only from a non-release target is removed when no
+opaque production inclusion makes that classification ambiguous. An
+unresolvable, unreadable, unparseable
 source, a source with no Cargo target owner, or a stale source reference is a
 configuration/operational error (exit `2`) rather than a counter the tool
 silently hides. Explicit `evaluate_unfiltered*` APIs bypass this filtering.
 
-The module graph does not infer ownership through `include!`, macro-generated
-module declarations, or build-script-generated source inclusion. If such a
-path appears in LCOV without a supported Cargo target or module edge, filtering
-fails with the offending source path rather than hiding its counters.
-Additionally, a statically recognizable non-test built-in `include!`
-encountered while walking a released source fails immediately: a separate
-test-target edge to the included file must not make released counters look
-test-only. A statically resolvable include reached only through a test-only or
-non-release context is indexed as non-release source so its attributed LCOV can
-be removed without becoming an unowned-source error; nested module discovery
-does not continue through the included file. Because `include!` contents may
-be context-dependent token fragments rather than standalone Rust files, these
-non-release leaves are read only for line validation. They are parsed as Rust
-only if an ordinary module or released edge also reaches the same file.
+The module graph does not evaluate `include!`, macro-generated module
+declarations, or build-script-generated source. A recognizable potentially
+released built-in `include!` enables the conservative retention above rather
+than aborting collection. In particular, a separate test-target edge must not
+erase the included file's production counters. Literal include paths are
+indexed as leaves without following nested modules; their counters are retained
+when released or ambiguous. Without opaque production inclusion, test-only
+include leaves retain their precise non-release exclusion.
+
+Included tokens may be context-dependent fragments rather than standalone Rust
+files. Leaves are therefore read only for line validation and acquire parsed
+file-local proofs only if an ordinary module edge also reaches the same file.
+An included source appearing in LCOV without any supported target/module or
+literal-include edge still fails with the offending path: no new generated-source
+ownership rule is inferred. The collector does not alter upstream export
+exclusions or add OUT_DIR counters absent from the original raw LCOV.
 
 Rust macro expansion is not available to the source walker. A module generated
 by `macro_rules!`, a procedural macro, or a renamed `include!` can therefore be
 classified as non-release when the same file is also reached through a
 supported non-release edge. Repositories using those shared generated-source
-patterns must use explicit `mod` declarations for released-surface filtering,
-or choose the unfiltered library API.
+patterns remain outside automatic expansion support. The conservative policy
+does not claim to discover arbitrary macro-generated source contexts.
 
 Canonical source identity is kept separate from Rust's module-resolution
 location. If a Cargo target or module source is reached through a file symlink,
