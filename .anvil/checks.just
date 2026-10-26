@@ -353,16 +353,15 @@ anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} ensure-no-default-features
 
-# Build affected examples, or run selected examples locally with bounded,
-# process-tree-aware cargo-each timeouts.
-[arg("run", long, value="true")]
+# Build and run affected examples with bounded, process-tree-aware cargo-each
+# timeouts. Explicit package/example selection overrides automatic exclusions.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("timeout", long, pattern='(?:[1-9][0-9]{0,2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)')]
-anvil-examples run="false" package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
+anvil-examples package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
     cargo each {{ if example == "" { if package == "" { anvil_affected_selection } else { "--package " + quote(package) } } else if package == "" { error("--example requires --package") } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if example == "" { "--examples" } else { "--example " + quote(example) } }} --all-features --locked
-    {{ if run == "true" { if example == "" { "" } else { "# " } } else { "# " } }}cargo each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --each-target example --target-filter {{ quote("not name-in-metadata:anvil.examples.no-run") }} --timeout {{ timeout }}s --keep-going -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{cargo-spec}' --example '{target}' --all-features --locked
-    {{ if run == "true" { if example == "" { "# " } else { "" } } else { "# " } }}cargo each --package {{ quote(package) }} --timeout {{ timeout }}s -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{spec}' --example {{ quote(example) }} --all-features --locked
+    {{ if example == "" { "" } else { "# " } }}cargo each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --each-target example --target-filter {{ quote("not name-in-metadata:anvil.examples.no-run") }} --timeout {{ timeout }}s --keep-going -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{cargo-spec}' --example '{target}' --all-features --locked
+    {{ if example == "" { "# " } else { "" } }}cargo each --package {{ quote(package) }} --timeout {{ timeout }}s -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{cargo-spec}' --example {{ quote(example) }} --all-features --locked
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 

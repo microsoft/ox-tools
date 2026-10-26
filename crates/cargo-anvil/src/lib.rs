@@ -482,8 +482,8 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{
-    Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, JsonArrayRegionSpec, OwnedFileSectionSpec, OwnedFileSpec, RegionId, RegionSpec,
-    TomlArrayRegionSpec,
+    Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, JsonArrayRegionSpec, OwnedFileSectionSpec, OwnedFileSpec, RegionId,
+    RegionSpec, TomlArrayRegionSpec,
 };
 pub use region::CommentSyntax;
 
