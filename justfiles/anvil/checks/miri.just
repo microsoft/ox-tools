@@ -91,6 +91,7 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
         exit 2
     }
 
+    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'
     $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }

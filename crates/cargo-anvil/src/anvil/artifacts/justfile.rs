@@ -402,6 +402,7 @@ mod tests {
         }
     }
 
+    // Protect ordinal member selection and source-qualified example execution.
     #[test]
     fn examples_select_and_run_members_by_exact_identity() {
         let examples = CHECK_FILES
@@ -425,18 +426,32 @@ mod tests {
         assert!(!examples.contains("'--manifest-path', $target"));
     }
 
+    // An explicitly selected opted-out package must skip before compilation;
+    // metadata discovery must not shadow the caller's package selector.
     #[test]
     fn miri_opt_out_reads_the_callers_package_selection() {
         let miri = CHECK_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
             .expect("miri.just is registered in CHECK_FILES");
-        // An explicitly selected opted-out package must skip before
-        // compilation, so the metadata loop must not shadow `$package`.
         assert!(!miri.contains("foreach ($package in"));
         assert!(miri.contains("} elseif ($excludedPackages.Contains(($package -split '@', 2)[0])) {"));
     }
 
+    // Package discovery must use the compiler validated for Miri, not the repository default.
+    #[test]
+    fn miri_selection_uses_the_validated_toolchain() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+        let (before_selection, _) = miri
+            .split_once("    $include = (& \"{{ just_executable() }}\" _anvil-impact-exclude affected)")
+            .expect("Miri resolves affected packages through workspace exclusions");
+        assert!(before_selection.contains("    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'"));
+    }
+
+    // A missing MSRV skips without discovery; otherwise discovery inherits the validated compiler.
     #[test]
     fn msrv_selection_uses_the_validated_toolchain_after_the_no_msrv_skip() {
         let msrv = CHECK_FILES
@@ -459,15 +474,25 @@ mod tests {
         assert!(!before_selection.contains("& cargo"));
     }
 
+    // Both probes must recognize `cargo install --list` entries from path and Git installs.
     #[test]
     fn tool_version_probe_accepts_source_installs() {
-        // `cargo install --list` prints `name vX.Y.Z (source):` for path and
-        // git installs; the probe must not treat those as missing.
         assert_eq!(
             TOOLS_JUST.matches(r"' v(\S+?)(?: \(.*\))?:$'").count(),
             2,
             "install and check probes must both accept source-qualified install lines"
         );
+    }
+
+    // Each resolver runs in its own PowerShell process and needs its own runtime checks.
+    #[test]
+    fn selection_resolvers_enable_strict_mode() {
+        for declaration in ["_anvil-impact-exclude tier:", "_anvil-workspace-exclude +specs:"] {
+            let (_, body) = IMPACT_JUST
+                .split_once(declaration)
+                .expect("both workspace selection resolvers are registered in impact.just");
+            assert!(body.starts_with("\n    Set-StrictMode -Version 3.0\n"), "{declaration}");
+        }
     }
 
     #[test]

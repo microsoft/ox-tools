@@ -751,6 +751,7 @@ _anvil-impact-include tier:
 # Resolve a tier's scope as workspace-exclude Cargo selection.
 [script("pwsh", "-NoProfile")]
 _anvil-impact-exclude tier:
+    Set-StrictMode -Version 3.0
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include '{{ tier }}')
     $impactExit = $LASTEXITCODE
@@ -767,6 +768,7 @@ _anvil-impact-exclude tier:
 # Convert workspace-member specs to workspace-exclude Cargo selection.
 [script("pwsh", "-NoProfile")]
 _anvil-workspace-exclude +specs:
+    Set-StrictMode -Version 3.0
     $ErrorActionPreference = 'Stop'
     $selected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($spec in -split '{{ specs }}') { [void]$selected.Add($spec) }
