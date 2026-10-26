@@ -307,8 +307,8 @@ pub use error::CoverageGateError;
 /// When a recognizable production `include!` makes indirect ownership
 /// uncertain, filtering warns on stderr, retains ambiguous source counters,
 /// and excludes only file-local test-only ranges. This conservative result
-/// is not complete production-only classification. Unowned sources and
-/// unrelated path, parse, checksum, and line-validation failures remain errors.
+/// is not complete production-only classification. Sources without a known owner
+/// and unrelated path, parse, checksum, and line-validation failures remain errors.
 /// Macro expansion and counters absent from the input are not inferred.
 ///
 /// This is a workspace operation, not a pure text transform. It runs
