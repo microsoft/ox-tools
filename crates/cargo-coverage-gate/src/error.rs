@@ -51,6 +51,7 @@ use serde_json::Value;
     ResolveCoverageSourceError,
     InspectCoverageSourceError,
     ReadCoverageSourceError,
+    CompilerSourceDiscoveryError,
     ParseCoverageSourceError,
     UnsupportedSourceEditionError,
     ConflictingSourceEditionError,
@@ -267,6 +268,15 @@ pub(crate) struct InspectCoverageSourceError {
 #[from(std::io::Error)]
 pub(crate) struct ReadCoverageSourceError {
     pub path: String,
+}
+
+/// The selected compiler could not establish its library-source location.
+#[ohno::error]
+#[display("could not verify compiler library sources using `{operation}`: {reason}")]
+#[from(std::io::Error, std::string::FromUtf8Error)]
+pub(crate) struct CompilerSourceDiscoveryError {
+    pub operation: String,
+    pub reason: String,
 }
 
 /// rust-analyzer's parser rejected a source file that contributed to the

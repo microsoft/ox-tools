@@ -725,10 +725,25 @@ One canonical released source cannot be attributed through different package
 path namespaces; that ambiguity fails explicitly. A source on a different
 filesystem root from its owning package also fails because no relative LCOV
 path can preserve both its real location and package ownership. Separately,
-upstream
-cargo-llvm-cov filename exclusions should keep dependency/sysroot sources out
-of the report; if one leaks through without a supported graph edge, the gate
-fails loudly with the offending path.
+upstream cargo-llvm-cov filename exclusions normally keep dependency and compiler
+sources out of the report. Compiler records can escape those filename regexes,
+for example when a custom compiler reports mixed path separators on Windows.
+The filter resolves the actual `SF:` path first and gives supported Cargo
+ownership precedence. For an otherwise unknown file outside workspace member
+directories, it queries the selected `RUSTC` (or `rustc` when unset) with
+`--print sysroot`, in the workspace working directory. It canonicalizes the
+existing `lib/rustlib/src/rust/library` directory beneath that reported sysroot.
+Only records canonically beneath this verified compiler-library tree are
+excluded. Separator, extended-prefix, and filesystem aliases therefore compare
+by source identity, not filename spelling or a broad `std` directory heuristic.
+
+This query is lazy and cached for the report batch. A missing optional compiler
+source tree proves nothing and leaves unknown records as errors. Failed
+compiler queries, invalid output, missing/unresolvable input files, and other
+unknown project/dependency paths still fail explicitly. A source explicitly
+owned by a Cargo target/module is never discarded merely because it also lies
+in the compiler tree. No exporter scope, toolchain selection, or user
+configuration is changed.
 
 ### 6.3 Aggregation
 

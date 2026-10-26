@@ -186,6 +186,15 @@ the workspace discovered from the invocation directory.
    missing from the input. Ordinary authored test modules require no annotations;
    exceptional helpers can use `#[cfg_attr(coverage_nightly, coverage(off))]`
    with the crate's usual coverage-attribute feature gate when appropriate.
+   Otherwise unknown external records are checked against compiler-source
+   provenance before being rejected: lazily query the selected `RUSTC` with
+   `--print sysroot` in the workspace directory, canonicalize its existing
+   `lib/rustlib/src/rust/library` root, and exclude only canonical descendants.
+   Cargo-owned sources and workspace member namespaces take precedence.
+   This handles mixed separators and aliases without a filename heuristic;
+   unknown dependencies, malformed queries, and missing files remain errors.
+   Discovery is shared across the report batch and adds no public API or
+   exporter behavior.
    Distinct `SF:` spellings that normalize to the same LCOV section key are
    merged line-by-line; conflicting checksums for the same normalized line are
    rejected instead of replacing one section's counters. Evaluation applies

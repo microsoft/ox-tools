@@ -43,6 +43,13 @@
 //! enable `#![cfg_attr(coverage_nightly, feature(coverage_attribute))]` in the
 //! containing crate. This does not expand macros, classify generated tests,
 //! or recover sources omitted from the input LCOV.
+//!
+//! Compiler-library records that escape upstream filename exclusions are
+//! removed only after canonical source paths establish that they are beneath
+//! the library-source tree reported by the selected `RUSTC --print sysroot`.
+//! Cargo-owned project sources take precedence, including explicit sources
+//! outside their package directory. Unknown project or dependency sources
+//! still fail; directory names alone never establish compiler ownership.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
@@ -311,6 +318,13 @@ pub use error::CoverageGateError;
 /// and unrelated path, parse, checksum, and line-validation failures remain errors.
 /// Macro expansion and counters absent from the input are not inferred.
 ///
+/// Otherwise unknown records outside workspace member directories are excluded
+/// only when their canonical paths are beneath the selected compiler's verified
+/// `lib/rustlib/src/rust/library` tree. Discovery honors `RUSTC` and the workspace
+/// working directory and is performed at most once per report batch, only when
+/// needed. Missing source files or failed compiler queries remain errors;
+/// an absent optional compiler source tree does not authorize any exclusion.
+///
 /// This is a workspace operation, not a pure text transform. It runs
 /// `cargo metadata --no-deps`, reads and parses reachable Rust sources, and
 /// resolves relative `SF:` paths against the Cargo workspace root. When
@@ -350,7 +364,8 @@ pub use error::CoverageGateError;
 /// Returns [`CoverageGateError`] when Cargo metadata cannot be loaded, the
 /// LCOV input is malformed, any source reachable from a Cargo target root
 /// cannot be resolved/read/parsed, target ownership cannot be determined, or
-/// LCOV line data does not match the current source tree.
+/// LCOV line data does not match the current source tree. Compiler-source
+/// discovery failures are also returned when provenance is needed.
 #[cfg_attr(coverage_nightly, coverage(off))]
 // This adapter only selects the real metadata loader; the injected implementation below is mutation-covered.
 #[mutants::skip]

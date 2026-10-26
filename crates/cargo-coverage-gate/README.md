@@ -52,6 +52,13 @@ annotations. Exceptional helpers can use the existing nightly
 enable `#![cfg_attr(coverage_nightly, feature(coverage_attribute))]` in the
 containing crate. This does not expand macros, classify generated tests,
 or recover sources omitted from the input LCOV.
+
+Compiler-library records that escape upstream filename exclusions are
+removed only after canonical source paths establish that they are beneath
+the library-source tree reported by the selected `RUSTC --print sysroot`.
+Cargo-owned project sources take precedence, including explicit sources
+outside their package directory. Unknown project or dependency sources
+still fail; directory names alone never establish compiler ownership.
 Numeric failures show exact covered/coverable counts and uncovered ranges;
 `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 and `NO DATA` explains that no records were attributed. Location lists are
@@ -281,7 +288,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb0NZWMlJYUEQbjSh4Vuu83Sgb5qseAGQTjdUbipaht67Xr55hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjJzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbGrk4sb8i25kbU6Fx-PRW9O0bb8fOZcMu7Tsbj9aOh3WkjlxhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjJzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/?search=EvaluatedReport::render_text

@@ -14,9 +14,11 @@
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::{env, fs};
 
 use cargo_metadata::{Edition as CargoEdition, Metadata, TargetKind};
 use ra_ap_syntax::ast::{self, HasAttrs, HasName, LiteralKind};
@@ -24,11 +26,11 @@ use ra_ap_syntax::{AstNode, AstToken, Edition, SourceFile, SyntaxKind, SyntaxNod
 
 use crate::CoverageGateError;
 use crate::error::{
-    AmbiguousModuleSourceError, ConditionalModulePathError, ConflictingReleasedSourceAttributionError, ConflictingSourceEditionError,
-    CoverageLineOutOfRangeError, InspectCoverageSourceError, InvalidModulePathAttributeError, InvalidTestAttributePathError,
-    InvalidTestAttributesValueError, NormalizedSourceChecksumError, PackageScopedTestAttributesError, ParseCoverageSourceError,
-    ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError, UnattributableReleasedSourceError, UnownedCoverageSourceError,
-    UnsupportedSourceEditionError,
+    AmbiguousModuleSourceError, CompilerSourceDiscoveryError, ConditionalModulePathError, ConflictingReleasedSourceAttributionError,
+    ConflictingSourceEditionError, CoverageLineOutOfRangeError, InspectCoverageSourceError, InvalidModulePathAttributeError,
+    InvalidTestAttributePathError, InvalidTestAttributesValueError, NormalizedSourceChecksumError, PackageScopedTestAttributesError,
+    ParseCoverageSourceError, ParseLcovError, ReadCoverageSourceError, ResolveCoverageSourceError, UnattributableReleasedSourceError,
+    UnownedCoverageSourceError, UnsupportedSourceEditionError,
 };
 
 const LINE_RELEASED: u8 = 1;
@@ -370,18 +372,15 @@ impl SourceIndex {
         .map(Some)
     }
 
-    fn source_for_lcov(&self, path: &Path) -> Result<(&Path, &IndexedSource), CoverageGateError> {
+    fn source_for_lcov(&self, path: &Path) -> Result<(PathBuf, Option<&IndexedSource>), CoverageGateError> {
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.workspace_root.join(path)
         };
         let resolved = resolve_source_path(&candidate)?;
-        let (canonical, source) = self
-            .files
-            .get_key_value(&resolved)
-            .ok_or_else(|| UnownedCoverageSourceError::new(diagnostic_path(path)))?;
-        Ok((canonical, source))
+        let source = self.files.get(&resolved);
+        Ok((resolved, source))
     }
 
     fn retained_source_path(&self, canonical: &Path, source: &IndexedSource) -> Result<PathBuf, CoverageGateError> {
@@ -1431,6 +1430,7 @@ fn meta_contains_path(meta: &ast::Meta) -> bool {
 }
 
 enum SourceDisposition<'a> {
+    CompilerLibrary,
     Exclude {
         line_count: usize,
     },
@@ -1441,12 +1441,22 @@ enum SourceDisposition<'a> {
     },
 }
 
-fn filter_report(report: lcov::Report, sources: &SourceIndex) -> Result<String, CoverageGateError> {
+fn filter_report(
+    report: lcov::Report,
+    sources: &SourceIndex,
+    is_compiler_source: &mut impl FnMut(&Path) -> Result<bool, CoverageGateError>,
+) -> Result<String, CoverageGateError> {
     filter_report_with(report, |path| {
         let (canonical, source) = sources.source_for_lcov(path)?;
+        let Some(source) = source else {
+            if attributed_path(&sources.member_dirs, &canonical).is_none() && is_compiler_source(&canonical)? {
+                return Ok(SourceDisposition::CompilerLibrary);
+            }
+            return Err(UnownedCoverageSourceError::new(diagnostic_path(path)).into());
+        };
         if !sources.opaque_include_sources.is_empty() {
             return Ok(SourceDisposition::Include {
-                source_file: sources.retained_source_path(canonical, source)?,
+                source_file: sources.retained_source_path(&canonical, source)?,
                 line_count: source.analysis.line_count,
                 test_only_lines: &source.analysis.test_only_lines,
             });
@@ -1471,6 +1481,7 @@ fn filter_report_with<'a>(
     let mut filtered = lcov::report::section::Sections::new();
     for (mut key, mut section) in report.sections {
         let (source_file, line_count, test_only) = match classify(&key.source_file)? {
+            SourceDisposition::CompilerLibrary => continue,
             SourceDisposition::Exclude { line_count } => {
                 validate_section_lines(&key.source_file, &section, line_count)?;
                 continue;
@@ -1544,6 +1555,16 @@ fn validate_line(path: &Path, line: u32, line_count: usize) -> Result<(), Covera
 }
 
 pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata: &Metadata) -> Result<Vec<String>, CoverageGateError> {
+    filter_reports_with_compiler_loader(reports, metadata, || {
+        discover_compiler_library(metadata.workspace_root.as_std_path())
+    })
+}
+
+fn filter_reports_with_compiler_loader(
+    reports: Vec<lcov::Report>,
+    metadata: &Metadata,
+    load_compiler_library: impl FnOnce() -> Result<Option<PathBuf>, CoverageGateError>,
+) -> Result<Vec<String>, CoverageGateError> {
     if reports.is_empty() {
         configured_test_attributes(metadata)?;
         return Ok(Vec::new());
@@ -1552,7 +1573,117 @@ pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata:
     if let Some(warning) = sources.conservative_warning() {
         eprintln!("{warning}");
     }
-    reports.into_iter().map(|report| filter_report(report, &sources)).collect()
+    let mut compiler_library: Option<Option<PathBuf>> = None;
+    let mut load_compiler_library = Some(load_compiler_library);
+    let mut is_compiler_source = |canonical: &Path| {
+        if compiler_library.is_none() {
+            let load = load_compiler_library
+                .take()
+                .expect("compiler library discovery is attempted only once per report batch");
+            compiler_library = Some(load()?);
+        }
+        Ok(compiler_library
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some_and(|root| canonical.starts_with(root)))
+    };
+    reports
+        .into_iter()
+        .map(|report| filter_report(report, &sources, &mut is_compiler_source))
+        .collect()
+}
+
+// Only the real process boundary is excluded; command construction and output
+// validation are exercised through the injected helpers below.
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[mutants::skip]
+fn discover_compiler_library(workspace_root: &Path) -> Result<Option<PathBuf>, CoverageGateError> {
+    compiler_library_with(
+        workspace_root,
+        |name| env::var_os(name),
+        |command| {
+            let operation = format!("{} --print sysroot", diagnostic_path(Path::new(command.get_program())));
+            let output = command.output().map_err(|error| {
+                CompilerSourceDiscoveryError::caused_by(operation.clone(), "compiler query could not be executed".to_owned(), error)
+            })?;
+            compiler_sysroot_output(
+                &operation,
+                output.status.success(),
+                &output.status.to_string(),
+                &output.stdout,
+                &output.stderr,
+            )
+        },
+        canonical_compiler_library,
+    )
+}
+
+fn compiler_library_with(
+    workspace_root: &Path,
+    var_os: impl FnOnce(&str) -> Option<OsString>,
+    read: impl FnOnce(&mut Command) -> Result<PathBuf, CoverageGateError>,
+    resolve: impl FnOnce(&Path) -> Result<Option<PathBuf>, CoverageGateError>,
+) -> Result<Option<PathBuf>, CoverageGateError> {
+    let rustc = var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    let mut command = Command::new(rustc);
+    command.current_dir(workspace_root).args(["--print", "sysroot"]);
+    let sysroot = read(&mut command)?;
+    resolve(&sysroot.join("lib").join("rustlib").join("src").join("rust").join("library"))
+}
+
+fn compiler_sysroot_output(
+    operation: &str,
+    success: bool,
+    status: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<PathBuf, CoverageGateError> {
+    if !success {
+        return Err(CompilerSourceDiscoveryError::new(
+            operation.to_owned(),
+            format!(
+                "compiler exited with {status}: {}",
+                crate::package_glob::diagnostic(String::from_utf8_lossy(stderr).trim())
+            ),
+        )
+        .into());
+    }
+    let output = String::from_utf8(stdout.to_vec())
+        .map_err(|error| CompilerSourceDiscoveryError::caused_by(operation.to_owned(), "sysroot output is not UTF-8".to_owned(), error))?;
+    let path = Path::new(output.trim());
+    if output.lines().count() != 1 || !path.is_absolute() {
+        return Err(CompilerSourceDiscoveryError::new(
+            operation.to_owned(),
+            "expected one absolute sysroot path; check the selected RUSTC compiler or proxy".to_owned(),
+        )
+        .into());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn canonical_compiler_library(path: &Path) -> Result<Option<PathBuf>, CoverageGateError> {
+    canonical_compiler_library_with(path, |path| fs::canonicalize(path), |path| fs::metadata(path))
+}
+
+fn canonical_compiler_library_with(
+    path: &Path,
+    canonicalize: impl FnOnce(&Path) -> std::io::Result<PathBuf>,
+    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+) -> Result<Option<PathBuf>, CoverageGateError> {
+    let canonical = match canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), error).into()),
+    };
+    let metadata = metadata(&canonical).map_err(|error| InspectCoverageSourceError::caused_by(diagnostic_path(&canonical), error))?;
+    if !metadata.is_dir() {
+        return Err(CompilerSourceDiscoveryError::new(
+            diagnostic_path(path),
+            "the compiler library-source root must be a directory".to_owned(),
+        )
+        .into());
+    }
+    Ok(Some(canonical))
 }
 
 pub(crate) fn parse_reports(inputs: &[&str]) -> Result<Vec<lcov::Report>, CoverageGateError> {
@@ -2695,10 +2826,12 @@ mod tests {
                 .any(|(surface, role, _, _, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
         );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
-        let error = index
-            .source_for_lcov(&root.join("member/src/implementation/root.rs"))
-            .expect_err("an existing source outside the target graph must fail")
-            .to_string();
+        let error = filter_reports_with_metadata(
+            vec![parse_lcov("TN:\nSF:member/src/implementation/root.rs\nDA:4,1\nend_of_record\n")],
+            &metadata,
+        )
+        .expect_err("an existing source outside the target graph must fail")
+        .to_string();
         assert!(error.contains("not reachable from any Cargo target"), "{error}");
 
         let filtered = filter_reports_with_metadata(
@@ -2974,6 +3107,7 @@ mod tests {
         let (_, constrained) = index
             .source_for_lcov(&root.join("member/src/required-feature-root.rs"))
             .expect("constrained root is indexed");
+        let constrained = constrained.expect("the target root has Cargo ownership");
         assert!(constrained.test_only_lines.contains(&7));
         assert!(!constrained.analysis.test_only_lines.contains(&7));
         let filtered = filter_reports_with_metadata(
@@ -3117,6 +3251,7 @@ mod tests {
         let (_, included) = index
             .source_for_lcov(&root.join("member/src/included-expression.rs"))
             .expect("included fragment");
+        let included = included.expect("the literal include is indexed");
         assert!(included.analysis.syntax.is_none());
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov("TN:\nSF:member/src/included-expression.rs\nDA:4,0\nend_of_record\n")],
@@ -3193,6 +3328,215 @@ mod tests {
         )
         .expect("test-only included source filters");
         assert_eq!(filtered, [""]);
+    }
+
+    #[test]
+    fn compiler_library_query_preserves_proxy_selection_and_workspace() {
+        let workspace = source_index_fixture_root();
+        let sysroot = workspace.join("toolchain");
+        let expected = sysroot.join("lib/rustlib/src/rust/library");
+        let resolved = workspace.join("canonical-library");
+        let root = compiler_library_with(
+            &workspace,
+            |name| {
+                assert_eq!(name, "RUSTC");
+                Some(OsString::from("selected-rustc-proxy"))
+            },
+            |command| {
+                assert_eq!(command.get_program(), "selected-rustc-proxy");
+                assert_eq!(command.get_current_dir(), Some(workspace.as_path()));
+                assert_eq!(command.get_args().collect::<Vec<_>>(), ["--print", "sysroot"]);
+                Ok(sysroot)
+            },
+            |path| {
+                assert_eq!(path, expected);
+                Ok(Some(resolved.clone()))
+            },
+        )
+        .expect("selected compiler query");
+        assert_eq!(root, Some(resolved));
+        let error = compiler_library_with(
+            &workspace,
+            |_| None,
+            |command| {
+                assert_eq!(command.get_program(), "rustc");
+                Err(CompilerSourceDiscoveryError::new("rustc".to_owned(), "query failed".to_owned()).into())
+            },
+            |_| panic!("a failed query must not resolve a guessed source root"),
+        )
+        .expect_err("compiler query failure stays explicit");
+        assert!(error.to_string().contains("query failed"));
+    }
+
+    #[test]
+    fn compiler_sysroot_output_rejects_failed_invalid_or_relative_queries() {
+        let root = source_index_fixture_root();
+        let stdout = format!("{}\n", root.display());
+        assert_eq!(
+            compiler_sysroot_output("proxy --print sysroot", true, "0", stdout.as_bytes(), b"").expect("absolute sysroot"),
+            root
+        );
+        let error = compiler_sysroot_output("proxy", false, "exit status: 7", stdout.as_bytes(), b"proxy failed")
+            .expect_err("failed compiler must not establish provenance");
+        assert!(error.to_string().contains("exit status: 7"));
+        assert!(error.to_string().contains("proxy failed"));
+        for bytes in [b"".as_slice(), b"relative/path", b"/first\n/second\n", &[0xff]] {
+            let error = compiler_sysroot_output("proxy", true, "0", bytes, b"").expect_err("invalid source discovery output");
+            assert!(
+                std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                    .any(<dyn std::error::Error + 'static>::is::<CompilerSourceDiscoveryError>)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn compiler_library_root_requires_an_existing_directory() {
+        let root = source_index_fixture_root();
+        let library = root.join("toolchain/lib/rustlib/src/rust/library");
+        assert_eq!(
+            canonical_compiler_library(&library).expect("installed source tree"),
+            Some(fs::canonicalize(&library).expect("canonical library"))
+        );
+        assert_eq!(
+            canonical_compiler_library(&root.join("absent-rust-src")).expect("optional sources may be absent"),
+            None
+        );
+        let error = canonical_compiler_library(&root.join("external-lib.rs")).expect_err("a file is not a source directory");
+        assert!(error.to_string().contains("must be a directory"));
+    }
+
+    #[test]
+    fn compiler_source_inspection_failures_do_not_become_missing_optional_sources() {
+        let path = Path::new("/compiler/library");
+        let denied = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let error = canonical_compiler_library_with(path, |_| Err(denied()), |_| panic!("resolution failed"))
+            .expect_err("permission failure is not optional absence");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<ResolveCoverageSourceError>)
+        );
+        let error = canonical_compiler_library_with(path, |path| Ok(path.to_path_buf()), |_| Err(denied()))
+            .expect_err("inspection failure remains explicit");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<InspectCoverageSourceError>)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn verified_compiler_sources_are_removed_once_across_canonical_aliases() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/conservative-root.rs").to_string_lossy().into_owned().into();
+        let library = root.join("toolchain/lib/rustlib/src/rust/library");
+        let compiler_file = library.join("std/src/sys/thread_local/native/mod.rs");
+        let alias = compiler_file
+            .parent()
+            .expect("fixture source has a parent")
+            .join("../native/mod.rs");
+        let alias = PathBuf::from(
+            alias
+                .to_string_lossy()
+                .replace("\\lib\\rustlib\\src\\rust\\library", "\\lib/rustlib/src/rust\\library"),
+        );
+        let canonical = fs::canonicalize(&compiler_file).expect("canonical source");
+        let inputs = [&compiler_file, &alias, &canonical]
+            .into_iter()
+            .map(|path| {
+                format!(
+                    "{}{}{}",
+                    lcov_section(&root.join("member/src/conservative-root.rs"), &[(6, 2), (7, 2), (8, 2), (17, 1)]),
+                    lcov_section(&root.join("member/src/conservative-shared.rs"), &[(4, 1), (8, 0), (15, 1)]),
+                    lcov_section(path, &[(4, 0)]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let loads = std::cell::Cell::new(0);
+        let filtered = filter_reports_with_compiler_loader(parse_reports(&refs).expect("raw input"), &metadata, || {
+            loads.set(loads.get() + 1);
+            canonical_compiler_library(&library)
+        })
+        .expect("verified compiler library records do not invalidate project coverage");
+        assert_eq!(loads.get(), 1);
+        assert_eq!(filtered[0], filtered[1]);
+        assert_eq!(filtered[0], filtered[2]);
+        for text in &filtered {
+            let report = parse_lcov(text);
+            assert_eq!(report.sections.len(), 2);
+            for (key, section) in report.sections {
+                let lines = section
+                    .lines
+                    .iter()
+                    .map(|(line, value)| (line.line, value.count))
+                    .collect::<BTreeMap<_, _>>();
+                if key.source_file == root.join("member/src/conservative-root.rs") {
+                    assert_eq!(lines, BTreeMap::from([(6, 2), (7, 2), (8, 2)]));
+                } else {
+                    assert_eq!(key.source_file, root.join("member/src/conservative-shared.rs"));
+                    assert_eq!(lines, BTreeMap::from([(4, 1), (8, 0)]));
+                }
+            }
+        }
+        let refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
+        let repeated = filter_reports_with_compiler_loader(parse_reports(&refs).expect("filtered input"), &metadata, || {
+            panic!("fully owned published reports must not query a compiler")
+        })
+        .expect("filtered output stays byte-stable");
+        assert_eq!(repeated, filtered);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn compiler_provenance_does_not_hide_unknown_or_missing_project_sources() {
+        let root = source_index_fixture_root();
+        let metadata = source_index_fixture_metadata(&root);
+        let library = root.join("toolchain/lib/rustlib/src/rust/library");
+        let lookalike = root.join("toolchain/lib/rustlib/src/rust/library-other/std.rs");
+        let error = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&lookalike, &[(4, 0)]))], &metadata, || {
+            canonical_compiler_library(&library)
+        })
+        .expect_err("source directory names alone do not prove compiler ownership");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<UnownedCoverageSourceError>)
+        );
+        let compiler_file = library.join("std/src/sys/thread_local/native/mod.rs");
+        filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, || Ok(None))
+            .expect_err("without an established compiler root the source remains unknown");
+        filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, || {
+            Err(CompilerSourceDiscoveryError::new("proxy".to_owned(), "unavailable".to_owned()).into())
+        })
+        .expect_err("failed discovery must not turn into exclusion");
+        let missing = library.join("std/missing.rs");
+        let error = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&missing, &[(4, 0)]))], &metadata, || {
+            panic!("an unresolvable input path must fail before source discovery")
+        })
+        .expect_err("missing source still fails");
+        assert!(
+            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                .any(<dyn std::error::Error + 'static>::is::<ResolveCoverageSourceError>)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn explicit_cargo_ownership_takes_precedence_over_compiler_source_location() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        let compiler_file = root.join("toolchain/lib/rustlib/src/rust/library/std/src/sys/thread_local/native/mod.rs");
+        metadata.packages[0].targets[0].src_path = compiler_file.to_string_lossy().into_owned().into();
+        let filtered = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, || {
+            panic!("a Cargo-owned source must not be discarded as compiler code")
+        })
+        .expect("explicit Cargo source is retained");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.len(), 1);
+        let section = report.sections.values().next().expect("retained project source");
+        assert_eq!(section.lines.len(), 1);
+        assert_eq!(section.lines.values().next().expect("production miss").count, 0);
     }
 
     #[test]
