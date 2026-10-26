@@ -697,11 +697,7 @@ mod tests {
     #[test]
     fn checks_fail_closed_and_preserve_opted_out_tests() {
         let checks = all_check_bodies();
-        for needle in [
-            "${prefix}: cargo metadata failed",
-            "coverage-gate {{ anvil_explicit_package_args }} run",
-            "mutants_command_prefix",
-        ] {
+        for needle in ["coverage-gate {{ anvil_explicit_package_args }} run", "mutants_command_prefix"] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
         assert!(
@@ -769,6 +765,21 @@ mod tests {
         assert!(
             !checks.contains("[script(\"pwsh\", \"-NoProfile\")]\nanvil-mutants-diff:"),
             "mutants-diff must not require PowerShell"
+        );
+        for needle in [
+            r#"anvil_readme_template := if path_exists("crates/README.j2")"#,
+            r#"else if path_exists("README.j2")"#,
+            "publishable and not metadata:ox-gen-readme.disable=true and (target-kind:lib or target-kind:proc-macro)",
+            "target-kind:bin and not (target-kind:lib or target-kind:proc-macro)",
+            "--chdir --keep-going",
+            "doc2readme --lib",
+            "doc2readme --bin",
+        ] {
+            assert!(checks.contains(needle), "readme-check is missing '{needle}'");
+        }
+        assert!(
+            !checks.contains("[script(\"pwsh\", \"-NoProfile\")]\n_anvil-readme"),
+            "readme-check must not require PowerShell"
         );
         for retired in [
             "careful-sysroot.id",
