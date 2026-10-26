@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-coverage-gate: retain block-local macro coverage
   - cargo-coverage-gate: preserve conservative filtering provenance
   - cargo-coverage-gate: retain measured member source counters
   - cargo-coverage-gate: verify compiler source provenance
