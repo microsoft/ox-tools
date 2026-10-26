@@ -1502,9 +1502,10 @@ enum SourceDisposition<'a> {
 fn filter_report(
     report: lcov::Report,
     sources: &SourceIndex,
+    provenance_witness: Option<&Path>,
     is_compiler_source: &mut impl FnMut(&Path) -> Result<bool, CoverageGateError>,
 ) -> Result<String, CoverageGateError> {
-    filter_report_with(report, |path| {
+    filter_report_with(report, provenance_witness, |path| {
         let (canonical, source) = sources.source_for_lcov(path)?;
         let Some(source) = source else {
             if attributed_path(&sources.member_dirs, &canonical).is_none() && is_compiler_source(&canonical)? {
@@ -1534,6 +1535,7 @@ fn filter_report(
 
 fn filter_report_with<'a>(
     mut report: lcov::Report,
+    provenance_witness: Option<&Path>,
     mut classify: impl FnMut(&Path) -> Result<SourceDisposition<'a>, CoverageGateError>,
 ) -> Result<String, CoverageGateError> {
     let mut filtered = lcov::report::section::Sections::new();
@@ -1587,6 +1589,17 @@ fn filter_report_with<'a>(
             }
         }
     }
+    if let Some(source_file) = provenance_witness
+        && !filtered.keys().any(|key| key.source_file == source_file)
+    {
+        let _ = filtered.insert(
+            lcov::report::section::Key {
+                test_name: String::new(),
+                source_file: source_file.to_path_buf(),
+            },
+            lcov::report::section::Value::default(),
+        );
+    }
     report.sections = filtered;
 
     let mut output = String::new();
@@ -1627,6 +1640,13 @@ fn filter_reports_with_compiler_loader(
     }
     let mut sources = SourceIndex::from_metadata(metadata)?;
     sources.index_reported_member_sources(&reports, metadata)?;
+    // A measured graph-gap source must survive even when all its counters are test-only.
+    let provenance_witness = sources
+        .files
+        .iter()
+        .find(|(_, source)| source.visit_contexts.is_empty())
+        .map(|(canonical, source)| sources.retained_source_path(canonical, source))
+        .transpose()?;
     if let Some(warning) = sources.conservative_warning() {
         eprintln!("{warning}");
     }
@@ -1646,7 +1666,7 @@ fn filter_reports_with_compiler_loader(
     };
     reports
         .into_iter()
-        .map(|report| filter_report(report, &sources, &mut is_compiler_source))
+        .map(|report| filter_report(report, &sources, provenance_witness.as_deref(), &mut is_compiler_source))
         .collect()
 }
 
@@ -1748,7 +1768,33 @@ pub(crate) fn parse_reports(inputs: &[&str]) -> Result<Vec<lcov::Report>, Covera
 }
 
 fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
-    lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).map_err(|error| CoverageGateError::from(ParseLcovError::from(error)))
+    let mut source_sections = BTreeSet::new();
+    let mut test_name = String::new();
+    let mut source_file = None;
+    let reader = lcov::Reader::new(input.as_bytes()).inspect(|record| {
+        if let Ok(record) = record {
+            match record {
+                lcov::Record::TestName { name } => test_name.clone_from(name),
+                lcov::Record::SourceFile { path } => source_file = Some(path.clone()),
+                lcov::Record::EndOfRecord => {
+                    let section_test_name = std::mem::take(&mut test_name);
+                    if let Some(source_file) = source_file.take() {
+                        let _ = source_sections.insert(lcov::report::section::Key {
+                            test_name: section_test_name,
+                            source_file,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    let mut report = lcov::Report::from_reader(reader).map_err(|error| CoverageGateError::from(ParseLcovError::from(error)))?;
+    // The LCOV parser discards zero-line sections; filtering needs their source-graph provenance.
+    for key in source_sections {
+        let _ = report.sections.entry(key).or_default();
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1914,7 +1960,7 @@ mod tests {
     }
 
     fn parse_lcov(input: &str) -> lcov::Report {
-        lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).expect("fixture LCOV parses")
+        parse_report(input).expect("fixture LCOV parses")
     }
 
     #[test]
@@ -2559,6 +2605,7 @@ mod tests {
         let analysis = analyze(source_path, RELEASED_AND_TEST_ONLY_SOURCE);
         let filtered = filter_report_with(
             parse_lcov("TN:\nSF:released-and-test-only-source.rs\nDA:4,1\nDA:5,1\nDA:6,1\nend_of_record\n"),
+            None,
             |_| {
                 Ok(SourceDisposition::Include {
                     source_file: source_path.to_path_buf(),
@@ -3406,7 +3453,169 @@ mod tests {
         let shared = lcov_section(&root.join("member/src/included-test.rs"), &[(4, 1)]);
         let filtered = filter_reports_with_metadata(parse_reports(&[&shared, &backend]).expect("raw measured member records"), &metadata)
             .expect("measured graph gaps make earlier whole-file exclusions uncertain");
-        assert_eq!(parse_lcov(&filtered[0]).sections.len(), 1);
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.len(), 2);
+        assert!(
+            report
+                .sections
+                .iter()
+                .any(|(key, section)| { key.source_file == root.join("member/src/macro-backend.rs") && section.is_empty() })
+        );
+        assert_eq!(report.sections.values().map(|section| section.lines.len()).sum::<usize>(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn conservative_provenance_survives_when_every_graph_gap_counter_is_excluded() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 100}});
+        for (count, expected) in [(0, crate::Verdict::Fail), (1, crate::Verdict::Pass)] {
+            let raw = format!(
+                "{}{}",
+                lcov_section(&root.join("member/src/included-test.rs"), &[(4, count)]),
+                lcov_section(&root.join("member/src/macro-backend.rs"), &[(15, 1)]),
+            );
+            let filtered = filter_reports_with_metadata(parse_reports(&[&raw]).expect("raw LCOV"), &metadata)
+                .expect("local test ranges are removed without losing conservative provenance");
+            let repeated = filter_reports_with_metadata(parse_reports(&[&filtered[0]]).expect("published LCOV"), &metadata)
+                .expect("published LCOV may be filtered again");
+            assert_eq!(repeated, filtered);
+
+            let report = parse_lcov(&filtered[0]);
+            assert_eq!(report.sections.len(), 2);
+            let witness = report
+                .sections
+                .iter()
+                .find(|(key, _)| key.source_file == root.join("member/src/macro-backend.rs"))
+                .map(|(_, section)| section)
+                .expect("the measured source-graph gap remains as a zero-line witness");
+            assert!(witness.lines.is_empty());
+            assert!(witness.functions.is_empty());
+            assert!(witness.branches.is_empty());
+            let coverage = crate::lcov_cov::CoverageReport::from_strs(&[&filtered[0]]).expect("filtered line coverage");
+            assert_eq!(coverage.files.iter().map(|file| file.lines_total).sum::<u32>(), 1);
+            assert_eq!(
+                coverage.files.iter().map(|file| file.lines_covered).sum::<u32>(),
+                u32::try_from(count).expect("count is zero or one")
+            );
+
+            let normal =
+                crate::evaluate_reports_with_metadata(parse_reports(&[&filtered[0]]).expect("published LCOV"), &metadata, &[], None)
+                    .expect("normal evaluation uses the same published counters");
+            assert_eq!(normal.verdict(), expected);
+            let workspace = crate::workspace::Workspace::from_metadata(&metadata, None).expect("workspace policy");
+            assert_eq!(
+                crate::verdict::evaluate(&coverage, &workspace, &[])
+                    .expect("already filtered evaluation")
+                    .verdict(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn conservative_provenance_is_carried_by_each_output_of_a_report_batch() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
+        let included = lcov_section(&root.join("member/src/included-test.rs"), &[(4, 0)]);
+        let gap = lcov_section(&root.join("member/src/../src/macro-backend.rs"), &[(15, 1)]);
+        let raw = [included.as_str(), gap.as_str(), ""];
+        let filtered = filter_reports_with_metadata(parse_reports(&raw).expect("raw feature reports"), &metadata).expect("batch filters");
+        for text in &filtered {
+            let repeated = filter_reports_with_metadata(parse_reports(&[text]).expect("individual published report"), &metadata)
+                .expect("each published report retains the batch's conservative proof");
+            assert_eq!(repeated.as_slice(), std::slice::from_ref(text));
+            let report = parse_lcov(text);
+            assert!(
+                report
+                    .sections
+                    .iter()
+                    .any(|(key, section)| { key.source_file == root.join("member/src/macro-backend.rs") && section.is_empty() })
+            );
+        }
+        let repeated = filter_reports_with_metadata(
+            parse_reports(&filtered.iter().map(String::as_str).collect::<Vec<_>>()).expect("published batch"),
+            &metadata,
+        )
+        .expect("published batch filters again");
+        assert_eq!(repeated, filtered);
+        let coverage = crate::lcov_cov::CoverageReport::from_strs(&filtered.iter().map(String::as_str).collect::<Vec<_>>())
+            .expect("zero-line source witnesses do not add coverage");
+        assert_eq!(coverage.files.iter().map(|file| file.lines_total).sum::<u32>(), 1);
+        assert_eq!(coverage.files.iter().map(|file| file.lines_covered).sum::<u32>(), 0);
+        let reversed = filter_reports_with_metadata(parse_reports(&["", &gap, &included]).expect("reordered batch"), &metadata)
+            .expect("batch ordering does not change provenance");
+        assert_eq!(reversed, filtered.into_iter().rev().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn zero_line_source_records_round_trip_without_contributing_coverage() {
+        let input = concat!(
+            "TN:discarded-empty-section\nend_of_record\n",
+            "TN:discarded\nTN:feature\nSF:member/src/macro-backend.rs\nLF:0\nLH:0\nend_of_record\n",
+            "SF:member/src/conservative-shared.rs\nend_of_record\n",
+        );
+        let report = parse_report(input).expect("valid zero-line LCOV records");
+        assert_eq!(report.sections.len(), 2);
+        assert!(report.sections.values().all(lcov::report::section::Value::is_empty));
+        assert_eq!(
+            report.sections.keys().map(|key| key.test_name.as_str()).collect::<Vec<_>>(),
+            ["", "feature"]
+        );
+        let mut serialized = String::new();
+        for record in report.clone().into_records() {
+            writeln!(&mut serialized, "{record}").expect("writing to String");
+        }
+        assert_eq!(
+            parse_report(&serialized).expect("filter parser preserves zero-line source evidence"),
+            report
+        );
+        assert!(
+            lcov::Report::from_reader(lcov::Reader::new(serialized.as_bytes()))
+                .expect("the serialized witness is standard LCOV")
+                .sections
+                .is_empty()
+        );
+        assert!(
+            crate::lcov_cov::CoverageReport::from_str(&serialized)
+                .expect("ordinary evaluation parses witness records")
+                .files
+                .is_empty()
+        );
+        assert!(!serialized.contains("DA:"));
+        parse_report("SF:member/src/macro-backend.rs\nTN:unexpected\nend_of_record\n")
+            .expect_err("preserving witnesses does not bypass LCOV grammar validation");
+    }
+
+    #[test]
+    fn a_provenance_witness_never_replaces_existing_counters_or_test_names() {
+        let source = Path::new("/workspace/member/src/macro-backend.rs");
+        let raw = "TN:feature\nSF:original.rs\nDA:4,0,checksum\nend_of_record\n";
+        let test_only = BTreeSet::new();
+        let filtered = filter_report_with(parse_lcov(raw), Some(source), |_| {
+            Ok(SourceDisposition::Include {
+                source_file: source.to_path_buf(),
+                line_count: 4,
+                test_only_lines: &test_only,
+            })
+        })
+        .expect("an existing source section already carries the witness");
+        let report = parse_lcov(&filtered);
+        assert_eq!(report.sections.len(), 1);
+        let (key, section) = report.sections.iter().next().expect("original source section");
+        assert_eq!(key.test_name, "feature");
+        assert_eq!(key.source_file, source);
+        let (line, value) = section.lines.iter().next().expect("original production miss");
+        assert_eq!(line.line, 4);
+        assert_eq!(value.count, 0);
+        assert_eq!(value.checksum.as_deref(), Some("checksum"));
+        let empty = filter_report_with(parse_lcov(""), None, |_| panic!("empty input has no source sections"))
+            .expect("without graph-gap provenance an empty report stays empty");
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -4342,7 +4551,7 @@ mod tests {
         input.push_str(&lcov_section(&bench, &[(1, 1)]));
         input.push_str(&lcov_section(&build, &[(1, 1)]));
 
-        let filtered = filter_report_with(parse_lcov(&input), |path| {
+        let filtered = filter_report_with(parse_lcov(&input), None, |path| {
             let source = sources
                 .get(path)
                 .ok_or_else(|| UnownedCoverageSourceError::new(path.display().to_string()))?;
@@ -4388,7 +4597,7 @@ mod tests {
         let lib = PathBuf::from("/workspace/surface/src/lib.rs");
         let orphan = PathBuf::from("/workspace/surface/src/orphan.rs");
         let unowned = lcov_section(&orphan, &[(1, 0)]);
-        let error = filter_report_with(parse_lcov(&unowned), |path| {
+        let error = filter_report_with(parse_lcov(&unowned), None, |path| {
             Err::<SourceDisposition<'static>, CoverageGateError>(UnownedCoverageSourceError::new(path.display().to_string()).into())
         })
         .expect_err("unowned source must fail")
@@ -4397,7 +4606,7 @@ mod tests {
 
         let stale = lcov_section(&lib, &[(3, 0)]);
         let test_only = BTreeSet::new();
-        let error = filter_report_with(parse_lcov(&stale), |_| {
+        let error = filter_report_with(parse_lcov(&stale), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: lib.clone(),
                 line_count: 2,
@@ -4409,13 +4618,13 @@ mod tests {
         assert!(error.contains("references line 3"), "{error}");
         assert!(error.contains("regenerate coverage"), "{error}");
 
-        let error = filter_report_with(parse_lcov(&stale), |_| Ok(SourceDisposition::Exclude { line_count: 2 }))
+        let error = filter_report_with(parse_lcov(&stale), None, |_| Ok(SourceDisposition::Exclude { line_count: 2 }))
             .expect_err("stale line data must fail even when the target is excluded")
             .to_string();
         assert!(error.contains("references line 3"), "{error}");
 
         let missing_function_line = format!("TN:\nSF:{}\nFNDA:0,unknown\nDA:1,0\nend_of_record\n", lib.display());
-        let filtered = filter_report_with(parse_lcov(&missing_function_line), |_| {
+        let filtered = filter_report_with(parse_lcov(&missing_function_line), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: lib.clone(),
                 line_count: 2,
@@ -4450,7 +4659,7 @@ mod tests {
     fn retained_source_paths_are_normalized_for_package_attribution() {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::new();
-        let filtered = filter_report_with(parse_lcov("TN:\nSF:surface/src/lib.rs\nDA:1,1\nend_of_record\n"), |_| {
+        let filtered = filter_report_with(parse_lcov("TN:\nSF:surface/src/lib.rs\nDA:1,1\nend_of_record\n"), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
                 line_count: 1,
@@ -4487,7 +4696,7 @@ mod tests {
         let test_only = BTreeSet::new();
         let input = "TN:same\nSF:/a/spelling/lib.rs\nDA:1,1,checksum\nDA:2,0\nend_of_record\n\
                      TN:same\nSF:/z/spelling/lib.rs\nDA:1,2,checksum\nDA:2,1\nDA:3,0\nend_of_record\n";
-        let filtered = filter_report_with(parse_lcov(input), |_| {
+        let filtered = filter_report_with(parse_lcov(input), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
                 line_count: 3,
@@ -4510,7 +4719,7 @@ mod tests {
     fn sections_with_only_test_lines_are_removed() {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::from([1]);
-        let filtered = filter_report_with(parse_lcov("TN:\nSF:surface/src/lib.rs\nDA:1,1\nend_of_record\n"), |_| {
+        let filtered = filter_report_with(parse_lcov("TN:\nSF:surface/src/lib.rs\nDA:1,1\nend_of_record\n"), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
                 line_count: 1,
@@ -4528,7 +4737,7 @@ mod tests {
         let test_only = BTreeSet::new();
         let input = "TN:same\nSF:surface/src/lib.rs\nDA:1,1,first\nend_of_record\n\
                      TN:same\nSF:/other/spelling/lib.rs\nDA:1,2,second\nend_of_record\n";
-        let error = filter_report_with(parse_lcov(input), |_| {
+        let error = filter_report_with(parse_lcov(input), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
                 line_count: 1,
@@ -4552,7 +4761,7 @@ mod tests {
             "TN:{controlled}\nSF:first.rs\nDA:1,1,first\nend_of_record\n\
              TN:{controlled}\nSF:second.rs\nDA:1,2,second\nend_of_record\n"
         );
-        let error = filter_report_with(parse_lcov(&input), |_| {
+        let error = filter_report_with(parse_lcov(&input), None, |_| {
             Ok(SourceDisposition::Include {
                 source_file: normalized.clone(),
                 line_count: 1,

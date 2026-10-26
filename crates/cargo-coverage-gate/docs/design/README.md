@@ -598,6 +598,14 @@ under the member's unambiguous target edition; graph non-reachability is not
 proof that such measured code is invalid or test-only. Measured graph gaps enable
 the same conservative cross-file policy for the entire report batch before any
 section is filtered, so input order cannot erase shared production counters.
+Each published output also carries a canonical source witness for a measured
+graph gap. If filtering removes every test-only counter from that source, a
+standard zero-line `SF:` section preserves the source identity without adding
+any `DA:`, function, or branch counters. The filtering parser preserves empty
+source sections even though ordinary LCOV aggregation ignores them. Re-filtering
+one published file or the whole feature batch therefore retains the same
+conservative classification, counters, and verdict. This evidence is embedded
+in the LCOV; it does not depend on a sidecar file or an in-memory prior run.
 
 This is an intentionally conservative line set, **not complete production-only
 classification**. No annotation is required on ordinary test modules.

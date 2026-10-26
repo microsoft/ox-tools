@@ -207,6 +207,11 @@ the workspace discovered from the invocation directory.
    merges by source path and line.
    Filtered output removes function and branch records entirely because the
    available proof is line-granular.
+   A measured graph-gap source is retained as a zero-line source witness in
+   every output that depends on the batch's conservative classification.
+   The filtering parser preserves these standard empty source sections while
+   ordinary aggregation ignores them, so a second filtering pass cannot lose
+   provenance merely because all of the witness source's counters were test-only.
 4. The LCOV parser merges filtered reports by source path and line number. A line is
    coverable when it has a distinct `DA:` record. Hit counts determine the
    covered subset, while sorted coverable and uncovered line numbers remain

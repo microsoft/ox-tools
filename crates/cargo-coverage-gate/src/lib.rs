@@ -338,7 +338,10 @@ pub use error::CoverageGateError;
 /// directory. The returned LCOV is parsed and serialized canonically, so
 /// retained `SF:` paths are normalized to the owning member path reported by
 /// Cargo metadata, and record ordering and summary records may differ from the
-/// input.
+/// input. When conservative filtering depends on a measured source-graph gap,
+/// a zero-line `SF:` record preserves that evidence even if all counters for
+/// that source are test-only. It adds no coverable lines or hits and keeps
+/// filtering idempotent.
 ///
 /// Qualified framework test macros are configured explicitly:
 ///
@@ -384,6 +387,8 @@ pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<Stri
 ///
 /// The returned vector preserves input order and length.
 /// An empty input returns an empty vector without workspace discovery.
+/// Each output carries any zero-line source witness needed to preserve the
+/// batch's conservative classification when that output is filtered on its own.
 ///
 /// # Errors
 ///
