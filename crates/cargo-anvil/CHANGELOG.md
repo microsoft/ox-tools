@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-26
+
+- ✨ Features
+
+  - cargo-anvil: adopt cargo-each 0.6 package selection
+  - cargo-anvil: manage JSON array entries ([#283](https://github.com/microsoft/ox-tools/pull/283))
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: skip package discovery when no MSRV is declared
+  - cargo-anvil: run examples from the canonical workspace root
+  - cargo-anvil: build example specs from manifest paths and fix test shims
+  - cargo-anvil: select examples and Miri opt-outs by exact identity
+  - cargo-anvil: avoid ambiguous package specs in remaining recipes
+
+- 📚 Documentation
+
+  - cargo-anvil: note coverage still passes name@version specs
+  - cargo-anvil: explain shared license allow list
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: drop old-Cargo workarounds and document Cargo 1.93 minimum
+  - cargo-anvil: remove obsolete package-name handling
+
 ## [0.19.0] - 2026-10-24
 
 - ✨ Features

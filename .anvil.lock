@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.19.0"
-catalog_checksum = "sha256:7b30fdf8ce2b646bef38662baf38603ab03a12b86ec14d0e67752c610d945b08"
+tool_version = "0.20.0"
+catalog_checksum = "sha256:4a441998e5a6ea549c3db91621ed11b58065518e75ea2a64c990fff7a8c6bfff"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -117,7 +117,7 @@ checksum = "sha256:235cc86e5d234a9bf51af42e4ab6bdfdc98807b1f4e84f0f389ad40d5bc87
 
 [[file]]
 path = "justfiles/anvil/checks/examples.just"
-checksum = "sha256:a0bcba2206b4ae8e4bb9c5b7247c720dfaaf070adb76aec700b4efde18bd03ab"
+checksum = "sha256:1776515cd4b0c726b328123075ddcec9d90f4418bdb1c0188fe962b5ce7fa92d"
 
 [[file]]
 path = "justfiles/anvil/checks/external-types.just"
@@ -157,7 +157,7 @@ checksum = "sha256:fb8a8e44030a89a5030d53aef7c099ba7b43d995423614f20d1c4e94c6a93
 
 [[file]]
 path = "justfiles/anvil/checks/msrv-test.just"
-checksum = "sha256:fa2064c5c4e2c0df22195d687eaeb343bf596710fef827baf1d0f7104f39dc53"
+checksum = "sha256:c98034758fd7168b374e6a4daecf04af5ac7631dd957226c97eb01d248641f85"
 
 [[file]]
 path = "justfiles/anvil/checks/mutants-diff.just"
