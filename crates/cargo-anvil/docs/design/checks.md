@@ -300,6 +300,8 @@ so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
 parallel with the other PR groups. When no root MSRV exists,
 `anvil-msrv-test` reports the skip before resolving package exclusions, so this
 no-op needs neither Cargo metadata nor an available stable toolchain.
+When an MSRV exists, the recipe selects that toolchain for its own process,
+including package metadata discovery; it does not require a second compiler.
 Setup installs the declared MSRV through rustup when it is not already
 available.
 

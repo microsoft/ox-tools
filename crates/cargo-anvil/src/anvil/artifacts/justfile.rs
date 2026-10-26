@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn msrv_skip_precedes_metadata_dependent_selection() {
+    fn msrv_selection_uses_the_validated_toolchain_after_the_no_msrv_skip() {
         let msrv = CHECK_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/msrv-test.just").then_some(*body))
@@ -446,12 +446,12 @@ mod tests {
         let (before_selection, _) = msrv
             .split_once("    $include = (& \"{{ just_executable() }}\" _anvil-impact-exclude affected)")
             .expect("MSRV tests resolve affected packages through workspace exclusions");
-        assert!(before_selection.contains(
-            "    $toolchainOutput = & \"{{ just_executable() }}\" _anvil-resolve-stable msrv | Out-String\n\
-             \x20   $resolverExit = $LASTEXITCODE\n\
-             \x20   if ($resolverExit -ne 0) { exit $resolverExit }\n\
-             \x20   $toolchain = $toolchainOutput.Trim()\n\
-             \x20   if ([string]::IsNullOrWhiteSpace($toolchain)) {\n\
+        let (before_binding, _) = before_selection
+            .split_once("    $env:RUSTUP_TOOLCHAIN = $toolchain")
+            .expect("package discovery must inherit the validated MSRV toolchain");
+        assert!(before_binding.contains("    if ($resolverExit -ne 0) { exit $resolverExit }"));
+        assert!(before_binding.contains(
+            "    if ([string]::IsNullOrWhiteSpace($toolchain)) {\n\
              \x20       Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'\n\
              \x20       exit 0\n\
              \x20   }"
