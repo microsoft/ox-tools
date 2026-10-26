@@ -18,7 +18,7 @@ allow-wildcard-paths = true
 
 # allowed duplicated dependencies
 skip = [
-    { crate = "allocator-api2", version = "0.2", reason = "hashbrown/rallocator require 0.2; plurality requires 0.4" },
+    { crate = "allocator-api2", version = "0.2", reason = "hashbrown requires 0.2; plurality requires 0.4" },
     { crate = "getrandom", version = "0.3", reason = "Bolero/tempfile require 0.3; jobserver requires 0.4" },
     { crate = "r-efi", version = "5", reason = "getrandom 0.3 requires 5; getrandom 0.4 requires 6" },
     { crate = "hashbrown", version = "0.14", reason = "rowan requires 0.14; indexmap requires 0.17" },

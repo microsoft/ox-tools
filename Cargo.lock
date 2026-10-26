@@ -12,15 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocation_hints"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edea269523fd8bc279a0e4f1578e18b204d1bc14c23c830727df7a5c7e7968f7"
-dependencies = [
- "pin-project-lite",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1746,9 +1737,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "allocator-api2 0.2.21",
-]
 
 [[package]]
 name = "heck"
@@ -2889,17 +2877,13 @@ dependencies = [
 
 [[package]]
 name = "rallocator"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19170a50990d08388cf9abef93e188c699cd20f4a5652b865c4721ce6a305625"
+checksum = "9fd808d66c79bff707b16f916e14015447818dbde2e1afd14716831853900e8c"
 dependencies = [
- "allocation_hints",
- "allocator-api2 0.2.21",
- "hashbrown 0.17.1",
  "libc",
  "seismograph",
  "seismograph_rallocator",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3330,9 +3314,9 @@ dependencies = [
 
 [[package]]
 name = "seismograph"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51caaf2040ab7a4bcd319e28273137d481f3537b1ba88fa226b3033a2c4b1d0d"
+checksum = "c5f8d2898334476c6b661421262c82eac7dfeed85d218d260722cb792f1c94eb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3340,9 +3324,9 @@ dependencies = [
 
 [[package]]
 name = "seismograph_rallocator"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f82727c3e9b4224b4ac52a49c449b864d6eb5d59c76d263cdccb994b96b861b4"
+checksum = "344e725a2343dda56fb7d0349433ac5d89f40b68f659f26141a6a5d1383aceac"
 dependencies = [
  "seismograph",
 ]

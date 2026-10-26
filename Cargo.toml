@@ -81,7 +81,7 @@ proc-macro2 = { version = "1.0.107", default-features = false }
 quote = { version = "1.0.42", default-features = false }
 # 0.0.349 includes a parser fixture that crashes CodeQL 2.26.4; retry the bump with a newer CodeQL release.
 ra_ap_syntax = { version = "0.0.331", default-features = false }
-rallocator = { version = "0.2.0", default-features = false }
+rallocator = { version = "0.3.0", default-features = false }
 reflink-copy = { version = "0.1.30", default-features = false }
 regex = { version = "1.13.1", default-features = false }
 regex-syntax = { version = "0.8.11", default-features = false }
