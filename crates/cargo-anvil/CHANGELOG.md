@@ -11,6 +11,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: reuse the validated MSRV for package discovery
   - cargo-anvil: skip package discovery when no MSRV is declared
   - cargo-anvil: run examples from the canonical workspace root
   - cargo-anvil: build example specs from manifest paths and fix test shims
@@ -21,6 +22,10 @@
 
   - cargo-anvil: note coverage still passes name@version specs
   - cargo-anvil: explain shared license allow list
+
+- ✔️ Tasks
+
+  - cargo-anvil: release v0.20.0 after rebasing package selection
 
 - ♻️ Code Refactoring
 

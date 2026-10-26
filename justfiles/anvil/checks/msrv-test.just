@@ -19,6 +19,7 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
+    $env:RUSTUP_TOOLCHAIN = $toolchain
     $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
