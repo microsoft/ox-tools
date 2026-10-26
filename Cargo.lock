@@ -119,7 +119,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf332d47e38792623cfaea6bb345081b2af66181cb4b8cca1413ab78dafc7080"
 dependencies = [
- "performables",
+ "performables 0.2.0",
  "thread_aware",
  "tokio",
 ]
@@ -425,7 +425,7 @@ checksum = "d221bfbbcb6822673b11072ff09cab05cb0d4db5fc0da44d7c796763d203c41b"
 dependencies = [
  "bytes",
  "nm",
- "performables",
+ "performables 0.2.0",
  "plurality",
  "smallvec",
  "thread_aware",
@@ -528,7 +528,7 @@ dependencies = [
  "tar",
  "tempfile",
  "terminal_size",
- "tick",
+ "tick 0.8.0",
  "tokio",
  "toml",
  "unicode-ident",
@@ -681,7 +681,7 @@ dependencies = [
  "serde_json",
  "syn 3.0.9",
  "tempfile",
- "tick",
+ "tick 0.8.0",
  "toml",
  "toml_edit 0.25.17+spec-1.1.0",
  "unicode-width",
@@ -1371,14 +1371,14 @@ dependencies = [
  "ohno",
  "opentelemetry",
  "opentelemetry-semantic-conventions",
- "performables",
+ "performables 0.2.0",
  "rustls",
  "seatbelt",
  "seatbelt_http",
  "smallvec",
  "templated_uri",
  "thread_aware",
- "tick",
+ "tick 0.7.1",
  "tokio",
  "tower-service",
  "tracing",
@@ -1409,7 +1409,7 @@ dependencies = [
  "pin-project",
  "seatbelt",
  "templated_uri",
- "tick",
+ "tick 0.7.1",
  "tokio-native-tls",
  "tower",
  "tracing",
@@ -1816,7 +1816,7 @@ dependencies = [
  "serde_json",
  "templated_uri",
  "thread_aware",
- "tick",
+ "tick 0.7.1",
 ]
 
 [[package]]
@@ -2644,6 +2644,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "performables"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a55224f3117dc71bf5c2c96c235e33e98231742cd927c6ff40d845c0050798c6"
+dependencies = [
+ "thread_aware_core",
+]
+
+[[package]]
 name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3305,7 +3314,7 @@ dependencies = [
  "opentelemetry",
  "recoverable",
  "thread_aware",
- "tick",
+ "tick 0.7.1",
  "tracing",
 ]
 
@@ -3319,7 +3328,7 @@ dependencies = [
  "http_extensions",
  "seatbelt",
  "templated_uri",
- "tick",
+ "tick 0.7.1",
 ]
 
 [[package]]
@@ -3774,9 +3783,9 @@ dependencies = [
 
 [[package]]
 name = "thread_aware"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f2d8f0aa7bc71a23d3d7a29f3fa900ba9c8eaa77f4dd26555d5971876965f1"
+checksum = "68a059eeef4b5cf26a277ee5f85f0901ecd349748b71a0e5a4a9b78e487152d4"
 dependencies = [
  "thread_aware_core",
  "thread_aware_macros",
@@ -3784,15 +3793,15 @@ dependencies = [
 
 [[package]]
 name = "thread_aware_core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "666b23e2beda781541846ca49f41f3913681de55052d97d85443cddaeebb6d79"
+checksum = "e584ba0bc4ecb6a865aaab9d46704368542dc83a2391d5bfbd731bb6d98e22ef"
 
 [[package]]
 name = "thread_aware_macros"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "126a351b9012f8a23a07ada9117c16783f1393fa35a7d147a74433077cd5cd2c"
+checksum = "d62f39f1d33b20bc3cd262799b10b23b4b5909b849d8118b29c0c11a95de9c34"
 dependencies = [
  "syn 3.0.9",
  "thread_aware_macros_impl",
@@ -3800,9 +3809,9 @@ dependencies = [
 
 [[package]]
 name = "thread_aware_macros_impl"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bafd0853ac2befab6db91557ed512a447ca06d1305dafb697d4cb5d0a35315c"
+checksum = "2194f962451fcbce065a654dac8ca0cdb44355070b5aa5266b468220f63b796d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3826,7 +3835,21 @@ checksum = "191bbf2c450bf3bd3e93578bee072575fa7211378d159dd16a234c210c58b92c"
 dependencies = [
  "futures-core",
  "jiff",
- "performables",
+ "performables 0.2.0",
+ "pin-project-lite",
+ "thread_aware",
+ "tokio",
+]
+
+[[package]]
+name = "tick"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d78ddf145aada8350702c88dc94d6da7e4b08e4e18723484b2d244f8da5f20c"
+dependencies = [
+ "futures-core",
+ "jiff",
+ "performables 0.3.0",
  "pin-project-lite",
  "thread_aware",
  "tokio",
