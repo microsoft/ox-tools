@@ -481,6 +481,7 @@ dependencies = [
  "constant_time_eq",
  "csv",
  "env_logger",
+ "fakeable",
  "fetch",
  "flate2",
  "futures",
@@ -1321,6 +1322,26 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fakeable"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "178b3df39288495c873af881414024b135b7943b4f6ee78bb1880eae74017822"
+dependencies = [
+ "fakeable_impl",
+]
+
+[[package]]
+name = "fakeable_impl"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "593c147523dbb19ab7ceed9cb0b085beaa12800c5b36cf9f3df94f34887d2f16"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

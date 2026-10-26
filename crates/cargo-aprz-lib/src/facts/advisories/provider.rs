@@ -17,6 +17,10 @@ use crate::facts::crate_spec::CrateSpec;
 use crate::facts::progress::Progress;
 use crate::{HashMap, Result};
 
+mod publication;
+
+use publication::{SnapshotIo, publish_snapshot};
+
 /// Log target for advisories provider
 const LOG_TARGET: &str = "advisories";
 
@@ -74,7 +78,8 @@ impl Provider {
             .into_app_err("validating the downloaded advisory database")?;
         let cache = cache.clone();
         let database_url = database_url.to_owned();
-        tokio::task::spawn_blocking(move || with_cache_lock(lock, || publish_snapshot(&cache, stage, &database_url))).await??;
+        tokio::task::spawn_blocking(move || with_cache_lock(lock, || publish_snapshot(SnapshotIo::new(cache, stage), &database_url)))
+            .await??;
         Ok(Self {
             database: Arc::new(database),
         })
@@ -156,7 +161,7 @@ async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress, lock: Arc
     .into_app_err("opening the advisory database")
 }
 
-fn with_cache_lock<T>(lock: Arc<std::fs::File>, operation: impl FnOnce() -> T) -> T {
+fn with_cache_lock<L, T>(lock: Arc<L>, operation: impl FnOnce() -> T) -> T {
     // Blocking work outlives a cancelled initializer, so it must own its lock guard.
     let _lock = lock;
     operation()
@@ -226,48 +231,6 @@ fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
 
 fn archive_identity(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
-}
-
-/// Publishes a validated staging directory as the current advisory snapshot.
-///
-/// Replacing `last_synced.bin` is the commit point: the staging directory stays owned by
-/// `stage` (and is removed on failure) until then. Removing older data afterwards is
-/// best-effort and cannot undo a published snapshot.
-fn publish_snapshot(cache: &Cache, stage: tempfile::TempDir, url: &str) -> Result<()> {
-    let previous = match Cache::new(cache.dir(), Duration::MAX, false).load::<(String, String)>("last_synced.bin") {
-        CacheResult::Data((_, directory)) if directory.starts_with(".advisories-") => Some(snapshot_path(cache.dir(), &directory)?),
-        _ => None,
-    };
-    let directory = stage
-        .path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ohno::app_err!("advisory snapshot directory name is not UTF-8"))?;
-    let marker = tempfile::NamedTempFile::new_in(cache.dir())?;
-    let filename = marker
-        .path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ohno::app_err!("advisory marker filename is not UTF-8"))?;
-    cache.save(filename, &(archive_identity(url), directory))?;
-    marker
-        .persist(cache.dir().join("last_synced.bin"))
-        .map_err(|error| error.error)
-        .into_app_err("publishing the advisory cache synchronization marker")?;
-    let published = stage.keep();
-    if let Some(previous) = previous
-        && previous != published
-        && let Err(error) = std::fs::remove_dir_all(&previous)
-    {
-        log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", previous.display());
-    }
-    let legacy = cache.dir().join("repo");
-    if let Err(error) = std::fs::remove_dir_all(&legacy)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        log::warn!(target: LOG_TARGET, "Could not remove old advisory snapshot '{}': {error}", legacy.display());
-    }
-    Ok(())
 }
 
 async fn run_blocking_with_progress<T, F>(progress: &dyn Progress, msg: &str, success_verb: &str, blocking_fn: F) -> Result<T>
@@ -624,14 +587,6 @@ mod tests {
         assert!(!progress.use_colors(), "the recorder inherits the default, which is no color");
     }
 
-    /// Attempts the cache lock once, without waiting.
-    async fn try_lock_cache(root: &Path) -> Result<std::fs::File> {
-        let lock = open_cache_lock(root).await?;
-        lock.try_lock()
-            .map_err(|error| ohno::app_err!("failed to try the advisory cache lock: {error}"))?;
-        Ok(lock)
-    }
-
     #[tokio::test]
     async fn cache_lock_waits_on_the_injected_clock_until_released() {
         let root = tempfile::tempdir().unwrap();
@@ -677,56 +632,6 @@ mod tests {
         assert!(error.to_string().contains("waiting for another advisory cache refresh"), "{error}");
     }
 
-    #[tokio::test]
-    async fn cancelled_cache_publication_keeps_the_lock_until_blocking_work_finishes() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = Cache::new(root.path(), Duration::MAX, false);
-        let previous = root.path().join(".advisories-old");
-        seed_database(&previous);
-        cache.save("last_synced.bin", &("old-url", ".advisories-old")).unwrap();
-        let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
-        seed_database(stage.path());
-        let snapshot = stage.path().to_path_buf();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
-        let caller = tokio::spawn(async move {
-            let lock = Arc::new(lock_cache(cache.dir()).await?);
-            tokio::task::spawn_blocking(move || {
-                let result = with_cache_lock(lock, || {
-                    started_tx.send(()).expect("the test waits for publication to start");
-                    release_rx.recv().expect("the test releases the publication worker");
-                    publish_snapshot(&cache, stage, "new-url")
-                });
-                finished_tx.send(()).expect("the test waits for the publication worker to finish");
-                result
-            })
-            .await?
-        });
-
-        started_rx.await.unwrap();
-        caller.abort();
-        let cancelled = caller.await.unwrap_err();
-        let contender = try_lock_cache(root.path()).await;
-        let blocked = contender.is_err();
-        drop(contender);
-        release_tx.send(()).unwrap();
-        finished_rx.await.unwrap();
-        let _next_lock = try_lock_cache(root.path())
-            .await
-            .expect("publication must release the lock when its worker finishes");
-
-        assert!(cancelled.is_cancelled());
-        assert!(blocked, "a competing initializer must not lock during detached publication");
-        assert!(snapshot.join("crates").is_dir());
-        assert!(!previous.exists(), "the detached worker must finish old-snapshot cleanup");
-        let cache = Cache::new(root.path(), Duration::MAX, false);
-        assert!(matches!(
-            cache.load::<(String, String)>("last_synced.bin"),
-            CacheResult::Data((identity, _)) if identity == archive_identity("new-url")
-        ));
-    }
-
     #[test]
     fn cache_snapshot_paths_cannot_escape_the_cache_root() {
         let error = snapshot_path(Path::new("cache"), "../outside").expect_err("the marker cannot reference a parent directory");
@@ -743,7 +648,7 @@ mod tests {
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let snapshot = stage.path().to_path_buf();
 
-        let error = publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
+        let error = publish_snapshot(SnapshotIo::new(cache, stage), "https://example.invalid/archive.tar.gz")
             .expect_err("a directory cannot be replaced by the marker file");
 
         assert!(error.to_string().contains("publishing the advisory cache"), "{error}");
@@ -805,7 +710,7 @@ mod tests {
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
 
-        publish_snapshot(&cache, stage, "new-url").expect("legacy cleanup is best-effort after publication");
+        publish_snapshot(SnapshotIo::new(cache.clone(), stage), "new-url").expect("legacy cleanup is best-effort after publication");
 
         let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
             panic!("cleanup failures must not discard the new marker");
@@ -905,7 +810,7 @@ mod tests {
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
 
-        publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
+        publish_snapshot(SnapshotIo::new(cache.clone(), stage), "https://example.invalid/archive.tar.gz")
             .expect("old snapshot cleanup is optional once the new snapshot is published");
 
         let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {

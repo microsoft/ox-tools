@@ -141,6 +141,7 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 cargo-gamma-attrs = { workspace = true }
+fakeable = { workspace = true }
 fetch = { workspace = true, features = ["test-util"] }
 insta = { workspace = true }
 serde_json = { workspace = true }
