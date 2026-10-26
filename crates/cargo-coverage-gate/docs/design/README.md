@@ -48,7 +48,7 @@ lower-coverage code.
 7. **Released-surface measurement**: tests still execute and cover production
    code, but source that can only belong to test/example/bench/build-script
    targets, plus item regions that provably require `cfg(test)`, is excluded.
-   Opaque production includes conservatively retain counters whose indirect
+   Opaque production source macros and measured graph gaps conservatively retain counters whose indirect
    source contexts cannot be proven; ordinary authored test-only ranges are
    still removed.
 8. **Open source**: ships from `github.com/microsoft/ox-tools` to crates.io.
@@ -583,7 +583,7 @@ the released Cargo surface:
   than hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
-line surface as the gate. A recognizable production `include!` can introduce
+line surface as the gate. A production `include!` or an opaque item macro can introduce
 another released context for a file otherwise reached only through a test module
 or non-release target. In that case the tool warns on stderr and uses file-local
 test-only proofs throughout the workspace: ordinary authored `#[cfg(test)]`
@@ -592,6 +592,12 @@ attributes are still excluded. Whole-file/non-release-target exclusions and
 additional exclusions depending on inherited module or target guards are not
 assumed. Ambiguous hit and zero-hit counters remain measured under their existing
 source/package attribution, including all canonical aliases.
+An emitted, existing Rust file canonically beneath a workspace member is also
+retained when no supported module edge reaches it. Its local syntax is parsed
+under the member's unambiguous target edition; graph non-reachability is not
+proof that such measured code is invalid or test-only. Measured graph gaps enable
+the same conservative cross-file policy for the entire report batch before any
+section is filtered, so input order cannot erase shared production counters.
 
 This is an intentionally conservative line set, **not complete production-only
 classification**. No annotation is required on ordinary test modules.
@@ -671,18 +677,20 @@ upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
 
 ### 6.2 File-to-package attribution
 
-Released-surface filtering requires every `SF:` path to be reachable from a
-Cargo target root through supported module declarations or a statically located
-include leaf. A source reached only from a non-release target is removed when no
-opaque production inclusion makes that classification ambiguous. An
+Released-surface filtering establishes source ownership through supported Cargo
+target/module edges, literal include leaves, or canonical workspace member
+namespaces for emitted Rust files. A source reached only from a non-release target
+is removed when no opaque production macro or measured graph gap makes that
+classification ambiguous. An
 unresolvable, unreadable, unparseable
-source, a source with no Cargo target owner, or a stale source reference is a
+source, a source outside every established ownership boundary, an ambiguous Rust
+edition, or a stale source reference is a
 configuration/operational error (exit `2`) rather than a counter the tool
 silently hides. Explicit `evaluate_unfiltered*` APIs bypass this filtering.
 
 The module graph does not evaluate `include!`, macro-generated module
-declarations, or build-script-generated source. A recognizable potentially
-released built-in `include!` enables the conservative retention above rather
+declarations, or build-script-generated source. A potentially released built-in
+`include!` or opaque item-position macro enables the conservative retention above rather
 than aborting collection. In particular, a separate test-target edge must not
 erase the included file's production counters. Literal include paths are
 indexed as leaves without following nested modules; their counters are retained
@@ -692,17 +700,21 @@ include leaves retain their precise non-release exclusion.
 Included tokens may be context-dependent fragments rather than standalone Rust
 files. Leaves are therefore read only for line validation and acquire parsed
 file-local proofs only if an ordinary module edge also reaches the same file.
-An included source appearing in LCOV without any supported target/module or
-literal-include edge still fails with the offending path: no new generated-source
+An emitted source lacking a module edge is retained only within an established
+canonical member namespace, after successful Rust parsing and line validation.
+Other unknown external paths still fail: no general external/generated-source
 ownership rule is inferred. The collector does not alter upstream export
 exclusions or add OUT_DIR counters absent from the original raw LCOV.
 
-Rust macro expansion is not available to the source walker. A module generated
-by `macro_rules!`, a procedural macro, or a renamed `include!` can therefore be
-classified as non-release when the same file is also reached through a
-supported non-release edge. Repositories using those shared generated-source
-patterns remain outside automatic expansion support. The conservative policy
-does not claim to discover arbitrary macro-generated source contexts.
+Rust macro expansion is not available to the source walker. Item macros are
+treated as opaque possible source declarations rather than expanded, including
+`cfg_select!`; an unused macro definition or an ordinary expression macro alone
+does not establish another source edge. A source shared between a test module
+and an opaque production macro retains its hits and genuine misses instead of
+being classified by the test edge alone. File-local authored test-only ranges
+are still removed. This policy discovers neither macro-generated test bodies
+nor which conditional macro arm compiled; it processes only the actual measured
+files and does not claim complete production-only classification.
 
 Canonical source identity is kept separate from Rust's module-resolution
 location. If a Cargo target or module source is reached through a file symlink,

@@ -33,8 +33,9 @@
 //! exposing a same-named local feature: another feature may activate the
 //! dependency through `dep:dep`.
 //!
-//! A recognizable production `include!` makes indirect source ownership
-//! uncertain. Filtering then warns on stderr, removes only file-local
+//! A potentially released source-declaring macro or a measured file missing
+//! from the module graph makes indirect source ownership uncertain.
+//! Filtering then warns on stderr, removes only file-local
 //! test-only ranges, and retains ambiguous counters, including zero-hit
 //! production lines. Such output is conservative, not complete production-only
 //! classification. Ordinary authored `#[cfg(test)]` blocks still need no
@@ -43,6 +44,9 @@
 //! enable `#![cfg_attr(coverage_nightly, feature(coverage_attribute))]` in the
 //! containing crate. This does not expand macros, classify generated tests,
 //! or recover sources omitted from the input LCOV.
+//! A measured, readable Rust file in a known workspace member namespace
+//! retains its counters even when its declaring module is inside an opaque
+//! macro. The filter parses its local syntax without expanding that macro.
 //!
 //! Compiler-library records that escape upstream filename exclusions are
 //! removed only after canonical source paths establish that they are beneath
@@ -311,11 +315,13 @@ pub use error::CoverageGateError;
 /// `test`, or an exact qualified attribute listed in workspace metadata).
 /// Function and branch records are omitted because the proof is line-granular.
 ///
-/// When a recognizable production `include!` makes indirect ownership
+/// When a potentially released source macro or a measured graph gap makes indirect ownership
 /// uncertain, filtering warns on stderr, retains ambiguous source counters,
 /// and excludes only file-local test-only ranges. This conservative result
-/// is not complete production-only classification. Sources without a known owner
-/// and unrelated path, parse, checksum, and line-validation failures remain errors.
+/// is not complete production-only classification. Measured Rust files beneath
+/// a known member namespace are parsed and retained using local test-only proofs,
+/// even without a discovered module edge. Unknown external sources and unrelated
+/// path, parse, checksum, edition, and line-validation failures remain errors.
 /// Macro expansion and counters absent from the input are not inferred.
 ///
 /// Otherwise unknown records outside workspace member directories are excluded
@@ -362,7 +368,7 @@ pub use error::CoverageGateError;
 /// # Errors
 ///
 /// Returns [`CoverageGateError`] when Cargo metadata cannot be loaded, the
-/// LCOV input is malformed, any source reachable from a Cargo target root
+/// LCOV input is malformed, a reachable or measured member source
 /// cannot be resolved/read/parsed, target ownership cannot be determined, or
 /// LCOV line data does not match the current source tree. Compiler-source
 /// discovery failures are also returned when provenance is needed.

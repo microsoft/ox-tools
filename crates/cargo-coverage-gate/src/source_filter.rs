@@ -8,7 +8,7 @@
 //! scripts. Out-of-line modules are followed with Rust's module-resolution
 //! rules. Within released files, syntax ranges guarded exclusively by test
 //! configuration are removed from every line-bearing LCOV record. Opaque
-//! production includes limit exclusions to file-local proofs, retaining
+//! production macros and measured source-graph gaps limit exclusions to file-local proofs, retaining
 //! counters whose indirect source contexts cannot be established.
 
 use std::borrow::Cow;
@@ -162,7 +162,7 @@ struct SourceIndex {
     workspace_root: PathBuf,
     files: BTreeMap<PathBuf, IndexedSource>,
     member_dirs: MemberDirectories,
-    opaque_include_sources: BTreeSet<PathBuf>,
+    uncertain_sources: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -317,12 +317,12 @@ impl SourceIndex {
             )?;
         }
 
-        let opaque_include_sources = files
+        let uncertain_sources = files
             .iter()
             .filter(|(_, indexed)| {
                 indexed.analysis.syntax.as_ref().is_some_and(|syntax| {
                     indexed.visit_contexts.iter().any(|(surface, role, _, _, guard)| {
-                        *role != SourceRole::IncludedSource && source_has_released_include(syntax, *surface, guard, &test_attributes)
+                        *role != SourceRole::IncludedSource && source_has_opaque_source_macro(syntax, *surface, guard, &test_attributes)
                     })
                 })
             })
@@ -332,8 +332,50 @@ impl SourceIndex {
             workspace_root,
             files,
             member_dirs,
-            opaque_include_sources,
+            uncertain_sources,
         })
+    }
+
+    fn index_reported_member_sources(&mut self, reports: &[lcov::Report], metadata: &Metadata) -> Result<(), CoverageGateError> {
+        let test_attributes = configured_test_attributes(metadata)?;
+        for report in reports {
+            for key in report.sections.keys() {
+                let (canonical, source) = self.source_for_lcov(&key.source_file)?;
+                if source.is_some() {
+                    continue;
+                }
+                let Some(reported_member) = canonical
+                    .ancestors()
+                    .find_map(|ancestor| self.member_dirs.reported_by_canonical.get(ancestor))
+                else {
+                    continue;
+                };
+                let package = metadata
+                    .workspace_packages()
+                    .into_iter()
+                    .find(|package| {
+                        package
+                            .manifest_path
+                            .parent()
+                            .is_some_and(|parent| parent.as_std_path() == reported_member)
+                    })
+                    .expect("member directories originate from the same Cargo metadata snapshot");
+                let edition = measured_member_edition(package, &canonical)?;
+                let analysis = analyze_source(&canonical, edition, &test_attributes)?;
+                let _ = self.uncertain_sources.insert(canonical.clone());
+                let _ = self.files.insert(
+                    canonical,
+                    IndexedSource {
+                        analysis,
+                        edition,
+                        released_path: None,
+                        test_only_lines: BTreeSet::new(),
+                        visit_contexts: BTreeSet::new(),
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     fn revisit_indexed_source(
@@ -417,9 +459,9 @@ impl SourceIndex {
     }
 
     fn conservative_warning(&self) -> Option<String> {
-        self.opaque_include_sources.first().map(|path| {
+        self.uncertain_sources.first().map(|path| {
             format!(
-                "warning: coverage-gate: opaque production `include!` in `{}`; \
+                "warning: coverage-gate: opaque production macro or incomplete source graph at `{}`; \
                  excluding only file-local test-only ranges and retaining ambiguous source counters. \
                  Filtered LCOV is conservative, not complete production-only classification; \
                  use `#[cfg_attr(coverage_nightly, coverage(off))]` for exceptional code only when appropriate",
@@ -427,6 +469,18 @@ impl SourceIndex {
             )
         })
     }
+}
+
+fn measured_member_edition(package: &cargo_metadata::Package, source: &Path) -> Result<Edition, CoverageGateError> {
+    let mut editions = package.targets.iter().map(|target| syntax_edition(target.edition, source));
+    let first = editions.next().unwrap_or_else(|| syntax_edition(package.edition, source))?;
+    for edition in editions {
+        let edition = edition?;
+        if first != edition {
+            return Err(ConflictingSourceEditionError::new(diagnostic_path(source), format!("{first:?}"), format!("{edition:?}")).into());
+        }
+    }
+    Ok(first)
 }
 
 fn source_roots(
@@ -1170,7 +1224,7 @@ fn approximate_cfg_possibilities_without_test(formula: &CfgFormula) -> CfgPossib
     }
 }
 
-fn source_has_released_include(
+fn source_has_opaque_source_macro(
     source: &ast::SourceFile,
     surface: Surface,
     inherited_guard: &CfgFormula,
@@ -1184,10 +1238,10 @@ fn source_has_released_include(
         cfg_formula_possibilities_without_test(inherited_guard),
         attributes_guard(ast::attrs_including_inner(source), test_attributes),
     );
-    syntax_contains_released_include(source.syntax(), test_attributes, &source_guard, source_possibilities)
+    syntax_contains_opaque_source_macro(source.syntax(), test_attributes, &source_guard, source_possibilities)
 }
 
-fn syntax_contains_released_include(
+fn syntax_contains_opaque_source_macro(
     node: &SyntaxNode,
     test_attributes: &BTreeSet<String>,
     inherited_guard: &CfgFormula,
@@ -1200,10 +1254,14 @@ fn syntax_contains_released_include(
         let (guard, possibilities) = extend_cfg_guard(inherited_guard, inherited_possibilities, own_guard);
         let test_only = !possibilities.can_be_true;
         (!test_only
-            && ast::MacroCall::cast(child.clone())
-                .and_then(|macro_call| macro_call.path())
-                .is_some_and(|path| path_is_builtin_include(&path)))
-            || syntax_contains_released_include(&child, test_attributes, &guard, possibilities)
+            && ast::MacroCall::cast(child.clone()).is_some_and(|macro_call| {
+                macro_call.path().is_some_and(|path| path_is_builtin_include(&path))
+                    || matches!(
+                        macro_call.syntax().parent().map(|parent| parent.kind()),
+                        Some(SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST)
+                    )
+            }))
+            || syntax_contains_opaque_source_macro(&child, test_attributes, &guard, possibilities)
     })
 }
 
@@ -1454,7 +1512,7 @@ fn filter_report(
             }
             return Err(UnownedCoverageSourceError::new(diagnostic_path(path)).into());
         };
-        if !sources.opaque_include_sources.is_empty() {
+        if !sources.uncertain_sources.is_empty() {
             return Ok(SourceDisposition::Include {
                 source_file: sources.retained_source_path(&canonical, source)?,
                 line_count: source.analysis.line_count,
@@ -1555,21 +1613,20 @@ fn validate_line(path: &Path, line: u32, line_count: usize) -> Result<(), Covera
 }
 
 pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata: &Metadata) -> Result<Vec<String>, CoverageGateError> {
-    filter_reports_with_compiler_loader(reports, metadata, || {
-        discover_compiler_library(metadata.workspace_root.as_std_path())
-    })
+    filter_reports_with_compiler_loader(reports, metadata, discover_compiler_library)
 }
 
 fn filter_reports_with_compiler_loader(
     reports: Vec<lcov::Report>,
     metadata: &Metadata,
-    load_compiler_library: impl FnOnce() -> Result<Option<PathBuf>, CoverageGateError>,
+    load_compiler_library: impl FnOnce(&Path) -> Result<Option<PathBuf>, CoverageGateError>,
 ) -> Result<Vec<String>, CoverageGateError> {
     if reports.is_empty() {
         configured_test_attributes(metadata)?;
         return Ok(Vec::new());
     }
-    let sources = SourceIndex::from_metadata(metadata)?;
+    let mut sources = SourceIndex::from_metadata(metadata)?;
+    sources.index_reported_member_sources(&reports, metadata)?;
     if let Some(warning) = sources.conservative_warning() {
         eprintln!("{warning}");
     }
@@ -1580,7 +1637,7 @@ fn filter_reports_with_compiler_loader(
             let load = load_compiler_library
                 .take()
                 .expect("compiler library discovery is attempted only once per report batch");
-            compiler_library = Some(load()?);
+            compiler_library = Some(load(metadata.workspace_root.as_std_path())?);
         }
         Ok(compiler_library
             .as_ref()
@@ -2059,6 +2116,10 @@ mod tests {
         );
         assert_eq!(relative_path(Path::new(r"C:\workspace\member"), Path::new(r"D:\shared.rs")), None);
         assert_eq!(relative_path(Path::new("member"), Path::new("shared.rs")), None);
+        assert_eq!(
+            relative_path(Path::new("/workspace/../member"), Path::new("/workspace/shared.rs")),
+            None
+        );
     }
 
     #[test]
@@ -2826,13 +2887,13 @@ mod tests {
                 .any(|(surface, role, _, _, _)| *surface == Surface::NonReleased && *role == SourceRole::PathModule)
         );
         assert_eq!(indexed.released_path.as_deref(), Some(root.join("member/src/shared.rs").as_path()));
-        let error = filter_reports_with_metadata(
+        let measured = filter_reports_with_compiler_loader(
             vec![parse_lcov("TN:\nSF:member/src/implementation/root.rs\nDA:4,1\nend_of_record\n")],
             &metadata,
+            |_| panic!("measured member source has an established package namespace"),
         )
-        .expect_err("an existing source outside the target graph must fail")
-        .to_string();
-        assert!(error.contains("not reachable from any Cargo target"), "{error}");
+        .expect("an existing measured member source is conservatively retained");
+        assert_eq!(parse_lcov(&measured[0]).sections.len(), 1);
 
         let filtered = filter_reports_with_metadata(
             vec![parse_lcov(concat!(
@@ -2929,7 +2990,7 @@ mod tests {
 
         let index = SourceIndex::from_metadata(&metadata).expect("released includes retain uncertain counters");
         let declaring = fs::canonicalize(root.join("member/src/include-root.rs")).expect("canonical include root");
-        assert_eq!(index.opaque_include_sources, BTreeSet::from([declaring]));
+        assert_eq!(index.uncertain_sources, BTreeSet::from([declaring]));
         let warning = index.conservative_warning().expect("conservative filtering must be visible");
         assert!(warning.contains("retaining ambiguous source counters"));
         assert!(warning.contains("not complete production-only classification"));
@@ -2939,7 +3000,7 @@ mod tests {
             Path::new("/workspace/lib.rs"),
             "#[cfg(test)] mod tests { include!(\"helper.rs\"); }\n",
         );
-        assert!(!source_has_released_include(
+        assert!(!source_has_opaque_source_macro(
             test_only.syntax(),
             Surface::Released,
             &CfgFormula::Value(true),
@@ -2948,13 +3009,13 @@ mod tests {
 
         for path in ["include", "::core::include", "std::prelude::v1::include"] {
             let analysis = analyze(Path::new("/workspace/lib.rs"), &format!("{path}!(\"helper.rs\");\n"));
-            assert!(source_has_released_include(
+            assert!(source_has_opaque_source_macro(
                 analysis.syntax(),
                 Surface::Released,
                 &CfgFormula::Value(true),
                 &BTreeSet::new(),
             ));
-            assert!(!source_has_released_include(
+            assert!(!source_has_opaque_source_macro(
                 analysis.syntax(),
                 Surface::NonReleased,
                 &CfgFormula::Value(true),
@@ -2963,7 +3024,7 @@ mod tests {
         }
 
         let custom = analyze(Path::new("/workspace/lib.rs"), "company::include!(\"helper.rs\");\n");
-        assert!(!source_has_released_include(
+        assert!(source_has_opaque_source_macro(
             custom.syntax(),
             Surface::Released,
             &CfgFormula::Value(true),
@@ -3120,25 +3181,15 @@ mod tests {
         assert_eq!(section.lines.len(), 1);
         assert_eq!(section.lines.values().next().expect("retained miss").count, 0);
 
-        for (source, line) in [
-            ("conservative-root.rs", 0),
-            ("conservative-root.rs", 46),
-            ("implementation/root.rs", 4),
-        ] {
+        for (source, line) in [("conservative-root.rs", 0), ("conservative-root.rs", 46)] {
             let raw = format!("TN:\nSF:member/src/{source}\nDA:{line},1\nend_of_record\n");
             let error =
                 filter_reports_with_metadata(vec![parse_lcov(&raw)], &metadata).expect_err("unrelated input failures remain explicit");
             let causes = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source());
             assert!(
-                if source == "implementation/root.rs" {
-                    causes
-                        .into_iter()
-                        .any(<dyn std::error::Error + 'static>::is::<UnownedCoverageSourceError>)
-                } else {
-                    causes
-                        .into_iter()
-                        .any(<dyn std::error::Error + 'static>::is::<CoverageLineOutOfRangeError>)
-                },
+                causes
+                    .into_iter()
+                    .any(<dyn std::error::Error + 'static>::is::<CoverageLineOutOfRangeError>),
                 "{error}"
             );
         }
@@ -3165,7 +3216,7 @@ mod tests {
             member_dirs: MemberDirectories {
                 reported_by_canonical: BTreeMap::from([(member.clone(), member.clone()), (other.clone(), other.clone())]),
             },
-            opaque_include_sources: BTreeSet::new(),
+            uncertain_sources: BTreeSet::new(),
         };
         assert!(index.conservative_warning().is_none());
         let mut source = IndexedSource {
@@ -3276,13 +3327,181 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn opaque_item_macros_retain_shared_production_even_without_unresolved_records() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/macro-root.rs").to_string_lossy().into_owned().into();
+        let index = SourceIndex::from_metadata(&metadata).expect("opaque item macro does not require expansion");
+        assert_eq!(
+            index.uncertain_sources,
+            BTreeSet::from([fs::canonicalize(root.join("member/src/macro-root.rs")).expect("canonical root")])
+        );
+        let raw = format!(
+            "{}{}",
+            lcov_section(&root.join("member/src/conservative-shared.rs"), &[(4, 1), (8, 0), (15, 1)]),
+            lcov_section(&root.join("member/src/../src/conservative-shared.rs"), &[(4, 2), (9, 0)]),
+        );
+        let filtered = filter_reports_with_metadata(parse_reports(&[&raw]).expect("raw source"), &metadata)
+            .expect("shared released contexts are uncertain, not test-only");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.len(), 1);
+        let section = report.sections.values().next().expect("shared production");
+        let lines = section
+            .lines
+            .iter()
+            .map(|(line, value)| (line.line, value.count))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(lines, BTreeMap::from([(4, 3), (8, 0), (9, 0)]));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn measured_member_source_gaps_use_local_proofs_before_filtering_the_whole_batch() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/macro-root.rs").to_string_lossy().into_owned().into();
+        let shared = lcov_section(&root.join("member/src/conservative-shared.rs"), &[(4, 1), (8, 0), (15, 1)]);
+        let backend = format!(
+            "{}{}",
+            lcov_section(
+                &root.join("member/src/macro-backend.rs"),
+                &[(4, 1), (5, 1), (6, 1), (8, 0), (9, 0), (10, 0), (15, 1)]
+            ),
+            lcov_section(&root.join("member/src/../src/macro-backend.rs"), &[(4, 2), (9, 0)]),
+        );
+        let filtered = filter_reports_with_compiler_loader(parse_reports(&[&shared, &backend]).expect("raw source"), &metadata, |_| {
+            panic!("existing measured source belongs to a known member namespace")
+        })
+        .expect("module-graph gaps must not discard measured member source");
+        let shared_report = parse_lcov(&filtered[0]);
+        let lines = shared_report
+            .sections
+            .values()
+            .next()
+            .expect("shared source")
+            .lines
+            .keys()
+            .map(|line| line.line)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, [4, 8]);
+        let backend_report = parse_lcov(&filtered[1]);
+        assert_eq!(backend_report.sections.len(), 1);
+        let (key, section) = backend_report.sections.iter().next().expect("macro-declared member source");
+        assert_eq!(key.source_file, root.join("member/src/macro-backend.rs"));
+        let lines = section
+            .lines
+            .iter()
+            .map(|(line, value)| (line.line, value.count))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(lines, BTreeMap::from([(4, 3), (5, 1), (6, 1), (8, 0), (9, 0), (10, 0)]));
+        let repeated = filter_reports_with_metadata(
+            parse_reports(&filtered.iter().map(String::as_str).collect::<Vec<_>>()).expect("filtered reports"),
+            &metadata,
+        )
+        .expect("published line filtering is stable");
+        assert_eq!(repeated, filtered);
+
+        metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
+        let shared = lcov_section(&root.join("member/src/included-test.rs"), &[(4, 1)]);
+        let filtered = filter_reports_with_metadata(parse_reports(&[&shared, &backend]).expect("raw measured member records"), &metadata)
+            .expect("measured graph gaps make earlier whole-file exclusions uncertain");
+        assert_eq!(parse_lcov(&filtered[0]).sections.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn measured_member_source_gaps_preserve_invalid_source_and_line_failures() {
+        let root = source_index_fixture_root();
+        let metadata = source_index_fixture_metadata(&root);
+        for (path, line) in [
+            ("member/src/invalid-source.txt", 1),
+            ("member/src/missing-source.rs", 1),
+            ("member/src/macro-backend.rs", 0),
+            ("member/src/macro-backend.rs", 99),
+        ] {
+            let error = filter_reports_with_metadata(vec![parse_lcov(&lcov_section(&root.join(path), &[(line, 0)]))], &metadata)
+                .expect_err("uncertain ownership does not validate malformed source or stale counters");
+            let causes = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source());
+            assert!(if path == "member/src/invalid-source.txt" {
+                causes
+                    .into_iter()
+                    .any(<dyn std::error::Error + 'static>::is::<ParseCoverageSourceError>)
+            } else if path.contains("missing") {
+                causes
+                    .into_iter()
+                    .any(<dyn std::error::Error + 'static>::is::<ResolveCoverageSourceError>)
+            } else {
+                causes
+                    .into_iter()
+                    .any(<dyn std::error::Error + 'static>::is::<CoverageLineOutOfRangeError>)
+            });
+        }
+    }
+
+    #[test]
+    fn measured_member_source_requires_an_unambiguous_rust_edition() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        let source = root.join("member/src/macro-backend.rs");
+        assert_eq!(
+            measured_member_edition(&metadata.packages[0], &source).expect("uniform target edition"),
+            Edition::Edition2024
+        );
+        metadata.packages[0].targets[1].edition = CargoEdition::E2021;
+        measured_member_edition(&metadata.packages[0], &source).expect_err("a missing target edge cannot resolve conflicting editions");
+        metadata.packages[0].targets.clear();
+        metadata.packages[0].edition = CargoEdition::E2018;
+        assert_eq!(
+            measured_member_edition(&metadata.packages[0], &source).expect("package edition without targets"),
+            Edition::Edition2018
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn only_potentially_released_source_macros_make_graph_exclusions_uncertain() {
+        for source in [
+            "opaque! { mod child; }\n",
+            "mod inline { opaque! { mod child; } }\n",
+            "std::cfg_select! { unix => { mod child; } _ => {} }\n",
+            "fn production() { include!(\"fragment.rs\"); }\n",
+        ] {
+            assert!(
+                source_has_opaque_source_macro(
+                    analyze(Path::new("fixture.rs"), source).syntax(),
+                    Surface::Released,
+                    &CfgFormula::Value(true),
+                    &BTreeSet::new()
+                ),
+                "{source}"
+            );
+        }
+        for source in [
+            "#[cfg(test)] opaque! { mod child; }\n",
+            "fn production() { assert!(true); }\n",
+            "macro_rules! unused { () => { mod child; } }\n",
+        ] {
+            assert!(
+                !source_has_opaque_source_macro(
+                    analyze(Path::new("fixture.rs"), source).syntax(),
+                    Surface::Released,
+                    &CfgFormula::Value(true),
+                    &BTreeSet::new()
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "canonicalizes checked-in fixture paths, which Miri isolation forbids")]
     fn test_only_included_sources_are_indexed_without_parsing() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root.join("member/src/test-include-root.rs").to_string_lossy().into_owned().into();
         let index = SourceIndex::from_metadata(&metadata).expect("test-only include is indexed");
-        assert!(index.opaque_include_sources.is_empty());
+        assert!(index.uncertain_sources.is_empty());
         assert!(index.conservative_warning().is_none());
         let included = fs::canonicalize(root.join("member/src/included-test.rs")).expect("canonical included test source");
         let indexed = index.files.get(&included).expect("included test source indexed");
@@ -3455,7 +3674,8 @@ mod tests {
             .collect::<Vec<_>>();
         let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
         let loads = std::cell::Cell::new(0);
-        let filtered = filter_reports_with_compiler_loader(parse_reports(&refs).expect("raw input"), &metadata, || {
+        let filtered = filter_reports_with_compiler_loader(parse_reports(&refs).expect("raw input"), &metadata, |workspace| {
+            assert_eq!(workspace, root);
             loads.set(loads.get() + 1);
             canonical_compiler_library(&library)
         })
@@ -3481,7 +3701,7 @@ mod tests {
             }
         }
         let refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
-        let repeated = filter_reports_with_compiler_loader(parse_reports(&refs).expect("filtered input"), &metadata, || {
+        let repeated = filter_reports_with_compiler_loader(parse_reports(&refs).expect("filtered input"), &metadata, |_| {
             panic!("fully owned published reports must not query a compiler")
         })
         .expect("filtered output stays byte-stable");
@@ -3495,7 +3715,7 @@ mod tests {
         let metadata = source_index_fixture_metadata(&root);
         let library = root.join("toolchain/lib/rustlib/src/rust/library");
         let lookalike = root.join("toolchain/lib/rustlib/src/rust/library-other/std.rs");
-        let error = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&lookalike, &[(4, 0)]))], &metadata, || {
+        let error = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&lookalike, &[(4, 0)]))], &metadata, |_| {
             canonical_compiler_library(&library)
         })
         .expect_err("source directory names alone do not prove compiler ownership");
@@ -3504,14 +3724,14 @@ mod tests {
                 .any(<dyn std::error::Error + 'static>::is::<UnownedCoverageSourceError>)
         );
         let compiler_file = library.join("std/src/sys/thread_local/native/mod.rs");
-        filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, || Ok(None))
+        filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, |_| Ok(None))
             .expect_err("without an established compiler root the source remains unknown");
-        filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, || {
+        filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, |_| {
             Err(CompilerSourceDiscoveryError::new("proxy".to_owned(), "unavailable".to_owned()).into())
         })
         .expect_err("failed discovery must not turn into exclusion");
         let missing = library.join("std/missing.rs");
-        let error = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&missing, &[(4, 0)]))], &metadata, || {
+        let error = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&missing, &[(4, 0)]))], &metadata, |_| {
             panic!("an unresolvable input path must fail before source discovery")
         })
         .expect_err("missing source still fails");
@@ -3528,7 +3748,7 @@ mod tests {
         let mut metadata = source_index_fixture_metadata(&root);
         let compiler_file = root.join("toolchain/lib/rustlib/src/rust/library/std/src/sys/thread_local/native/mod.rs");
         metadata.packages[0].targets[0].src_path = compiler_file.to_string_lossy().into_owned().into();
-        let filtered = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, || {
+        let filtered = filter_reports_with_compiler_loader(vec![parse_lcov(&lcov_section(&compiler_file, &[(4, 0)]))], &metadata, |_| {
             panic!("a Cargo-owned source must not be discarded as compiler code")
         })
         .expect("explicit Cargo source is retained");
