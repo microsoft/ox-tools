@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-26
+
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: retain ambiguous include coverage
+  - cargo-coverage-gate: correct feature guards and editions ([#280](https://github.com/microsoft/ox-tools/pull/280))
+
 ## [0.7.1] - 2026-10-20
 
 - 🐛 Bug Fixes
