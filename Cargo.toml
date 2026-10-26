@@ -56,6 +56,7 @@ env_logger = { version = "0.11.11", default-features = false }
 fakeable = { version = "0.2.2", default-features = false }
 fetch = { version = "0.19.0", default-features = false }
 flate2 = { version = "1.1.10", default-features = false }
+future_assert = { version = "0.1.0", default-features = false }
 futures = { version = "0.3.34", default-features = false }
 futures-util = { version = "0.3.34", default-features = false }
 glob = { version = "0.3.3", default-features = false }

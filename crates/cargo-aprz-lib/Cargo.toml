@@ -143,6 +143,7 @@ windows = { workspace = true, features = [
 cargo-gamma-attrs = { workspace = true }
 fakeable = { workspace = true }
 fetch = { workspace = true, features = ["test-util"] }
+future_assert = { workspace = true }
 insta = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

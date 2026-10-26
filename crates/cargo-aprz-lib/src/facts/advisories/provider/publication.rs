@@ -97,6 +97,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex, mpsc};
 
+    use future_assert::FutureTestExt;
+
     use super::*;
     use crate::facts::advisories::provider::with_cache_lock;
 
@@ -252,19 +254,19 @@ mod tests {
             started: started_tx,
             release: release_rx,
         }));
-        let caller = tokio::spawn(async move {
+        let mut caller = Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let result = with_cache_lock(lease, || publish_snapshot(SnapshotIo::fake(io), "new-url"));
                 let _ = finished_tx.send(result);
             })
             .await
         });
+        caller.as_mut().unwrap_pending();
 
         started_rx
             .await
             .expect("the worker reaches marker publication while holding its lease");
-        caller.abort();
-        let cancelled = caller.await;
+        drop(caller);
         let contender = MemoryState::try_lock(&state);
         // Release and observe the complete coordinator (including lease destruction)
         // before asserting, so even a regression cannot strand a blocking worker.
@@ -275,11 +277,6 @@ mod tests {
         finished
             .expect("the worker reports completion")
             .expect("detached publication succeeds");
-        assert!(
-            cancelled
-                .expect_err("the caller was cancelled while its worker was blocked")
-                .is_cancelled()
-        );
         assert!(matches!(contender, Err(std::fs::TryLockError::WouldBlock)));
         let _next_lease = MemoryState::try_lock(&state).expect("completion includes releasing the worker's lease");
         let state = state.lock().expect("no test panics while holding the state lock");
