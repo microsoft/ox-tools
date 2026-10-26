@@ -583,7 +583,7 @@ the released Cargo surface:
   than hiding released code.
 
 Filtering removes matching line records so downstream coverage UIs see the same
-line surface as the gate. A production `include!` or an opaque item macro can introduce
+line surface as the gate. A production macro invocation can introduce
 another released context for a file otherwise reached only through a test module
 or non-release target. In that case the tool warns on stderr and uses file-local
 test-only proofs throughout the workspace: ordinary authored `#[cfg(test)]`
@@ -697,8 +697,8 @@ configuration/operational error (exit `2`) rather than a counter the tool
 silently hides. Explicit `evaluate_unfiltered*` APIs bypass this filtering.
 
 The module graph does not evaluate `include!`, macro-generated module
-declarations, or build-script-generated source. A potentially released built-in
-`include!` or opaque item-position macro enables the conservative retention above rather
+declarations, or build-script-generated source. A potentially released macro
+invocation enables the conservative retention above rather
 than aborting collection. In particular, a separate test-target edge must not
 erase the included file's production counters. Literal include paths are
 indexed as leaves without following nested modules; their counters are retained
@@ -714,10 +714,12 @@ Other unknown external paths still fail: no general external/generated-source
 ownership rule is inferred. The collector does not alter upstream export
 exclusions or add OUT_DIR counters absent from the original raw LCOV.
 
-Rust macro expansion is not available to the source walker. Item macros are
-treated as opaque possible source declarations rather than expanded, including
-`cfg_select!`; an unused macro definition or an ordinary expression macro alone
-does not establish another source edge. A source shared between a test module
+Rust macro expansion is not available to the source walker. Potentially released
+macro invocations are treated as opaque possible source declarations rather than
+expanded, including block-local calls and `cfg_select!`. The invocation's
+syntactic position does not prove that its expansion cannot contain modules.
+Unused macro definitions and invocations in provably test-only contexts do not
+make the source graph uncertain. A source shared between a test module
 and an opaque production macro retains its hits and genuine misses instead of
 being classified by the test edge alone. File-local authored test-only ranges
 are still removed. This policy discovers neither macro-generated test bodies

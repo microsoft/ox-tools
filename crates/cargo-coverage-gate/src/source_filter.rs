@@ -792,6 +792,15 @@ fn classify_test_only_lines(
         .collect()
 }
 
+fn syntax_cfg_guard(node: &SyntaxNode, test_attributes: &BTreeSet<String>) -> CfgFormula {
+    if let Some(owner) = ast::AnyHasAttrs::cast(node.clone()) {
+        attributes_guard(ast::attrs_including_inner(&owner), test_attributes)
+    } else {
+        // MacroExpr has parsed outer attributes but is absent from AnyHasAttrs.
+        attributes_guard(node.children().filter_map(ast::Attr::cast), test_attributes)
+    }
+}
+
 fn collect_test_ranges(root: &SyntaxNode, test_attributes: &BTreeSet<String>, inherited_guard: &CfgFormula) -> Vec<TextRange> {
     fn collect(
         node: &SyntaxNode,
@@ -800,15 +809,10 @@ fn collect_test_ranges(root: &SyntaxNode, test_attributes: &BTreeSet<String>, in
         inherited_possibilities: CfgPossibilities,
         ranges: &mut Vec<TextRange>,
     ) {
-        let owner = ast::AnyHasAttrs::cast(node.clone());
-        let own_guard = owner.as_ref().map_or(CfgFormula::Value(true), |owner| {
-            attributes_guard(ast::attrs_including_inner(owner), test_attributes)
-        });
+        let own_guard = syntax_cfg_guard(node, test_attributes);
         let (guard, possibilities) = extend_cfg_guard(inherited_guard, inherited_possibilities, own_guard);
-        if let Some(owner) = owner
-            && !possibilities.can_be_true
-        {
-            ranges.push(syntax_owner_range(owner.syntax()));
+        if !possibilities.can_be_true {
+            ranges.push(syntax_owner_range(node));
             return;
         }
         for child in node.children() {
@@ -1248,19 +1252,10 @@ fn syntax_contains_opaque_source_macro(
     inherited_possibilities: CfgPossibilities,
 ) -> bool {
     node.children().any(|child| {
-        let own_guard = ast::AnyHasAttrs::cast(child.clone()).map_or(CfgFormula::Value(true), |owner| {
-            attributes_guard(ast::attrs_including_inner(&owner), test_attributes)
-        });
+        let own_guard = syntax_cfg_guard(&child, test_attributes);
         let (guard, possibilities) = extend_cfg_guard(inherited_guard, inherited_possibilities, own_guard);
         let test_only = !possibilities.can_be_true;
-        (!test_only
-            && ast::MacroCall::cast(child.clone()).is_some_and(|macro_call| {
-                macro_call.path().is_some_and(|path| path_is_builtin_include(&path))
-                    || matches!(
-                        macro_call.syntax().parent().map(|parent| parent.kind()),
-                        Some(SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST)
-                    )
-            }))
+        (!test_only && ast::MacroCall::can_cast(child.kind()))
             || syntax_contains_opaque_source_macro(&child, test_attributes, &guard, possibilities)
     })
 }
@@ -1354,9 +1349,7 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
         inherited_guard: &CfgFormula,
     ) -> Result<(), CoverageGateError> {
         for child in node.children() {
-            let own_guard = ast::AnyHasAttrs::cast(child.clone()).map_or(CfgFormula::Value(true), |owner| {
-                attributes_guard(ast::attrs_including_inner(&owner), self.test_attributes)
-            });
+            let own_guard = syntax_cfg_guard(&child, self.test_attributes);
             let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
             if let Some(macro_call) = ast::MacroCall::cast(child.clone())
                 && macro_call.path().is_some_and(|path| path_is_builtin_include(&path))
@@ -3404,6 +3397,52 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
+    fn block_local_macros_retain_production_counters_already_indexed_through_test_edges() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[0].src_path = root.join("member/src/block-macro-root.rs").to_string_lossy().into_owned().into();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 100}});
+        let index = SourceIndex::from_metadata(&metadata).expect("block-local declaration source parses");
+        let (_, shared) = index
+            .source_for_lcov(&root.join("member/src/conservative-shared.rs"))
+            .expect("known source");
+        let shared = shared.expect("the shared source is already indexed");
+        assert!(shared.released_path.is_none(), "the ordinary graph contains only the test edge");
+        assert!(shared.visit_contexts.iter().all(|(surface, ..)| *surface == Surface::NonReleased));
+        let raw = format!(
+            "{}{}",
+            lcov_section(&root.join("member/src/conservative-shared.rs"), &[(4, 1), (8, 0), (15, 1)]),
+            lcov_section(&root.join("member/src/../src/conservative-shared.rs"), &[(4, 2), (9, 0)]),
+        );
+        let filtered = filter_reports_with_metadata(parse_reports(&[&raw]).expect("actual shared counters"), &metadata)
+            .expect("opaque production context prevents whole-file test exclusion");
+        let report = parse_lcov(&filtered[0]);
+        assert_eq!(report.sections.len(), 1);
+        let (key, section) = report.sections.iter().next().expect("shared production counters remain");
+        assert_eq!(key.source_file, root.join("member/src/conservative-shared.rs"));
+        let lines = section
+            .lines
+            .iter()
+            .map(|(line, value)| (line.line, value.count))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(lines, BTreeMap::from([(4, 3), (8, 0), (9, 0)]));
+        assert!(
+            index.files.values().all(|source| !source.visit_contexts.is_empty()),
+            "no measured graph gap is needed"
+        );
+        let repeated = filter_reports_with_metadata(parse_reports(&[&filtered[0]]).expect("published counters"), &metadata)
+            .expect("block-local source uncertainty survives filtering");
+        assert_eq!(repeated, filtered);
+        let evaluated = crate::evaluate_reports_with_metadata(vec![report], &metadata, &[], None).expect("production verdict");
+        assert_eq!(
+            evaluated.verdict(),
+            crate::Verdict::Fail,
+            "genuine production misses must not disappear"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
     fn measured_member_source_gaps_use_local_proofs_before_filtering_the_whole_batch() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
@@ -3675,6 +3714,11 @@ mod tests {
             "mod inline { opaque! { mod child; } }\n",
             "std::cfg_select! { unix => { mod child; } _ => {} }\n",
             "fn production() { include!(\"fragment.rs\"); }\n",
+            "fn production() { declare_shared! {} }\n",
+            "fn production() { declare_shared!(); }\n",
+            "fn production() { let _value = declare_shared!(); }\n",
+            "fn production() { declare_shared!() }\n",
+            "fn production() { assert!(true); }\n",
         ] {
             assert!(
                 source_has_opaque_source_macro(
@@ -3688,7 +3732,8 @@ mod tests {
         }
         for source in [
             "#[cfg(test)] opaque! { mod child; }\n",
-            "fn production() { assert!(true); }\n",
+            "#[cfg(test)] fn only_tests() { declare_shared! {} }\n",
+            "fn production() { #[cfg(test)] declare_shared! {} }\n",
             "macro_rules! unused { () => { mod child; } }\n",
         ] {
             assert!(
@@ -3701,6 +3746,26 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn block_local_macro_guards_agree_for_line_filtering_and_source_edges() {
+        let path = Path::new("/workspace/lib.rs");
+        let source = analyze(
+            path,
+            "fn production() {\n    #[cfg(test)] include!(\"included-expression.rs\");\n}\n",
+        );
+        assert_eq!(source.test_only_lines, BTreeSet::from([2]));
+        assert!(!source_has_opaque_source_macro(
+            source.syntax(),
+            Surface::Released,
+            &CfgFormula::Value(true),
+            &BTreeSet::new()
+        ));
+        let declarations = declarations(path, &source, SourceRole::CrateRoot, &BTreeSet::new()).expect("guarded include declaration");
+        assert_eq!(declarations.len(), 1);
+        assert!(declaration_is_test_only(&declarations[0]));
     }
 
     #[test]

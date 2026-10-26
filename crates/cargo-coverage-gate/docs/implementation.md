@@ -124,7 +124,7 @@ the workspace discovered from the invocation directory.
    using Rust's distinct crate-root, plain-module, and path-module child
    directories. Conditional `cfg_attr(..., path = "...")` edges fail
    explicitly because they require the complete Cargo build configuration.
-   A potentially released built-in `include!` or item-position macro enables
+   A potentially released macro invocation enables
    conservative filtering rather than aborting the operation. It can introduce
    a released context for source otherwise known only through a test edge.
    In this mode file-local test-only ranges are removed, but whole-file and
@@ -146,6 +146,9 @@ the workspace discovered from the invocation directory.
    enables the same conservative cross-file policy for every report. Unknown
    external source ownership still fails; no macro or generated-test evaluation
    is added.
+   Block-local and expression-position invocations are included: their AST
+   position does not constrain generated module declarations. Test-only
+   invocations and unused macro definitions do not enable conservative mode.
    Canonical paths identify source contents and workspace ownership, while a
    separate module-resolution path preserves the declaring file name and
    directory semantics used by rustc, including for symlinked source files.
