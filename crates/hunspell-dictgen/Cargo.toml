@@ -19,6 +19,11 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/hunspell-di
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.cargo_check_external_types]
+# The `#[ohno::error]` attribute on `GenerateError` implements traits in
+# `ohno` that transitively appear in the public API.
+allowed_external_types = ["ohno::*"]
+
 [[bin]]
 name = "hunspell-dictgen"
 path = "src/main.rs"
