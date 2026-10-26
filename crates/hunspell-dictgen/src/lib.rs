@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn invalid_utf8_names_the_input_path() {
         let temporary = TempDir::new().expect("temporary directory creation should succeed");
-        let input = fixture("invalid-utf8.bin");
+        let input = fixture("invalid-utf8.txt");
         let output = temporary.path().join("words.dic");
 
         let error = generate(&input, &output).expect_err("invalid UTF-8 must fail");
