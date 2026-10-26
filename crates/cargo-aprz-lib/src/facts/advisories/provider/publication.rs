@@ -137,8 +137,24 @@ mod tests {
 
     impl Drop for MemoryLease {
         fn drop(&mut self) {
-            self.0.lock().expect("no test panics while holding the state lock").locked = false;
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).locked = false;
         }
+    }
+
+    #[test]
+    fn memory_lease_releases_poisoned_state() {
+        let state = MemoryState::seeded();
+        let lease = MemoryState::try_lock(&state).expect("the first owner acquires the memory lease");
+        let panic = std::panic::catch_unwind(|| {
+            let _state = state.lock().expect("the state has not been poisoned yet");
+            panic!("scripted assertion failure while holding the state lock");
+        });
+        assert!(panic.is_err());
+
+        drop(lease);
+
+        let state = state.lock().expect_err("the scripted panic poisons the state lock").into_inner();
+        assert!(!state.locked);
     }
 
     struct Checkpoint {
