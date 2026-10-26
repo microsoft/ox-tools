@@ -298,7 +298,8 @@ No doctest coverage is lost, since `--all-targets` suppresses doctests too and
 The group uses the same OS/architecture matrix and per-OS impact sets as `pr-test`
 so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
 parallel with the other PR groups. When no root MSRV exists,
-`anvil-msrv-test` reports the skip and exits successfully without running tests.
+`anvil-msrv-test` reports the skip before resolving package exclusions, so this
+no-op needs neither Cargo metadata nor an available stable toolchain.
 Setup installs the declared MSRV through rustup when it is not already
 available.
 

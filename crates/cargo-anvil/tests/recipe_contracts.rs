@@ -1445,6 +1445,7 @@ fn msrv_test_propagates_nested_just_failures() {
         &["anvil-msrv-test"],
         &[
             ("FAKE_IMPACT_HELPER_EXIT", OsStr::new("31")),
+            ("FAKE_RESOLVER_OUTPUT", OsStr::new("test-msrv")),
             ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
         ],
     );
@@ -1475,8 +1476,28 @@ fn msrv_test_propagates_nested_just_failures() {
         "the MSRV resolver's exit code must propagate"
     );
     assert!(
-        fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
+        fs::read_to_string(&cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after resolver failure"
+    );
+
+    let no_msrv = run_just(
+        tmp.path(),
+        &["anvil-msrv-test"],
+        &[
+            ("FAKE_IMPACT_HELPER_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+            ("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+        ],
+    );
+    assert!(
+        no_msrv.status.success(),
+        "missing MSRV must skip even when package discovery is unavailable:\n{}",
+        String::from_utf8_lossy(&no_msrv.stderr)
+    );
+    assert!(String::from_utf8_lossy(&no_msrv.stdout).contains("no root MSRV declared; skipping"));
+    assert!(
+        fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
+        "missing MSRV must skip before any Cargo invocation"
     );
 }
 
@@ -2343,6 +2364,8 @@ fn metadata_consuming_checks_fail_when_discovery_fails() {
                 "anvil-toolchain-nightly-external-types-validate-prereqs",
                 "anvil-tool-cargo-check-external-types-install installer",
                 "anvil-toolchain-nightly-external-types-install",
+                "anvil-tool-cargo-each-validate-prereqs",
+                "anvil-tool-cargo-each-install installer",
                 "anvil-impact",
             ][..],
         ),
@@ -2355,6 +2378,26 @@ fn metadata_consuming_checks_fail_when_discovery_fails() {
     ] {
         let tmp = fixture(&[(recipe_file, contents), ("impact.just", IMPACT)], dependencies);
         seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+        if recipe == "anvil-external-types" {
+            let cargo_log = tmp.path().join("cargo.log");
+            let output = run_just(
+                tmp.path(),
+                &[recipe],
+                &[
+                    ("FAKE_EACH_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+                    ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+                ],
+            );
+            assert_failed(&output, "external-types cargo-each discovery failure");
+            assert!(
+                fs::read_to_string(cargo_log)
+                    .unwrap()
+                    .contains("each --package fixture@0.1.0 --filter lib --keep-going -- cargo +nightly-test check-external-types --manifest-path {manifest}"),
+                "external-types must reach its cargo-each invocation"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("anvil-external-types: failed."));
+            continue;
+        }
         let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))]);
         assert_failed(&output, &format!("{recipe} cargo metadata failure"));
         if recipe == "anvil-doc-test" {

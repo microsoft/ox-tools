@@ -438,6 +438,28 @@ mod tests {
     }
 
     #[test]
+    fn msrv_skip_precedes_metadata_dependent_selection() {
+        let msrv = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/msrv-test.just").then_some(*body))
+            .expect("msrv-test.just is registered in CHECK_FILES");
+        let (before_selection, _) = msrv
+            .split_once("    $include = (& \"{{ just_executable() }}\" _anvil-impact-exclude affected)")
+            .expect("MSRV tests resolve affected packages through workspace exclusions");
+        assert!(before_selection.contains(
+            "    $toolchainOutput = & \"{{ just_executable() }}\" _anvil-resolve-stable msrv | Out-String\n\
+             \x20   $resolverExit = $LASTEXITCODE\n\
+             \x20   if ($resolverExit -ne 0) { exit $resolverExit }\n\
+             \x20   $toolchain = $toolchainOutput.Trim()\n\
+             \x20   if ([string]::IsNullOrWhiteSpace($toolchain)) {\n\
+             \x20       Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'\n\
+             \x20       exit 0\n\
+             \x20   }"
+        ));
+        assert!(!before_selection.contains("& cargo"));
+    }
+
+    #[test]
     fn tool_version_probe_accepts_source_installs() {
         // `cargo install --list` prints `name vX.Y.Z (source):` for path and
         // git installs; the probe must not treat those as missing.
