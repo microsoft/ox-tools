@@ -8,8 +8,6 @@ use std::path::PathBuf;
 use clap::Parser;
 use ohno::{AppError, IntoAppError};
 
-#[mutants::skip] // Entry point: one-line dispatch to the library API.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> Result<(), AppError> {
     let cli = Cli::parse();
 
