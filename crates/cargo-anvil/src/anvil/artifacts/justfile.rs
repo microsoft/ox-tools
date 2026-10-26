@@ -757,6 +757,19 @@ mod tests {
             checks.contains("--target-dir {{ quote(anvil_careful_target_dir) }}"),
             "careful must isolate Cargo artifacts by compiler and tool identity"
         );
+        for needle in [
+            r#"anvil_mutants_diff_file := ".anvil-mutants-diff-" + just_pid() + ".diff""#,
+            r#"trim(read(anvil_impact_input_dir + "/affected.packages")) == """#,
+            "git diff {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}",
+            "mutants --in-diff {{ quote(anvil_mutants_diff_file) }}",
+            "rm {{ quote(anvil_mutants_diff_file) }}",
+        ] {
+            assert!(checks.contains(needle), "mutants-diff is missing '{needle}'");
+        }
+        assert!(
+            !checks.contains("[script(\"pwsh\", \"-NoProfile\")]\nanvil-mutants-diff:"),
+            "mutants-diff must not require PowerShell"
+        );
         for retired in [
             "careful-sysroot.id",
             "cargo clean",

@@ -260,7 +260,7 @@ available.
 
 | Check     | Invocation                                                                  | Source |
 |-----------|-----------------------------------------------------------------------------|--------|
-| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
+| `mutants` | Resolves the base ref and uses Just's native file read to skip when the affected package artifact is empty. For nonempty or full-workspace runs it creates `.anvil-mutants-diff-<just-pid>.diff` from `git diff <base>` against the working tree, then uses cargo-each once-mode to run `cargo mutants --in-diff <file> --no-shuffle --jobs 0` over the selected packages. A successful run removes the PID-scoped hidden file; a failed run retains it for diagnosis. The working-tree diff includes committed, staged, unstaged, and deleted changes relative to the base, keeping cargo-mutants' line validation aligned with tracked files on disk. Missing impact artifacts fail during Just evaluation, while cargo-each validates nonempty package specs before mutation execution. Just-time platform prefixes make the recipe a no-op on aarch64-pc-windows-msvc where cargo-mutants does not build; other ARM legs run normally. | oxidizer-github |
 
 The mutants check requires a base ref. Resolution precedence is `BASE_REF`,
 the ADO target branch, the GitHub base branch, then `origin/main`. Repositories

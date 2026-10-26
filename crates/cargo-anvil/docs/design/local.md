@@ -71,8 +71,9 @@ evaluation. `cargo-delta` owns Git analysis and impact artifacts. `cargo-aprz`
 owns GitHub credential discovery.
 
 Scripts remain only where the domain tool has no equivalent interface:
-README comparison, spell dictionary generation, mutation-diff preparation,
-and container orchestration. Miri profiles use recipe-scoped Just environment
+README comparison, spell dictionary generation, and container orchestration.
+Mutation diff preparation is a direct Git command guarded by cargo-each
+once-mode. Miri profiles use recipe-scoped Just environment
 attributes around a shared cargo-each runner. Cargo-careful uses an
 identity-keyed target directory; Bolero discovery uses a JSONL file consumed by
 cargo-each; PR-title policy is a Just regex; and the MSRV path uses cargo-each's

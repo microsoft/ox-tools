@@ -16,44 +16,22 @@
 # is the only sub-recipe that can't follow, so it bails out early on the
 # affected leg. Coverage on the other three legs is unchanged.
 
+anvil_mutants_diff_file := ".anvil-mutants-diff-" + just_pid() + ".diff"
+anvil_mutants_diff_prefix := if mutants_command_prefix != "" {
+    mutants_command_prefix
+} else if anvil_impact_mode == "off" {
+    ""
+} else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
+    "# "
+} else {
+    ""
+}
+
 # Run mutation testing for changes relative to the base branch.
-[script("pwsh", "-NoProfile")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    if ('{{ anvil_impact_mode }}' -ne 'off') {
-        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
-        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
-            throw "anvil-mutants-diff: missing impact package file $packageFile"
-        }
-        if ((Get-Item -LiteralPath $packageFile).Length -eq 0) {
-            Write-Host 'anvil-mutants-diff: no affected packages; skipping'
-            exit 0
-        }
-    }
-    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
-        exit 0
-    }
-    $base = '{{ replace(anvil_base_ref, "'", "''") }}'
-    # cargo-mutants --in-diff takes a FILE path containing a unified
-    # diff, not a git revision range. Write the diff to a temp file
-    # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at
-    # the job's scratch dir; fall back to the system temp dir locally.
-    $tmp_dir = $env:RUNNER_TEMP
-    if (-not $tmp_dir) { $tmp_dir = $env:AGENT_TEMPDIRECTORY }
-    if (-not $tmp_dir) { $tmp_dir = [System.IO.Path]::GetTempPath() }
-    $diff_path = Join-Path $tmp_dir 'anvil-mutants-diff.diff'
-    # Diff the base against the WORKING TREE, not against HEAD.
-    # cargo-mutants validates every line of the diff against the file on
-    # disk and aborts when they disagree, so a commit-to-commit diff fails
-    # the moment anything is uncommitted -- which is the normal local state,
-    # since the point of running a tier locally is to check work in progress.
-    # CI has a clean tree, so the two forms are identical there and this is
-    # not a behaviour change for it.
-    git diff "$base" --output=$diff_path
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    {{ anvil_mutants_diff_prefix }}git diff {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
+    {{ anvil_mutants_diff_prefix }}cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --in-diff {{ quote(anvil_mutants_diff_file) }} --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
+    {{ anvil_mutants_diff_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
 
 # --- pr-mutants members ---
 
