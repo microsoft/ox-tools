@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-coverage-gate: retain measured member source counters
   - cargo-coverage-gate: verify compiler source provenance
   - cargo-coverage-gate: retain ambiguous include coverage
   - cargo-coverage-gate: correct feature guards and editions ([#280](https://github.com/microsoft/ox-tools/pull/280))
