@@ -182,9 +182,16 @@ fn publish_dictionary(path: &Path, contents: &[u8]) -> Result<(), GenerateError>
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::error::Error as _;
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use super::*;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("test_data").join(name)
+    }
 
     #[test]
     fn empty_input_renders_an_empty_dictionary() {
@@ -247,9 +254,8 @@ mod tests {
     #[test]
     fn generation_creates_parent_directories() {
         let temporary = TempDir::new().expect("temporary directory creation should succeed");
-        let input = temporary.path().join("words.txt");
+        let input = fixture("words.txt");
         let output = temporary.path().join("nested").join("target").join("words.dic");
-        fs::write(&input, "beta\nalpha\n").expect("input fixture should be writable");
 
         generate(&input, &output).expect("generation should create missing output parents");
 
@@ -263,16 +269,15 @@ mod tests {
     #[test]
     fn generation_replaces_an_existing_output() {
         let temporary = TempDir::new().expect("temporary directory creation should succeed");
-        let input = temporary.path().join("words.txt");
+        let input = fixture("words.txt");
         let output = temporary.path().join("words.dic");
-        fs::write(&input, "new\n").expect("input fixture should be writable");
         fs::write(&output, "stale partial content").expect("existing output fixture should be writable");
 
         generate(&input, &output).expect("generation should atomically replace an existing output");
 
         assert_eq!(
             fs::read_to_string(output).expect("replacement dictionary should be readable"),
-            "1\nnew\n"
+            "2\nalpha\nbeta\n"
         );
     }
 
@@ -280,13 +285,16 @@ mod tests {
     #[test]
     fn invalid_utf8_names_the_input_path() {
         let temporary = TempDir::new().expect("temporary directory creation should succeed");
-        let input = temporary.path().join("invalid.txt");
+        let input = fixture("invalid-utf8.bin");
         let output = temporary.path().join("words.dic");
-        fs::write(&input, [0xff]).expect("invalid UTF-8 fixture should be writable");
 
         let error = generate(&input, &output).expect_err("invalid UTF-8 must fail");
+        let cause = error
+            .source()
+            .and_then(|source| source.downcast_ref::<DecodeInputError>())
+            .expect("the generation error should preserve the decode stage");
 
-        assert!(error.to_string().contains(&input.display().to_string()));
+        assert_eq!(cause.path, input.display().to_string());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -296,44 +304,57 @@ mod tests {
         let output = temporary.path().join("words.dic");
 
         let error = generate(temporary.path(), &output).expect_err("reading a directory as input must fail");
+        let cause = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ReadInputError>())
+            .expect("the generation error should preserve the input read stage");
 
-        assert!(error.to_string().contains(&temporary.path().display().to_string()));
+        assert_eq!(cause.path, temporary.path().display().to_string());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn output_parent_creation_failure_names_the_output_path() {
         let temporary = TempDir::new().expect("temporary directory creation should succeed");
-        let input = temporary.path().join("words.txt");
+        let input = temporary.path().join("missing.txt");
         let parent_file = temporary.path().join("not-a-directory");
         let output = parent_file.join("words.dic");
-        fs::write(&input, "word\n").expect("input fixture should be writable");
         fs::write(&parent_file, "blocking file").expect("blocking fixture should be writable");
 
         let error = generate(&input, &output).expect_err("a file cannot be used as an output parent");
+        let cause = error
+            .source()
+            .and_then(|source| source.downcast_ref::<CreateOutputDirectoryError>())
+            .expect("the generation error should preserve the output directory stage");
 
-        assert!(error.to_string().contains(&output.display().to_string()));
+        assert_eq!(
+            (&cause.parent, &cause.output),
+            (&parent_file.display().to_string(), &output.display().to_string())
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn publication_failure_does_not_replace_the_existing_directory() {
         let temporary = TempDir::new().expect("temporary directory creation should succeed");
-        let input = temporary.path().join("words.txt");
+        let input = temporary.path().join("missing.txt");
         let output = temporary.path().join("words.dic");
         let marker = output.join("marker.txt");
-        fs::write(&input, "word\n").expect("input fixture should be writable");
         fs::create_dir(&output).expect("output directory fixture should be creatable");
         fs::write(&marker, "keep").expect("marker fixture should be writable");
 
         let error = generate(&input, &output).expect_err("a directory cannot be replaced by the staged file");
+        let cause = error
+            .source()
+            .and_then(|source| source.downcast_ref::<PublishOutputError>())
+            .expect("the generation error should preserve the publication stage");
 
         assert_eq!(
             (
-                error.to_string().contains(&output.display().to_string()),
+                &cause.path,
                 fs::read_to_string(marker).expect("failed publication must preserve the destination"),
             ),
-            (true, "keep".to_owned())
+            (&output.display().to_string(), "keep".to_owned())
         );
     }
 }
