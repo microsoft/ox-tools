@@ -6,6 +6,7 @@
 
 - ✨ Features
 
+  - cargo-anvil: release v0.20.0
   - cargo-anvil: consolidate generated infrastructure
   - cargo-anvil: manage JSON array entries ([#283](https://github.com/microsoft/ox-tools/pull/283))
 
@@ -15,6 +16,7 @@
 
 - ♻️ Code Refactoring
 
+  - cargo-anvil: make README checks shell-free
   - cargo-anvil: make mutants diff shell-free
   - cargo-anvil: make Miri recipes shell-free
   - cargo-anvil: remove portable recipe PowerShell
