@@ -1823,6 +1823,7 @@ name = "hunspell-dictgen"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "mutants",
  "ohno",
  "tempfile",
 ]
