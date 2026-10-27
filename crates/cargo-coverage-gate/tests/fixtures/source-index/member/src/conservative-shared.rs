@@ -6,7 +6,7 @@ pub fn shared(value: u32) -> u32 {
 }
 
 pub fn production_miss() -> u32 {
-    37
+    37 // Arbitrary value; coverage assertions classify source lines, not numeric results.
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ pub fn production(input: u32) -> u32 {
 }
 
 pub fn production_miss() -> u32 {
-    47
+    47 // Arbitrary value; coverage assertions classify source lines, not numeric results.
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-include!(concat!(env!("OUT_DIR"), "/production.rs"));
+include!(concat!(env!("OUT_DIR"), "/production.rs")); // Return values are arbitrary; coverage assertions classify source lines.
 
 pub fn production(value: u32) -> u32 {
     value + 1

@@ -351,8 +351,9 @@ impl SourceIndex {
                     continue;
                 };
                 let package = metadata
-                    .workspace_packages()
-                    .into_iter()
+                    .packages
+                    .iter()
+                    .filter(|package| metadata.workspace_members.contains(&package.id))
                     .find(|package| {
                         package
                             .manifest_path
@@ -1732,21 +1733,26 @@ fn compiler_sysroot_output(
 }
 
 fn canonical_compiler_library(path: &Path) -> Result<Option<PathBuf>, CoverageGateError> {
-    canonical_compiler_library_with(path, |path| fs::canonicalize(path), |path| fs::metadata(path))
+    canonical_compiler_library_with(
+        path,
+        |path| fs::canonicalize(path),
+        |path| fs::metadata(path).map(|metadata| metadata.is_dir()),
+    )
 }
 
 fn canonical_compiler_library_with(
     path: &Path,
     canonicalize: impl FnOnce(&Path) -> std::io::Result<PathBuf>,
-    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+    is_directory: impl FnOnce(&Path) -> std::io::Result<bool>,
 ) -> Result<Option<PathBuf>, CoverageGateError> {
     let canonical = match canonicalize(path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), error).into()),
     };
-    let metadata = metadata(&canonical).map_err(|error| InspectCoverageSourceError::caused_by(diagnostic_path(&canonical), error))?;
-    if !metadata.is_dir() {
+    let is_directory =
+        is_directory(&canonical).map_err(|error| InspectCoverageSourceError::caused_by(diagnostic_path(&canonical), error))?;
+    if !is_directory {
         return Err(CompilerSourceDiscoveryError::new(
             diagnostic_path(path),
             "the compiler library-source root must be a directory".to_owned(),
@@ -3883,20 +3889,40 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "canonicalizes immutable fixture paths, which Miri isolation forbids")]
     fn compiler_library_root_requires_an_existing_directory() {
-        let root = source_index_fixture_root();
-        let library = root.join("toolchain/lib/rustlib/src/rust/library");
+        let library = Path::new("/compiler/library");
+        let canonical = PathBuf::from("/canonical/library");
         assert_eq!(
-            canonical_compiler_library(&library).expect("installed source tree"),
-            Some(fs::canonicalize(&library).expect("canonical library"))
+            canonical_compiler_library_with(
+                library,
+                |path| {
+                    assert_eq!(path, library);
+                    Ok(canonical.clone())
+                },
+                |path| {
+                    assert_eq!(path, canonical);
+                    Ok(true)
+                },
+            )
+            .expect("an existing directory establishes the compiler source root"),
+            Some(canonical.clone())
         );
         assert_eq!(
-            canonical_compiler_library(&root.join("absent-rust-src")).expect("optional sources may be absent"),
+            canonical_compiler_library_with(
+                library,
+                |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                |_| panic!("missing optional sources must not be inspected"),
+            )
+            .expect("optional sources may be absent"),
             None
         );
-        let error = canonical_compiler_library(&root.join("external-lib.rs")).expect_err("a file is not a source directory");
-        assert!(error.to_string().contains("must be a directory"));
+        let error =
+            canonical_compiler_library_with(library, |_| Ok(canonical), |_| Ok(false)).expect_err("a file is not a source directory");
+        let cause = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(<dyn std::error::Error + 'static>::downcast_ref::<CompilerSourceDiscoveryError>)
+            .expect("a non-directory compiler source root has a typed discovery error");
+        assert_eq!(cause.operation, "/compiler/library");
+        assert_eq!(cause.reason, "the compiler library-source root must be a directory");
     }
 
     #[test]
@@ -3924,6 +3950,19 @@ mod tests {
         let mut metadata = source_index_fixture_metadata(&root);
         metadata.packages[0].targets[0].src_path = root.join("member/src/conservative-root.rs").to_string_lossy().into_owned().into();
         let library = root.join("toolchain/lib/rustlib/src/rust/library");
+        assert_eq!(
+            canonical_compiler_library(&library).expect("installed source tree"),
+            Some(fs::canonicalize(&library).expect("canonical library"))
+        );
+        assert_eq!(
+            canonical_compiler_library(&root.join("absent-rust-src")).expect("optional sources may be absent"),
+            None
+        );
+        let error = canonical_compiler_library(&root.join("external-lib.rs")).expect_err("a file is not a source directory");
+        let cause = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(<dyn std::error::Error + 'static>::downcast_ref::<CompilerSourceDiscoveryError>)
+            .expect("the filesystem adapter rejects file roots with a typed discovery error");
+        assert_eq!(cause.reason, "the compiler library-source root must be a directory");
         let compiler_file = library.join("std/src/sys/thread_local/native/mod.rs");
         let alias = compiler_file
             .parent()

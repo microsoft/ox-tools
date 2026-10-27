@@ -187,9 +187,10 @@ the workspace discovered from the invocation directory.
    Overlapping test-only syntax ranges are merged, then source-ordered tokens
    are classified with a single advancing range cursor. Line records inside
    excluded ranges are removed.
-   Unreadable/unparseable sources, paths with no Cargo target owner, stale line
-   numbers, ambiguous modules, and unsupported path attributes are operational
-   errors rather than reasons to drop counters.
+   Unreadable/unparseable sources, paths with neither Cargo/member ownership nor
+   verified compiler provenance, stale line numbers, ambiguous modules, and
+   unsupported path attributes are operational errors rather than reasons to
+   drop counters.
    Opaque includes do not change raw export behavior or restore OUT_DIR records
    missing from the input. Ordinary authored test modules require no annotations;
    exceptional helpers can use `#[cfg_attr(coverage_nightly, coverage(off))]`
@@ -238,8 +239,10 @@ the workspace discovered from the invocation directory.
   number, and ascending because `FileReport` construction explicitly sorts
   them.
 - Uncovered lines are a subset of coverable lines.
-- Every successful input source is reachable from a Cargo target, and every
-  retained source is attributable to one workspace member.
+- Every successful input source has established Cargo ownership, belongs to a
+  known canonical member namespace as a measured graph gap, or has verified
+  compiler-library provenance. Graph-gap acceptance does not prove target
+  reachability. Every retained source is attributable to one workspace member.
 - Retained LCOV source paths are rewritten into the owning member's
   cargo-metadata path namespace before package attribution.
 - Published `run` artifacts are already filtered; evaluation never gates a
@@ -250,6 +253,22 @@ the workspace discovered from the invocation directory.
   deterministic ordering.
 - A no-data outcome is explanatory rather than location-bearing because there
   are no attributed LCOV records to name.
+
+## Verification boundaries
+
+Syntax, counter-merging, and compiler-source decisions use in-memory inputs and
+injected collaborators. Compiler-root checks receive canonicalization results
+and a directory predicate, so directory, file, optional-absence, and inspection
+error decisions do not require filesystem access.
+
+Source-traversal regressions exercise real canonicalization and parsing against
+immutable, checked-in fixtures, with test-owned metadata, source indexes, and
+reports. They call private metadata/compiler-loader entry points from the source
+filter's test module. The public filtering APIs run `cargo metadata`; they are
+not process-free seams for these regressions. Keeping the private fixture checks
+together avoids exporting a test-only API or spawning processes just to change
+test targets. Filesystem and parser cases have individual, explicit Miri skips;
+the isolated decision tests remain enabled.
 
 ## Display bound
 
