@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-27
+
+- ✨ Features
+
+  - cargo-anvil: manage JSON array entries ([#283](https://github.com/microsoft/ox-tools/pull/283))
+  - cargo-gamma: improve campaign reliability and mutation detection ([#282](https://github.com/microsoft/ox-tools/pull/282))
+  - cargo-gamma: resume interrupted campaigns and streamline mutant testing ([#248](https://github.com/microsoft/ox-tools/pull/248))
+  - cargo-gamma: improve campaign scheduling and UX ([#208](https://github.com/microsoft/ox-tools/pull/208))
+
+- 🐛 Bug Fixes
+
+  - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
+  - cargo-aprz-lib: pin unicode-ident below 1.0.25 ([#207](https://github.com/microsoft/ox-tools/pull/207))
+
+- ✔️ Tasks
+
+  - clean up cargo-deny warnings without narrowing license policy ([#287](https://github.com/microsoft/ox-tools/pull/287))
+  - deps: upgrade cel to 0.15.0 ([#256](https://github.com/microsoft/ox-tools/pull/256))
+
+- ♻️ Code Refactoring
+
+  - cargo-aprz: replace reqwest with fetch ([#275](https://github.com/microsoft/ox-tools/pull/275))
+
+- 🧩 Miscellaneous
+
+  - Address Sander's 'Tsunami of Feedback' ([#221](https://github.com/microsoft/ox-tools/pull/221))
+
 ## [1.2.0] - 2026-09-23
 
 - ✨ Features
