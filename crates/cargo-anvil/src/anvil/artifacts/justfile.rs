@@ -937,6 +937,58 @@ mod tests {
     }
 
     #[test]
+    fn aprz_pins_the_fixed_parser_source() {
+        let pins: Vec<_> = VERSIONS_JUST.lines().filter(|line| line.starts_with("cargo_aprz_")).collect();
+        assert_eq!(
+            pins,
+            [
+                r#"cargo_aprz_version := "1.2.0""#,
+                r#"cargo_aprz_git_url := "https://github.com/microsoft/ox-tools""#,
+                r#"cargo_aprz_git_rev := "bb4c91862d603794764401d57f63f3054196e17a""#,
+            ]
+        );
+    }
+
+    #[test]
+    fn aprz_setup_and_validation_share_the_source_gate() {
+        let recipes: Vec<_> = TOOLS_JUST
+            .lines()
+            .filter(|line| line.starts_with("anvil-tool-cargo-aprz-"))
+            .collect();
+        assert_eq!(
+            recipes,
+            [
+                r#"anvil-tool-cargo-aprz-install installer="install": anvil-toolchain-stable-install (_anvil-cargo-aprz "install" installer)"#,
+                r#"anvil-tool-cargo-aprz-validate-prereqs: (_anvil-cargo-aprz "validate")"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn aprz_installation_never_falls_back_to_a_registry_binary() {
+        let helper = TOOLS_JUST
+            .split_once("_anvil-cargo-aprz action installer=\"install\":\n")
+            .expect("the APRZ source helper is declared in tools.just")
+            .1
+            .split_once("\n# Install the fixed `cargo-aprz`")
+            .expect("the helper ends before the APRZ setup recipe")
+            .0;
+        let commands: Vec<_> = helper
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("& cargo ") || line.starts_with("& \"{{just_executable()}}\""))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "$listOutput = @(& cargo {{_anvil_stable_toolchain_args}} install --list 2>&1)",
+                "& cargo {{_anvil_stable_toolchain_args}} install --locked --force --git $repository --rev $revision --version \"=$version\" cargo-aprz",
+                "& \"{{just_executable()}}\" _anvil-cargo-aprz validate",
+            ]
+        );
+    }
+
+    #[test]
     fn stable_toolchain_selection_is_scoped_to_each_command() {
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
         assert!(

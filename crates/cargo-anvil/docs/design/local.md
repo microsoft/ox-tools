@@ -243,6 +243,18 @@ reproducibility *and* leaves the user in control. Bumping a pin is a deliberate
 catalog edit (changing a variable in `versions.just`), not an upstream-release-triggered
 surprise.
 
+APRZ temporarily uses an immutable source pin instead of a registry release.
+Published `cargo-aprz` / `cargo-aprz-lib` 1.2.0 predates the crates.io `username`
+CSV fix, so its version alone cannot distinguish working and broken installs.
+`cargo_aprz_git_url` and `cargo_aprz_git_rev` in `versions.just` select the fixed
+source; both `install` and `binstall` setup modes build that exact revision with
+`cargo install --locked`. Setup skips only an installed package with the matching
+version, repository, and revision. Otherwise it replaces the stale installation;
+read-only validation rejects it with `just anvil-aprz-setup` guidance. This narrow
+exception also replaces a same-version registry binary restored from a cache.
+Return APRZ to the normal registry/minimum-version policy when a fixed release
+is published.
+
 `cargo-binstall` and `just` are bootstrap utilities rather than catalog checks.
 When absent, setup installs the latest compatible release available at that time;
 when present, setup accepts it. They are intentionally outside the catalog's exact
