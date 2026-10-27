@@ -98,6 +98,9 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   catalog pins.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
+- Supporting Cargo older than 1.93, the minimum supported version for every toolchain an
+  adopter selects, including a declared MSRV. Recipes rely on its behaviour, such as
+  source-qualified package IDs in `cargo metadata`, and keep no workarounds for older Cargo.
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
 - Acting as a runtime: the tool emits `just` recipes and cloud-workflow building blocks, then exits.
   It is **not** invoked at build/test/cloud workflows time. `just` is the runtime. (A narrow exception

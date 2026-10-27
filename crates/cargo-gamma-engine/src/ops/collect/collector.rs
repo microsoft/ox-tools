@@ -4391,6 +4391,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 continue;
             }
 
+            // Multiplication by one stalls ordinary unit-step counters. This syntax-based
+            // population rule also applies to custom assignments; it does not infer traits.
+            if *mutator == "assign.add_to_mul" {
+                let mut right = node.right.as_ref();
+                while let Expr::Paren(paren) = right {
+                    right = &paren.expr;
+                }
+                if matches!(right, Expr::Lit(ExprLit { lit: Lit::Int(value), .. }) if value.base10_parse::<u128>().is_ok_and(|number| number == 1))
+                {
+                    continue;
+                }
+            }
+
             if mutator.starts_with("arith.") && self.unsupported_operator(node, operator) {
                 continue;
             }

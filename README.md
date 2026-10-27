@@ -35,6 +35,7 @@ These are the crates built out of this repo:
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
 - [`cargo-unique-target-names`](./crates/cargo-unique-target-names/README.md) - A cargo subcommand that detects workspace targets which uplift to the same build artifact
 - [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that finds unused and misplaced dependencies
+- [`hunspell-dictgen`](./crates/hunspell-dictgen/README.md) - Generate deterministic Hunspell dictionaries from human-maintained word lists
 
 ## About this Repo
 

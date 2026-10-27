@@ -89,10 +89,10 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | --- | ---: | --- |
 | [`fn_value`](#fn_value) | 21 | Does anything check what this function returns? |
 | [`relational`](#relational) | 10 | Is this comparison's boundary the right one? |
-| [`arith`](#arith) | 10 | Does this calculation's operator matter? |
+| [`arith`](#arith) | 11 | Does this calculation's operator matter? |
 | [`bitwise`](#bitwise) | 4 | Is this mask or flag combination correct? |
 | [`shift`](#shift) | 2 | Is this shift's direction load-bearing? |
-| [`assign`](#assign) | 10 | Does this compound assignment's operator matter? |
+| [`assign`](#assign) | 11 | Does this compound assignment's operator matter? |
 | [`logical`](#logical) | 6 | Is this `&&` really an `&&`? |
 | [`bool_expr`](#bool_expr) | 1 | Does anything observe whether this boolean value is true or false? |
 | [`cond`](#cond) | 3 | Does anything depend on this branch being taken? |
@@ -118,7 +118,7 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`call_result`](#call_result) | 1 | Does this call's result matter independently of its side effects? |
 | [`parameter`](#parameter) | 1 | Does this function parameter contribute to behavior? |
 | [`regex`](#regex) | 6 | Does this pattern's matching semantics matter? |
-| **Total** | **144** | |
+| **Total** | **146** | |
 
 <!-- end generated -->
 
@@ -185,7 +185,7 @@ The `ROR` alias covers this whole family; a test suite that only exercises value
 
 ### `arith`
 
-Swaps one arithmetic operator for another: `+`/`-`/`*`/`/`/`%` interchanged in pairs. A surviving mutant means no test distinguishes the actual formula from a nearby wrong one — the inputs used never produce a different result under the substituted operator.
+Swaps one arithmetic operator for another: `+`/`-`/`*`/`/`/`%` replaced by selected alternatives. A surviving mutant means no test distinguishes the actual formula from a nearby wrong one — the inputs used never produce a different result under the substituted operator.
 
 ```rust
 // original
@@ -229,7 +229,22 @@ let packed = high_byte >> 8;
 
 ### `assign`
 
-The compound-assignment counterpart of `arith`/`bitwise`/`shift`: swaps `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` for their paired opposite. A surviving mutant means the test never observes the accumulated value after the compound assignment runs, only before, or in a case where both operators land on the same result.
+The compound-assignment counterpart of `arith`/`bitwise`/`shift`: swaps `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` for selected alternatives. A surviving mutant means the test never observes the accumulated value after the compound assignment runs, only before, or in a case where both operators land on the same result.
+
+Compound-assignment candidates are checked by the compiler. Unsupported
+replacements, such as `Instant *= Duration` or `String *= &str`, are withdrawn
+during convergence and do not run as tests or count as survivors. Type names
+and aliases alone do not prove trait support, and premature filtering could
+silently remove valid custom operations under shadowed names. Compiler checks
+avoid that loss of coverage at the cost of extra build rounds.
+Select specific mutators with `--mutators` to
+control the candidate population.
+
+`assign.add_to_mul` skips `+= 1`, including integer suffixes, alternate bases,
+and parentheses (for example, `+= (0x1u32)`). This reduces stalled counter
+mutants; `+=` to `-=` remains available. The rule also applies to custom
+assignment operators and explicit selection. Variables, constants, and
+expressions are not evaluated to identify a unit step.
 
 ```rust
 // original
@@ -616,6 +631,7 @@ the mutator runs when `--mutators` is not given.
 | `arith.div_to_rem` | replace / with % | `AOR` | yes |
 | `arith.rem_to_div` | replace % with / | `AOR` | yes |
 | `arith.rem_to_mul` | replace % with * | `AOR` | yes |
+| `arith.rem_to_add` | replace % with + | `AOR` | yes |
 
 #### `bitwise`
 
@@ -638,6 +654,7 @@ the mutator runs when `--mutators` is not given.
 | Mutator | What it does | Alias | Default |
 | --- | --- | --- | --- |
 | `assign.add_to_sub` | replace += with -= | `ASR` | yes |
+| `assign.add_to_mul` | replace += with *= | `ASR` | yes |
 | `assign.sub_to_add` | replace -= with += | `ASR` | yes |
 | `assign.mul_to_div` | replace *= with /= | `ASR` | yes |
 | `assign.div_to_mul` | replace /= with *= | `ASR` | yes |

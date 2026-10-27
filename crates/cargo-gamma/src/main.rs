@@ -110,7 +110,7 @@
 //!   days for large workspaces. `cargo-gamma` compiles every mutant into a single instrumented test binary and activates them
 //!   individually at runtime, turning multi-minute rebuilds into fast process launches. Finally, it remembers
 //!   what it learned while running to accelerate subsequent runs and CI workflows with check-in-ready hints.
-//! * **Thoroughness.** `cargo-gamma` tests 144 mutator transforms across 31 families. It catches off-by-one
+//! * **Thoroughness.** `cargo-gamma` tests 146 mutator transforms across 31 families. It catches off-by-one
 //!   errors (`<` vs `<=`), inverted conditions, arithmetic typos (`+` vs `-`), dropped statements, match
 //!   guard errors, and literal tweaks.
 //! * **Seamless workflow.** Works with your standard `cargo test` suite or `cargo-nextest`, provides built-in
@@ -1710,7 +1710,8 @@ use std::{env, process};
 use cargo_gamma_lib::run;
 use real_host::RealHost;
 
-#[cfg(not(miri))]
+// `rallocator` supports only Linux and Windows hosts; others use the system allocator.
+#[cfg(all(not(miri), any(target_os = "linux", windows)))]
 rallocator::rallocator!();
 
 #[cfg_attr(coverage_nightly, coverage(off))]

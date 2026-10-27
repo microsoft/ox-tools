@@ -93,6 +93,16 @@ removes the legacy Git checkout; failed refreshes leave it intact. RustSec is
 used only for parsing and queries, with its Git features disabled; advisory
 collection requires neither a Git executable nor RustSec's HTTP transports.
 
+Publication keeps its cache lease in the blocking worker, even when its async
+caller is cancelled. A private I/O adapter, made `fakeable` only in unit tests,
+lets in-memory tests exercise the same marker commit, staging ownership, and
+best-effort cleanup coordinator as the filesystem backend. Channel-controlled
+marker I/O checks cancellation and lease release without real files, database
+parsing, subprocesses, or timing assumptions. `future_assert` polls the caller
+once to start blocking work and verify it is pending; dropping the caller at the
+marker checkpoint cancels it without an outer spawned task or polling retries.
+Native filesystem coverage remains separate.
+
 ## Progress styling
 
 Progress phase labels use the command's explicit color policy. Colored labels

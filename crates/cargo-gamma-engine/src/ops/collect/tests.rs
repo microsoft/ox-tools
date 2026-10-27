@@ -495,7 +495,11 @@ const OPERATOR_ORACLE: &[OperatorCase] = &[
     (
         "fn f(a: i32, b: i32) -> i32 { a % b }",
         "arith",
-        &[("arith.rem_to_div", "(a) / (b)"), ("arith.rem_to_mul", "(a) * (b)")],
+        &[
+            ("arith.rem_to_div", "(a) / (b)"),
+            ("arith.rem_to_mul", "(a) * (b)"),
+            ("arith.rem_to_add", "(a) + (b)"),
+        ],
     ),
     (
         "fn f(a: i32, b: i32) -> i32 { a & b }",
@@ -543,7 +547,7 @@ const OPERATOR_ORACLE: &[OperatorCase] = &[
     (
         "fn f(a: &mut i32, b: i32) { *a += b; }",
         "assign",
-        &[("assign.add_to_sub", "*a -= (b)")],
+        &[("assign.add_to_sub", "*a -= (b)"), ("assign.add_to_mul", "*a *= (b)")],
     ),
     (
         "fn f(a: &mut i32, b: i32) { *a -= b; }",
@@ -627,7 +631,7 @@ fn the_operator_oracle_covers_every_replacement_the_tables_offer() {
     let pairs: usize = OPERATOR_ORACLE.iter().map(|(_, _, expected)| expected.len()).sum();
 
     assert_eq!(OPERATOR_ORACLE.len(), 28, "one row per binary and compound-assignment operator");
-    assert_eq!(pairs, 42, "one assertion per binary operator mutation");
+    assert_eq!(pairs, 44, "one assertion per operator substitution");
 }
 
 #[test]
@@ -2759,6 +2763,42 @@ fn compound_assignment_is_mutated() {
     let found = mutators("fn f(a: &mut i32) { *a += 1; }", "assign");
 
     assert_eq!(found, vec!["assign.add_to_sub"]);
+}
+
+#[test]
+fn unit_increments_keep_subtraction_but_skip_multiplication() {
+    for right in ["1", "1u32", "1_u32", "01", "0b1", "0o1", "0x1u32", "((1))"] {
+        let source = format!("fn f(a: &mut u32) {{ *a += {right}; }}");
+        for selection in ["assign", "@default", "assign.add_to_mul,assign.add_to_sub"] {
+            let found = candidates(&source, selection)
+                .into_iter()
+                .filter(|candidate| candidate.mutator.starts_with("assign."))
+                .map(|candidate| (candidate.mutator, candidate.replacement.to_string()))
+                .collect::<Vec<_>>();
+
+            assert_eq!(found, [("assign.add_to_sub", format!("*a -= ({right})"))], "{source}: {selection}");
+        }
+    }
+}
+
+#[test]
+fn other_increment_operands_keep_multiplication_candidates() {
+    for right in ["0", "2", "-1", "amount", "STEP", "step()", "1 + 0", "{ 1 }", "1 as i32"] {
+        let source = format!(
+            "const STEP: i32 = 1; fn step() -> i32 {{ 1 }}
+             fn f(a: &mut i32, amount: i32) {{ *a += {right}; }}"
+        );
+        let found = candidates(&source, "assign.add_to_mul")
+            .into_iter()
+            .map(|candidate| candidate.replacement.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(found, [format!("*a *= ({right})")], "{source}");
+    }
+
+    let found = candidates("fn f(a: &mut f64) { *a += 1.0; }", "assign.add_to_mul");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].replacement, "*a *= (1.0)");
 }
 
 #[test]
@@ -6145,5 +6185,39 @@ fn the_positions_a_stated_value_is_refused_on_emit_no_candidate() {
         let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
 
         let _rejected = check_stated(&file).expect_err("an inert position must be reported rather than silently ignored");
+    }
+}
+
+#[test]
+fn assignment_candidates_do_not_depend_on_unrelated_type_names() {
+    for source in [
+        "struct State { value: std::time::Instant }
+         struct Counter;
+         impl std::ops::AddAssign<i32> for Counter { fn add_assign(&mut self, _: i32) {} }
+         impl std::ops::MulAssign<i32> for Counter { fn mul_assign(&mut self, _: i32) {} }
+         fn target() { let mut value = Counter; value += 2; }",
+        "use std::time::Instant as Clock;
+         fn target(raw: &mut i32) {
+             type Clock = i32;
+             let value: &mut Clock = raw;
+             *value += 2;
+         }",
+        "type Clock = std::time::Instant;
+         fn target(raw: &mut i32) {
+             type Clock = i32;
+             let value: &mut Clock = raw;
+             *value += 2;
+         }",
+        "struct Clock;
+         type Ref<'a, T> = &'a mut T;
+         fn target(mut raw: &mut i32) {
+             use core::primitive::i32 as Clock;
+             let value: &mut Ref<'_, Clock> = &mut raw;
+             **value += 2;
+         }",
+    ] {
+        let found = candidates(source, "assign.add_to_mul");
+        let replacements = found.iter().map(|candidate| candidate.mutator).collect::<Vec<_>>();
+        assert_eq!(replacements, ["assign.add_to_mul"], "{source}: {found:?}");
     }
 }
