@@ -4,166 +4,6 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
-# Platform configs replace, rather than overlay, cargo-mutants' default config.
-_anvil_mutants_platform_config := ".cargo/mutants." + os() + ".toml"
-_anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutants_platform_config) == "true" {
-    "--config=" + _anvil_mutants_platform_config
-} else {
-    ""
-}
-
-# Scheduled groups execute a private group recipe in a child Just process so
-# the internal full-workspace override is visible while that child's dependency
-# graph is evaluated.
-[private]
-_anvil-unscoped name:
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}
-
-# cargo-delta owns Git inspection, merge-base snapshots, cache invalidation, and
-# package projection. ANVIL_IMPACT=consume reads package files produced by an
-# earlier job; ANVIL_IMPACT=off selects the complete workspace. Child Just
-# processes use the override rather than shell-specific environment mutation.
-anvil_impact_override := ""
-anvil_impact_mode := if anvil_impact_override != "" {
-    anvil_impact_override
-} else if env("ANVIL_IMPACT", "") == "" {
-    ""
-} else if env("ANVIL_IMPACT") == "consume" {
-    "consume"
-} else if env("ANVIL_IMPACT") == "off" {
-    "off"
-} else {
-    error("ANVIL_IMPACT must be unset, 'consume', or 'off'")
-}
-
-anvil_impact_input_dir := if anvil_impact_mode == "consume" {
-    env("ANVIL_IMPACT_INPUT_DIR", "target/anvil/impact")
-} else {
-    "target/anvil/impact"
-}
-
-anvil_impact_compute_prefix := if anvil_impact_mode == "" { "" } else { "# " }
-
-anvil_base_ref := if env("BASE_REF", "") == "" {
-    if env("SYSTEM_PULLREQUEST_TARGETBRANCH", "") == "" {
-        if env("GITHUB_BASE_REF", "") == "" {
-            "origin/main"
-        } else {
-            "origin/" + env("GITHUB_BASE_REF")
-        }
-    } else {
-        "origin/" + replace(env("SYSTEM_PULLREQUEST_TARGETBRANCH"), "refs/heads/", "")
-    }
-} else {
-    env("BASE_REF")
-}
-
-anvil_modified_selection := if anvil_impact_mode == "off" {
-    "--workspace"
-} else {
-    "--package-file " + quote(anvil_impact_input_dir + "/modified.packages")
-}
-
-anvil_affected_selection := if anvil_impact_mode == "off" {
-    "--workspace"
-} else {
-    "--package-file " + quote(anvil_impact_input_dir + "/affected.packages")
-}
-
-anvil_required_selection := if anvil_impact_mode == "off" {
-    "--workspace"
-} else {
-    "--package-file " + quote(anvil_impact_input_dir + "/required.packages")
-}
-
-# Some tools represent the complete workspace by omitting package selectors
-# rather than accepting Cargo's `--workspace` flag. In scoped modes cargo-each
-# still expands the selected set to explicit `--package` arguments.
-anvil_explicit_package_args := if anvil_impact_mode == "off" { "" } else { "'{packages}'" }
-
-# Resolve cargo-each's optional workspace compatibility floor once, lazily.
-# The stable marker makes the dry-run output safe to consume as a Just value.
-workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
-workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
-
-# Resolve the command toolchain without overriding either RUSTUP_TOOLCHAIN or a
-# repository toolchain file. Repositories with neither use their declared
-# workspace rust-version when present and otherwise use Cargo's default.
-anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
-    if path_exists(justfile_directory() + "/rust-toolchain.toml") {
-        ""
-    } else if path_exists(justfile_directory() + "/rust-toolchain") {
-        ""
-    } else if workspace_rust_version == "" {
-        ""
-    } else {
-        quote("+" + workspace_rust_version)
-    }
-} else {
-    ""
-}
-
-anvil_workspace_toolchain_selection := if anvil_stable_toolchain_arg == "" { "--none" } else { "--workspace" }
-anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
-anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
-
-# Compute package-file artifacts for the three impact tiers. In consume/off
-# mode the interpolation comments out these command lines, making the recipe a
-# no-op without shell control flow.
-[group("anvil")]
-anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# PR tier: every check that should run on every pull request, split
-# into two groups so the fast checks aren't blocked behind the slow
-# ones in cloud workflows.
-
-# Run all pull request checks.
-[group("anvil")]
-anvil-pr: anvil-pr-validate-prereqs \
-    anvil-pr-fast \
-    anvil-pr-slow
-
-# scheduled tier: full-workspace re-runs of things that can change
-# without a commit (advisories, flakes) + the truly expensive
-# exhaustive checks that don't fit in a PR budget. Runs on a schedule
-# against `main`, not on PRs.
-#
-# The scheduled tier is deliberately NOT impact-scoped: it is the catch-all
-# that backstops PR-tier scoping. Every impact-scoped check depends on
-# `anvil-impact` and populates its own scope from the cache, so the tier runs
-# with ANVIL_IMPACT=off, which makes every cargo-each selection use the
-# complete workspace and the `anvil-impact` dependency no-op.
-# A dependency-only recipe cannot set an environment variable for its own
-# dependencies, so the public tier wraps the private one through
-# `_anvil-unscoped`.
-
-# Run all scheduled checks.
-[group("anvil")]
-anvil-scheduled: (_anvil-unscoped "scheduled")
-
-[private]
-_anvil-scheduled: anvil-scheduled-validate-prereqs \
-    anvil-scheduled-test \
-    anvil-scheduled-advisories \
-    anvil-scheduled-runtime-analysis \
-    anvil-scheduled-exhaustive
-
-# Full-workspace for the same reason as the scheduled tier.
-
-# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
-[group("anvil")]
-anvil-full: (_anvil-unscoped "full")
-
-[private]
-_anvil-full: anvil-full-validate-prereqs \
-    anvil-pr \
-    _anvil-scheduled
-
 # Build all targets and features for local development.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -196,56 +36,15 @@ anvil-audit: anvil-audit-validate-prereqs
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{packages}' --all-features --no-run
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
-# each fuzz target gets a 60-second libfuzzer run, just enough to
-# surface obvious crashes/hangs introduced by a PR without paying for
-# a long fuzzing campaign.
-#
-# Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
-# build dependency) only builds on Linux, so the recipe self-skips on
-# non-Linux hosts -- the pr-runtime-analysis Windows/ARM legs treat
-# bolero as a no-op rather than a failure. This matches oxidizer's
-# reference workflow, whose bolero job runs exclusively on ubuntu.
-# Crates that ship bolero harnesses still get them compiled and
-# exercised as ordinary tests by anvil-llvm-cov on every leg; the
-# libfuzzer campaign is the Linux-only extra.
-#
-# Target discovery is `cargo +<nightly> bolero list --profile release` over the affected packages.
-# Crates with no bolero harness print zero targets and the recipe
-# no-ops. The libfuzzer engine requires nightly, so the test
-# invocation uses the pinned rust_nightly. Adopters who want longer
-# campaigns wire a separate scheduled job; anvil deliberately does
-# not ship a long-form fuzz tier (the failure surface is too
-# repo-specific to standardize).
-
-anvil_bolero_targets_file := "target" / ("bolero-list-" + just_pid() + ".jsonl")
-
-[private]
-_ensure-target-dir: anvil-impact
-    {{ if path_exists("target") { "# target directory already exists" } else { "mkdir target" } }}
-
 # Run Bolero tests for affected workspace packages.
 anvil-bolero: anvil-bolero-validate-prereqs _ensure-target-dir
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'
     {{ bolero_command_prefix }}rm {{ quote(anvil_bolero_targets_file) }}
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-anvil_careful_rustc_identity := shell("rustup run " + rust_nightly + " rustc -vV")
-anvil_careful_executable_hash := sha256_file(which("cargo-careful"))
-anvil_careful_identity := sha256(anvil_careful_rustc_identity + "\n" + anvil_careful_executable_hash)
-anvil_careful_target_dir := "target" / "anvil" / "careful" / anvil_careful_identity
-
 # Run tests with cargo-careful for affected workspace packages.
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-careful
-
-[private]
-_anvil-careful:
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -460,48 +259,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
 
-anvil_miri_jobs := env("ANVIL_MIRI_JOBS", "auto")
-anvil_miri_profile := "standard"
-anvil_miri_race_day := datetime_utc("%-d")
-anvil_miri_race_seed_range := anvil_miri_race_day + "0.." + anvil_miri_race_day + "2"
-anvil_miri_profile_miriflags := if anvil_miri_profile == "standard" {
-    ""
-} else if anvil_miri_profile == "tree-borrows" {
-    "-Zmiri-tree-borrows"
-} else if anvil_miri_profile == "strict-provenance" {
-    "-Zmiri-strict-provenance"
-} else if anvil_miri_profile == "race-coverage" {
-    "-Zmiri-many-seeds=" + anvil_miri_race_seed_range
-} else {
-    error("unknown Miri profile '" + anvil_miri_profile + "'")
-}
-anvil_miri_profile_rustflags := if anvil_miri_profile == "standard" {
-    ""
-} else {
-    "--cfg miri_" + replace(anvil_miri_profile, "-", "_")
-}
-anvil_miri_flags := trim(anvil_miri_profile_miriflags + " " + env("MIRIFLAGS", ""))
-anvil_miri_rustflags := trim(anvil_miri_profile_rustflags + " " + env("RUSTFLAGS", ""))
-
 # Run Miri tests for affected workspace packages.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-profile "standard" package test example)
-
-# Impact is resolved before the child process so Miri profile flags are scoped
-# only to the executable runner and never reach prerequisite or impact commands.
-[private]
-_anvil-miri-profile profile package="" test_filter="" example="": anvil-impact
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_miri_profile {{ quote(profile) }} --set anvil_impact_override {{ quote(anvil_impact_mode) }} _anvil-miri-test {{ quote(package) }} {{ quote(test_filter) }} {{ quote(example) }}
-
-[private]
-[env("MIRIFLAGS", anvil_miri_flags)]
-[env("RUSTFLAGS", anvil_miri_rustflags)]
-_anvil-miri-test package="" test_filter="" example="":
-    {{ if test_filter != "" { if example != "" { error("choose exactly one of --test or --example") } else { "# test filter selected" } } else if example != "" { if package == "" { error("--example requires --package") } else { "# example selected" } } else { "# complete test suite selected" } }}
-    {{ if example == "" { "" } else { "# " } }}cargo +{{ rust_nightly }} each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo +{{ rust_nightly }} miri test --package '{cargo-spec}' --tests --all-features --locked {{ if test_filter == "" { "" } else { "-- " + quote(test_filter) } }}
-    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} each --package {{ quote(package) }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo +{{ rust_nightly }} miri run --package '{cargo-spec}' --example {{ quote(example) }} --all-features --locked
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
@@ -542,29 +304,6 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --all-features --locked
     cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --locked
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
-# the affected-tier guard is the wiring-layer's coarse filter (if no
-# affected packages exist, the entire mutants run is pointless).
-#
-# Skip on aarch64-pc-windows-msvc: cargo-mutants doesn't build there
-# (upstream winapi incompatibility), so `_anvil-require cargo-mutants`
-# would fail. The merged pr-slow group runs on all four OS legs; mutants
-# is the only sub-recipe that can't follow, so it bails out early on the
-# affected leg. Coverage on the other three legs is unchanged.
-
-anvil_mutants_diff_file := ".anvil-mutants-diff-" + just_pid() + ".diff"
-anvil_mutants_diff_prefix := if mutants_command_prefix != "" {
-    mutants_command_prefix
-} else if anvil_impact_mode == "off" {
-    ""
-} else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
-    "# "
-} else {
-    ""
-}
-
 # Run mutation testing for changes relative to the base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     {{ anvil_mutants_diff_prefix }}git diff {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
@@ -580,72 +319,9 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
     {{ mutants_command_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --workspace --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Unscoped (PR title is not source-related).
-#
-# Validates that $env:PR_TITLE matches the accepted title syntax when it
-# holds a value; no-op when unset or empty. Cloud workflows inject PR_TITLE
-# explicitly: both GH Actions and ADO resolve the current title via their REST
-# APIs, fail closed when a known PR's title cannot be retrieved, and publish an
-# empty value only outside PR builds. Local runs have no reliable way to recover
-# the PR title, so an unset or empty value defers the check rather than failing
-# it.
-# It does NOT tolerate a non-empty-but-wrong value: a misconfigured cloud
-# variable (e.g. an unexpanded pipeline macro) is a real error and fails
-# the check loudly rather than silently passing.
-
-anvil_pr_title := env("PR_TITLE", "")
-anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'
-anvil_pr_title_error := "PR title '" + anvil_pr_title + "' does not match the accepted Conventional Commits subset.\nAllowed patterns: <type>: <description>, <type>(<scope>): <description>, <type>!: <description>, <type>(<scope>)!: <description>\nAllowed types (case-insensitive): feat, fix, chore, docs, refactor, test, build, ci, perf, revert"
-
 # Validate the pull request title.
 anvil-pr-title: anvil-pr-title-validate-prereqs
     {{ if anvil_pr_title == "" { "echo " + quote("anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation") } else if anvil_pr_title =~ anvil_pr_title_pattern { "# PR title matches the accepted Conventional Commits subset" } else { error(anvil_pr_title_error) } }}
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Unscoped.
-#
-# A workspace-level README template (`crates/README.j2` / `README.j2`) feeds
-# every crate's README but is a repo-level input cargo-delta does not map to a
-# cargo package, so this check cannot be safely impact-scoped and always runs.
-#
-# cargo-doc2readme regenerates a crate's README.md from its rustdoc.
-# Two extension points users frequently need:
-#   * Workspace-level template (`crates/README.j2` or `README.j2` at repo
-#     root): a Tera template applied to every crate's README. anvil
-#     auto-detects it and passes `--template` to the per-crate runs.
-#   * Per-crate opt-out: hand-crafted READMEs (e.g. a tool crate whose
-#     README is more freeform than the lib docs) opt out by adding
-#     `[package.metadata.ox-gen-readme]\ndisable = true` to their
-#     Cargo.toml. anvil skips those crates.
-#
-# Library or proc-macro rustdoc is preferred when a crate has one; bin-only
-# crates use their binary rustdoc so every publishable crate follows the same
-# generation policy.
-#
-# cargo-each owns metadata filtering, crate-root working directories, ordered
-# execution, and failure aggregation. The workspace template is passed as an
-# absolute path so it remains valid after each per-package chdir.
-
-anvil_readme_template := if path_exists("crates/README.j2") {
-    absolute_path("crates/README.j2")
-} else if path_exists("README.j2") {
-    absolute_path("README.j2")
-} else {
-    ""
-}
-anvil_readme_template_arg := if anvil_readme_template == "" {
-    ""
-} else {
-    "--template " + quote(anvil_readme_template)
-}
-
-# Generate or check every eligible crate README with the same selection policy.
-_anvil-readme mode: anvil-readme-check-validate-prereqs
-    cargo each --workspace --filter {{ quote("publishable and not metadata:ox-gen-readme.disable=true and (target-kind:lib or target-kind:proc-macro)") }} --chdir --keep-going -- cargo {{ anvil_stable_toolchain_arg }} doc2readme --lib {{ if mode == "check" { "--check" } else if mode == "generate" { "" } else { error("invalid README mode '" + mode + "'; expected 'generate' or 'check'") } }} {{ anvil_readme_template_arg }}
-    cargo each --workspace --filter {{ quote("publishable and not metadata:ox-gen-readme.disable=true and target-kind:bin and not (target-kind:lib or target-kind:proc-macro)") }} --chdir --keep-going -- cargo {{ anvil_stable_toolchain_arg }} doc2readme --bin {{ if mode == "check" { "--check" } else if mode == "generate" { "" } else { error("invalid README mode '" + mode + "'; expected 'generate' or 'check'") } }} {{ anvil_readme_template_arg }}
 
 # Check README files, or regenerate them with `--fix`.
 [arg("fix", long, value="true")]
@@ -714,158 +390,3 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Run the fast pull request checks.
-[group("anvil")]
-anvil-pr-fast: anvil-pr-fast-validate-prereqs \
-    anvil-fmt \
-    anvil-clippy \
-    anvil-check-all-targets \
-    anvil-cargo-sort \
-    anvil-license-headers \
-    anvil-ensure-no-cyclic-deps \
-    anvil-ensure-no-default-features \
-    anvil-doc-build \
-    anvil-readme-check \
-    anvil-spellcheck \
-    anvil-pr-title \
-    anvil-deny \
-    anvil-audit \
-    anvil-udeps \
-    anvil-external-types
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Run pull request compatibility tests under the declared MSRV.
-[group("anvil")]
-anvil-pr-msrv: anvil-pr-msrv-validate-prereqs anvil-msrv-test
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# pr-slow is the local umbrella for everything that takes more than ~30s
-# per crate (tests, MSRV tests, stricter runtimes, mutation testing). Its
-# groups can be invoked individually without invoking the other groups:
-#
-#   pr-test: tests + coverage
-#   pr-msrv: all-target tests under the declared MSRV
-#   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
-#   pr-mutants: mutation testing
-#
-# Cloud workflows run these groups as independent parallel jobs.
-# The umbrella runs them sequentially only when invoked locally:
-#
-#   $ just anvil-pr-test   # tests + coverage only
-#   $ just anvil-pr-msrv   # MSRV all-target tests only
-#   $ just anvil-pr-runtime-analysis   # miri + careful only
-#   $ just anvil-pr-mutants   # mutants only
-
-# Run the slow pull request checks.
-[group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Run the pull request tests.
-[group("anvil")]
-anvil-pr-test: anvil-pr-test-validate-prereqs \
-    anvil-llvm-cov \
-    anvil-doc-test \
-    anvil-examples
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Run the pull request runtime analysis.
-[group("anvil")]
-anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
-    anvil-miri \
-    anvil-careful \
-    anvil-loom \
-    anvil-bolero
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Run the pull request mutation tests.
-[group("anvil")]
-anvil-pr-mutants: anvil-pr-mutants-validate-prereqs anvil-mutants-diff
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Scheduled groups
-
-# Scheduled groups are the full-workspace backstop for PR-tier impact scoping,
-# so route through _anvil-unscoped: it exports ANVIL_IMPACT=off
-# before the check dependencies run, so the group is full-workspace regardless
-# of how it is invoked (CI, `just anvil-scheduled`, or
-# `just anvil-scheduled-test` directly). Because these groups never recompute
-# the impact set, they no longer need cargo-delta as a prerequisite.
-
-# Run the scheduled tests.
-[group("anvil")]
-anvil-scheduled-test: (_anvil-unscoped "scheduled-test")
-
-[private]
-_anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
-    anvil-llvm-cov \
-    anvil-doc-test \
-    anvil-examples
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Full-workspace backstop: routed through _anvil-unscoped so
-# ANVIL_IMPACT=off is set before the check dependencies run, regardless of how
-# the group is invoked. The group does not recompute impact and therefore does
-# not require cargo-delta.
-
-# Run the scheduled advisory checks.
-[group("anvil")]
-anvil-scheduled-advisories: (_anvil-unscoped "scheduled-advisories")
-
-[private]
-_anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
-    anvil-deny \
-    anvil-audit \
-    anvil-aprz \
-    anvil-clippy
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# scheduled-runtime-analysis is the full-workspace counterpart of
-# pr-runtime-analysis: it re-runs miri unscoped (PR-tier miri is
-# impact-scoped, so crates untouched by a PR never get miri coverage)
-# and adds the three stricter miri profiles (tree-borrows, strict-
-# provenance, race-coverage) which are too expensive for PR.
-
-# Full-workspace backstop: routed through _anvil-unscoped so
-# ANVIL_IMPACT=off is set before the check dependencies run, regardless of how
-# the group is invoked. The group does not recompute impact and therefore does
-# not require cargo-delta.
-
-# Run the scheduled runtime analysis.
-[group("anvil")]
-anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
-
-[private]
-_anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
-    anvil-miri \
-    anvil-miri-tree-borrows \
-    anvil-miri-strict-provenance \
-    anvil-miri-race-coverage
-
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Full-workspace backstop: routed through _anvil-unscoped so
-# ANVIL_IMPACT=off is set before the check dependencies run, regardless of how
-# the group is invoked. The group does not recompute impact and therefore does
-# not require cargo-delta.
-
-# Run the scheduled exhaustive checks.
-[group("anvil")]
-anvil-scheduled-exhaustive: (_anvil-unscoped "scheduled-exhaustive")
-
-[private]
-_anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
-    anvil-mutants-full \
-    anvil-cargo-hack \
-    anvil-bench

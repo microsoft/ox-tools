@@ -25,13 +25,15 @@ struct Generated {
     temp: TempDir,
     hub: String,
     checks: String,
+    groups: String,
+    helpers: String,
     setup: String,
     container: String,
 }
 
 impl Generated {
     fn all_recipes(&self) -> String {
-        [&self.hub, &self.checks, &self.setup, &self.container]
+        [&self.hub, &self.checks, &self.groups, &self.helpers, &self.setup, &self.container]
             .into_iter()
             .map(String::as_str)
             .collect::<Vec<_>>()
@@ -67,6 +69,8 @@ fn generated_with_catalog(catalog: &Catalog) -> Generated {
     Generated {
         hub: read("anvil.just"),
         checks: read("checks.just"),
+        groups: read("groups.just"),
+        helpers: read("helpers.just"),
         setup: read("setup.just"),
         container: read("container.just"),
         temp,
@@ -214,7 +218,7 @@ if ($env:FAKE_RUSTUP_EXIT) { exit [int]$env:FAKE_RUSTUP_EXIT }
 #[test]
 fn generated_recipes_are_split_by_responsibility() {
     let generated = generated();
-    for import in ["setup.just", "checks.just", "container.just"] {
+    for import in ["setup.just", "helpers.just", "checks.just", "groups.just", "container.just"] {
         let declaration = if import == "container.just" {
             format!("import? '{import}'")
         } else {
@@ -224,14 +228,24 @@ fn generated_recipes_are_split_by_responsibility() {
     }
     assert!(generated.hub.contains("alias anvil := anvil-pr"));
     assert!(generated.checks.contains("anvil-clippy:"));
-    assert!(generated.checks.contains("anvil-pr-fast:"));
-    assert!(generated.checks.contains("anvil-impact:"));
+    assert!(generated.checks.contains("anvil-build package="));
+    assert!(generated.checks.contains("anvil-readme fix="));
+    assert!(!generated.checks.contains("anvil-pr-fast:"));
+    assert!(!generated.checks.contains("anvil-impact:"));
+    assert!(!generated.checks.lines().any(|line| line.starts_with("_anvil-readme ")));
+    assert!(generated.groups.contains("anvil-pr-fast:"));
+    assert!(!generated.groups.lines().any(|line| line.starts_with("_anvil-unscoped ")));
+    assert!(generated.helpers.contains("anvil-impact:"));
+    assert!(generated.helpers.lines().any(|line| line.starts_with("_anvil-readme ")));
+    assert!(generated.helpers.lines().any(|line| line.starts_with("_anvil-unscoped ")));
     assert!(!generated.checks.contains("anvil-clippy-setup"));
     assert!(generated.setup.contains("anvil-clippy-setup"));
     assert!(generated.setup.contains("cargo_delta_version"));
     assert!(!generated.setup.contains("anvil-clippy:"));
     assert!(generated.container.contains("anvil-container *command:"));
     assert!(!generated.container.contains("anvil-clippy:"));
+    assert!(!generated.groups.contains("anvil-clippy:"));
+    assert!(!generated.helpers.contains("anvil-clippy:"));
     assert!(!generated.all_recipes().contains("anvil-semver-check"));
 }
 
@@ -407,7 +421,7 @@ fn msrv_recipes_use_only_the_declared_root_version() {
     assert!(generated.setup.contains("rustup run '{workspace-rust-version}' rustc --version"));
     assert!(
         generated
-            .checks
+            .helpers
             .contains("anvil_msrv_selection := if workspace_rust_version == \"\"")
     );
     assert!(!generated.all_recipes().contains("ANVIL_MSRV_TOOLCHAIN"));
@@ -730,7 +744,14 @@ fn container_context_and_setup_use_all_generated_recipe_files() {
     let root = generated.temp.path();
     let ignore = std::fs::read_to_string(root.join(".anvil/container/Dockerfile.dockerignore")).unwrap();
     let dockerfile = std::fs::read_to_string(root.join(".anvil/container/Dockerfile")).unwrap();
-    for path in ["anvil.just", "checks.just", "setup.just", "container.just"] {
+    for path in [
+        "anvil.just",
+        "checks.just",
+        "groups.just",
+        "helpers.just",
+        "setup.just",
+        "container.just",
+    ] {
         assert!(ignore.contains(&format!("!.anvil/{path}")));
         assert!(generated.container.contains(&format!("'.anvil/{path}'")));
     }

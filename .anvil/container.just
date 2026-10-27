@@ -220,7 +220,8 @@ anvil-container-tag:
     foreach ($declared in @(
         'rust-toolchain.toml', 'rust-toolchain', 'Cargo.toml',
         '.anvil', '.anvil/anvil.just', '.anvil/checks.just',
-        '.anvil/setup.just', '.anvil/container.just', '.anvil/container'
+        '.anvil/groups.just', '.anvil/helpers.just', '.anvil/setup.just',
+        '.anvil/container.just', '.anvil/container'
     )) {
         $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
@@ -270,6 +271,8 @@ anvil-container-tag:
     $inputs += @(
         '.anvil/anvil.just',
         '.anvil/checks.just',
+        '.anvil/groups.just',
+        '.anvil/helpers.just',
         '.anvil/setup.just',
         '.anvil/container.just'
     )
@@ -354,6 +357,8 @@ anvil-container-tag:
         '.anvil/container',
         '.anvil/anvil.just',
         '.anvil/checks.just',
+        '.anvil/groups.just',
+        '.anvil/helpers.just',
         '.anvil/setup.just',
         '.anvil/container.just',
         'rust-toolchain.toml',

@@ -134,6 +134,8 @@ fn apply_writes_files_then_dry_run_is_clean() {
         .stdout(predicates::str::contains("cargo_anvil::run").not());
     assert!(ws.path().join(".anvil/anvil.just").is_file());
     assert!(ws.path().join(".anvil/checks.just").is_file());
+    assert!(ws.path().join(".anvil/groups.just").is_file());
+    assert!(ws.path().join(".anvil/helpers.just").is_file());
     assert!(ws.path().join(".anvil/setup.just").is_file());
     assert!(ws.path().join(".anvil/container.just").is_file());
     assert!(ws.path().join(".anvil/manifest.toml").is_file());

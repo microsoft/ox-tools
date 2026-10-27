@@ -87,7 +87,7 @@ switch from another tool built on the cargo-anvil engine.
 The generated command interface uses
 [`just`][__link0], a cross-platform command runner.
 A repository’s `Justfile` imports the `.anvil/anvil.just` hub, which loads
-generated checks, setup, and container recipe files.
+generated checks, groups, helpers, setup, and container recipe files.
 
 Run the complete pull-request tier locally:
 
@@ -432,7 +432,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbN-MuUvowoLgbEykEo1hFL8Abl0DYNSjOxuEbsQo81u2m5rNhZIGDa2NhcmdvLWFudmlsZjAuMjAuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb4OaNZdi9hCUbRBMVNHzGQEUbb7hLD8BRt2AbQg9j4XpdifxhZIGDa2NhcmdvLWFudmlsZjAuMjEuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -451,9 +451,9 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link22]: https://mutants.rs/
  [__link23]: https://crates.io/crates/cargo-hack
  [__link24]: https://crates.io/crates/cargo-coverage-gate
- [__link25]: https://docs.rs/cargo-anvil/0.20.0/cargo_anvil/?search=Catalog::anvil
- [__link26]: https://docs.rs/cargo-anvil/0.20.0/cargo_anvil/?search=Artifact
- [__link27]: https://docs.rs/cargo-anvil/0.20.0/cargo_anvil/fn.run_app.html
+ [__link25]: https://docs.rs/cargo-anvil/0.21.0/cargo_anvil/?search=Catalog::anvil
+ [__link26]: https://docs.rs/cargo-anvil/0.21.0/cargo_anvil/?search=Artifact
+ [__link27]: https://docs.rs/cargo-anvil/0.21.0/cargo_anvil/fn.run_app.html
  [__link3]: https://crates.io/crates/cargo-each
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather

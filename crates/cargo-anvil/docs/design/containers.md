@@ -123,7 +123,9 @@ printed, since a caller that asked not to build is usually asking which image is
 repo/
 └── .anvil/
     ├── anvil.just                         import hub
-    ├── checks.just                        checks, groups, tiers, and impact
+    ├── checks.just                        checks and developer utilities
+    ├── groups.just                        public groups and tiers
+    ├── helpers.just                       private recipes and shared definitions
     ├── setup.just                         pins and setup/validation
     ├── container.just                     container recipes
     └── container/

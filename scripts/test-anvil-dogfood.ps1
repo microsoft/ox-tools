@@ -314,6 +314,8 @@ function Invoke-Suite([string]$EngineName) {
         '.anvil/container/Dockerfile.dockerignore',
         '.anvil/anvil.just',
         '.anvil/checks.just',
+        '.anvil/groups.just',
+        '.anvil/helpers.just',
         '.anvil/setup.just',
         '.anvil/container.just'
     )) {
@@ -428,7 +430,9 @@ function Invoke-Suite([string]$EngineName) {
     Assert-That 'a baseline tag is available' ([bool]$baseline)
 
     $cases = @(
-        @{ File = '.anvil/checks.just';    Why = 'checks and group routing decide which setup recipes are reached' }
+        @{ File = '.anvil/checks.just';    Why = 'checks decide which setup recipes are reached' }
+        @{ File = '.anvil/groups.just';    Why = 'groups and tiers decide which checks are reached' }
+        @{ File = '.anvil/helpers.just';   Why = 'private orchestration and impact definitions affect execution' }
         @{ File = '.anvil/setup.just';     Why = 'pins and install recipes decide what is installed' }
         @{ File = '.anvil/container.just'; Why = 'the driver passes build args, secrets and hook output into the build' }
     )

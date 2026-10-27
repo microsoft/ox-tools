@@ -22,7 +22,9 @@ repo/
 └── .anvil/
     ├── manifest.toml
     ├── anvil.just                 small import hub and aliases
-    ├── checks.just                check, group, tier, impact, and developer recipes
+    ├── checks.just                checks and developer utilities
+    ├── groups.just                public groups and tiers
+    ├── helpers.just               private recipes, impact, and shared definitions
     ├── setup.just                 pins and setup/validation recipes
     ├── container.just             container recipes and private helpers
     └── container/
@@ -31,7 +33,7 @@ repo/
         └── hooks.ps1              optional and repository-owned
 ```
 
-The three generated recipe files are fully owned physical files. Source
+The five generated responsibility files are fully owned physical files. Source
 templates remain split inside cargo-anvil for maintainability, and the catalog
 exposes every top-level recipe as an independently addressable delimiter-free
 section. A derived catalog can add, replace, or remove one recipe while the
@@ -81,6 +83,10 @@ cargo-each; PR-title policy is a Just regex; and the MSRV path uses cargo-each's
 optional workspace-version contract. The remaining scripts are not shared Anvil
 runners and do not own generic package iteration.
 
+Developer utilities such as `anvil-build` and `anvil-readme` live in
+`checks.just`: like checks, they directly perform work rather than orchestrating
+other generated recipes.
+
 ### Groups and tiers
 
 Groups are the cloud parallelism boundary:
@@ -101,6 +107,8 @@ anvil-scheduled-exhaustive
 `anvil-scheduled`, and `anvil-full` are the tier entry points. Scheduled groups
 execute through `_anvil-unscoped`, which starts a child Just process with the
 internal impact override set to `off` while its dependency graph is evaluated.
+Public group and tier entry points live in `groups.just`; their private
+implementations and shared impact/toolchain definitions live in `helpers.just`.
 
 ## 3. Setup and toolchain policy
 

@@ -272,7 +272,9 @@ repo/
 ├── .anvil/
 │   ├── manifest.toml                              sidecar manifest tracking last-rendered checksums
 │   ├── anvil.just                                 import hub (see local.md)
-│   ├── checks.just                                checks, groups, tiers, impact
+│   ├── checks.just                                checks and developer utilities
+│   ├── groups.just                                public groups and tiers
+│   ├── helpers.just                               private recipes and shared definitions
 │   ├── setup.just                                 pins and setup/validation
 │   ├── container.just                             container recipes
 │   ├── container/                                 container image definition (see containers.md)

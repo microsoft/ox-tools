@@ -12,7 +12,8 @@ does not introduce an Anvil-specific runner.
 1. Put every Anvil-owned file under `.anvil/` unless a consumer requires a
    conventional location.
 2. Replace the generated Just tree with a small `.anvil/anvil.just` hub and
-   three responsibility-oriented files: checks, setup, and container.
+   five responsibility-oriented files: checks, groups, helpers, setup, and
+   container.
 3. Keep recipe bodies portable: the shell may launch a command, but control
    flow, JSON processing, workspace traversal, and policy do not live in Bash
    or PowerShell.
@@ -32,7 +33,9 @@ repo/
 ├── .anvil/
 │   ├── manifest.toml
 │   ├── anvil.just                    import hub and alias
-│   ├── checks.just                   checks, groups, tiers, impact, developer commands
+│   ├── checks.just                   checks and developer utilities
+│   ├── groups.just                   public groups and tiers
+│   ├── helpers.just                  private recipes, impact, and shared definitions
 │   ├── setup.just                    pins and setup/validation recipes
 │   ├── container.just                container commands and helpers
 │   ├── container/
@@ -70,12 +73,12 @@ repo/
 └── .gitattributes
 ```
 
-The root `Justfile` imports only `.anvil/anvil.just`; that hub imports the
-three generated responsibility files. The root remains user-composed.
+The root `Justfile` imports only `.anvil/anvil.just`; that hub imports the five
+generated responsibility files. The root remains user-composed.
 
 ### 2.1 Files that can move
 
-- The complete `justfiles/anvil/` tree becomes four `.anvil/*.just` files,
+- The complete `justfiles/anvil/` tree becomes six `.anvil/*.just` files,
   without returning to one file per check.
 - `.anvil.lock` becomes `.anvil/manifest.toml`.
 - GitHub local actions move from `.github/actions/anvil-*` to

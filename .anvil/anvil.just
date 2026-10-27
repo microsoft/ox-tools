@@ -7,7 +7,9 @@
 export RUSTUP_AUTO_INSTALL := "0"
 
 import 'setup.just'
+import 'helpers.just'
 import 'checks.just'
+import 'groups.just'
 # A downstream catalog can remove every container artifact without making the
 # remaining recipe surface fail to parse.
 import? 'container.just'

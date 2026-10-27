@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-27
+
+- ✨ Features
+
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: reconcile consolidation with current main
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
+
+- 🧩 Miscellaneous
+
+  - Merge current main into cargo-anvil consolidation
+
 ## [0.20.0] - 2026-10-26
 
 - ✨ Features

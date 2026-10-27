@@ -87,7 +87,7 @@
 //! The generated command interface uses
 //! [`just`](https://github.com/casey/just), a cross-platform command runner.
 //! A repository's `Justfile` imports the `.anvil/anvil.just` hub, which loads
-//! generated checks, setup, and container recipe files.
+//! generated checks, groups, helpers, setup, and container recipe files.
 //!
 //! Run the complete pull-request tier locally:
 //!

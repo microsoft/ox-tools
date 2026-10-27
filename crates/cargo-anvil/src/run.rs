@@ -5525,6 +5525,8 @@ mod tests {
             "Justfile",
             ".anvil/anvil.just",
             ".anvil/checks.just",
+            ".anvil/groups.just",
+            ".anvil/helpers.just",
             ".anvil/setup.just",
             ".anvil/container.just",
             ".anvil/manifest.toml",

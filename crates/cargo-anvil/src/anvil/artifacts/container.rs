@@ -476,6 +476,8 @@ mod tests {
     #[test]
     fn build_context_admits_only_what_the_image_copies() {
         assert!(DOCKERIGNORE.contains("!.anvil/anvil.just"));
+        assert!(DOCKERIGNORE.contains("!.anvil/groups.just"));
+        assert!(DOCKERIGNORE.contains("!.anvil/helpers.just"));
         assert!(!DOCKERIGNORE.contains("justfiles"));
         assert!(!DOCKERIGNORE.contains("!Cargo.toml"));
         assert!(DOCKERIGNORE.contains("!rust-toolchain.toml"));
@@ -1007,6 +1009,8 @@ mod tests {
         for path in [
             "!.anvil/anvil.just",
             "!.anvil/checks.just",
+            "!.anvil/groups.just",
+            "!.anvil/helpers.just",
             "!.anvil/setup.just",
             "!.anvil/container.just",
             "!.anvil/container",
