@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.7.2] - 2026-10-26
+## [0.7.2] - 2026-10-27
 
 - 🐛 Bug Fixes
 
@@ -20,6 +20,10 @@
 - ✔️ Tasks
 
   - cargo-coverage-gate: prepare 0.7.2 release
+
+- ♻️ Code Refactoring
+
+  - cargo-coverage-gate: streamline source ownership and test seams
 
 ## [0.7.1] - 2026-10-20
 
