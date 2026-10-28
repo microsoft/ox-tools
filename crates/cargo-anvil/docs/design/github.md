@@ -1082,20 +1082,31 @@ checksums stale and takes them off the automatic update path.
 ### Dependabot ownership
 
 When the GitHub backend is selected, `cargo anvil` adds the catalog's generated
-workflow and composite-action YAML paths to `exclude-paths` in existing
+workflow and action-manifest YAML paths to `exclude-paths` in existing
 `github-actions` Dependabot update entries. Paths are exact repository-relative
-file names, not action-name ignores or `anvil-*` globs: a repository-owned workflow
-such as `codeql.yml` remains eligible even when it uses the same actions.
-GitHub Actions entries must scan `/`, as required by Dependabot.
+file names with glob metacharacters escaped, not action-name ignores or `anvil-*`
+globs: a repository-owned workflow such as `codeql.yml` remains eligible even when
+it uses the same actions. Catalog-owned `action.yml` and `action.yaml` files are
+included at the root and in other directories.
+
+Root, subdirectory, and multi-directory update jobs retain their existing scan
+settings. Exclusions remain repository-relative because the GitHub Actions
+fetcher's [directory listing filter][dependabot-contents-filter] matches the
+repository-relative `path` from each returned entry. This also avoids a shared
+`directories` list applying a bare `action.yml` exclusion to unrelated action
+directories.
 
 Anvil patches `.github/dependabot.yml` or `.github/dependabot.yaml` without taking
 ownership of the file. Existing exclusions, schedules, groups, cooldowns, other
 settings, comments, and unrelated ecosystem entries are preserved. Missing paths
-are added once; existing exclusions are never removed. Anvil does not create a
-Dependabot configuration or enable a missing update job. Rerun `cargo anvil` after
-adding Dependabot configuration. Malformed or ambiguous configuration, including
-aliases or shared YAML containers that would need editing, is left unchanged with
-an actionable refusal; unrelated YAML anchors remain supported.
+are added once; existing exclusions are never removed. Block lists, including
+indentless lists, and inline YAML lists retain flat string entries. Anvil does not
+create a Dependabot configuration or enable a missing update job. Rerun
+`cargo anvil` after adding Dependabot configuration. Configurations already
+scheduled for whole-file retirement are not patched or recreated. Malformed or
+ambiguous configuration, including aliases or shared YAML containers that would
+need editing, is left unchanged with an actionable refusal; anchors on untouched
+containers do not cause refusals, and unrelated YAML anchors remain supported.
 
 The source repository deliberately continues receiving generated-action update
 PRs so maintainers can update the templates/catalog and regenerate the deployed
@@ -1115,6 +1126,7 @@ source catalog. See the [Dependabot options reference][dependabot-exclude-paths]
 
 [immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
 [dependabot-exclude-paths]: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths
+[dependabot-contents-filter]: https://github.com/dependabot/dependabot-core/blob/510dd5e861be74ddc533083fe8b9953a66670f2f/common/lib/dependabot/file_fetchers/base.rb
 
 ## 10. Coverage upload
 

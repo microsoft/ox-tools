@@ -39,7 +39,7 @@ pub(crate) fn generated_action_paths(catalog: &Catalog, backends: &[Backend]) ->
                         .extension()
                         .is_some_and(|extension| extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml"))
             });
-            let action = path.starts_with(".github/actions/") && (path.ends_with("/action.yml") || path.ends_with("/action.yaml"));
+            let action = matches!(path.rsplit('/').next(), Some("action.yml" | "action.yaml"));
             workflow || action
         })
         .collect();
@@ -65,6 +65,7 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
         bail!("expected Dependabot configuration version 2");
     }
     let updates = fields.get("updates").ok_or_else(|| app_err!("missing Dependabot `updates` list"))?;
+    let paths: Vec<_> = paths.iter().map(|path| literal_glob_path(path)).collect();
     let mut insertions = Vec::new();
     for job in updates.sequence()? {
         let fields = job.fields()?;
@@ -75,17 +76,21 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
         if ecosystem != "github-actions" {
             continue;
         }
-        if fields.contains_key("<<") {
-            bail!("expand YAML merge keys in the GitHub Actions Dependabot job before adding exclusions");
-        }
-        job.require_unshared()?;
-        require_root_directory(&fields)?;
         let exclusions = fields.get("exclude-paths");
         let existing = exclusions.map(|node| node.sequence()).transpose()?.unwrap_or_default();
         let existing = existing.iter().map(Node::scalar).collect::<Result<Vec<_>, _>>()?;
-        let missing: Vec<_> = paths.iter().copied().filter(|path| !existing.contains(path)).collect();
+        let missing: Vec<_> = paths.iter().map(String::as_str).filter(|path| !existing.contains(path)).collect();
         if missing.is_empty() {
             continue;
+        }
+        if fields.contains_key("<<") {
+            bail!("expand YAML merge keys in the GitHub Actions Dependabot job before adding exclusions");
+        }
+        root.require_unshared()?;
+        updates.require_unshared()?;
+        job.require_unshared()?;
+        if let Some(exclusions) = exclusions {
+            exclusions.require_unshared()?;
         }
         insertions.push(match exclusions {
             Some(sequence) => sequence_insertion(text, sequence, &missing),
@@ -104,19 +109,15 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
     Ok(Some(output))
 }
 
-fn require_root_directory(fields: &BTreeMap<&str, &Node>) -> Result<(), AppError> {
-    let root = match (fields.get("directory"), fields.get("directories")) {
-        (Some(directory), None) => directory.scalar()? == "/",
-        (None, Some(directories)) => {
-            let entries = directories.sequence()?;
-            entries.len() == 1 && entries[0].scalar()? == "/"
+fn literal_glob_path(path: &str) -> String {
+    let mut pattern = String::new();
+    for character in path.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']' | '{' | '}') {
+            pattern.push('\\');
         }
-        _ => false,
-    };
-    if !root {
-        bail!("GitHub Actions Dependabot jobs must use `directory: \"/\"` (or `directories: [\"/\"]`)");
+        pattern.push(character);
     }
-    Ok(())
+    pattern
 }
 
 fn quoted_paths(paths: &[&str]) -> String {
@@ -133,7 +134,8 @@ fn sequence_insertion(text: &str, sequence: &Node, paths: &[&str]) -> (usize, St
         return (sequence.span.start + 1, format!("{}{separator}", quoted_paths(paths)));
     }
     let start = line_start(text, sequence.span.start);
-    let indent = &text[start..sequence.span.start];
+    let prefix = &text[start..sequence.span.start];
+    let indent = &prefix[..prefix.len() - prefix.trim_start_matches(' ').len()];
     (start, block_entries(paths, indent, crate::region::text_newline(text)))
 }
 
@@ -183,7 +185,7 @@ struct Node {
 
 impl Node {
     fn require_unshared(&self) -> Result<(), AppError> {
-        if self.shared || self.kind == Kind::Alias {
+        if self.shared {
             bail!("expand YAML aliases, anchors, or tags on the Dependabot containers that need editing");
         }
         Ok(())
@@ -197,7 +199,6 @@ impl Node {
     }
 
     fn sequence(&self) -> Result<&[Self], AppError> {
-        self.require_unshared()?;
         if self.kind != Kind::Sequence {
             bail!("expected a YAML list for Dependabot `updates`, `directories`, or `exclude-paths`");
         }
@@ -234,10 +235,10 @@ fn parse(text: &str) -> Result<Node, AppError> {
         let (event, span) = event.into_app_err("Dependabot configuration is not valid YAML")?;
         let span = offsets[span.start.index()]..offsets[span.end.index()];
         let (kind, shared, opening) = match event {
-            Event::Scalar(value, _, anchor, tag) => (Kind::Scalar(value.into_owned()), anchor != 0 || tag.is_some(), false),
+            Event::Scalar(value, _, _, _) => (Kind::Scalar(value.into_owned()), false, false),
             Event::SequenceStart(anchor, tag) => (Kind::Sequence, anchor != 0 || tag.is_some(), true),
             Event::MappingStart(anchor, tag) => (Kind::Mapping, anchor != 0 || tag.is_some(), true),
-            Event::Alias(_) => (Kind::Alias, true, false),
+            Event::Alias(_) => (Kind::Alias, false, false),
             Event::SequenceEnd | Event::MappingEnd => {
                 let mut node = stack.pop().expect("YAML parser balances collection start and end events");
                 node.span.end = span.end;
@@ -291,13 +292,24 @@ mod tests {
             .with_artifact(Artifact::backend_file(Backend::GitHub, ".github/workflows/generated.yaml", ""))
             .with_artifact(Artifact::owned_file(".github/actions/generated/action.yml", ""))
             .with_artifact(Artifact::owned_file(".github/actions/generated/helper.json", ""))
+            .with_artifact(Artifact::owned_file("action.yml", ""))
+            .with_artifact(Artifact::owned_file("action.yaml", ""))
+            .with_artifact(Artifact::owned_file("actions/inner/action.yml", ""))
+            .with_artifact(Artifact::owned_file(".github/workflows/nested/workflow.yml", ""))
+            .with_artifact(Artifact::owned_file(".github/workflows/notes.txt", ""))
             .with_artifact(Artifact::owned_file("justfiles/anvil/extra.just", ""))
             .with_artifact(Artifact::backend_file(Backend::Ado, ".github/workflows/ado-only.yml", ""))
             .build()
             .unwrap();
         assert_eq!(
             generated_action_paths(&catalog, &[Backend::GitHub]),
-            [".github/actions/generated/action.yml", ".github/workflows/generated.yaml"]
+            [
+                ".github/actions/generated/action.yml",
+                ".github/workflows/generated.yaml",
+                "action.yaml",
+                "action.yml",
+                "actions/inner/action.yml",
+            ]
         );
         assert!(generated_action_paths(&catalog, &[]).is_empty());
     }
@@ -341,6 +353,103 @@ mod tests {
             assert!(expanded.contains(".github/workflows/new.yml"));
             assert!(expanded.contains(".github/actions/anvil-setup/action.yml"));
         }
+    }
+
+    #[test]
+    fn indentless_exclusions_remain_flat_strings_and_idempotent() {
+        let source = concat!(
+            "version: 2\nupdates:\n",
+            "- package-ecosystem: github-actions\n",
+            "  directory: /\n",
+            "  exclude-paths:\n",
+            "  # repository policy\n",
+            "  - vendor/**\n",
+        );
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = source.replace('\n', newline);
+            let output = update(&source, PATHS).unwrap().unwrap();
+            let root = parse(&output).unwrap();
+            let fields = root.fields().unwrap();
+            let job = &fields["updates"].sequence().unwrap()[0];
+            let fields = job.fields().unwrap();
+            let values = fields["exclude-paths"]
+                .sequence()
+                .unwrap()
+                .iter()
+                .map(Node::scalar)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(values, [PATHS[0], PATHS[1], "vendor/**"]);
+            assert!(output.contains("# repository policy"));
+            assert!(update(&output, PATHS).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn anchored_containers_are_safe_when_no_patch_is_needed() {
+        let complete = format!("{JOB}    exclude-paths: [{}]\n", quoted_paths(PATHS));
+        for source in [
+            JOB.replace("updates:", "updates: &updates").replace("github-actions", "cargo"),
+            JOB.replace("updates:", "updates: !updates").replace("github-actions", "cargo"),
+            complete.replace("updates:", "updates: &updates"),
+            complete.replace("- package-ecosystem", "- &job\n    package-ecosystem"),
+            complete.replace("- package-ecosystem", "- !job\n    package-ecosystem"),
+            complete.replace("exclude-paths:", "exclude-paths: &paths"),
+            complete.replace("exclude-paths:", "exclude-paths: !paths"),
+        ] {
+            assert!(update(&source, PATHS).unwrap().is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn subdirectory_jobs_accept_exact_repository_paths() {
+        for directory in [
+            "directory: /.github/actions/anvil-setup",
+            "directory: /.github/workflows",
+            "directory: /repository-owned",
+            "directories: ['/', '/.github/actions/anvil-setup', '/repository-owned']",
+        ] {
+            let source = JOB.replace("directory: /", directory);
+            let output = update(&source, PATHS).unwrap().unwrap();
+            assert!(output.contains(directory));
+            assert!(output.contains(PATHS[0]));
+            assert!(output.contains(PATHS[1]));
+            assert!(!output.contains("\"action.yml\""));
+            assert!(update(&output, PATHS).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn literal_glob_filenames_do_not_emit_neighbor_patterns() {
+        let paths = [
+            ".github/workflows/ci[12].yml",
+            ".github/workflows/ci{linux,windows}.yml",
+            ".github/workflows/ci?.yml",
+            ".github/workflows/ci*.yml",
+        ];
+        let output = update(JOB, &paths).unwrap().unwrap();
+        let root = parse(&output).unwrap();
+        let fields = root.fields().unwrap();
+        let fields = fields["updates"].sequence().unwrap()[0].fields().unwrap();
+        let exclusions = fields["exclude-paths"]
+            .sequence()
+            .unwrap()
+            .iter()
+            .map(Node::scalar)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            exclusions,
+            [
+                r".github/workflows/ci\[12\].yml",
+                r".github/workflows/ci\{linux,windows\}.yml",
+                r".github/workflows/ci\?.yml",
+                r".github/workflows/ci\*.yml",
+            ]
+        );
+        assert!(!exclusions.contains(&".github/workflows/ci1.yml"));
+        assert!(!exclusions.contains(&".github/workflows/ci2.yml"));
+        assert!(update(&output, &paths).unwrap().is_none());
     }
 
     #[test]
@@ -423,18 +532,19 @@ mod tests {
             "version: 2\nupdates: [github-actions]\n".to_owned(),
             "version: 2\nupdates: [{package-ecosystem: []}]\n".to_owned(),
             format!("{JOB}    directory: /\n"),
-            JOB.replace("    directory: /\n", ""),
-            format!("{JOB}    directories: ['/']\n"),
-            JOB.replace("directory: /", "directory: /other"),
-            JOB.replace("directory: /", "directories: [/, /other]"),
-            JOB.replace("directory: /", "directories: []"),
             format!("{JOB}    exclude-paths: null\n"),
             format!("{JOB}    exclude-paths: &paths [vendor/**]\n"),
+            format!("{JOB}    exclude-paths: !paths [vendor/**]\n"),
+            JOB.replace("updates:", "updates: &updates"),
+            JOB.replace("updates:", "updates: !updates"),
+            JOB.replace("- package-ecosystem", "- &job\n    package-ecosystem"),
+            JOB.replace("- package-ecosystem", "- !job\n    package-ecosystem"),
+            format!("&root\n{JOB}"),
+            format!("!root\n{JOB}"),
             format!("paths: &paths [vendor/**]\n{JOB}    exclude-paths: *paths\n"),
             format!("{JOB}    <<: {{labels: []}}\n"),
             format!("{JOB}---\nversion: 2\nupdates: []\n"),
             format!("{JOB}  - *missing\n"),
-            JOB.replace("- package-ecosystem", "- &shared package-ecosystem"),
         ] {
             assert!(update(&source, PATHS).is_err(), "{source}");
         }

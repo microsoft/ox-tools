@@ -349,9 +349,20 @@ fn plan_dependabot_exclusions(
     if paths.is_empty() {
         return Ok(());
     }
+    let retired_files = plan
+        .items()
+        .iter()
+        .filter_map(|item| match &item.target {
+            Target::File { path } if item.decision == Decision::Remove => Some((hosts.resolve)(repo_root, path)),
+            _ => None,
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
     let mut configurations = Vec::new();
     for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
         let path = (hosts.resolve)(repo_root, path)?;
+        if retired_files.contains(&path) {
+            continue;
+        }
         if let Some(text) = hosts.get_or_read(repo_root, &path)? {
             configurations.push((path, text));
         }
@@ -2784,6 +2795,32 @@ mod tests {
     }
 
     #[test]
+    fn dependabot_patches_do_not_recreate_retired_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for (recorded, resolved) in [
+            (".github/dependabot.yml", ".github/dependabot.yml"),
+            (".github/Dependabot.yml", ".github/dependabot.yml"),
+            (".github/dependabot.yaml", ".github/dependabot.yaml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            hosts.set(resolved, source.to_owned());
+            let mut plan = Plan::default();
+            plan.push(PlanItem::remove_file(recorded));
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::Remove);
+            assert!(plan.refusals().is_empty());
+        }
+    }
+
+    #[test]
     fn dependabot_exclusions_follow_the_owned_files_resolved_casing() {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         let catalog = Catalog::builder(test_cli())
@@ -2826,6 +2863,42 @@ mod tests {
         let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
         assert!(error.to_string().contains("ambiguous owned-file casing"));
         assert!(plan.items().is_empty());
+    }
+
+    #[test]
+    fn dependabot_retirement_path_resolution_errors_are_reported() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            assert_eq!(path, ".github/Dependabot.yml");
+            bail!("cannot resolve retired configuration");
+        };
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_file(".github/Dependabot.yml"));
+        let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+        assert!(error.to_string().contains("cannot resolve retired configuration"));
+        assert_eq!(plan.items().len(), 1);
+    }
+
+    #[test]
+    fn dependabot_region_retirement_does_not_skip_the_repository_file_patch() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_region(".github/dependabot.yml", "old-policy", source.to_owned()));
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        assert_eq!(plan.items().len(), 2);
+        assert!(matches!(plan.items()[1].target, Target::File { .. }));
+        assert_eq!(plan.items()[1].decision, Decision::Write);
     }
 
     #[test]
