@@ -96,16 +96,6 @@ Cargo-installed tools do not depend on routine workspace dependency changes,
 while toolchain files and catalog pins define the cache-pruning boundary.
 Rustup toolchains live outside Cargo home.
 
-APRZ's temporary source-pin exception lives in `_anvil-cargo-aprz` in
-`tools.just`. Its installer and read-only validator share a Cargo install-list
-match that includes the package version, repository, requested full revision,
-and resolved revision. A registry or path install with the same version does
-not pass. Both installer backends use a locked source build for this one tool;
-the rest of the catalog retains its existing registry/binstall behavior.
-The source pin lives in `versions.just`, so changing it also invalidates cloud
-Cargo-home caches. Remove the exception when a compatible registry release is
-available.
-
 Canonical recipes and workflow fragments live under `templates/`. The artifact
 registry embeds those files, renderer tests pin conditional substitutions such
 as ADO's `pr-fast`-only title lookup, and snapshot tests pin complete emitted
